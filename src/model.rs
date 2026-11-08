@@ -8,6 +8,7 @@ pub const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 pub enum Tool {
     #[default]
     Pen,
+    Pencil,
     Marker,
     Line,
     Arrow,
@@ -17,8 +18,9 @@ pub enum Tool {
     Laser,
 }
 impl Tool {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Pen,
+        Self::Pencil,
         Self::Marker,
         Self::Line,
         Self::Arrow,
@@ -30,7 +32,8 @@ impl Tool {
     pub fn label(self) -> &'static str {
         match self {
             Self::Pen => "Pen",
-            Self::Marker => "Marker",
+            Self::Pencil => "Pencil",
+            Self::Marker => "Highlighter",
             Self::Line => "Line",
             Self::Arrow => "Arrow",
             Self::Rectangle => "Box",
@@ -87,7 +90,12 @@ impl Stroke {
         } else {
             1.
         };
-        self.width * scale * 0.5
+        let tilt = if self.tool == Tool::Pencil {
+            1.0 + p.tilt[0].hypot(p.tilt[1]).min(90.0) / 60.0
+        } else {
+            1.0
+        };
+        self.width * scale * tilt * 0.5
     }
     pub fn polyline(&self) -> Vec<Point> {
         if self.points.is_empty() {

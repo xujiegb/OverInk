@@ -3,21 +3,25 @@
 //! scRGB surfaces; applying an ICC transform there would double-manage color.
 use crate::sdl::*;
 use lcms2_sys as cms;
+use std::hash::{Hash, Hasher};
 use std::ptr;
 pub struct ColorManager {
     transform: cms::HTRANSFORM,
     pub status: String,
+    pub revision: u64,
 }
 impl Default for ColorManager {
     fn default() -> Self {
         Self {
             transform: ptr::null_mut(),
             status: "sRGB surface / system compositor".into(),
+            revision: 0,
         }
     }
 }
 impl ColorManager {
     pub fn refresh(&mut self, window: &crate::sdl::Window, extended: bool) {
+        self.revision = if extended { 1 } else { 2 };
         if !self.transform.is_null() {
             unsafe { cms::cmsDeleteTransform(self.transform) };
             self.transform = ptr::null_mut()
@@ -40,6 +44,9 @@ impl ColorManager {
                 self.status = "X11: no ICC profile; sRGB assumption".into();
                 return;
             }
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            std::slice::from_raw_parts(data.cast::<u8>(), size).hash(&mut hash);
+            self.revision = hash.finish();
             let output = cms::cmsOpenProfileFromMem(data, size as u32);
             SDL_free(data);
             if output.is_null() {
@@ -78,6 +85,32 @@ impl ColorManager {
             )
         }
         out.map(|v| v.clamp(0., 1.))
+    }
+    pub fn map_rgba8(&self, rgba: &mut [u8]) {
+        if self.transform.is_null() {
+            return;
+        }
+        for bytes in rgba.chunks_mut(4096 * 4) {
+            let mut rgb: Vec<[f32; 3]> = bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|v| [v[0] as f32 / 255., v[1] as f32 / 255., v[2] as f32 / 255.])
+                .collect();
+            unsafe {
+                cms::cmsDoTransform(
+                    self.transform,
+                    rgb.as_ptr().cast(),
+                    rgb.as_mut_ptr().cast(),
+                    rgb.len() as u32,
+                );
+            }
+            for (pixel, rgb) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(rgb) {
+                for i in 0..3 {
+                    pixel[i] = (rgb[i].clamp(0., 1.) * 255.).round() as u8;
+                }
+            }
+        }
     }
 }
 impl Drop for ColorManager {

@@ -115,22 +115,51 @@ impl Window {
             })
         }
     }
-    pub fn place_on_display(&self, index: usize, overlay: bool) -> Result<(), String> {
+    pub fn display_id(&self) -> Option<u32> {
+        let id = unsafe { SDL_GetDisplayForWindow(self.raw) }.0;
+        (id != 0).then_some(id)
+    }
+    pub fn place_on_display(&self, id: u32, overlay: bool) -> Result<(), String> {
         unsafe {
-            let mut count = 0;
-            let displays = SDL_GetDisplays(&mut count);
-            if displays.is_null() || count == 0 {
-                return Err(error());
-            }
-            let display = *displays.add(index.min(count as usize - 1));
-            SDL_free(displays.cast());
+            let display = SDL_DisplayID(id);
             let mut r = SDL_Rect::default();
             check(SDL_GetDisplayBounds(display, &mut r))?;
-            if overlay {
+            if overlay && driver() == "wayland" {
+                // A fullscreen-desktop surface can request an output on Wayland;
+                // ordinary toplevel positioning is controlled by the compositor.
+                check(SDL_SetWindowFullscreenMode(self.raw, ptr::null()))?;
+                let center = SDL_WINDOWPOS_CENTERED_DISPLAY(display);
+                // SDL retains the pending output even when the compositor
+                // rejects positioning the still-windowed surface.
+                SDL_SetWindowPosition(self.raw, center, center);
+                check(SDL_SetWindowFullscreen(self.raw, true))?;
+            } else if overlay {
                 check(SDL_SetWindowSize(self.raw, r.w, r.h))?;
                 check(SDL_SetWindowPosition(self.raw, r.x, r.y))?;
             } else {
-                SDL_SetWindowPosition(self.raw, r.x + 32, r.y + 32);
+                let center = SDL_WINDOWPOS_CENTERED_DISPLAY(display);
+                check(SDL_SetWindowPosition(self.raw, center, center))?;
+            }
+            Ok(())
+        }
+    }
+    pub fn recover_on_display(&self, id: u32) -> Result<(), String> {
+        unsafe {
+            if driver() == "wayland" {
+                return Ok(());
+            }
+            let mut bounds = SDL_Rect::default();
+            check(SDL_GetDisplayUsableBounds(SDL_DisplayID(id), &mut bounds))?;
+            let (mut x, mut y) = (0, 0);
+            check(SDL_GetWindowPosition(self.raw, &mut x, &mut y))?;
+            let size = self.size();
+            let center = [x + (size[0] * 0.5) as i32, y + (size[1] * 0.5) as i32];
+            if center[0] < bounds.x
+                || center[0] >= bounds.x + bounds.w
+                || center[1] < bounds.y
+                || center[1] >= bounds.y + bounds.h
+            {
+                self.place_on_display(id, false)?;
             }
             Ok(())
         }
@@ -139,27 +168,6 @@ impl Window {
 impl Drop for Window {
     fn drop(&mut self) {
         unsafe { SDL_DestroyWindow(self.raw) }
-    }
-}
-pub fn displays() -> Vec<String> {
-    unsafe {
-        let mut count = 0;
-        let p = SDL_GetDisplays(&mut count);
-        if p.is_null() {
-            return vec![];
-        }
-        let names = (0..count as usize)
-            .map(|i| {
-                let n = SDL_GetDisplayName(*p.add(i));
-                if n.is_null() {
-                    format!("Display {}", i + 1)
-                } else {
-                    CStr::from_ptr(n).to_string_lossy().into_owned()
-                }
-            })
-            .collect();
-        SDL_free(p.cast());
-        names
     }
 }
 pub struct Renderer {
@@ -205,7 +213,9 @@ impl Renderer {
                 .to_string_lossy()
                 .into_owned();
             SDL_SetRenderDrawBlendMode(raw, SDL_BLENDMODE_BLEND);
-            SDL_SetRenderVSync(raw, 1);
+            // One shared frame clock paces both windows. Two blocking presents
+            // would halve the requested rate on some desktop drivers.
+            SDL_SetRenderVSync(raw, 0);
             Ok(Self {
                 raw,
                 extended,

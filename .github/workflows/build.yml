@@ -58,7 +58,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+      - name: Link the macOS availability runtime
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -eu
+          runtime_dir="$(xcrun clang -print-resource-dir)/lib/darwin"
+          mkdir -p "$RUNNER_TEMP/overink-clang-runtime"
+          cp "$runtime_dir/libclang_rt.osx.a" "$RUNNER_TEMP/overink-clang-runtime/"
+          target_key=$(printf '%s' '${{ matrix.target }}' | tr '[:lower:]-' '[:upper:]_')
+          echo "CARGO_TARGET_${target_key}_RUSTFLAGS=-Lnative=$RUNNER_TEMP/overink-clang-runtime -lstatic=clang_rt.osx" >> "$GITHUB_ENV"
       - name: Check and build
+        if: runner.os != 'Windows'
         shell: bash
         env:
           MACOSX_DEPLOYMENT_TARGET: '11.0'
@@ -69,7 +80,22 @@ jobs:
           cargo clippy --locked --target "$OVERINK_TARGET" --all-targets -- -D warnings
           cargo test --locked --release --target "$OVERINK_TARGET"
           cargo build --locked --release --target "$OVERINK_TARGET"
-      - name: Check Wayland color-picker protocol
+      - name: Check and build with the MSVC linker
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          OVERINK_TARGET: ${{ matrix.target }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $tools = Join-Path $env:VCToolsInstallDir "bin/Host$env:VSCMD_ARG_HOST_ARCH/$env:VSCMD_ARG_TGT_ARCH"
+          if (!(Test-Path (Join-Path $tools 'link.exe'))) { throw 'MSVC linker not found' }
+          $env:PATH = "$tools;$env:PATH"
+          cargo fmt --all -- --check
+          cargo clippy --locked --target $env:OVERINK_TARGET --all-targets -- -D warnings
+          cargo test --locked --release --target $env:OVERINK_TARGET
+          cargo build --locked --release --target $env:OVERINK_TARGET
+      - name: Check Wayland color and screenshot protocols
         if: runner.os == 'Linux'
         env:
           OVERINK_TARGET: ${{ matrix.target }}

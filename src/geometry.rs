@@ -127,7 +127,41 @@ fn ribbon(m: &mut Mesh, points: &[Point], stroke: &Stroke, aa: f32) {
 }
 pub fn mesh(stroke: &Stroke, aa: f32) -> Mesh {
     let mut m = Mesh::default();
-    ribbon(&mut m, &stroke.polyline(), stroke, aa);
+    let mut points = stroke.polyline();
+    if stroke.tool == Tool::Pencil && points.len() > 1 {
+        let mut samples = vec![points[0]];
+        for pair in points.windows(2) {
+            let steps = (pair[0].dist(pair[1]) / 2.0).ceil().clamp(1.0, 32.0) as usize;
+            for i in 1..=steps {
+                let t = i as f32 / steps as f32;
+                let a = pair[0];
+                let b = pair[1];
+                samples.push(Point::new(
+                    a.x + (b.x - a.x) * t,
+                    a.y + (b.y - a.y) * t,
+                    a.pressure + (b.pressure - a.pressure) * t,
+                    [
+                        a.tilt[0] + (b.tilt[0] - a.tilt[0]) * t,
+                        a.tilt[1] + (b.tilt[1] - a.tilt[1]) * t,
+                    ],
+                ));
+            }
+            if samples.len() >= 100_000 {
+                break;
+            }
+        }
+        points = samples;
+    }
+    ribbon(&mut m, &points, stroke, aa);
+    if stroke.tool == Tool::Pencil {
+        // Stable paper-like density, so redrawing the same samples never flickers.
+        for vertex in &mut m.vertices {
+            let mut hash = (vertex.xy[0].floor() as i32 as u32).wrapping_mul(0x45d9f3b)
+                ^ (vertex.xy[1].floor() as i32 as u32).wrapping_mul(0x119de1f3);
+            hash ^= hash >> 16;
+            vertex.coverage *= 0.32 + 0.68 * (hash & 255) as f32 / 255.0;
+        }
+    }
     if stroke.tool == Tool::Arrow && stroke.points.len() >= 2 {
         let a = stroke.points[0];
         let b = *stroke.points.last().unwrap();
@@ -177,5 +211,48 @@ mod tests {
             );
             assert!(m.indices.iter().all(|i| (*i as usize) < m.vertices.len()));
         }
+    }
+    #[test]
+    fn pencil_density_is_stable_and_tilt_changes_its_width() {
+        let mut stroke = Stroke {
+            tool: Tool::Pencil,
+            color: InkColor::default(),
+            width: 8.0,
+            opacity: 0.68,
+            pressure_curve: 1.0,
+            pressure_enabled: true,
+            points: vec![
+                Point::new(10.0, 10.0, 0.2, [0.; 2]),
+                Point::new(70.0, 40.0, 0.9, [60.0, 0.0]),
+            ],
+        };
+        let a = mesh(&stroke, 0.5);
+        let b = mesh(&stroke, 0.5);
+        assert_eq!(a.indices, b.indices);
+        assert!(
+            a.vertices
+                .iter()
+                .zip(&b.vertices)
+                .all(|(a, b)| a.coverage == b.coverage && a.xy == b.xy)
+        );
+        assert!(
+            a.vertices
+                .iter()
+                .any(|v| v.coverage > 0.0 && v.coverage < 0.9)
+        );
+        let tilted = stroke.radius(stroke.points[1]);
+        stroke.points[1].tilt = [0.; 2];
+        assert!(tilted > stroke.radius(stroke.points[1]));
+        assert!(
+            a.vertices
+                .iter()
+                .all(|v| v.coverage.is_finite() && (0.0..=1.0).contains(&v.coverage))
+        );
+        assert_eq!(
+            serde_json::from_str::<Stroke>(&serde_json::to_string(&stroke).unwrap())
+                .unwrap()
+                .tool,
+            Tool::Pencil
+        );
     }
 }

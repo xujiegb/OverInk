@@ -1,8 +1,8 @@
-mod desktop;
+pub(crate) mod desktop;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-mod portal;
+pub(crate) mod portal;
 #[cfg(target_os = "macos")]
 use macos::SystemJob;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]

@@ -13,7 +13,7 @@ use zbus::{
     blocking::{Connection, Proxy},
     zvariant::{OwnedObjectPath, OwnedValue, Structure, Value},
 };
-type CloseHandle = (Connection, String);
+pub(crate) type CloseHandle = (Connection, String);
 pub struct SystemJob {
     receiver: mpsc::Receiver<PickResult>,
     cancelled: Arc<AtomicBool>,
@@ -80,6 +80,34 @@ fn pick(
     cancelled: &AtomicBool,
     close: &Mutex<Option<CloseHandle>>,
 ) -> Result<Option<InkColor>, Box<dyn std::error::Error + Send + Sync>> {
+    let Some(mut values) = request("PickColor", HashMap::new(), cancelled, close)? else {
+        return Ok(None);
+    };
+    let value = values.remove("color").ok_or("Portal returned no color")?;
+    let structure = Structure::try_from(value)?;
+    let fields = structure.fields();
+    if fields.len() != 3 {
+        return Err("Portal returned an invalid RGB tuple".into());
+    }
+    let mut rgb = [0.; 3];
+    for (i, field) in fields.iter().enumerate() {
+        let value = f64::try_from(field)?;
+        if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+            return Err("Portal returned an invalid RGB component".into());
+        }
+        rgb[i] = value as f32;
+    }
+    Ok(Some(InkColor {
+        rgb,
+        space: Space::Srgb,
+    }))
+}
+pub(crate) fn request(
+    method: &str,
+    mut options: HashMap<&str, Value<'_>>,
+    cancelled: &AtomicBool,
+    close: &Mutex<Option<CloseHandle>>,
+) -> Result<Option<HashMap<String, OwnedValue>>, Box<dyn std::error::Error + Send + Sync>> {
     let connection = Connection::session()?;
     let screenshot = Proxy::new(
         &connection,
@@ -112,8 +140,8 @@ fn pick(
     )?;
     // Install the response subscription before invoking PickColor.
     let mut responses = request.receive_signal("Response")?;
-    let options = HashMap::from([("handle_token", Value::from(token.as_str()))]);
-    let handle: OwnedObjectPath = screenshot.call("PickColor", &("", options))?;
+    options.insert("handle_token", Value::from(token));
+    let handle: OwnedObjectPath = screenshot.call(method, &("", options))?;
     if handle.as_str() != path {
         return Err("Portal returned an unexpected request handle".into());
     }
@@ -131,42 +159,59 @@ fn pick(
             Err("Portal closed without a response".into())
         };
     };
-    let (code, mut values): (u32, HashMap<String, OwnedValue>) = message.body().deserialize()?;
+    let (code, values): (u32, HashMap<String, OwnedValue>) = message.body().deserialize()?;
     if code == 1 {
         return Ok(None);
     }
     if code != 0 {
-        return Err("Screen color selection was denied or failed".into());
+        return Err("Screen capture or color selection was denied or failed".into());
     }
-    let value = values.remove("color").ok_or("Portal returned no color")?;
-    let structure = Structure::try_from(value)?;
-    let fields = structure.fields();
-    if fields.len() != 3 {
-        return Err("Portal returned an invalid RGB tuple".into());
-    }
-    let mut rgb = [0.; 3];
-    for (i, field) in fields.iter().enumerate() {
-        let value = f64::try_from(field)?;
-        if !value.is_finite() || !(0.0..=1.0).contains(&value) {
-            return Err("Portal returned an invalid RGB component".into());
-        }
-        rgb[i] = value as f32;
-    }
-    Ok(Some(InkColor {
-        rgb,
-        space: Space::Srgb,
-    }))
+    Ok(Some(values))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    struct MockScreenshot;
+    struct MockScreenshot {
+        screenshot: std::path::PathBuf,
+    }
     #[zbus::interface(name = "org.freedesktop.portal.Screenshot")]
     impl MockScreenshot {
         #[zbus(property, name = "version")]
         fn version(&self) -> u32 {
             2
+        }
+        async fn screenshot(
+            &self,
+            _parent: &str,
+            options: HashMap<String, OwnedValue>,
+            #[zbus(header)] header: zbus::message::Header<'_>,
+            #[zbus(connection)] connection: &zbus::Connection,
+        ) -> zbus::fdo::Result<OwnedObjectPath> {
+            assert!(bool::try_from(options.get("interactive").unwrap()).unwrap());
+            image::RgbaImage::from_pixel(3, 2, image::Rgba([18, 171, 239, 255]))
+                .save(&self.screenshot)
+                .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+            let token = <&str>::try_from(options.get("handle_token").unwrap()).unwrap();
+            let sender = header.sender().unwrap();
+            let path = format!(
+                "/org/freedesktop/portal/desktop/request/{}/{}",
+                sender.as_str().trim_start_matches(':').replace('.', "_"),
+                token
+            );
+            let uri =
+                OwnedValue::try_from(Value::from(format!("file://{}", self.screenshot.display())))
+                    .unwrap();
+            connection
+                .emit_signal(
+                    Some(sender.as_str()),
+                    path.as_str(),
+                    "org.freedesktop.portal.Request",
+                    "Response",
+                    &(0u32, HashMap::from([("uri", uri)])),
+                )
+                .await?;
+            Ok(OwnedObjectPath::try_from(path).unwrap())
         }
         async fn pick_color(
             &self,
@@ -202,11 +247,24 @@ mod tests {
     #[test]
     #[ignore = "requires an isolated session bus: dbus-run-session cargo test portal_response -- --ignored"]
     fn portal_response_before_method_reply_is_received() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "overink-portal-test-{}-{unique}.png",
+            std::process::id()
+        ));
         let _service = zbus::blocking::connection::Builder::session()
             .unwrap()
             .name("org.freedesktop.portal.Desktop")
             .unwrap()
-            .serve_at("/org/freedesktop/portal/desktop", MockScreenshot)
+            .serve_at(
+                "/org/freedesktop/portal/desktop",
+                MockScreenshot {
+                    screenshot: path.clone(),
+                },
+            )
             .unwrap()
             .build()
             .unwrap();
@@ -225,5 +283,28 @@ mod tests {
             );
             thread::sleep(std::time::Duration::from_millis(10));
         }
+        let mut screenshot = crate::background::system::Job::start([0, 0, 3, 2]).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Some(result) = screenshot.poll() {
+                let image = result.unwrap().unwrap();
+                assert_eq!((image.width, image.height), (3, 2));
+                assert!(
+                    image
+                        .rgba
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .all(|v| *v == [18, 171, 239, 255])
+                );
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Screenshot response was lost"
+            );
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+        std::fs::remove_file(path).unwrap();
     }
 }

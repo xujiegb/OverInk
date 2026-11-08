@@ -5,8 +5,11 @@
     windows_subsystem = "windows"
 )]
 mod app;
+mod background;
 mod color;
+mod display;
 mod export;
+mod frame_rate;
 mod geometry;
 mod gui;
 mod icc;
@@ -34,7 +37,7 @@ fn start() -> Result<(), String> {
         match a.as_str() {
             "--help" | "-h" => {
                 println!(
-                    "OverInk 0.1.0 — Rust 2024 / egui / SDL3\n\n  --whiteboard   Start with an opaque white background\n  --x11         Use X11 / XWayland instead of native Wayland\n  --sdr         Disable extended-linear-sRGB output\n  --display N   Annotate display N (1-based)\n  --smoke-test  Render synthetic pen and touch events with SDL dummy video\n\nKeys (when an OverInk window has focus):\n  Space: click through / draw   H: hide / show\n  Esc: cancel stroke / click through   P/M/L/A/R/O/E/K: tools\n  1–4: preset colors   Ctrl/Cmd+Z: undo   Ctrl/Cmd+Shift+Z: redo\n  Ctrl/Cmd+S: save   Ctrl/Cmd+O: open   Ctrl/Cmd+Shift+S: SVG\n\nThe separate control window remains usable in click-through mode.\nSessions autosave every 10 seconds and on normal exit.\nTouchscreens: draw with multiple fingers. Native pens take priority over finger drawing."
+                    "OverInk 0.1.0 — Rust 2024 / egui / SDL3\n\n  --whiteboard   Start with an opaque white background\n  --x11         Use X11 / XWayland instead of native Wayland\n  --sdr         Disable extended-linear-sRGB output\n  --display N   Start on display N (1-based)\n  --smoke-test  Render synthetic pen and touch events with SDL dummy video\n\nKeys (when an OverInk window has focus):\n  Space: click through / draw   H: hide / show\n  Esc: cancel stroke / click through   B: pencil   P/M/L/A/R/O/E/K: other tools\n  1–4: preset colors   Ctrl/Cmd+Z: undo   Ctrl/Cmd+Shift+Z: redo\n  Ctrl/Cmd+S: save   Ctrl/Cmd+O: open   Ctrl/Cmd+Shift+S: SVG\n\nDrag the control window to choose the drawing display.\nDisconnected displays lose their page and undo history.\nFrame-rate choices: Auto, 120, 90, 60, 30 FPS. Auto follows the display.\nBackground choices: live desktop or frozen snapshot.\nThe separate control window remains usable in click-through mode.\nSessions autosave every 10 seconds and on normal exit.\nTouchscreens: draw with multiple fingers. Native pens take priority over finger drawing."
                 );
                 return Ok(());
             }

@@ -269,6 +269,102 @@ mod x11 {
         let max = mask >> shift;
         Ok(((pixel & mask) >> shift) as f32 / max as f32)
     }
+    pub fn capture(window: &Window) -> Result<crate::background::Image, String> {
+        let origin = position(window, [0.; 2])?;
+        let [w, h] = window.pixel_size();
+        let mut out = crate::background::Image::buffer(w as u32, h as u32)?;
+        unsafe {
+            let lib = library()?;
+            let d = display(window)?;
+            let geometry: Symbol<
+                unsafe extern "C" fn(
+                    *mut c_void,
+                    c_ulong,
+                    *mut c_ulong,
+                    *mut c_int,
+                    *mut c_int,
+                    *mut u32,
+                    *mut u32,
+                    *mut u32,
+                    *mut u32,
+                ) -> c_int,
+            > = lib.get(b"XGetGeometry\0").map_err(|e| e.to_string())?;
+            let (mut root, mut x, mut y, mut rw, mut rh, mut border, mut depth) =
+                (0, 0, 0, 0, 0, 0, 0);
+            if geometry(
+                d,
+                origin.root,
+                &mut root,
+                &mut x,
+                &mut y,
+                &mut rw,
+                &mut rh,
+                &mut border,
+                &mut depth,
+            ) == 0
+                || origin.x < 0
+                || origin.y < 0
+                || origin.x as i64 + w as i64 > rw as i64
+                || origin.y as i64 + h as i64 > rh as i64
+            {
+                return Err("Capture is outside the connected display bounds".into());
+            }
+            let get: Symbol<
+                unsafe extern "C" fn(
+                    *mut c_void,
+                    c_ulong,
+                    c_int,
+                    c_int,
+                    u32,
+                    u32,
+                    c_ulong,
+                    c_int,
+                ) -> *mut Image,
+            > = lib.get(b"XGetImage\0").map_err(|e| e.to_string())?;
+            let pixel: Symbol<unsafe extern "C" fn(*mut Image, c_int, c_int) -> c_ulong> =
+                lib.get(b"XGetPixel\0").map_err(|e| e.to_string())?;
+            let destroy: Symbol<unsafe extern "C" fn(*mut Image) -> c_int> =
+                lib.get(b"XDestroyImage\0").map_err(|e| e.to_string())?;
+            let image = get(
+                d,
+                origin.root,
+                origin.x,
+                origin.y,
+                w as u32,
+                h as u32,
+                c_ulong::MAX,
+                2,
+            );
+            if image.is_null() {
+                return Err("Cannot capture the desktop".into());
+            }
+            let masks = [(*image).red_mask, (*image).green_mask, (*image).blue_mask];
+            if masks.contains(&0) {
+                destroy(image);
+                return Err("Desktop capture requires a TrueColor visual".into());
+            }
+            for y in 0..h {
+                for x in 0..w {
+                    let value = pixel(image, x, y);
+                    let offset = (y as usize * w as usize + x as usize) * 4;
+                    for (i, mask) in masks.into_iter().enumerate() {
+                        out.rgba[offset + i] = (channel(value, mask).unwrap() * 255.).round() as u8;
+                    }
+                    out.rgba[offset + 3] = 255;
+                }
+            }
+            destroy(image);
+            let mut size = 0;
+            let profile = SDL_GetWindowICCProfile(window.raw, &mut size);
+            if !profile.is_null() {
+                if size > 0 && size <= 16 * 1024 * 1024 {
+                    out.convert_to_srgb(std::slice::from_raw_parts(profile.cast::<u8>(), size));
+                }
+                SDL_free(profile);
+            }
+        }
+        Ok(out)
+    }
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -283,7 +379,7 @@ mod x11 {
     }
 }
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-pub use x11::{position, sample};
+pub use x11::{capture, position, sample};
 
 #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "freebsd")))]
 pub fn position(_window: &Window, _local: [f32; 2]) -> Result<ScreenPoint, String> {

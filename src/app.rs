@@ -1,6 +1,9 @@
 use crate::{
     color::{InkColor, PRESETS, Space},
-    export, geometry, gui,
+    display::{Display, Pages},
+    export,
+    frame_rate::{FramePacer, FrameRate},
+    geometry, gui,
     icc::ColorManager,
     model::{History, MAX_POINTS, Point, Stroke, Tool},
     native::Passthrough,
@@ -36,6 +39,8 @@ struct Commands {
     display: bool,
     quit: bool,
     pick: bool,
+    frame_rate: bool,
+    background: bool,
 }
 struct App {
     history: History,
@@ -51,7 +56,11 @@ struct App {
     hidden: bool,
     board: bool,
     display: usize,
-    display_names: Vec<String>,
+    displays: Vec<Display>,
+    pages: Pages,
+    frame_rate: FrameRate,
+    suspended: bool,
+    frozen: bool,
     pens: HashMap<u32, Pen>,
     pen_proximity: BTreeSet<u32>,
     touches: BTreeMap<TouchKey, FingerStroke>,
@@ -78,6 +87,9 @@ impl App {
         {
             status = format!("Restore: {e}")
         }
+        let displays = crate::display::connected().unwrap_or_default();
+        let display = display.min(displays.len().saturating_sub(1));
+        let pages = Pages::new(displays.get(display).map(|d| d.id));
         Self {
             history,
             tool: Tool::Pen,
@@ -92,7 +104,11 @@ impl App {
             hidden: false,
             board,
             display,
-            display_names: crate::sdl::displays(),
+            displays,
+            pages,
+            frame_rate: FrameRate::load(&base.join("frame-rate.json")),
+            suspended: false,
+            frozen: false,
             pens: HashMap::new(),
             pen_proximity: BTreeSet::new(),
             touches: BTreeMap::new(),
@@ -120,16 +136,19 @@ impl App {
             },
             opacity: if tool == Tool::Marker {
                 self.opacity * 0.32
+            } else if tool == Tool::Pencil {
+                self.opacity * 0.68
             } else {
                 self.opacity
             },
             pressure_curve: self.curve,
-            pressure_enabled: self.pressure && matches!(tool, Tool::Pen | Tool::Marker),
+            pressure_enabled: self.pressure
+                && matches!(tool, Tool::Pen | Tool::Pencil | Tool::Marker),
             points: vec![],
         }
     }
     fn begin(&mut self, source: Source, p: Point, eraser: bool) {
-        if self.pass || self.hidden {
+        if self.pass || self.hidden || self.suspended {
             return;
         }
         self.history.commit();
@@ -165,7 +184,7 @@ impl App {
     }
     fn motion(&mut self, source: Source, p: Point, eraser: bool) {
         self.pointer = Some(p);
-        if self.source != Some(source) || self.pass || self.hidden {
+        if self.source != Some(source) || self.pass || self.hidden || self.suspended {
             return;
         }
         if eraser || self.tool == Tool::Eraser {
@@ -217,6 +236,61 @@ impl App {
         for p in self.pens.values_mut() {
             p.down = false
         }
+    }
+    fn reset_contacts(&mut self) {
+        self.history.active = None;
+        self.source = None;
+        self.touches.clear();
+        self.pens.clear();
+        self.pen_proximity.clear();
+        self.pointer = None;
+        self.laser.clear();
+    }
+    fn refresh_displays(
+        &mut self,
+        displays: Vec<Display>,
+        controller: Option<u32>,
+    ) -> (bool, bool) {
+        let ids: BTreeSet<u32> = displays.iter().map(|d| d.id).collect();
+        let old = self
+            .displays
+            .iter()
+            .find(|d| Some(d.id) == self.pages.active)
+            .cloned();
+        let removed = self.pages.active.is_some_and(|id| !ids.contains(&id));
+        if removed {
+            self.reset_contacts();
+        }
+        self.pages.retain(&mut self.history, &ids);
+        let target = controller
+            .filter(|id| ids.contains(id))
+            .or(self.pages.active.filter(|id| ids.contains(id)))
+            .or_else(|| displays.first().map(|d| d.id));
+        if let Some(id) = target {
+            if self.pages.active != Some(id) {
+                self.stop();
+                self.reset_contacts();
+                self.pages.switch(&mut self.history, id);
+            }
+        } else {
+            self.reset_contacts();
+        }
+        self.suspended = target.is_none();
+        self.display = displays
+            .iter()
+            .position(|d| Some(d.id) == target)
+            .unwrap_or(0);
+        let new = displays.get(self.display);
+        let layout = old.as_ref().map(|d| (d.id, d.bounds, d.scale))
+            != new.map(|d| (d.id, d.bounds, d.scale));
+        self.displays = displays;
+        if removed {
+            self.status = "Display disconnected: its ink and undo history were cleared".into();
+        }
+        (layout, removed)
+    }
+    fn refresh_hz(&self) -> f64 {
+        self.displays.get(self.display).map_or(0.0, |d| d.refresh)
     }
     fn draft_point_count(&self) -> usize {
         self.history
@@ -293,7 +367,12 @@ impl App {
             }
             return;
         }
-        if !self.touch_enabled || self.pass || self.hidden || !self.pen_proximity.is_empty() {
+        if !self.touch_enabled
+            || self.pass
+            || self.hidden
+            || self.suspended
+            || !self.pen_proximity.is_empty()
+        {
             return;
         }
         let Some(point) = touch::point(event, size) else {
@@ -517,6 +596,7 @@ impl App {
                     c.mode = true
                 }
                 SDLK_P => self.tool = Tool::Pen,
+                SDLK_B => self.tool = Tool::Pencil,
                 SDLK_M => self.tool = Tool::Marker,
                 SDLK_L => self.tool = Tool::Line,
                 SDLK_A => self.tool = Tool::Arrow,
@@ -679,6 +759,16 @@ impl App {
                             ui.selectable_value(&mut self.color.space, Space::DisplayP3, "Display P3 color");
                         });
                     ui.add(egui::Slider::new(&mut self.width, 1.0..=48.0).text("Size"));
+                    ui.label("Frame rate");
+                    egui::ComboBox::from_id_salt("frame-rate")
+                        .selected_text(if self.frame_rate == FrameRate::Auto {
+                            format!("Auto ({:.2} FPS)", self.frame_rate.hz(self.refresh_hz()))
+                        } else { self.frame_rate.label().into() })
+                        .show_ui(ui, |ui| {
+                            for rate in FrameRate::ALL {
+                                if ui.selectable_value(&mut self.frame_rate, rate, rate.label()).changed() { c.frame_rate = true; }
+                            }
+                        }).response.on_hover_text("Auto follows the display containing the control window. Actual output is limited by the display and renderer.");
                 });
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut self.pressure, "Pen pressure");
@@ -689,16 +779,30 @@ impl App {
                 ui.horizontal(|ui| {
                     if ui.button("Undo").clicked() { self.touches.clear(); self.history.undo(); }
                     if ui.button("Redo").clicked() { self.touches.clear(); self.history.redo(); }
-                    if ui.button("Clear").clicked() { self.touches.clear(); self.history.clear(); }
+                    if ui.button("Clear page").clicked() { self.reset_contacts(); self.history.clear(); }
                     ui.separator();
-                    if ui.checkbox(&mut self.board, "Whiteboard").changed() { c.mode = true; }
+                    if ui.checkbox(&mut self.board, "Whiteboard").changed() {
+                        c.mode = true;
+                        if self.board { self.frozen = false; c.background = true; }
+                    }
                     egui::ComboBox::from_id_salt("display")
-                        .selected_text(self.display_names.get(self.display).cloned().unwrap_or_else(|| "Display".into()))
+                        .selected_text(self.displays.get(self.display).map(|d| d.name.clone()).unwrap_or_else(|| "No display".into()))
                         .show_ui(ui, |ui| {
-                            for (i, name) in self.display_names.iter().enumerate() {
-                                if ui.selectable_value(&mut self.display, i, name).changed() { c.display = true; }
+                            for (i, display) in self.displays.iter().enumerate() {
+                                if ui.selectable_value(&mut self.display, i, &display.name).changed() { c.display = true; }
                             }
-                        });
+                        }).response.on_hover_text("Drag this control window to another display to draw there; each display has its own page.");
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Background");
+                    if ui.selectable_label(!self.board && !self.frozen, "Live desktop").clicked() {
+                        c.background = self.board || self.frozen; self.frozen = false; self.board = false;
+                    }
+                    if ui.selectable_label(self.frozen, "Frozen desktop").clicked() && !self.frozen {
+                        c.background = true; self.frozen = true; self.board = false;
+                    }
+                    if self.frozen && ui.button("Refresh snapshot").clicked() { c.background = true; }
+                    if video == "wayland" { ui.small("Choose this display in the system screenshot dialog."); }
                 });
                 ui.horizontal(|ui| {
                     ui.label("File");
@@ -727,13 +831,24 @@ impl App {
             });
         c
     }
-    fn paint(&mut self, r: &Renderer, w: &Window, color: &ColorManager) -> Result<(), String> {
+    fn paint(
+        &mut self,
+        r: &Renderer,
+        w: &Window,
+        color: &ColorManager,
+        background: &mut crate::background::Background,
+    ) -> Result<(), String> {
         let bg = if self.board {
             [0.97, 0.97, 0.96, 1.]
         } else {
             [0., 0., 0., if self.pass { 0. } else { 1. / 255. }]
         };
         let scale = r.begin(w, bg)?;
+        if let Err(error) = background.draw(r, w, color) {
+            background.live();
+            self.frozen = false;
+            self.status = format!("Frozen background unavailable: {error}");
+        }
         let aa = 0.8 / scale[0].max(scale[1]);
         for s in &self.history.doc.strokes {
             paint_stroke(r, s, color, aa, 1.)?
@@ -826,7 +941,7 @@ fn apply_mode(
     toolbar: &Window,
     pass: &mut Passthrough,
 ) -> Result<(), String> {
-    if a.hidden {
+    if a.hidden || a.suspended {
         return w.show(false);
     }
     w.show(true)?;
@@ -863,7 +978,8 @@ pub fn run(options: Options) -> Result<(), String> {
     let mut app = App::new(options.board || options.smoke, options.display);
     let canvas = Window::new("OverInk - canvas", 1100, 720, !options.smoke)?;
     if !options.smoke
-        && let Err(e) = canvas.place_on_display(options.display, true)
+        && let Some(id) = app.pages.active
+        && let Err(e) = canvas.place_on_display(id, true)
         && video != "wayland"
     {
         return Err(e);
@@ -871,18 +987,20 @@ pub fn run(options: Options) -> Result<(), String> {
     app.canvas_units = canvas.scale() / unsafe { SDL_GetWindowPixelDensity(canvas.raw) }.max(0.1);
     let canvas_render = Renderer::new(&canvas, options.sdr)?;
     // Declare renderers before GUI texture owners, so textures are destroyed first.
-    let toolbar = Window::new("OverInk", 820, 430, false)?;
+    let toolbar = Window::new("OverInk", 820, 500, false)?;
     let toolbar_render = Renderer::new(&toolbar, options.sdr)?;
     let units = toolbar.scale() / unsafe { SDL_GetWindowPixelDensity(toolbar.raw) }.max(0.1);
     unsafe {
         SDL_SetWindowSize(
             toolbar.raw,
             (820. * units).round() as i32,
-            (450. * units).round() as i32,
+            (500. * units).round() as i32,
         );
     }
-    unsafe {
-        SDL_SetWindowParent(toolbar.raw, canvas.raw);
+    if !options.smoke
+        && let Some(id) = app.pages.active
+    {
+        let _ = toolbar.place_on_display(id, false);
     }
     let mut gui = gui::Gui::new();
     let mut native = Passthrough::new(&canvas);
@@ -891,8 +1009,10 @@ pub fn run(options: Options) -> Result<(), String> {
     let mut toolbar_color = ColorManager::default();
     toolbar_color.refresh(&toolbar, toolbar_render.extended);
     canvas.show(true)?;
-    if !options.smoke {
-        let _ = canvas.place_on_display(options.display, true);
+    if !options.smoke
+        && let Some(id) = app.pages.active
+    {
+        let _ = canvas.place_on_display(id, true);
     }
     toolbar.show(true)?;
     unsafe {
@@ -910,17 +1030,50 @@ pub fn run(options: Options) -> Result<(), String> {
         smoke_events(&mut app, canvas.id)?;
     }
     let mut picker = crate::picker::Picker::default();
+    let mut background = crate::background::Background::default();
     let mut picker_windows_hidden = false;
     let mut running = true;
     let mut frame = 0;
     let mut last_color = Instant::now();
+    let mut last_displays = Instant::now();
+    let mut topology_dirty = !options.smoke;
+    let mut pacer = FramePacer::new(app.frame_rate, app.refresh_hz(), Instant::now());
     while running {
+        let mut disconnected = BTreeSet::new();
+        let mut controller_scale_changed = false;
+        let mut canvas_surface_changed = false;
         let mut event = SDL_Event::default();
         while unsafe { SDL_PollEvent(&mut event) } {
             let ty = unsafe { SDL_EventType(event.r#type) };
             if ty == SDL_EVENT_QUIT {
                 running = false;
                 break;
+            }
+            if ty >= SDL_EVENT_DISPLAY_FIRST && ty <= SDL_EVENT_DISPLAY_LAST {
+                topology_dirty = !options.smoke;
+                if ty == SDL_EVENT_DISPLAY_REMOVED {
+                    disconnected.insert(unsafe { event.display.displayID.0 });
+                }
+            }
+            if matches!(
+                ty,
+                SDL_EVENT_WINDOW_MOVED
+                    | SDL_EVENT_WINDOW_DISPLAY_CHANGED
+                    | SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED
+            ) && unsafe { event.window.windowID } == toolbar.id
+            {
+                topology_dirty = !options.smoke;
+                controller_scale_changed |= ty == SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED;
+            }
+            if matches!(
+                ty,
+                SDL_EVENT_WINDOW_DISPLAY_CHANGED
+                    | SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED
+                    | SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED
+                    | SDL_EVENT_WINDOW_HDR_STATE_CHANGED
+            ) && unsafe { event.window.windowID } == canvas.id
+            {
+                canvas_surface_changed = true;
             }
             if ty == SDL_EVENT_WINDOW_CLOSE_REQUESTED {
                 let id = unsafe { event.window.windowID };
@@ -935,7 +1088,12 @@ pub fn run(options: Options) -> Result<(), String> {
             let was_picking = picker.active();
             picker.event(&event, &canvas);
             gui.event(&event, toolbar.id, toolbar.size());
-            if !was_picking {
+            if !was_picking
+                && !background.pending()
+                && !topology_dirty
+                && !app.suspended
+                && (options.smoke || canvas.display_id() == app.pages.active)
+            {
                 app.event(&event, canvas.id, canvas.size());
             }
             let canvas_activated = unsafe {
@@ -947,7 +1105,7 @@ pub fn run(options: Options) -> Result<(), String> {
             if canvas_activated {
                 crate::native::keep_controller_above(&toolbar);
             }
-            if ty == SDL_EVENT_KEY_DOWN && !was_picking {
+            if ty == SDL_EVENT_KEY_DOWN && !was_picking && !background.pending() {
                 let id = unsafe { event.key.windowID };
                 if id == canvas.id || id == toolbar.id {
                     let c = app.keyboard(
@@ -968,7 +1126,68 @@ pub fn run(options: Options) -> Result<(), String> {
         if !running {
             break;
         }
-        if picker.hides_windows() && !picker_windows_hidden {
+        if controller_scale_changed {
+            let units =
+                toolbar.scale() / unsafe { SDL_GetWindowPixelDensity(toolbar.raw) }.max(0.1);
+            gui.units = units;
+            unsafe {
+                SDL_SetWindowSize(
+                    toolbar.raw,
+                    (820. * units).round() as i32,
+                    (500. * units).round() as i32,
+                );
+            }
+        }
+        if !options.smoke
+            && (topology_dirty || last_displays.elapsed() > Duration::from_millis(500))
+        {
+            let displays = crate::display::connected()
+                .unwrap_or_else(|error| {
+                    app.status = format!("Display query: {error}");
+                    app.displays.clone()
+                })
+                .into_iter()
+                .filter(|d| !disconnected.contains(&d.id))
+                .collect::<Vec<_>>();
+            let (layout, removed) = app.refresh_displays(displays, toolbar.display_id());
+            if layout || removed || canvas.display_id() != app.pages.active {
+                if picker.active() {
+                    picker.cancel();
+                }
+                canvas.show(false)?;
+                if let Some(id) = app.pages.active {
+                    if let Err(error) = canvas.place_on_display(id, true) {
+                        app.status = format!("Cannot move the drawing surface: {error}");
+                        app.suspended = true;
+                    }
+                    if removed {
+                        let _ = toolbar.recover_on_display(id);
+                    }
+                    canvas_color.refresh(&canvas, canvas_render.extended);
+                    toolbar_color.refresh(&toolbar, toolbar_render.extended);
+                    background.invalidate_texture();
+                    apply_mode(&mut app, &canvas, &toolbar, &mut native)?;
+                }
+            }
+            if removed && let Err(error) = app.history.save(&app.save_path) {
+                app.status = format!("Save after display removal: {error}");
+            }
+            topology_dirty = false;
+            last_displays = Instant::now();
+        }
+        if canvas_surface_changed {
+            canvas_color.refresh(&canvas, canvas_render.extended);
+            background.invalidate_texture();
+        }
+        app.canvas_units =
+            canvas.scale() / unsafe { SDL_GetWindowPixelDensity(canvas.raw) }.max(0.1);
+        pacer.configure(app.frame_rate, app.refresh_hz(), Instant::now());
+        background.display(
+            app.displays.get(app.display).filter(|_| !app.suspended),
+            &app.displays.iter().map(|d| d.id).collect(),
+            &video,
+        );
+        if (picker.hides_windows() || background.pending()) && !picker_windows_hidden {
             canvas.show(false)?;
             toolbar.show(false)?;
             picker_windows_hidden = true;
@@ -984,11 +1203,17 @@ pub fn run(options: Options) -> Result<(), String> {
                 Ok(None) => app.status = "Color selection cancelled".into(),
                 Err(error) => app.status = error,
             }
+        }
+        if let Some(result) = background.poll(&canvas) {
+            app.frozen = background.frozen;
+            app.status = match result { Ok(()) => "Desktop frozen. Ink remains editable; switch to Live desktop to resume the background.".into(), Err(error) => error };
+        }
+        if picker_windows_hidden && !picker.hides_windows() && !background.pending() {
             toolbar.show(true)?;
             apply_mode(&mut app, &canvas, &toolbar, &mut native)?;
             picker_windows_hidden = false;
         }
-        if picker.hides_windows() {
+        if picker.hides_windows() || background.pending() {
             unsafe {
                 SDL_Delay(8);
             }
@@ -997,11 +1222,16 @@ pub fn run(options: Options) -> Result<(), String> {
         // The OS/SDL updates HDR white point dynamically. ICC changes are polled to
         // also catch profile replacement without a display move notification.
         if last_color.elapsed() > Duration::from_secs(3) {
+            let previous = canvas_color.revision;
             canvas_color.refresh(&canvas, canvas_render.extended);
             toolbar_color.refresh(&toolbar, toolbar_render.extended);
+            if previous != canvas_color.revision {
+                background.invalidate_texture();
+            }
             last_color = Instant::now();
         }
-        let input = gui.input(&toolbar);
+        let mut input = gui.input(&toolbar);
+        input.predicted_dt = pacer.period.as_secs_f32();
         let ctx = gui.ctx.clone();
         let mut cmd = Commands::default();
         let output = ctx.run_ui(input, |ui| {
@@ -1010,7 +1240,19 @@ pub fn run(options: Options) -> Result<(), String> {
         if cmd.quit {
             running = false
         }
-        if cmd.pick {
+        if cmd.background {
+            if picker.active() {
+                picker.cancel();
+            }
+            app.stop();
+            app.reset_contacts();
+            if app.frozen {
+                background.freeze();
+            } else {
+                background.live();
+            }
+        }
+        if cmd.pick && !background.pending() {
             if picker.active() {
                 picker.cancel();
             } else {
@@ -1035,15 +1277,28 @@ pub fn run(options: Options) -> Result<(), String> {
         }
         if cmd.display {
             app.stop();
-            canvas
-                .place_on_display(app.display, true)
-                .unwrap_or_else(|e| app.status = e);
-            canvas_color.refresh(&canvas, canvas_render.extended);
+            if let Some(display) = app.displays.get(app.display)
+                && let Err(error) = toolbar.place_on_display(display.id, false)
+            {
+                app.status = error;
+            }
+            topology_dirty = true;
         }
-        if cmd.mode || cmd.display {
+        if cmd.frame_rate {
+            if let Err(error) = app.frame_rate.save(&state_dir().join("frame-rate.json")) {
+                app.status = format!("Frame-rate setting: {error}");
+            }
+            pacer.configure(app.frame_rate, app.refresh_hz(), Instant::now());
+        }
+        if cmd.mode {
             apply_mode(&mut app, &canvas, &toolbar, &mut native)?;
         }
-        if picker.hides_windows() {
+        if picker.hides_windows() || background.pending() {
+            if !picker_windows_hidden {
+                canvas.show(false)?;
+                toolbar.show(false)?;
+                picker_windows_hidden = true;
+            }
             // Consume texture deltas from the frame that launched the sampler,
             // without presenting an application window over the desktop sample.
             gui.paint(&toolbar_render, &toolbar, &toolbar_color, output)?;
@@ -1058,9 +1313,12 @@ pub fn run(options: Options) -> Result<(), String> {
         if picker.choosing() {
             canvas_render.begin(&canvas, [0., 0., 0., 1. / 255.])?;
             canvas_render.present()?;
-        } else if !app.hidden {
+        } else if !app.hidden
+            && !app.suspended
+            && (options.smoke || canvas.display_id() == app.pages.active)
+        {
             app.history.doc.size = canvas.size();
-            app.paint(&canvas_render, &canvas, &canvas_color)?;
+            app.paint(&canvas_render, &canvas, &canvas_color, &mut background)?;
             // Software transparent-window updates may replace the input shape.
             // Reapply the empty region after presentation so visible ink stays click-through.
             if app.pass
@@ -1116,10 +1374,7 @@ pub fn run(options: Options) -> Result<(), String> {
             );
             running = false;
         }
-        // Two windows must not busy-loop if a renderer cannot provide vsync.
-        unsafe {
-            SDL_Delay(8);
-        }
+        pacer.wait();
     }
     if !options.smoke {
         app.stop();
@@ -1249,7 +1504,11 @@ mod touch_tests {
             hidden: false,
             board: true,
             display: 0,
-            display_names: vec![],
+            displays: vec![],
+            pages: Pages::default(),
+            frame_rate: FrameRate::Auto,
+            suspended: false,
+            frozen: false,
             pens: HashMap::new(),
             pen_proximity: BTreeSet::new(),
             touches: BTreeMap::new(),
@@ -1279,6 +1538,53 @@ mod touch_tests {
             },
         };
         app.event(&event, SDL_WindowID(1), [800., 600.]);
+    }
+    fn screen(id: u32, x: i32, refresh: f64) -> Display {
+        Display {
+            id,
+            name: format!("Screen {id}"),
+            bounds: [x, 0, 1920, 1080],
+            refresh,
+            scale: 1.0,
+        }
+    }
+    #[test]
+    fn controller_moves_between_pages_and_refresh_rates_without_mixing_strokes() {
+        let mut a = app();
+        a.displays = vec![screen(10, 0, 60.0), screen(20, 1920, 120.0)];
+        a.pages = Pages::new(Some(10));
+        finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 1, 0.1, 0.1);
+        finger(&mut a, SDL_EVENT_FINGER_UP, 1, 1, 0.2, 0.2);
+        let (layout, removed) =
+            a.refresh_displays(vec![screen(20, 1920, 120.0), screen(10, 0, 60.0)], Some(20));
+        assert!(layout);
+        assert!(!removed);
+        assert!(a.history.doc.strokes.is_empty());
+        assert_eq!(a.frame_rate.hz(a.refresh_hz()), 120.0);
+        a.refresh_displays(vec![screen(20, 1920, 90.0), screen(10, 0, 60.0)], Some(10));
+        assert_eq!(a.history.doc.strokes.len(), 1);
+        assert_eq!(a.pages.active, Some(10));
+        assert_eq!(a.display, 1);
+        a.refresh_displays(vec![screen(20, 1920, 90.0), screen(10, 0, 60.0)], Some(20));
+        assert_eq!(a.refresh_hz(), 90.0);
+    }
+    #[test]
+    fn unplugging_clears_contacts_and_cannot_be_undone_or_draw_on_a_missing_screen() {
+        let mut a = app();
+        a.displays = vec![screen(10, 0, 60.0)];
+        a.pages = Pages::new(Some(10));
+        finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 1, 0.1, 0.1);
+        let (layout, removed) = a.refresh_displays(vec![], None);
+        assert!(layout && removed && a.suspended);
+        assert!(a.touches.is_empty());
+        finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 1, 0.2, 0.2);
+        a.history.undo();
+        a.history.redo();
+        assert!(a.history.doc.strokes.is_empty());
+        assert!(a.touches.is_empty());
+        a.refresh_displays(vec![screen(30, 0, 60.0)], Some(30));
+        assert!(!a.suspended);
+        assert!(a.history.doc.strokes.is_empty());
     }
     #[test]
     fn finger_stroke_is_saved_in_logical_units_without_fake_pen_pressure() {
