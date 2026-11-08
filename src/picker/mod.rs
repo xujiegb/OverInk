@@ -182,7 +182,8 @@ mod tests {
     fn cancellation_resets_desktop_and_delayed_system_selection() {
         let mut picker = Picker::default();
         picker.start("x11");
-        assert!(picker.choosing());
+        assert_eq!(picker.choosing(), !cfg!(target_os = "macos"));
+        assert_eq!(picker.hides_windows(), cfg!(target_os = "macos"));
         picker.cancel();
         assert!(!picker.active());
         assert!(matches!(picker.result, Some(Ok(None))));

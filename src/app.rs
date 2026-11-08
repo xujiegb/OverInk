@@ -61,6 +61,7 @@ struct App {
     frame_rate: FrameRate,
     suspended: bool,
     frozen: bool,
+    protected: Option<crate::controller::Rect>,
     pens: HashMap<u32, Pen>,
     pen_proximity: BTreeSet<u32>,
     touches: BTreeMap<TouchKey, FingerStroke>,
@@ -109,6 +110,7 @@ impl App {
             frame_rate: FrameRate::load(&base.join("frame-rate.json")),
             suspended: false,
             frozen: false,
+            protected: None,
             pens: HashMap::new(),
             pen_proximity: BTreeSet::new(),
             touches: BTreeMap::new(),
@@ -148,7 +150,11 @@ impl App {
         }
     }
     fn begin(&mut self, source: Source, p: Point, eraser: bool) {
-        if self.pass || self.hidden || self.suspended {
+        if self.pass
+            || self.hidden
+            || self.suspended
+            || self.protected.is_some_and(|r| r.contains(p.x, p.y))
+        {
             return;
         }
         self.history.commit();
@@ -183,6 +189,11 @@ impl App {
         self.history.active = Some(s);
     }
     fn motion(&mut self, source: Source, p: Point, eraser: bool) {
+        if self.protected.is_some_and(|r| r.contains(p.x, p.y)) {
+            self.end(source);
+            self.pointer = None;
+            return;
+        }
         self.pointer = Some(p);
         if self.source != Some(source) || self.pass || self.hidden || self.suspended {
             return;
@@ -235,6 +246,26 @@ impl App {
         self.source = None;
         for p in self.pens.values_mut() {
             p.down = false
+        }
+    }
+    fn use_mouse(&mut self) {
+        self.stop();
+        self.reset_contacts();
+        self.pass = true;
+        self.status = "Mouse mode: click the desktop. Select any drawing tool to resume.".into();
+    }
+    fn use_tool(&mut self, tool: Tool) {
+        self.stop();
+        self.reset_contacts();
+        self.tool = tool;
+        self.pass = false;
+        self.hidden = false;
+    }
+    fn toggle_mouse(&mut self) {
+        if self.pass {
+            self.use_tool(self.tool);
+        } else {
+            self.use_mouse();
         }
     }
     fn reset_contacts(&mut self) {
@@ -321,6 +352,9 @@ impl App {
         }
     }
     fn touch_motion(&mut self, key: TouchKey, point: Point) {
+        if self.protected.is_some_and(|r| r.contains(point.x, point.y)) {
+            return;
+        }
         let can_append = self.draft_point_count() < MAX_POINTS;
         let Some(finger) = self.touches.get_mut(&key) else {
             return;
@@ -379,6 +413,9 @@ impl App {
             return;
         };
         if event.r#type == SDL_EVENT_FINGER_DOWN {
+            if self.protected.is_some_and(|r| r.contains(point.x, point.y)) {
+                return;
+            }
             if self.touches.contains_key(&key)
                 || self.touches.len() >= 16
                 || touch::is_indirect(event.touchID)
@@ -557,7 +594,7 @@ impl App {
                     self.touches.clear();
                     self.source = None
                 } else {
-                    self.pass = true;
+                    self.use_mouse();
                     c.mode = true
                 }
                 return c;
@@ -586,8 +623,7 @@ impl App {
             }
             match k.key {
                 SDLK_SPACE => {
-                    self.stop();
-                    self.pass = !self.pass;
+                    self.toggle_mouse();
                     c.mode = true
                 }
                 SDLK_H => {
@@ -595,15 +631,21 @@ impl App {
                     self.hidden = !self.hidden;
                     c.mode = true
                 }
-                SDLK_P => self.tool = Tool::Pen,
-                SDLK_B => self.tool = Tool::Pencil,
-                SDLK_M => self.tool = Tool::Marker,
-                SDLK_L => self.tool = Tool::Line,
-                SDLK_A => self.tool = Tool::Arrow,
-                SDLK_R => self.tool = Tool::Rectangle,
-                SDLK_O => self.tool = Tool::Ellipse,
-                SDLK_E => self.tool = Tool::Eraser,
-                SDLK_K => self.tool = Tool::Laser,
+                SDLK_P | SDLK_B | SDLK_M | SDLK_L | SDLK_A | SDLK_R | SDLK_O | SDLK_E | SDLK_K => {
+                    let tool = match k.key {
+                        SDLK_B => Tool::Pencil,
+                        SDLK_M => Tool::Marker,
+                        SDLK_L => Tool::Line,
+                        SDLK_A => Tool::Arrow,
+                        SDLK_R => Tool::Rectangle,
+                        SDLK_O => Tool::Ellipse,
+                        SDLK_E => Tool::Eraser,
+                        SDLK_K => Tool::Laser,
+                        _ => Tool::Pen,
+                    };
+                    self.use_tool(tool);
+                    c.mode = true;
+                }
                 SDLK_1 => self.select_color(InkColor::from_rgb8(PRESETS[0])),
                 SDLK_2 => self.select_color(InkColor::from_rgb8(PRESETS[1])),
                 SDLK_3 => self.select_color(InkColor::from_rgb8(PRESETS[2])),
@@ -739,15 +781,21 @@ impl App {
                         if ui.button(if self.hidden { "Show" } else { "Hide" }).clicked() {
                             self.stop(); self.hidden = !self.hidden; c.mode = true;
                         }
-                        let label = if self.pass { "Resume drawing" } else { "Click through" };
+                        let label = if self.pass { "Resume drawing" } else { "Mouse mode" };
                         let button = egui::Button::new(label).fill(egui::Color32::from_rgb(73, 86, 128));
-                        if ui.add(button).clicked() { self.stop(); self.pass = !self.pass; c.mode = true; }
+                        if ui.add(button).clicked() { self.toggle_mouse(); c.mode = true; }
                     });
                 });
                 ui.add_space(3.);
                 ui.horizontal_wrapped(|ui| {
+                    if ui.selectable_label(self.pass, "Mouse")
+                        .on_hover_text("Click underlying apps while keeping your ink. A drawing tool resumes drawing.").clicked() {
+                        self.use_mouse(); c.mode=true;
+                    }
                     for tool in Tool::ALL {
-                        if ui.selectable_value(&mut self.tool, tool, tool.label()).changed() { self.stop(); }
+                        if ui.selectable_label(!self.pass && self.tool == tool, tool.label()).clicked() {
+                            self.use_tool(tool); c.mode=true;
+                        }
                     }
                 });
                 self.color_controls(ui, &mut c);
@@ -826,7 +874,7 @@ impl App {
                     ui.colored_label(egui::Color32::from_rgb(236, 173, 69),
                         "Wayland: compositor controls overlay position and stacking. Use --x11 for desktop overlay if needed.");
                 }
-                ui.small("Space: click through   Esc: cancel / pass   P: pen   E: erase   K: laser   Ctrl/Cmd+Z: undo");
+                ui.small("Mouse: desktop clicks   Space: mouse / draw   P: pen   E: erase   Ctrl/Cmd+Z: undo");
                 ui.label(egui::RichText::new(&self.status).size(11.).color(egui::Color32::from_rgb(165, 178, 211)));
             });
         c
@@ -838,27 +886,44 @@ impl App {
         color: &ColorManager,
         background: &mut crate::background::Background,
     ) -> Result<(), String> {
-        let bg = if self.board {
+        let bg = if self.board && !self.pass {
             [0.97, 0.97, 0.96, 1.]
         } else {
             [0., 0., 0., if self.pass { 0. } else { 1. / 255. }]
         };
-        let scale = r.begin(w, bg)?;
-        if let Err(error) = background.draw(r, w, color) {
-            background.live();
-            self.frozen = false;
-            self.status = format!("Frozen background unavailable: {error}");
+        // Clear the protected area to transparent even on software renderers,
+        // which cannot implement SDL's custom alpha-mask texture blend mode.
+        let scale = r.begin(w, [0.; 4])?;
+        let clips = crate::controller::outside(w.size().map(|v| v.ceil() as i32), self.protected);
+        for area in &clips {
+            unsafe {
+                check(SDL_SetRenderClipRect(r.raw, &area.sdl()))?;
+                check(SDL_SetRenderDrawColorFloat(
+                    r.raw, bg[0], bg[1], bg[2], bg[3],
+                ))?;
+                check(SDL_RenderFillRect(r.raw, ptr::null()))?;
+            }
+            if !self.pass
+                && let Err(error) = background.draw(r, w, color)
+            {
+                background.live();
+                self.frozen = false;
+                self.status = format!("Frozen background unavailable: {error}");
+            }
+        }
+        unsafe {
+            SDL_SetRenderClipRect(r.raw, ptr::null());
         }
         let aa = 0.8 / scale[0].max(scale[1]);
         for s in &self.history.doc.strokes {
-            paint_stroke(r, s, color, aa, 1.)?
+            paint_stroke(r, s, color, aa, 1., &clips)?
         }
         if let Some(ref s) = self.history.active {
-            paint_stroke(r, s, color, aa, 1.)?
+            paint_stroke(r, s, color, aa, 1., &clips)?
         }
         for finger in self.touches.values() {
             if let Some(ref stroke) = finger.stroke {
-                paint_stroke(r, stroke, color, aa, 1.)?;
+                paint_stroke(r, stroke, color, aa, 1., &clips)?;
             }
         }
         let now = Instant::now();
@@ -882,6 +947,7 @@ impl App {
                 color,
                 aa,
                 1. - now.duration_since(pair[0].1).as_secs_f32() / 0.9,
+                &clips,
             )?
         }
         r.present()
@@ -893,6 +959,7 @@ fn paint_stroke(
     color: &ColorManager,
     aa: f32,
     fade: f32,
+    clips: &[crate::controller::Rect],
 ) -> Result<(), String> {
     let m = geometry::mesh(s, aa);
     let rgb = color.map(s.color.output_rgb(r.extended));
@@ -913,7 +980,42 @@ fn paint_stroke(
             tex_coord: SDL_FPoint { x: 0., y: 0. },
         })
         .collect();
-    r.geometry(ptr::null_mut(), &vertices, &m.indices)
+    let bounds = vertices.iter().fold(
+        [
+            f32::INFINITY,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+        ],
+        |b, v| {
+            [
+                b[0].min(v.position.x),
+                b[1].min(v.position.y),
+                b[2].max(v.position.x),
+                b[3].max(v.position.y),
+            ]
+        },
+    );
+    let result = (|| {
+        for area in clips {
+            if bounds[2] < area.x as f32
+                || bounds[3] < area.y as f32
+                || bounds[0] >= (area.x + area.w) as f32
+                || bounds[1] >= (area.y + area.h) as f32
+            {
+                continue;
+            }
+            unsafe {
+                check(SDL_SetRenderClipRect(r.raw, &area.sdl()))?;
+            }
+            r.geometry(ptr::null_mut(), &vertices, &m.indices)?;
+        }
+        Ok(())
+    })();
+    unsafe {
+        SDL_SetRenderClipRect(r.raw, ptr::null());
+    }
+    result
 }
 fn state_dir() -> PathBuf {
     if let Some(p) = std::env::var_os("OVERINK_STATE_DIR") {
@@ -942,10 +1044,10 @@ fn apply_mode(
     pass: &mut Passthrough,
 ) -> Result<(), String> {
     if a.hidden || a.suspended {
-        return w.show(false);
+        return crate::native::show_canvas(w, toolbar, false);
     }
-    w.show(true)?;
-    if let Err(e) = pass.set(w, a.pass) {
+    crate::native::show_canvas(w, toolbar, true)?;
+    if let Err(e) = pass.set(w, a.pass && mouse_released()) {
         a.pass = false;
         a.status = format!("Passthrough unavailable: {e}. Use Hide.");
     }
@@ -957,7 +1059,15 @@ fn apply_mode(
         // Keep the controller above the drawing input region after resuming.
         SDL_RaiseWindow(toolbar.raw);
     }
+    crate::native::keep_controller_above(w, toolbar);
     Ok(())
+}
+
+fn mouse_released() -> bool {
+    // Keep the native input region until SDL receives the matching button-up.
+    // Removing it during a drag can lose that release and make SDL discard the
+    // next controller button-down as a duplicate of the unfinished drag.
+    unsafe { SDL_GetMouseState(ptr::null_mut(), ptr::null_mut()).0 == 0 }
 }
 
 pub struct Options {
@@ -1008,7 +1118,7 @@ pub fn run(options: Options) -> Result<(), String> {
     canvas_color.refresh(&canvas, canvas_render.extended);
     let mut toolbar_color = ColorManager::default();
     toolbar_color.refresh(&toolbar, toolbar_render.extended);
-    canvas.show(true)?;
+    crate::native::show_canvas(&canvas, &toolbar, true)?;
     if !options.smoke
         && let Some(id) = app.pages.active
     {
@@ -1031,6 +1141,7 @@ pub fn run(options: Options) -> Result<(), String> {
     }
     let mut picker = crate::picker::Picker::default();
     let mut background = crate::background::Background::default();
+    let mut controller_guard = crate::controller::Guard::default();
     let mut picker_windows_hidden = false;
     let mut running = true;
     let mut frame = 0;
@@ -1082,7 +1193,7 @@ pub fn run(options: Options) -> Result<(), String> {
                     break;
                 } else if id == canvas.id {
                     app.hidden = true;
-                    canvas.show(false)?;
+                    crate::native::show_canvas(&canvas, &toolbar, false)?;
                 }
             }
             let was_picking = picker.active();
@@ -1103,7 +1214,7 @@ pub fn run(options: Options) -> Result<(), String> {
                     || (ty == SDL_EVENT_FINGER_DOWN && event.tfinger.windowID == canvas.id)
             };
             if canvas_activated {
-                crate::native::keep_controller_above(&toolbar);
+                crate::native::keep_controller_above(&canvas, &toolbar);
             }
             if ty == SDL_EVENT_KEY_DOWN && !was_picking && !background.pending() {
                 let id = unsafe { event.key.windowID };
@@ -1154,7 +1265,7 @@ pub fn run(options: Options) -> Result<(), String> {
                 if picker.active() {
                     picker.cancel();
                 }
-                canvas.show(false)?;
+                crate::native::show_canvas(&canvas, &toolbar, false)?;
                 if let Some(id) = app.pages.active {
                     if let Err(error) = canvas.place_on_display(id, true) {
                         app.status = format!("Cannot move the drawing surface: {error}");
@@ -1186,9 +1297,10 @@ pub fn run(options: Options) -> Result<(), String> {
             app.displays.get(app.display).filter(|_| !app.suspended),
             &app.displays.iter().map(|d| d.id).collect(),
             &video,
+            !app.pass,
         );
         if (picker.hides_windows() || background.pending()) && !picker_windows_hidden {
-            canvas.show(false)?;
+            crate::native::show_canvas(&canvas, &toolbar, false)?;
             toolbar.show(false)?;
             picker_windows_hidden = true;
         }
@@ -1248,6 +1360,9 @@ pub fn run(options: Options) -> Result<(), String> {
             app.reset_contacts();
             if app.frozen {
                 background.freeze();
+                if app.pass {
+                    background.pause_capture();
+                }
             } else {
                 background.live();
             }
@@ -1261,7 +1376,7 @@ pub fn run(options: Options) -> Result<(), String> {
                 app.picking = true;
                 picker.start(&video);
                 if picker.choosing() {
-                    canvas.show(true)?;
+                    crate::native::show_canvas(&canvas, &toolbar, true)?;
                     native.set(&canvas, false)?;
                     unsafe {
                         SDL_RaiseWindow(canvas.raw);
@@ -1269,7 +1384,7 @@ pub fn run(options: Options) -> Result<(), String> {
                     }
                 }
                 if picker.hides_windows() {
-                    canvas.show(false)?;
+                    crate::native::show_canvas(&canvas, &toolbar, false)?;
                     toolbar.show(false)?;
                     picker_windows_hidden = true;
                 }
@@ -1295,7 +1410,7 @@ pub fn run(options: Options) -> Result<(), String> {
         }
         if picker.hides_windows() || background.pending() {
             if !picker_windows_hidden {
-                canvas.show(false)?;
+                crate::native::show_canvas(&canvas, &toolbar, false)?;
                 toolbar.show(false)?;
                 picker_windows_hidden = true;
             }
@@ -1310,6 +1425,15 @@ pub fn run(options: Options) -> Result<(), String> {
         toolbar_render.begin(&toolbar, [0.094, 0.11, 0.149, 1.])?;
         gui.paint(&toolbar_render, &toolbar, &toolbar_color, output)?;
         toolbar_render.present()?;
+        let mouse = app.pass && !picker.choosing() && mouse_released();
+        match controller_guard.update(&canvas, &toolbar, mouse, canvas_render.name != "software") {
+            Ok(rect) => app.protected = rect,
+            Err(error) => {
+                app.hidden = true;
+                crate::native::show_canvas(&canvas, &toolbar, false)?;
+                app.status = format!("Drawing layer hidden to keep the controls usable: {error}");
+            }
+        }
         if picker.choosing() {
             canvas_render.begin(&canvas, [0., 0., 0., 1. / 255.])?;
             canvas_render.present()?;
@@ -1319,16 +1443,22 @@ pub fn run(options: Options) -> Result<(), String> {
         {
             app.history.doc.size = canvas.size();
             app.paint(&canvas_render, &canvas, &canvas_color, &mut background)?;
-            // Software transparent-window updates may replace the input shape.
-            // Reapply the empty region after presentation so visible ink stays click-through.
-            if app.pass
-                && canvas_render.name == "software"
-                && let Err(e) = native.set(&canvas, true)
-            {
-                app.pass = false;
-                app.status = e;
-            }
         }
+        // A software present can replace the X11 input shape. The protected
+        // controller region must remain excluded in every drawing tool.
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        if video == "x11"
+            && let Err(error) = native.set_guarded(&canvas, mouse, app.protected)
+        {
+            app.status = format!("Controller input protection: {error}");
+        }
+        if mouse
+            && video != "x11"
+            && let Err(error) = native.set(&canvas, true)
+        {
+            app.status = format!("Mouse mode: {error}");
+        }
+        crate::native::keep_controller_above(&canvas, &toolbar);
         if !options.smoke
             && app.last_save.elapsed() > Duration::from_secs(10)
             && app.history.active.is_none()
@@ -1509,6 +1639,7 @@ mod touch_tests {
             frame_rate: FrameRate::Auto,
             suspended: false,
             frozen: false,
+            protected: None,
             pens: HashMap::new(),
             pen_proximity: BTreeSet::new(),
             touches: BTreeMap::new(),
@@ -1538,6 +1669,83 @@ mod touch_tests {
             },
         };
         app.event(&event, SDL_WindowID(1), [800., 600.]);
+    }
+    #[test]
+    fn mouse_commits_the_unfinished_stroke_and_any_tool_resumes_drawing() {
+        let mut a = app();
+        a.begin(Source::Mouse, Point::new(10., 20., 0.5, [0.; 2]), false);
+        a.motion(Source::Mouse, Point::new(50., 60., 0.7, [0.; 2]), false);
+        a.use_mouse();
+        assert!(a.pass);
+        assert!(a.history.active.is_none());
+        assert!(a.source.is_none());
+        assert_eq!(a.history.doc.strokes.len(), 1);
+        assert_eq!(a.history.doc.strokes[0].points.len(), 2);
+        a.motion(Source::Mouse, Point::new(90., 90., 1., [0.; 2]), false);
+        a.begin(Source::Mouse, Point::new(100., 100., 1., [0.; 2]), false);
+        assert!(a.history.active.is_none());
+        for tool in Tool::ALL {
+            a.hidden = true;
+            a.use_tool(tool);
+            assert!(!a.pass && !a.hidden);
+            assert_eq!(a.tool, tool);
+            a.use_mouse();
+        }
+        assert_eq!(a.history.doc.strokes.len(), 1);
+        assert_eq!(a.history.doc.strokes[0].points.len(), 2);
+    }
+    #[test]
+    fn controller_area_rejects_pen_touch_and_eraser_edits() {
+        let mut a = app();
+        a.protected = Some(crate::controller::Rect {
+            x: 100,
+            y: 100,
+            w: 300,
+            h: 200,
+        });
+        a.begin(Source::Pen(1), Point::new(150., 150., 1., [0.; 2]), false);
+        assert!(a.history.active.is_none());
+        finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 1, 0.2, 0.3);
+        assert!(a.touches.is_empty());
+        a.begin(Source::Mouse, Point::new(50., 150., 1., [0.; 2]), false);
+        a.motion(Source::Mouse, Point::new(150., 150., 1., [0.; 2]), false);
+        assert!(a.history.active.is_none());
+        assert_eq!(a.history.doc.strokes.len(), 1);
+        assert!(a.history.doc.strokes[0].points.iter().all(|p| p.x < 100.));
+        a.use_tool(Tool::Eraser);
+        let count = a.history.doc.strokes.len();
+        a.begin(Source::Mouse, Point::new(150., 150., 1., [0.; 2]), true);
+        assert_eq!(a.history.doc.strokes.len(), count);
+    }
+    #[test]
+    fn tool_hotkeys_and_space_switch_between_mouse_and_drawing() {
+        let mut a = app();
+        a.use_mouse();
+        for (key, tool) in [
+            (SDLK_P, Tool::Pen),
+            (SDLK_B, Tool::Pencil),
+            (SDLK_E, Tool::Eraser),
+        ] {
+            let event = SDL_Event {
+                key: SDL_KeyboardEvent {
+                    r#type: SDL_EVENT_KEY_DOWN,
+                    key,
+                    ..Default::default()
+                },
+            };
+            assert!(a.keyboard(&event, false).mode);
+            assert!(!a.pass);
+            assert_eq!(a.tool, tool);
+            let space = SDL_Event {
+                key: SDL_KeyboardEvent {
+                    r#type: SDL_EVENT_KEY_DOWN,
+                    key: SDLK_SPACE,
+                    ..Default::default()
+                },
+            };
+            assert!(a.keyboard(&space, false).mode);
+            assert!(a.pass);
+        }
     }
     fn screen(id: u32, x: i32, refresh: f64) -> Display {
         Display {

@@ -7,6 +7,7 @@
 mod app;
 mod background;
 mod color;
+mod controller;
 mod display;
 mod export;
 mod frame_rate;

@@ -141,8 +141,174 @@ impl Passthrough {
     }
 }
 
-pub fn keep_controller_above(controller: &Window) {
-    let _ = controller;
+pub fn keep_controller_above(canvas: &Window, controller: &Window) {
+    let _ = canvas;
+    #[cfg(target_os = "windows")]
+    unsafe {
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn SetWindowPos(
+                h: *mut c_void,
+                after: *mut c_void,
+                x: i32,
+                y: i32,
+                w: i32,
+                hgt: i32,
+                flags: u32,
+            ) -> i32;
+        }
+        let hwnd = SDL_GetPointerProperty(
+            SDL_GetWindowProperties(controller.raw),
+            SDL_PROP_WINDOW_WIN32_HWND_POINTER,
+            std::ptr::null_mut(),
+        );
+        if !hwnd.is_null() {
+            // Keep drawing focus on the canvas; raising the controller must not
+            // interrupt a pen stroke or activate the window beneath it.
+            SetWindowPos(
+                hwnd,
+                (-1isize) as *mut c_void,
+                0,
+                0,
+                0,
+                0,
+                0x1 | 0x2 | 0x10 | 0x200,
+            );
+        }
+    }
+    #[cfg(target_os = "macos")]
+    unsafe {
+        #[link(name = "objc")]
+        unsafe extern "C" {
+            fn sel_registerName(name: *const std::ffi::c_char) -> *mut c_void;
+            fn objc_msgSend();
+        }
+        let window = SDL_GetPointerProperty(
+            SDL_GetWindowProperties(controller.raw),
+            SDL_PROP_WINDOW_COCOA_WINDOW_POINTER,
+            std::ptr::null_mut(),
+        );
+        let under = SDL_GetPointerProperty(
+            SDL_GetWindowProperties(canvas.raw),
+            SDL_PROP_WINDOW_COCOA_WINDOW_POINTER,
+            std::ptr::null_mut(),
+        );
+        if !window.is_null() && !under.is_null() {
+            let get: unsafe extern "C" fn(*mut c_void, *mut c_void) -> isize =
+                std::mem::transmute(objc_msgSend as *const ());
+            let set: unsafe extern "C" fn(*mut c_void, *mut c_void, isize) =
+                std::mem::transmute(objc_msgSend as *const ());
+            let order: unsafe extern "C" fn(*mut c_void, *mut c_void, isize, isize) =
+                std::mem::transmute(objc_msgSend as *const ());
+            let level = get(under, sel_registerName(c"level".as_ptr())).saturating_add(1);
+            if get(window, sel_registerName(c"level".as_ptr())) != level {
+                set(window, sel_registerName(c"setLevel:".as_ptr()), level);
+            }
+            order(
+                window,
+                sel_registerName(c"orderWindow:relativeTo:".as_ptr()),
+                1,
+                get(under, sel_registerName(c"windowNumber".as_ptr())),
+            );
+        }
+    }
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     let _ = unix::raise_controller(controller);
+}
+
+pub fn show_canvas(canvas: &Window, controller: &Window, shown: bool) -> Result<(), String> {
+    if crate::sdl::driver() == "wayland" {
+        unsafe {
+            // Transient toplevels stay above the fullscreen drawing surface.
+            // Detach before hiding it so Hide cannot also hide the controls.
+            let parent = if shown {
+                canvas.raw
+            } else {
+                std::ptr::null_mut()
+            };
+            if SDL_GetWindowParent(controller.raw) != parent {
+                check(SDL_SetWindowParent(controller.raw, parent))?;
+            }
+        }
+    }
+    canvas.show(shown)
+}
+
+pub fn controller_bounds(canvas: &Window, controller: &Window) -> Option<[f32; 4]> {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        #[repr(C)]
+        struct Rect {
+            left: i32,
+            top: i32,
+            right: i32,
+            bottom: i32,
+        }
+        #[repr(C)]
+        struct Point {
+            x: i32,
+            y: i32,
+        }
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn GetWindowRect(w: *mut c_void, rect: *mut Rect) -> i32;
+            fn ScreenToClient(w: *mut c_void, point: *mut Point) -> i32;
+        }
+        let window = SDL_GetPointerProperty(
+            SDL_GetWindowProperties(controller.raw),
+            SDL_PROP_WINDOW_WIN32_HWND_POINTER,
+            std::ptr::null_mut(),
+        );
+        let surface = SDL_GetPointerProperty(
+            SDL_GetWindowProperties(canvas.raw),
+            SDL_PROP_WINDOW_WIN32_HWND_POINTER,
+            std::ptr::null_mut(),
+        );
+        if window.is_null() || surface.is_null() {
+            return None;
+        }
+        let mut rect = Rect {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        if GetWindowRect(window, &mut rect) == 0 {
+            return None;
+        }
+        let mut point = Point {
+            x: rect.left,
+            y: rect.top,
+        };
+        if ScreenToClient(surface, &mut point) == 0 {
+            return None;
+        }
+        let logical = canvas.size();
+        let pixels = canvas.pixel_size();
+        let scale = [logical[0] / pixels[0] as f32, logical[1] / pixels[1] as f32];
+        Some([
+            point.x as f32 * scale[0],
+            point.y as f32 * scale[1],
+            (rect.right - rect.left) as f32 * scale[0],
+            (rect.bottom - rect.top) as f32 * scale[1],
+        ])
+    }
+    #[cfg(not(target_os = "windows"))]
+    unsafe {
+        let (mut x, mut y, mut cx, mut cy) = (0, 0, 0, 0);
+        if !SDL_GetWindowPosition(canvas.raw, &mut x, &mut y)
+            || !SDL_GetWindowPosition(controller.raw, &mut cx, &mut cy)
+        {
+            return None;
+        }
+        let (mut top, mut left, mut bottom, mut right) = (0, 0, 0, 0);
+        SDL_GetWindowBordersSize(controller.raw, &mut top, &mut left, &mut bottom, &mut right);
+        let size = controller.size();
+        Some([
+            (cx - x - left) as f32,
+            (cy - y - top) as f32,
+            size[0] + (left + right) as f32,
+            size[1] + (top + bottom) as f32,
+        ])
+    }
 }

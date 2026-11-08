@@ -39,6 +39,8 @@ impl Runtime {
             SDL_SetHint(SDL_HINT_MOUSE_TOUCH_EVENTS, c"0".as_ptr());
             // The initial contact must draw even when it gives the canvas focus.
             SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, c"1".as_ptr());
+            // A canvas drag must release on entering the separate controller.
+            SDL_SetHint(SDL_HINT_MOUSE_AUTO_CAPTURE, c"0".as_ptr());
             SDL_SetAppMetadata(
                 c"OverInk".as_ptr(),
                 c"0.1.0".as_ptr(),
@@ -136,6 +138,9 @@ impl Window {
             } else if overlay {
                 check(SDL_SetWindowSize(self.raw, r.w, r.h))?;
                 check(SDL_SetWindowPosition(self.raw, r.x, r.y))?;
+                // Finish the pending native resize before a software renderer
+                // allocates its window surface at the old hidden-window size.
+                check(SDL_SyncWindow(self.raw))?;
             } else {
                 let center = SDL_WINDOWPOS_CENTERED_DISPLAY(display);
                 check(SDL_SetWindowPosition(self.raw, center, center))?;

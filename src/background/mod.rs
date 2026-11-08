@@ -152,11 +152,15 @@ impl Background {
         self.capture = Capture::Wait(Instant::now() + Duration::from_millis(120));
         self.started = Instant::now();
     }
+    pub fn pause_capture(&mut self) {
+        self.capture = Capture::Idle;
+    }
     pub fn display(
         &mut self,
         display: Option<&crate::display::Display>,
         connected: &BTreeSet<u32>,
         driver: &str,
+        drawing: bool,
     ) {
         self.images.retain(|id, _| connected.contains(id));
         let id = display.map(|d| d.id);
@@ -170,10 +174,15 @@ impl Background {
             self.texture = None;
             self.display = id;
             self.bounds = bounds;
-            if self.frozen && id.is_some_and(|id| !self.images.contains_key(&id)) {
-                self.capture = Capture::Wait(Instant::now() + Duration::from_millis(120));
-                self.started = Instant::now();
-            }
+        }
+        if !drawing {
+            self.pause_capture();
+        } else if !self.pending()
+            && self.frozen
+            && id.is_some_and(|id| !self.images.contains_key(&id))
+        {
+            self.capture = Capture::Wait(Instant::now() + Duration::from_millis(120));
+            self.started = Instant::now();
         }
         self.driver = driver.into();
     }
@@ -317,7 +326,7 @@ mod tests {
         bg.images.insert(7, Image::buffer(2, 2).unwrap());
         bg.display = Some(7);
         bg.frozen = true;
-        bg.display(None, &BTreeSet::new(), "x11");
+        bg.display(None, &BTreeSet::new(), "x11", true);
         assert!(bg.images.is_empty());
         assert!(!bg.pending());
         bg.freeze();
@@ -352,5 +361,25 @@ mod tests {
         );
         assert!(path.exists());
         std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn mouse_mode_defers_capture_without_discarding_frozen_pages() {
+        let mut bg = Background::default();
+        let screen = crate::display::Display {
+            id: 7,
+            name: "Display".into(),
+            bounds: [0, 0, 100, 100],
+            refresh: 60.,
+            scale: 1.,
+        };
+        bg.display(Some(&screen), &BTreeSet::from([7]), "x11", true);
+        bg.freeze();
+        bg.display(Some(&screen), &BTreeSet::from([7]), "x11", false);
+        assert!(!bg.pending());
+        assert!(bg.frozen);
+        bg.images.insert(7, Image::buffer(2, 2).unwrap());
+        bg.display(Some(&screen), &BTreeSet::from([7]), "x11", true);
+        assert!(!bg.pending());
+        assert!(bg.images.contains_key(&7));
     }
 }

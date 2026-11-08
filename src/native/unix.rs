@@ -234,6 +234,14 @@ impl Passthrough {
         Self { wayland, failure }
     }
     pub fn set(&mut self, w: &Window, pass: bool) -> Result<(), String> {
+        self.set_guarded(w, pass, None)
+    }
+    pub fn set_guarded(
+        &mut self,
+        w: &Window,
+        pass: bool,
+        hole: Option<crate::controller::Rect>,
+    ) -> Result<(), String> {
         if let Some(ref wl) = self.wayland {
             return wl.set(w, pass);
         }
@@ -284,6 +292,49 @@ impl Passthrough {
                     .get(b"XShapeCombineRectangles\0")
                     .map_err(|e| e.to_string())?;
                 f(display, window, 2, 0, 0, ptr::null(), 0, 0, 0);
+            } else if let Some(hole) = hole {
+                #[repr(C)]
+                struct Rectangle {
+                    x: i16,
+                    y: i16,
+                    width: u16,
+                    height: u16,
+                }
+                let mut rectangles = Vec::new();
+                for area in crate::controller::outside(w.pixel_size(), Some(hole.pixels(w))) {
+                    rectangles.push(Rectangle {
+                        x: area.x.try_into().map_err(|_| "Input region is too large")?,
+                        y: area.y.try_into().map_err(|_| "Input region is too large")?,
+                        width: area.w.try_into().map_err(|_| "Input region is too large")?,
+                        height: area.h.try_into().map_err(|_| "Input region is too large")?,
+                    });
+                }
+                let f: libloading::Symbol<
+                    unsafe extern "C" fn(
+                        *mut c_void,
+                        c_ulong,
+                        c_int,
+                        c_int,
+                        c_int,
+                        *const Rectangle,
+                        c_int,
+                        c_int,
+                        c_int,
+                    ),
+                > = ext
+                    .get(b"XShapeCombineRectangles\0")
+                    .map_err(|e| e.to_string())?;
+                f(
+                    display,
+                    window,
+                    2,
+                    0,
+                    0,
+                    rectangles.as_ptr(),
+                    rectangles.len() as c_int,
+                    0,
+                    0,
+                );
             } else {
                 let f: libloading::Symbol<
                     unsafe extern "C" fn(*mut c_void, c_ulong, c_int, c_int, c_int, c_ulong, c_int),
