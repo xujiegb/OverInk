@@ -45,7 +45,7 @@ jobs:
         name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build pkg-config libx11-dev libxext-dev libxi-dev libxrandr-dev libxcursor-dev libxfixes-dev libxrender-dev libxss-dev libxtst-dev libwayland-dev wayland-protocols libxkbcommon-dev libegl1-mesa-dev libgl1-mesa-dev
+          sudo apt-get install -y cmake ninja-build pkg-config dbus libx11-dev libxext-dev libxi-dev libxrandr-dev libxcursor-dev libxfixes-dev libxrender-dev libxss-dev libxtst-dev libwayland-dev wayland-protocols libxkbcommon-dev libegl1-mesa-dev libgl1-mesa-dev
       - if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
         with:
@@ -69,6 +69,11 @@ jobs:
           cargo clippy --locked --target "$OVERINK_TARGET" --all-targets -- -D warnings
           cargo test --locked --release --target "$OVERINK_TARGET"
           cargo build --locked --release --target "$OVERINK_TARGET"
+      - name: Check Wayland color-picker protocol
+        if: runner.os == 'Linux'
+        env:
+          OVERINK_TARGET: ${{ matrix.target }}
+        run: dbus-run-session -- cargo test --locked --release --target "$OVERINK_TARGET" portal_response -- --ignored
       - name: Render input smoke test
         if: runner.os == 'Linux'
         env:

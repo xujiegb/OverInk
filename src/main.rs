@@ -12,6 +12,7 @@ mod gui;
 mod icc;
 mod model;
 mod native;
+mod picker;
 mod sdl;
 mod touch;
 fn main() {

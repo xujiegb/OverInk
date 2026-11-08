@@ -35,11 +35,14 @@ struct Commands {
     mode: bool,
     display: bool,
     quit: bool,
+    pick: bool,
 }
 struct App {
     history: History,
     tool: Tool,
     color: InkColor,
+    hex_entry: crate::color::HexEntry,
+    picking: bool,
     width: f32,
     opacity: f32,
     pressure: bool,
@@ -79,6 +82,8 @@ impl App {
             history,
             tool: Tool::Pen,
             color: InkColor::default(),
+            hex_entry: crate::color::HexEntry::new(InkColor::default()),
+            picking: false,
             width: 5.,
             opacity: 1.,
             pressure: true,
@@ -464,6 +469,9 @@ impl App {
                 return c;
             }
             let m = gui::modifiers(k.r#mod);
+            if editing_text {
+                return c;
+            }
             if k.key == SDLK_ESCAPE {
                 if self.history.active.is_some() || !self.touches.is_empty() {
                     self.history.active = None;
@@ -473,9 +481,6 @@ impl App {
                     self.pass = true;
                     c.mode = true
                 }
-                return c;
-            }
-            if editing_text {
                 return c;
             }
             if m.command {
@@ -519,10 +524,10 @@ impl App {
                 SDLK_O => self.tool = Tool::Ellipse,
                 SDLK_E => self.tool = Tool::Eraser,
                 SDLK_K => self.tool = Tool::Laser,
-                SDLK_1 => self.color = InkColor::from_rgb8(PRESETS[0]),
-                SDLK_2 => self.color = InkColor::from_rgb8(PRESETS[1]),
-                SDLK_3 => self.color = InkColor::from_rgb8(PRESETS[2]),
-                SDLK_4 => self.color = InkColor::from_rgb8(PRESETS[3]),
+                SDLK_1 => self.select_color(InkColor::from_rgb8(PRESETS[0])),
+                SDLK_2 => self.select_color(InkColor::from_rgb8(PRESETS[1])),
+                SDLK_3 => self.select_color(InkColor::from_rgb8(PRESETS[2])),
+                SDLK_4 => self.select_color(InkColor::from_rgb8(PRESETS[3])),
                 _ => {}
             }
         }
@@ -553,6 +558,81 @@ impl App {
             Err(e) => self.status = format!("Export: {e}"),
         }
     }
+    fn select_color(&mut self, color: InkColor) {
+        self.color = color;
+        self.hex_entry = crate::color::HexEntry::new(color);
+    }
+    fn color_controls(&mut self, ui: &mut egui::Ui, commands: &mut Commands) {
+        ui.horizontal_wrapped(|ui| {
+            for (i, rgb) in PRESETS.iter().enumerate() {
+                let color = egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+                let selected = self.color.srgb8() == *rgb;
+                let button = egui::Button::new(
+                    egui::RichText::new((i + 1).to_string()).color(egui::Color32::WHITE),
+                )
+                .fill(color)
+                .stroke(egui::Stroke::new(
+                    if selected { 2. } else { 0. },
+                    egui::Color32::WHITE,
+                ))
+                .min_size(egui::vec2(32., 30.));
+                if ui
+                    .add(button)
+                    .on_hover_text(format!("{}  (sRGB)", InkColor::from_rgb8(*rgb).css()))
+                    .clicked()
+                {
+                    self.select_color(InkColor::from_rgb8(*rgb));
+                }
+            }
+            ui.separator();
+            ui.label("Palette");
+            let mut rgb = self.color.srgb8();
+            if ui
+                .color_edit_button_srgb(&mut rgb)
+                .on_hover_text("Choose a color from the palette")
+                .changed()
+            {
+                self.select_color(InkColor::from_rgb8(rgb));
+            }
+            if ui
+                .button("Pick screen")
+                .on_hover_text("Choose a desktop pixel; Esc cancels")
+                .clicked()
+            {
+                commands.pick = true;
+            }
+            self.hex_entry.sync(self.color);
+            ui.label("HEX");
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut self.hex_entry.text)
+                    .desired_width(90.)
+                    .char_limit(16)
+                    .hint_text("#FFFFFF"),
+            );
+            let accept = ui.button("Apply").clicked()
+                || (response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)));
+            if (response.has_focus() || response.lost_focus())
+                && ui.input(|input| input.key_pressed(egui::Key::Escape))
+            {
+                self.hex_entry.revert();
+            } else {
+                if (response.changed() || accept)
+                    && let Some(color) = self.hex_entry.apply()
+                {
+                    self.color = color;
+                }
+                if response.lost_focus() || accept {
+                    self.hex_entry.normalize();
+                }
+            }
+            if self.hex_entry.invalid {
+                ui.colored_label(
+                    egui::Color32::from_rgb(236, 113, 125),
+                    "Use #RRGGBB or #RGB",
+                );
+            }
+        });
+    }
     fn ui(
         &mut self,
         ui: &mut egui::Ui,
@@ -565,6 +645,12 @@ impl App {
             .fill(egui::Color32::from_rgb(24, 28, 38))
             .inner_margin(16)
             .show(ui, |ui| {
+                if self.picking {
+                    ui.heading("OverInk - pick a screen color");
+                    ui.label("Click a desktop pixel on this display. Esc or right-click cancels.");
+                    if ui.button("Cancel picker").clicked() { c.pick = true; }
+                    return;
+                }
                 ui.horizontal(|ui| {
                     ui.heading(egui::RichText::new("OverInk").color(egui::Color32::from_rgb(224, 227, 240)));
                     ui.label(egui::RichText::new("DRAW OVER YOUR IDEAS").size(10.).color(egui::Color32::GRAY));
@@ -584,20 +670,8 @@ impl App {
                         if ui.selectable_value(&mut self.tool, tool, tool.label()).changed() { self.stop(); }
                     }
                 });
+                self.color_controls(ui, &mut c);
                 ui.horizontal(|ui| {
-                    for (i, rgb) in PRESETS.iter().enumerate() {
-                        let color = egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
-                        let selected = self.color.srgb8() == *rgb;
-                        let button = egui::Button::new(egui::RichText::new((i + 1).to_string()).color(egui::Color32::WHITE))
-                            .fill(color)
-                            .stroke(egui::Stroke::new(if selected { 2. } else { 0. }, egui::Color32::WHITE))
-                            .min_size(egui::vec2(32., 30.));
-                        if ui.add(button).on_hover_text(format!("{}  (sRGB)", InkColor::from_rgb8(*rgb).css())).clicked() {
-                            self.color = InkColor::from_rgb8(*rgb);
-                        }
-                    }
-                    ui.separator();
-                    ui.color_edit_button_rgb(&mut self.color.rgb);
                     egui::ComboBox::from_id_salt("source-gamut")
                         .selected_text(match self.color.space { Space::Srgb => "sRGB color", Space::DisplayP3 => "Display P3 color" })
                         .show_ui(ui, |ui| {
@@ -835,6 +909,8 @@ pub fn run(options: Options) -> Result<(), String> {
         app.history = History::default();
         smoke_events(&mut app, canvas.id)?;
     }
+    let mut picker = crate::picker::Picker::default();
+    let mut picker_windows_hidden = false;
     let mut running = true;
     let mut frame = 0;
     let mut last_color = Instant::now();
@@ -856,8 +932,12 @@ pub fn run(options: Options) -> Result<(), String> {
                     canvas.show(false)?;
                 }
             }
+            let was_picking = picker.active();
+            picker.event(&event, &canvas);
             gui.event(&event, toolbar.id, toolbar.size());
-            app.event(&event, canvas.id, canvas.size());
+            if !was_picking {
+                app.event(&event, canvas.id, canvas.size());
+            }
             let canvas_activated = unsafe {
                 (ty == SDL_EVENT_WINDOW_FOCUS_GAINED && event.window.windowID == canvas.id)
                     || (ty == SDL_EVENT_MOUSE_BUTTON_DOWN && event.button.windowID == canvas.id)
@@ -867,12 +947,14 @@ pub fn run(options: Options) -> Result<(), String> {
             if canvas_activated {
                 crate::native::keep_controller_above(&toolbar);
             }
-            if ty == SDL_EVENT_KEY_DOWN {
+            if ty == SDL_EVENT_KEY_DOWN && !was_picking {
                 let id = unsafe { event.key.windowID };
                 if id == canvas.id || id == toolbar.id {
                     let c = app.keyboard(
                         &event,
-                        id == toolbar.id && gui.ctx.egui_wants_keyboard_input(),
+                        id == toolbar.id
+                            && (gui.ctx.egui_wants_keyboard_input()
+                                || egui::Popup::is_any_open(&gui.ctx)),
                     );
                     if c.mode {
                         apply_mode(&mut app, &canvas, &toolbar, &mut native)?
@@ -885,6 +967,32 @@ pub fn run(options: Options) -> Result<(), String> {
         }
         if !running {
             break;
+        }
+        if picker.hides_windows() && !picker_windows_hidden {
+            canvas.show(false)?;
+            toolbar.show(false)?;
+            picker_windows_hidden = true;
+        }
+        if let Some(result) = picker.poll(&canvas) {
+            app.picking = false;
+            app.pen_proximity.clear();
+            match result {
+                Ok(Some(color)) => {
+                    app.select_color(color);
+                    app.status = format!("Picked {}", color.css());
+                }
+                Ok(None) => app.status = "Color selection cancelled".into(),
+                Err(error) => app.status = error,
+            }
+            toolbar.show(true)?;
+            apply_mode(&mut app, &canvas, &toolbar, &mut native)?;
+            picker_windows_hidden = false;
+        }
+        if picker.hides_windows() {
+            unsafe {
+                SDL_Delay(8);
+            }
+            continue;
         }
         // The OS/SDL updates HDR white point dynamically. ICC changes are polled to
         // also catch profile replacement without a display move notification.
@@ -902,6 +1010,29 @@ pub fn run(options: Options) -> Result<(), String> {
         if cmd.quit {
             running = false
         }
+        if cmd.pick {
+            if picker.active() {
+                picker.cancel();
+            } else {
+                app.stop();
+                app.pen_proximity.clear();
+                app.picking = true;
+                picker.start(&video);
+                if picker.choosing() {
+                    canvas.show(true)?;
+                    native.set(&canvas, false)?;
+                    unsafe {
+                        SDL_RaiseWindow(canvas.raw);
+                        SDL_RaiseWindow(toolbar.raw);
+                    }
+                }
+                if picker.hides_windows() {
+                    canvas.show(false)?;
+                    toolbar.show(false)?;
+                    picker_windows_hidden = true;
+                }
+            }
+        }
         if cmd.display {
             app.stop();
             canvas
@@ -912,10 +1043,22 @@ pub fn run(options: Options) -> Result<(), String> {
         if cmd.mode || cmd.display {
             apply_mode(&mut app, &canvas, &toolbar, &mut native)?;
         }
+        if picker.hides_windows() {
+            // Consume texture deltas from the frame that launched the sampler,
+            // without presenting an application window over the desktop sample.
+            gui.paint(&toolbar_render, &toolbar, &toolbar_color, output)?;
+            unsafe {
+                SDL_Delay(8);
+            }
+            continue;
+        }
         toolbar_render.begin(&toolbar, [0.094, 0.11, 0.149, 1.])?;
         gui.paint(&toolbar_render, &toolbar, &toolbar_color, output)?;
         toolbar_render.present()?;
-        if !app.hidden {
+        if picker.choosing() {
+            canvas_render.begin(&canvas, [0., 0., 0., 1. / 255.])?;
+            canvas_render.present()?;
+        } else if !app.hidden {
             app.history.doc.size = canvas.size();
             app.paint(&canvas_render, &canvas, &canvas_color)?;
             // Software transparent-window updates may replace the input shape.
@@ -1096,6 +1239,8 @@ mod touch_tests {
             history: History::default(),
             tool: Tool::Pen,
             color: InkColor::default(),
+            hex_entry: crate::color::HexEntry::new(InkColor::default()),
+            picking: false,
             width: 5.,
             opacity: 1.,
             pressure: true,

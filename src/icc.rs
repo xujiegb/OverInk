@@ -87,3 +87,49 @@ impl Drop for ColorManager {
         }
     }
 }
+
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+pub fn display_sample_to_srgb(window: &Window, rgb: [f32; 3]) -> crate::color::InkColor {
+    let mut result = crate::color::InkColor {
+        rgb,
+        space: crate::color::Space::Srgb,
+    };
+    unsafe {
+        let mut size = 0;
+        let data = SDL_GetWindowICCProfile(window.raw, &mut size);
+        if data.is_null() {
+            return result;
+        }
+        let profile = if size > 0 && size <= 16 * 1024 * 1024 {
+            cms::cmsOpenProfileFromMem(data, size as u32)
+        } else {
+            ptr::null_mut()
+        };
+        SDL_free(data);
+        if profile.is_null() {
+            return result;
+        }
+        let srgb = cms::cmsCreate_sRGBProfile();
+        let transform = cms::cmsCreateTransform(
+            profile,
+            cms::PixelFormat::RGB_FLT,
+            srgb,
+            cms::PixelFormat::RGB_FLT,
+            cms::Intent::RelativeColorimetric,
+            cms::FLAGS_BLACKPOINTCOMPENSATION,
+        );
+        cms::cmsCloseProfile(profile);
+        cms::cmsCloseProfile(srgb);
+        if !transform.is_null() {
+            cms::cmsDoTransform(
+                transform,
+                rgb.as_ptr().cast(),
+                result.rgb.as_mut_ptr().cast(),
+                1,
+            );
+            cms::cmsDeleteTransform(transform);
+            result.rgb = result.rgb.map(|v| v.clamp(0., 1.));
+        }
+    }
+    result
+}

@@ -143,3 +143,124 @@ mod tests {
         assert!(a.into_iter().all(|v| (0.0..=1.0).contains(&v)));
     }
 }
+
+pub fn parse_hex(text: &str) -> Result<InkColor, &'static str> {
+    let value = text.trim();
+    let digits = value.strip_prefix('#').unwrap_or(value);
+    if !digits.is_ascii()
+        || !matches!(digits.len(), 3 | 6)
+        || !digits.bytes().all(|v| v.is_ascii_hexdigit())
+    {
+        return Err("Use #RRGGBB or #RGB");
+    }
+    let mut rgb = [0; 3];
+    for (i, component) in rgb.iter_mut().enumerate() {
+        *component = if digits.len() == 3 {
+            u8::from_str_radix(&digits[i..i + 1], 16).unwrap() * 17
+        } else {
+            u8::from_str_radix(&digits[i * 2..i * 2 + 2], 16).unwrap()
+        };
+    }
+    Ok(InkColor::from_rgb8(rgb))
+}
+
+pub struct HexEntry {
+    pub text: String,
+    pub invalid: bool,
+    last_color: String,
+}
+impl HexEntry {
+    pub fn new(color: InkColor) -> Self {
+        let text = color.css();
+        Self {
+            last_color: text.clone(),
+            text,
+            invalid: false,
+        }
+    }
+    pub fn sync(&mut self, color: InkColor) {
+        let hex = color.css();
+        if self.last_color != hex {
+            self.text = hex.clone();
+            self.last_color = hex;
+            self.invalid = false;
+        }
+    }
+    pub fn apply(&mut self) -> Option<InkColor> {
+        match parse_hex(&self.text) {
+            Ok(color) => {
+                self.invalid = false;
+                self.last_color = color.css();
+                Some(color)
+            }
+            Err(_) => {
+                self.invalid = true;
+                None
+            }
+        }
+    }
+    pub fn normalize(&mut self) {
+        if !self.invalid {
+            self.text = self.last_color.clone();
+        }
+    }
+    pub fn revert(&mut self) {
+        self.text = self.last_color.clone();
+        self.invalid = false;
+    }
+}
+
+#[cfg(test)]
+mod hex_tests {
+    use super::*;
+    #[test]
+    fn parses_common_hex_formats_and_roundtrips() {
+        for (text, expected) in [
+            ("#FFFFFF", [255; 3]),
+            ("ffffff", [255; 3]),
+            (" #abc ", [0xaa, 0xbb, 0xcc]),
+            ("000", [0; 3]),
+            ("#3C775E", PRESETS[1]),
+        ] {
+            let color = parse_hex(text).unwrap();
+            assert_eq!(color.srgb8(), expected);
+            assert_eq!(parse_hex(&color.css()).unwrap().srgb8(), expected);
+            assert_eq!(color.space, Space::Srgb);
+        }
+    }
+    #[test]
+    fn rejects_incomplete_alpha_and_non_ascii_codes() {
+        for text in [
+            "",
+            "#",
+            "#FF",
+            "#FFFF",
+            "#FFFFFF00",
+            "#GGGGGG",
+            "##FFFFFF",
+            "#ＦＦＦ",
+            "12 345",
+            "red",
+        ] {
+            assert!(parse_hex(text).is_err(), "{text}");
+        }
+    }
+    #[test]
+    fn invalid_edit_retains_the_last_color_and_external_choices_resynchronize() {
+        let initial = InkColor::default();
+        let mut entry = HexEntry::new(initial);
+        entry.text = "#12".into();
+        assert!(entry.apply().is_none());
+        assert!(entry.invalid);
+        entry.revert();
+        assert_eq!(entry.text, initial.css());
+        entry.text = "#abc".into();
+        let color = entry.apply().unwrap();
+        entry.sync(color);
+        assert_eq!(entry.text, "#abc");
+        entry.normalize();
+        assert_eq!(entry.text, "#AABBCC");
+        entry.sync(InkColor::from_rgb8(PRESETS[3]));
+        assert_eq!(entry.text, "#ECAD45");
+    }
+}

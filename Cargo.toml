@@ -25,3 +25,11 @@ strip = "debuginfo"
 
 [profile.dev]
 debug = 1
+
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+zbus = { version = "=5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "=0.5.3"
+objc2-app-kit = { version = "=0.2.2", default-features = false, features = ["std", "NSColor", "NSColorSpace", "NSColorSampler", "block2"] }
+block2 = "=0.5.1"
