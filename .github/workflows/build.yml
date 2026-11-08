@@ -1,0 +1,297 @@
+name: OverInk build
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      extra_linux:
+        description: Also build x86, ppc64le, riscv64, s390x and loong64 using QEMU
+        type: boolean
+        default: true
+      extra_freebsd:
+        description: Also build i386, ppc64le and riscv64 on configured native SSH hosts
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: overink-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: '1.99.1'
+
+jobs:
+  desktop:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-24.04, target: x86_64-unknown-linux-gnu}
+          - {os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu}
+          - {os: windows-2022, target: x86_64-pc-windows-msvc, msvc: x64}
+          - {os: windows-2022, target: i686-pc-windows-msvc, msvc: x86}
+          - {os: windows-11-arm, target: aarch64-pc-windows-msvc, msvc: arm64}
+          - {os: macos-15-intel, target: x86_64-apple-darwin}
+          - {os: macos-15, target: aarch64-apple-darwin}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - if: runner.os == 'Linux'
+        name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build pkg-config libx11-dev libxext-dev libxi-dev libxrandr-dev libxcursor-dev libxfixes-dev libxrender-dev libxss-dev libxtst-dev libwayland-dev wayland-protocols libxkbcommon-dev libegl1-mesa-dev libgl1-mesa-dev
+      - if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.msvc }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ matrix.target }}
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Check and build
+        shell: bash
+        env:
+          MACOSX_DEPLOYMENT_TARGET: '11.0'
+          OVERINK_TARGET: ${{ matrix.target }}
+        run: |
+          set -eu
+          cargo fmt --all -- --check
+          cargo clippy --locked --target "$OVERINK_TARGET" --all-targets -- -D warnings
+          cargo test --locked --release --target "$OVERINK_TARGET"
+          cargo build --locked --release --target "$OVERINK_TARGET"
+      - name: Render input smoke test
+        if: runner.os == 'Linux'
+        env:
+          OVERINK_STATE_DIR: ${{ runner.temp }}/overink-smoke
+        run: target/${{ matrix.target }}/release/overink --smoke-test
+      - name: Package executable
+        shell: bash
+        env:
+          OVERINK_TARGET: ${{ matrix.target }}
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, plistlib, shutil, subprocess, sys, tarfile, zipfile
+          target = os.environ['OVERINK_TARGET']
+          dist = pathlib.Path('dist')
+          dist.mkdir(exist_ok=True)
+          exe = 'overink.exe' if 'windows' in target else 'overink'
+          binary = pathlib.Path('target') / target / 'release' / exe
+          if 'apple-darwin' in target:
+              app = dist / 'OverInk.app'
+              contents = app / 'Contents'
+              (contents / 'MacOS').mkdir(parents=True, exist_ok=True)
+              (contents / 'Resources').mkdir(exist_ok=True)
+              shutil.copy2('LICENSE', contents / 'Resources' / 'LICENSE')
+              destination = contents / 'MacOS' / 'overink'
+              shutil.copy2(binary, destination)
+              destination.chmod(0o755)
+              info = dict(CFBundleName='OverInk', CFBundleDisplayName='OverInk',
+                          CFBundleExecutable='overink', CFBundleIdentifier='org.overink.OverInk',
+                          CFBundlePackageType='APPL', CFBundleShortVersionString='0.1.0',
+                          CFBundleVersion='1', LSMinimumSystemVersion='11.0',
+                          NSHighResolutionCapable=True, NSPrincipalClass='NSApplication')
+              with (contents / 'Info.plist').open('wb') as stream:
+                  plistlib.dump(info, stream)
+              subprocess.run(['codesign', '--force', '--sign', '-', str(app)], check=True)
+              subprocess.run(['ditto', '-c', '-k', '--keepParent', str(app), str(dist / f'OverInk-{target}.zip')], check=True)
+              shutil.rmtree(app)
+          elif 'windows' in target:
+              with zipfile.ZipFile(dist / f'OverInk-{target}.zip', 'w', zipfile.ZIP_DEFLATED) as archive:
+                  archive.write(binary, exe)
+                  archive.write('LICENSE', 'LICENSE')
+          else:
+              with tarfile.open(dist / f'OverInk-{target}.tar.gz', 'w:gz') as archive:
+                  archive.add(binary, arcname=exe)
+                  archive.add('LICENSE', arcname='LICENSE')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OverInk-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  linux-qemu:
+    name: Linux ${{ matrix.target }} (QEMU)
+    if: github.event_name == 'workflow_dispatch' && inputs.extra_linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {platform: linux/386, target: i686-unknown-linux-gnu}
+          - {platform: linux/ppc64le, target: powerpc64le-unknown-linux-gnu}
+          - {platform: linux/riscv64, target: riscv64gc-unknown-linux-gnu}
+          - {platform: linux/s390x, target: s390x-unknown-linux-gnu}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: all
+      - name: Build, test and package
+        shell: bash
+        env:
+          OVERINK_TARGET: ${{ matrix.target }}
+        run: |
+          set -eu
+          docker run --rm -i --platform '${{ matrix.platform }}' \
+            -e RUST_VERSION -e OVERINK_TARGET -v "$GITHUB_WORKSPACE:/src" -w /src \
+            debian:trixie-slim sh -s <<'CONTAINER'
+          set -eu
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl build-essential cmake ninja-build pkg-config libx11-dev libxext-dev libxi-dev libxrandr-dev libxcursor-dev libxfixes-dev libxrender-dev libxss-dev libxtst-dev libwayland-dev wayland-protocols libxkbcommon-dev libegl1-mesa-dev libgl1-mesa-dev
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/overink-rustup.sh
+          sh /tmp/overink-rustup.sh -y --profile minimal --default-toolchain "$RUST_VERSION"
+          . "$HOME/.cargo/env"
+          actual=$(rustc -vV | sed -n 's/^host: //p')
+          test "$actual" = "$OVERINK_TARGET"
+          export CARGO_BUILD_JOBS=2
+          cargo test --locked --release
+          cargo build --locked --release
+          OVERINK_STATE_DIR=/tmp/overink-smoke target/release/overink --smoke-test
+          mkdir -p dist
+          tar -czf "dist/OverInk-$actual.tar.gz" -C target/release overink -C ../.. LICENSE
+          CONTAINER
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OverInk-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  linux-loong64:
+    name: Linux loong64 musl (QEMU)
+    if: github.event_name == 'workflow_dispatch' && inputs.extra_linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v5
+      - uses: uraimo/run-on-arch-action@v3.2.0
+        with:
+          arch: loongarch64
+          distro: alpine_latest
+          install: |
+            apk add --no-cache build-base cmake ninja pkgconf rust cargo linux-headers libx11-dev libxext-dev libxi-dev libxrandr-dev libxcursor-dev libxfixes-dev libxrender-dev libxscrnsaver-dev libxtst-dev wayland-dev wayland-protocols libxkbcommon-dev mesa-dev
+          run: |
+            set -eu
+            actual=$(rustc -vV | sed -n 's/^host: //p')
+            test "$actual" = loongarch64-unknown-linux-musl
+            CARGO_BUILD_JOBS=2 cargo test --locked --release
+            CARGO_BUILD_JOBS=2 cargo build --locked --release
+            OVERINK_STATE_DIR=/tmp/overink-smoke target/release/overink --smoke-test
+            mkdir -p dist
+            tar -czf "dist/OverInk-$actual.tar.gz" -C target/release overink -C ../.. LICENSE
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OverInk-loongarch64-unknown-linux-musl
+          path: dist/*
+          if-no-files-found: error
+
+  freebsd:
+    name: FreeBSD ${{ matrix.target }} (VM)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {arch: x86_64, target: x86_64-unknown-freebsd}
+          - {arch: aarch64, target: aarch64-unknown-freebsd}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: vmactions/freebsd-vm@v1
+        with:
+          arch: ${{ matrix.arch }}
+          release: '15.1'
+          usesh: true
+          sync: scp
+          mem: 8192
+          prepare: |
+            pkg install -y rust cmake ninja pkgconf libX11 libXext libXi libXrandr libXcursor libXfixes libXrender libXScrnSaver libXtst wayland wayland-protocols libxkbcommon mesa-libs
+          run: |
+            set -eu
+            export PATH="/usr/local/bin:$PATH"
+            actual=$(rustc -vV | sed -n 's/^host: //p')
+            test "$actual" = '${{ matrix.target }}'
+            export CARGO_BUILD_JOBS=2
+            cargo test --locked --release
+            cargo build --locked --release
+            OVERINK_STATE_DIR=/tmp/overink-smoke target/release/overink --smoke-test
+            mkdir -p dist
+            tar -czf "dist/OverInk-$actual.tar.gz" -C target/release overink -C ../.. LICENSE
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OverInk-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  freebsd-native-extra:
+    # Native hosts need a working matching Rust compiler and SDL3 build dependencies.
+    # Variables: FREEBSD_I686_HOST, FREEBSD_PPC64LE_HOST, FREEBSD_RISCV64_HOST (user@host).
+    # Secrets: OVERINK_FREEBSD_SSH_KEY, OVERINK_FREEBSD_KNOWN_HOSTS (verified host keys).
+    name: FreeBSD ${{ matrix.target }} (native SSH)
+    if: github.event_name == 'workflow_dispatch' && inputs.extra_freebsd
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {target: i686-unknown-freebsd, host_var: FREEBSD_I686_HOST}
+          - {target: powerpc64le-unknown-freebsd, host_var: FREEBSD_PPC64LE_HOST}
+          - {target: riscv64gc-unknown-freebsd, host_var: FREEBSD_RISCV64_HOST}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build, test and retrieve packages
+        shell: bash
+        env:
+          OVERINK_SSH_HOST: ${{ vars[matrix.host_var] }}
+          OVERINK_SSH_KEY: ${{ secrets.OVERINK_FREEBSD_SSH_KEY }}
+          OVERINK_KNOWN_HOSTS: ${{ secrets.OVERINK_FREEBSD_KNOWN_HOSTS }}
+          OVERINK_TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          : "${OVERINK_SSH_HOST:?Set the FREEBSD_*_HOST repository variables}"
+          : "${OVERINK_SSH_KEY:?Set OVERINK_FREEBSD_SSH_KEY}"
+          : "${OVERINK_KNOWN_HOSTS:?Set OVERINK_FREEBSD_KNOWN_HOSTS}"
+          case "$OVERINK_SSH_HOST" in *[!a-zA-Z0-9_.@-]*) exit 1;; esac
+          case "$OVERINK_TARGET" in i686-unknown-freebsd|powerpc64le-unknown-freebsd|riscv64gc-unknown-freebsd) ;; *) exit 1;; esac
+          key_dir=$(mktemp -d)
+          trap 'rm -rf "$key_dir"' EXIT
+          chmod 700 "$key_dir"
+          printf '%s\n' "$OVERINK_SSH_KEY" > "$key_dir/key"
+          printf '%s\n' "$OVERINK_KNOWN_HOSTS" > "$key_dir/known_hosts"
+          chmod 600 "$key_dir/key" "$key_dir/known_hosts"
+          ssh_args=(-o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$key_dir/known_hosts" -i "$key_dir/key")
+          remote="overink-ci-${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}"
+          ssh "${ssh_args[@]}" "$OVERINK_SSH_HOST" "mkdir -p '$remote'"
+          tar --exclude=target --exclude=.git --exclude=dist -czf - . | ssh "${ssh_args[@]}" "$OVERINK_SSH_HOST" "tar -xzf - -C '$remote'"
+          ssh "${ssh_args[@]}" "$OVERINK_SSH_HOST" "cd '$remote' && expected='$OVERINK_TARGET' sh -s" <<'REMOTE'
+          set -eu
+          export PATH="/usr/local/bin:$PATH"
+          actual=$(rustc -vV | sed -n 's/^host: //p')
+          test "$actual" = "$expected"
+          export CARGO_BUILD_JOBS=2
+          cargo test --locked --release
+          cargo build --locked --release
+          OVERINK_STATE_DIR=/tmp/overink-smoke target/release/overink --smoke-test
+          mkdir -p dist
+          tar -czf "dist/OverInk-$actual.tar.gz" -C target/release overink -C ../.. LICENSE
+          REMOTE
+          mkdir -p dist
+          scp -O "${ssh_args[@]}" "$OVERINK_SSH_HOST:$remote/dist/*" dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OverInk-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
