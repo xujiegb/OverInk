@@ -7,13 +7,23 @@ mod unix;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub use unix::Passthrough;
 
-#[cfg(target_os = "windows")]
-pub struct Passthrough;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[derive(Default)]
+pub struct Passthrough {
+    applied: Option<(*mut c_void, bool)>,
+}
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 impl Passthrough {
     pub fn new(_window: &Window) -> Self {
-        Self
+        Self::default()
     }
+    pub fn invalidate(&mut self) {
+        self.applied = None;
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Passthrough {
     pub fn set(&mut self, window: &Window, pass: bool) -> Result<(), String> {
         unsafe {
             #[link(name = "user32")]
@@ -53,46 +63,61 @@ impl Passthrough {
             if hwnd.is_null() {
                 return Err("No Win32 window handle".into());
             }
-            #[cfg(target_pointer_width = "64")]
-            let style = GetWindowLongPtrW(hwnd, -20);
-            #[cfg(target_pointer_width = "32")]
-            let style = GetWindowLongW(hwnd, -20) as isize;
-            let style = if pass {
-                style | 0x20 | 0x80000
-            } else {
-                style & !0x20
-            }; // TRANSPARENT, LAYERED
+            if self.applied == Some((hwnd, pass)) {
+                return Ok(());
+            }
+            self.invalidate();
+            const GWL_EXSTYLE: i32 = -20;
+            const WS_EX_TRANSPARENT: isize = 0x20;
+            const WS_EX_LAYERED: isize = 0x80000;
             SetLastError(0);
             #[cfg(target_pointer_width = "64")]
-            let prev = SetWindowLongPtrW(hwnd, -20, style);
+            let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
             #[cfg(target_pointer_width = "32")]
-            let prev = SetWindowLongW(hwnd, -20, style as i32) as isize;
-            if prev == 0 && GetLastError() != 0 {
+            let style = GetWindowLongW(hwnd, GWL_EXSTYLE) as isize;
+            if style == 0 && GetLastError() != 0 {
                 return Err(std::io::Error::last_os_error().to_string());
             }
+            let desired = if pass {
+                style | WS_EX_TRANSPARENT | WS_EX_LAYERED
+            } else {
+                style & !WS_EX_TRANSPARENT
+            };
+            if desired != style {
+                SetLastError(0);
+                #[cfg(target_pointer_width = "64")]
+                let prev = SetWindowLongPtrW(hwnd, GWL_EXSTYLE, desired);
+                #[cfg(target_pointer_width = "32")]
+                let prev = SetWindowLongW(hwnd, GWL_EXSTYLE, desired as i32) as isize;
+                if prev == 0 && GetLastError() != 0 {
+                    return Err(std::io::Error::last_os_error().to_string());
+                }
+            }
+            // Refresh the style without raising the canvas over the toolbar.
+            const SWP_NOSIZE: u32 = 0x1;
+            const SWP_NOMOVE: u32 = 0x2;
+            const SWP_NOZORDER: u32 = 0x4;
+            const SWP_NOACTIVATE: u32 = 0x10;
+            const SWP_FRAMECHANGED: u32 = 0x20;
             if SetWindowPos(
                 hwnd,
-                (-1isize) as *mut c_void,
+                std::ptr::null_mut(),
                 0,
                 0,
                 0,
                 0,
-                0x1 | 0x2 | 0x10 | 0x20,
+                SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
             ) == 0
             {
                 return Err(std::io::Error::last_os_error().to_string());
             }
+            self.applied = Some((hwnd, pass));
             Ok(())
         }
     }
 }
 #[cfg(target_os = "macos")]
-pub struct Passthrough;
-#[cfg(target_os = "macos")]
 impl Passthrough {
-    pub fn new(_window: &Window) -> Self {
-        Self
-    }
     pub fn set(&mut self, window: &Window, pass: bool) -> Result<(), String> {
         unsafe {
             #[link(name = "objc")]
@@ -108,6 +133,9 @@ impl Passthrough {
             if ns.is_null() {
                 return Err("No Cocoa window handle".into());
             }
+            if self.applied == Some((ns, pass)) {
+                return Ok(());
+            }
             let send: unsafe extern "C" fn(*mut c_void, *mut c_void, bool) =
                 std::mem::transmute(objc_msgSend as *const ());
             send(
@@ -115,6 +143,7 @@ impl Passthrough {
                 sel_registerName(c"setIgnoresMouseEvents:".as_ptr()),
                 pass,
             );
+            self.applied = Some((ns, pass));
             Ok(())
         }
     }
@@ -136,6 +165,7 @@ impl Passthrough {
     pub fn new(_: &Window) -> Self {
         Self
     }
+    pub fn invalidate(&mut self) {}
     pub fn set(&mut self, _: &Window, _: bool) -> Result<(), String> {
         Err("Input passthrough is unavailable on this platform".into())
     }

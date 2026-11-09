@@ -1,6 +1,6 @@
 use crate::color::InkColor;
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 
 pub const MAX_POINTS: usize = 1_000_000;
 pub const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
@@ -97,6 +97,14 @@ impl Stroke {
         };
         self.width * scale * tilt * 0.5
     }
+    pub fn hit(&self, p: Point, radius: f32) -> bool {
+        let radius = radius + self.width * 0.5;
+        let points = self.polyline();
+        points.iter().any(|a| a.dist(p) <= radius)
+            || points
+                .windows(2)
+                .any(|ab| segment_distance(p, ab[0], ab[1]) <= radius)
+    }
     pub fn polyline(&self) -> Vec<Point> {
         if self.points.is_empty() {
             return vec![];
@@ -150,12 +158,10 @@ pub struct History {
     pub active: Option<Stroke>,
     undo: VecDeque<Vec<Stroke>>,
     redo: Vec<Vec<Stroke>>,
-    erasing: bool,
     pub changed: bool,
 }
 impl History {
     pub fn snapshot(&mut self) {
-        self.end_erase();
         self.undo.push_back(self.doc.strokes.clone());
         while self.undo.len() > 64
             || self
@@ -180,7 +186,6 @@ impl History {
         }
     }
     pub fn undo(&mut self) {
-        self.end_erase();
         self.active = None;
         if let Some(s) = self.undo.pop_back() {
             self.redo.push(std::mem::replace(&mut self.doc.strokes, s));
@@ -188,7 +193,6 @@ impl History {
         }
     }
     pub fn redo(&mut self) {
-        self.end_erase();
         self.active = None;
         if let Some(s) = self.redo.pop() {
             self.undo
@@ -197,41 +201,23 @@ impl History {
         }
     }
     pub fn clear(&mut self) {
-        self.end_erase();
         self.active = None;
         if !self.doc.strokes.is_empty() {
             self.snapshot();
             self.doc.strokes.clear()
         }
     }
-    pub fn erase(&mut self, p: Point, radius: f32) {
-        let keep: Vec<bool> = self
-            .doc
-            .strokes
-            .iter()
-            .map(|s| {
-                let points = s.polyline();
-                !points.iter().any(|a| a.dist(p) <= radius + s.width * 0.5)
-                    && !points
-                        .windows(2)
-                        .any(|ab| segment_distance(p, ab[0], ab[1]) <= radius + s.width * 0.5)
-            })
-            .collect();
-        if keep.iter().any(|k| !*k) {
-            if !self.erasing {
-                self.snapshot();
-                self.erasing = true;
-            }
-            let mut i = 0;
-            self.doc.strokes.retain(|_| {
-                let k = keep[i];
-                i += 1;
-                k
-            })
+    pub fn erase(&mut self, hits: &BTreeSet<usize>) {
+        if hits.is_empty() {
+            return;
         }
-    }
-    pub fn end_erase(&mut self) {
-        self.erasing = false;
+        self.snapshot();
+        let mut index = 0;
+        self.doc.strokes.retain(|_| {
+            let keep = !hits.contains(&index);
+            index += 1;
+            keep
+        });
     }
     pub fn set_document(&mut self, doc: Document, restore: bool) {
         if restore {
@@ -335,7 +321,8 @@ mod tests {
             ..History::default()
         };
         h.commit();
-        h.erase(Point::new(50., 0., 1., [0.; 2]), 3.);
+        assert!(h.doc.strokes[0].hit(Point::new(50., 0., 1., [0.; 2]), 3.));
+        h.erase(&BTreeSet::from([0]));
         assert!(h.doc.strokes.is_empty());
         h.undo();
         assert_eq!(h.doc.strokes.len(), 1);

@@ -124,15 +124,15 @@ impl Guard {
         toolbar: &Window,
         mouse: bool,
         shape_rendering: bool,
-    ) -> Result<Option<Rect>, String> {
+    ) -> Result<(Option<Rect>, bool), String> {
         let hole = rectangle(canvas, toolbar);
         // X11 has a dedicated input region. Rendering already clips the
         // transparent canvas, so an SDL shape would overwrite XShape.
         if crate::sdl::driver() == "x11" {
-            return Ok(hole);
+            return Ok((hole, false));
         }
         if unsafe { SDL_GetWindowFlags(canvas.raw) } & SDL_WINDOW_TRANSPARENT == 0 {
-            return Ok(None);
+            return Ok((None, false));
         }
         let size = canvas.pixel_size();
         // Cocoa derives ignoresMouseEvents from an active shape. Remove that
@@ -143,7 +143,7 @@ impl Guard {
             hole.map(|r| r.pixels(canvas))
         };
         if self.last == Some((size, pixels)) {
-            return Ok(hole);
+            return Ok((hole, false));
         }
         unsafe {
             if let Some(hole) = pixels {
@@ -168,7 +168,7 @@ impl Guard {
             }
         }
         self.last = Some((size, pixels));
-        Ok(hole)
+        Ok((hole, true))
     }
 }
 

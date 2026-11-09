@@ -44,7 +44,7 @@ enum Source {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Gesture {
     Ink,
-    Erase,
+    Erase(u64),
     Laser(u64),
 }
 #[derive(Clone, Copy)]
@@ -97,7 +97,8 @@ struct App {
     touch_enabled: bool,
     contact: Option<Contact>,
     laser: BTreeMap<u64, VecDeque<(Point, Instant)>>,
-    next_laser: u64,
+    next_gesture: u64,
+    pending_erasures: BTreeMap<u64, BTreeSet<usize>>,
     status: String,
     path: String,
     save_path: PathBuf,
@@ -114,10 +115,12 @@ impl App {
         let mut pages = Pages::new(displays.get(display).map(|d| d.id));
         pages.sync(&mut history, &displays);
         let mut status = "Ready. Draw on the canvas. Space switches to passthrough.".to_string();
-        if save_path.exists()
-            && let Err(e) = pages.load(&mut history, &save_path, true)
-        {
-            status = format!("Restore: {e}")
+        if save_path.exists() {
+            match pages.load(&mut history, &save_path, true) {
+                Ok(0) => {}
+                Ok(pending) => status = pending_pages(pending),
+                Err(error) => status = format!("Restore: {error}"),
+            }
         }
         Self {
             history,
@@ -147,7 +150,8 @@ impl App {
             touch_enabled: true,
             contact: None,
             laser: BTreeMap::new(),
-            next_laser: 0,
+            next_gesture: 0,
+            pending_erasures: BTreeMap::new(),
             status,
             path: save_path.to_string_lossy().into_owned(),
             save_path,
@@ -179,12 +183,56 @@ impl App {
     }
     fn gesture(&mut self, tool: Tool) -> Gesture {
         match tool {
-            Tool::Eraser => Gesture::Erase,
-            Tool::Laser => {
-                self.next_laser += 1;
-                Gesture::Laser(self.next_laser)
+            Tool::Eraser | Tool::Laser => {
+                self.next_gesture += 1;
+                if tool == Tool::Eraser {
+                    Gesture::Erase(self.next_gesture)
+                } else {
+                    Gesture::Laser(self.next_gesture)
+                }
             }
             _ => Gesture::Ink,
+        }
+    }
+    fn erase_sample(&mut self, id: u64, point: Point) {
+        let radius = self.width.max(12.) * self.canvas_units;
+        let hits = self.pending_erasures.entry(id).or_default();
+        for (index, stroke) in self.history.doc.strokes.iter().enumerate() {
+            if !hits.contains(&index) && stroke.hit(point, radius) {
+                hits.insert(index);
+            }
+        }
+    }
+    fn commit_erase(&mut self, id: u64) {
+        let Some(hits) = self
+            .pending_erasures
+            .remove(&id)
+            .filter(|hits| !hits.is_empty())
+        else {
+            return;
+        };
+        self.history.erase(&hits);
+        // Other contacts still refer to the same strokes after this deletion.
+        let removed: Vec<_> = hits.into_iter().collect();
+        for preview in self.pending_erasures.values_mut() {
+            *preview = std::mem::take(preview)
+                .into_iter()
+                .filter_map(|index| match removed.binary_search(&index) {
+                    Ok(_) => None,
+                    Err(earlier) => Some(index - earlier),
+                })
+                .collect();
+        }
+    }
+    fn cancel_gesture(&mut self, gesture: Gesture) {
+        match gesture {
+            Gesture::Erase(id) => {
+                self.pending_erasures.remove(&id);
+            }
+            Gesture::Laser(id) => {
+                self.laser.remove(&id);
+            }
+            Gesture::Ink => {}
         }
     }
     fn laser_sample(&mut self, id: u64, point: Point) {
@@ -213,9 +261,7 @@ impl App {
         let tool = if eraser { Tool::Eraser } else { self.tool };
         let gesture = self.gesture(tool);
         match gesture {
-            Gesture::Erase => self
-                .history
-                .erase(p, self.width.max(12.) * self.canvas_units),
+            Gesture::Erase(id) => self.erase_sample(id, p),
             Gesture::Laser(id) => self.laser_sample(id, p),
             Gesture::Ink => {
                 if self.draft_point_count() >= MAX_POINTS {
@@ -242,9 +288,7 @@ impl App {
             return;
         }
         match contact.gesture {
-            Gesture::Erase => self
-                .history
-                .erase(p, self.width.max(12.) * self.canvas_units),
+            Gesture::Erase(id) => self.erase_sample(id, p),
             Gesture::Laser(id) => self.laser_sample(id, p),
             Gesture::Ink => {
                 let can_append = self.draft_point_count() < MAX_POINTS;
@@ -280,30 +324,23 @@ impl App {
         }
     }
     fn finish_contact(&mut self) {
-        self.contact = None;
-        self.history.commit();
-        self.end_erase_if_idle();
-    }
-    fn end_erase_if_idle(&mut self) {
-        if self
-            .contact
-            .is_none_or(|contact| contact.gesture != Gesture::Erase)
-            && self
-                .touches
-                .values()
-                .all(|finger| finger.gesture != Gesture::Erase)
+        if let Some(Contact {
+            gesture: Gesture::Erase(id),
+            ..
+        }) = self.contact.take()
         {
-            self.history.end_erase();
+            self.commit_erase(id);
         }
+        self.history.commit();
     }
     fn discard_touches(&mut self) {
-        self.touches.clear();
-        self.end_erase_if_idle();
+        for finger in std::mem::take(&mut self.touches).into_values() {
+            self.cancel_gesture(finger.gesture);
+        }
     }
     fn stop(&mut self) {
         self.finish_contact();
         self.commit_touches();
-        self.history.end_erase();
         for pen in self.pens.values_mut() {
             pen.down = false;
         }
@@ -340,7 +377,8 @@ impl App {
     fn reset_contacts(&mut self) {
         self.history.active = None;
         self.contact = None;
-        self.discard_touches();
+        self.touches.clear();
+        self.pending_erasures.clear();
         for pen in self.pens.values_mut() {
             pen.down = false;
         }
@@ -402,6 +440,9 @@ impl App {
                 .sum::<usize>()
     }
     fn commit_touch(&mut self, finger: FingerStroke) {
+        if let Gesture::Erase(id) = finger.gesture {
+            self.commit_erase(id);
+        }
         if let Some(stroke) = finger.stroke
             && !stroke.points.is_empty()
         {
@@ -423,9 +464,7 @@ impl App {
             return;
         };
         match finger.gesture {
-            Gesture::Erase => self
-                .history
-                .erase(point, self.width.max(12.) * self.canvas_units),
+            Gesture::Erase(id) => self.erase_sample(id, point),
             Gesture::Laser(id) => self.laser_sample(id, point),
             Gesture::Ink => {
                 if let Some(stroke) = &mut finger.stroke {
@@ -437,12 +476,9 @@ impl App {
     fn touch_event(&mut self, event: SDL_TouchFingerEvent, size: [f32; 2]) {
         let key = TouchKey::from(event);
         if event.r#type == SDL_EVENT_FINGER_CANCELED {
-            if let Some(finger) = self.touches.remove(&key)
-                && let Gesture::Laser(id) = finger.gesture
-            {
-                self.laser.remove(&id);
+            if let Some(finger) = self.touches.remove(&key) {
+                self.cancel_gesture(finger.gesture);
             }
-            self.end_erase_if_idle();
             return;
         }
         if event.r#type == SDL_EVENT_FINGER_UP {
@@ -452,7 +488,6 @@ impl App {
             if let Some(finger) = self.touches.remove(&key) {
                 self.commit_touch(finger);
             }
-            self.end_erase_if_idle();
             return;
         }
         if !self.touch_enabled
@@ -553,10 +588,8 @@ impl App {
                         self.motion(contact.source, Point::new(m.x, m.y, 1., [0.; 2]));
                     }
                 }
-                SDL_EVENT_FINGER_DOWN
-                | SDL_EVENT_FINGER_MOTION
-                | SDL_EVENT_FINGER_UP
-                | SDL_EVENT_FINGER_CANCELED
+                SDL_EVENT_FINGER_CANCELED => self.touch_event(e.tfinger, size),
+                SDL_EVENT_FINGER_DOWN | SDL_EVENT_FINGER_MOTION | SDL_EVENT_FINGER_UP
                     if e.tfinger.windowID == overlay =>
                 {
                     self.touch_event(e.tfinger, size);
@@ -714,7 +747,8 @@ impl App {
         self.stop();
         let p = PathBuf::from(&self.path);
         match self.pages.load(&mut self.history, &p, false) {
-            Ok(()) => self.status = "Session loaded".into(),
+            Ok(0) => self.status = "Session loaded".into(),
+            Ok(pending) => self.status = pending_pages(pending),
             Err(e) => self.status = format!("Open: {e}"),
         }
     }
@@ -770,8 +804,14 @@ impl App {
             SDL_SetRenderClipRect(r.raw, ptr::null());
         }
         let aa = 0.8 / scale[0].max(scale[1]);
-        for s in &self.history.doc.strokes {
-            paint_stroke(r, s, color, aa, &clips)?
+        for (index, stroke) in self.history.doc.strokes.iter().enumerate() {
+            if self
+                .pending_erasures
+                .values()
+                .all(|preview| !preview.contains(&index))
+            {
+                paint_stroke(r, stroke, color, aa, &clips)?;
+            }
         }
         if let Some(ref s) = self.history.active {
             paint_stroke(r, s, color, aa, &clips)?
@@ -875,6 +915,10 @@ fn paint_stroke(
     }
     result
 }
+fn pending_pages(count: usize) -> String {
+    format!("{count} saved ink page(s) waiting for a matching display.")
+}
+
 fn state_dir() -> PathBuf {
     if let Some(p) = std::env::var_os("OVERINK_STATE_DIR") {
         return PathBuf::from(p);
@@ -1055,7 +1099,6 @@ pub fn run(options: Options) -> Result<(), String> {
             {
                 canvas_surface_changed = true;
             }
-            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             if ty == SDL_EVENT_WINDOW_SHOWN && unsafe { event.window.windowID } == canvas.id {
                 native.invalidate();
             }
@@ -1137,6 +1180,7 @@ pub fn run(options: Options) -> Result<(), String> {
                 .displays
                 .iter()
                 .any(|old| !displays.iter().any(|d| d.id == old.id));
+            let was_suspended = app.suspended;
             let (layout, removed) = app.refresh_displays(displays, requested.or(moved_to));
             if requested.is_some()
                 && video != "wayland"
@@ -1154,7 +1198,7 @@ pub fn run(options: Options) -> Result<(), String> {
                         app.status = format!("Cannot move the drawing surface: {error}");
                         app.suspended = true;
                     }
-                    if removed {
+                    if removed || was_suspended {
                         let _ = toolbar.recover_on_display(id);
                     }
                     canvas_color.refresh(&canvas, canvas_render.extended);
@@ -1199,6 +1243,7 @@ pub fn run(options: Options) -> Result<(), String> {
             app.picking = false;
             match result {
                 Ok(Some(color)) => {
+                    let color = color.converted(app.color.space);
                     app.select_color(color);
                     app.status = format!("Picked {}", color.hex());
                 }
@@ -1338,7 +1383,12 @@ pub fn run(options: Options) -> Result<(), String> {
         }
         let mouse = !picker.choosing() && app.mouse_ready();
         match controller_guard.update(&canvas, &toolbar, mouse, canvas_render.name != "software") {
-            Ok(rect) => app.protected = rect,
+            Ok((rect, shape_changed)) => {
+                app.protected = rect;
+                if shape_changed {
+                    native.invalidate();
+                }
+            }
             Err(error) => {
                 app.hidden = true;
                 crate::native::show_canvas(&canvas, &toolbar, false)?;
@@ -1369,7 +1419,11 @@ pub fn run(options: Options) -> Result<(), String> {
             }
         }
         #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-        if mouse && let Err(error) = native.set(&canvas, true) {
+        if mouse
+            && !app.hidden
+            && !app.suspended
+            && let Err(error) = native.set(&canvas, true)
+        {
             app.status = format!("Mouse mode: {error}");
         }
         if !options.smoke
@@ -1561,7 +1615,8 @@ mod touch_tests {
             touch_enabled: true,
             contact: None,
             laser: BTreeMap::new(),
-            next_laser: 0,
+            next_gesture: 0,
+            pending_erasures: BTreeMap::new(),
             status: String::new(),
             path: String::new(),
             save_path: PathBuf::new(),
@@ -1575,7 +1630,11 @@ mod touch_tests {
                 r#type: ty,
                 touchID: SDL_TouchID(device),
                 fingerID: SDL_FingerID(id),
-                windowID: SDL_WindowID(1),
+                windowID: if ty == SDL_EVENT_FINGER_CANCELED {
+                    SDL_WindowID(0)
+                } else {
+                    SDL_WindowID(1)
+                },
                 x,
                 y,
                 ..Default::default()
@@ -1625,6 +1684,105 @@ mod touch_tests {
         assert_eq!(a.history.doc.strokes.len(), 2);
         a.history.undo();
         assert_eq!(a.history.doc.strokes.len(), 1);
+    }
+    fn add_ink(a: &mut App, xs: &[f32]) {
+        for &x in xs {
+            let source = Source::Mouse(LEFT_BUTTON);
+            a.begin(source, Point::new(x, 60., 1., [0.; 2]), false);
+            a.end(source);
+        }
+    }
+    #[test]
+    fn escape_cancels_erase_preview_without_changing_redo() {
+        let mut a = app();
+        add_ink(&mut a, &[80., 240.]);
+        a.history.undo();
+        a.history.changed = false;
+        a.use_tool(Tool::Eraser);
+        a.begin(
+            Source::Mouse(LEFT_BUTTON),
+            Point::new(80., 60., 1., [0.; 2]),
+            false,
+        );
+        assert_eq!(
+            a.pending_erasures.values().next().unwrap(),
+            &BTreeSet::from([0])
+        );
+        assert_eq!(a.history.doc.strokes.len(), 1);
+        a.keyboard(
+            &SDL_Event {
+                key: SDL_KeyboardEvent {
+                    r#type: SDL_EVENT_KEY_DOWN,
+                    key: SDLK_ESCAPE,
+                    ..Default::default()
+                },
+            },
+            false,
+        );
+        assert!(a.pending_erasures.is_empty());
+        assert!(a.contact.is_none() && !a.history.changed);
+        a.history.redo();
+        assert_eq!(a.history.doc.strokes.len(), 2);
+    }
+    #[test]
+    fn finger_cancel_and_palm_rejection_discard_only_their_erase_previews() {
+        let mut a = app();
+        add_ink(&mut a, &[80., 240., 480.]);
+        a.use_tool(Tool::Eraser);
+        a.begin(
+            Source::Mouse(RIGHT_BUTTON),
+            Point::new(240., 60., 1., [0.; 2]),
+            true,
+        );
+        finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 1, 0.1, 0.1);
+        finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 2, 0.6, 0.1);
+        assert_eq!(a.pending_erasures.len(), 3);
+        finger(&mut a, SDL_EVENT_FINGER_CANCELED, 1, 1, 0.1, 0.1);
+        assert_eq!(a.pending_erasures.len(), 2);
+        assert_eq!(a.history.doc.strokes.len(), 3);
+        a.event(
+            &SDL_Event {
+                pproximity: SDL_PenProximityEvent {
+                    r#type: SDL_EVENT_PEN_PROXIMITY_IN,
+                    which: SDL_PenID(7),
+                    windowID: SDL_WindowID(1),
+                    ..Default::default()
+                },
+            },
+            SDL_WindowID(1),
+            [800., 600.],
+        );
+        assert!(a.touches.is_empty());
+        assert_eq!(a.pending_erasures.len(), 1);
+        a.end(Source::Mouse(RIGHT_BUTTON));
+        assert_eq!(
+            a.history
+                .doc
+                .strokes
+                .iter()
+                .map(|s| s.points[0].x)
+                .collect::<Vec<_>>(),
+            [80., 480.]
+        );
+        a.history.undo();
+        assert_eq!(a.history.doc.strokes.len(), 3);
+    }
+    #[test]
+    fn concurrent_erasers_commit_independently_after_indices_shift() {
+        let mut a = app();
+        add_ink(&mut a, &[80., 240., 480.]);
+        a.use_tool(Tool::Eraser);
+        finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 1, 0.1, 0.1);
+        finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 2, 0.6, 0.1);
+        // Lift away from all strokes so the release itself cannot erase them.
+        finger(&mut a, SDL_EVENT_FINGER_UP, 1, 1, 0.9, 0.1);
+        finger(&mut a, SDL_EVENT_FINGER_UP, 1, 2, 0.9, 0.1);
+        assert_eq!(a.history.doc.strokes.len(), 1);
+        assert_eq!(a.history.doc.strokes[0].points[0].x, 240.);
+        a.history.undo();
+        assert_eq!(a.history.doc.strokes.len(), 2);
+        a.history.undo();
+        assert_eq!(a.history.doc.strokes.len(), 3);
     }
     #[test]
     fn pen_tilt_before_pressure_and_tool_changes_keep_proximity() {

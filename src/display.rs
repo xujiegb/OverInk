@@ -101,6 +101,37 @@ struct DisplayKey {
     slot: u32,
 }
 
+fn take_unique_page(
+    docs: &mut BTreeMap<DisplayKey, Document>,
+    predicate: impl Fn(&DisplayKey, &Document) -> bool,
+) -> Option<Document> {
+    let mut matches = docs.iter().filter(|(key, doc)| predicate(key, doc));
+    let key = matches.next()?.0.clone();
+    if matches.next().is_some() {
+        return None;
+    }
+    docs.remove(&key)
+}
+
+fn take_named_page(
+    key: &DisplayKey,
+    connected: &BTreeMap<u32, DisplayKey>,
+    docs: &mut BTreeMap<DisplayKey, Document>,
+) -> Option<(Document, bool)> {
+    if let Some(doc) = docs.remove(key) {
+        return Some((doc, false));
+    }
+    if connected
+        .values()
+        .filter(|other| other.name == key.name)
+        .count()
+        != 1
+    {
+        return None;
+    }
+    take_unique_page(docs, |saved, _| saved.name == key.name).map(|doc| (doc, true))
+}
+
 const SESSION_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize)]
@@ -163,6 +194,7 @@ impl Pages {
         let ids = displays.iter().map(|d| d.id).collect();
         let removed = self.retain(history, &ids);
         self.keys.retain(|id, _| ids.contains(id));
+        let mut added = Vec::new();
         for display in displays {
             if self.keys.contains_key(&display.id) {
                 continue;
@@ -175,15 +207,21 @@ impl Pages {
             while self.keys.values().any(|used| *used == key) {
                 key.slot += 1;
             }
-            if let Some(doc) = self.unmatched.remove(&key) {
-                let page = if self.active == Some(display.id) {
+            self.keys.insert(display.id, key);
+            added.push(display.id);
+        }
+        for id in added {
+            if let Some((doc, relocated)) =
+                take_named_page(&self.keys[&id], &self.keys, &mut self.unmatched)
+            {
+                let page = if self.active == Some(id) {
                     &mut *history
                 } else {
-                    self.parked.entry(display.id).or_default()
+                    self.parked.entry(id).or_default()
                 };
                 page.set_document(doc, true);
+                self.changed |= relocated;
             }
-            self.keys.insert(display.id, key);
         }
         removed
     }
@@ -247,7 +285,7 @@ impl Pages {
         history: &mut History,
         path: &Path,
         restore: bool,
-    ) -> Result<(), String> {
+    ) -> Result<usize, String> {
         let mut data = Vec::new();
         File::open(path)
             .and_then(|file| file.take(MAX_FILE_BYTES + 1).read_to_end(&mut data))
@@ -260,6 +298,7 @@ impl Pages {
                 doc.validate()?;
                 history.set_document(doc, restore);
                 self.changed = true;
+                Ok(0)
             }
             SessionFile::Multi(session) => {
                 if session.version != SESSION_VERSION {
@@ -272,21 +311,55 @@ impl Pages {
                         return Err("Duplicate display in session".into());
                     }
                 }
+                let saved_count = docs.len();
                 let mut relocated = false;
+                let mut matched = BTreeMap::new();
                 for (id, key) in &self.keys {
-                    let doc = docs.remove(key).or_else(|| {
-                        // A uniquely named display may move between runs.
-                        if self.keys.values().filter(|k| k.name == key.name).count() != 1 {
-                            return None;
+                    if let Some((doc, moved)) = take_named_page(key, &self.keys, &mut docs) {
+                        matched.insert(*id, doc);
+                        relocated |= moved;
+                    }
+                }
+                // An unmatched blank page cannot supply ink to another screen.
+                docs.retain(|_, doc| !doc.strokes.is_empty());
+                // Different backends can report different names for the same
+                // layout. Match unique origins only with the same screen count.
+                if saved_count == self.keys.len() {
+                    for (id, key) in &self.keys {
+                        if matched.contains_key(id)
+                            || self
+                                .keys
+                                .values()
+                                .filter(|other| other.origin == key.origin)
+                                .count()
+                                != 1
+                        {
+                            continue;
                         }
-                        let mut candidates = docs.keys().filter(|k| k.name == key.name);
-                        let candidate = candidates.next()?.clone();
-                        if candidates.next().is_some() {
-                            return None;
+                        if let Some(doc) =
+                            take_unique_page(&mut docs, |saved, _| saved.origin == key.origin)
+                        {
+                            matched.insert(*id, doc);
+                            relocated = true;
                         }
-                        relocated = true;
-                        docs.remove(&candidate)
-                    });
+                    }
+                }
+                let single_screen = saved_count == 1 && self.keys.len() == 1;
+                if (!restore || single_screen)
+                    && let Some(id) = self.active.filter(|id| self.keys.contains_key(id))
+                    && !matched.contains_key(&id)
+                    && let Some(doc) = take_unique_page(&mut docs, |_, _| true)
+                {
+                    matched.insert(id, doc);
+                    relocated = true;
+                }
+                let pending = docs.len();
+                for id in self.keys.keys() {
+                    let doc = matched.remove(id);
+                    if doc.is_none() && pending > 0 {
+                        // Keep the current page while the saved page is unassigned.
+                        continue;
+                    }
                     let page = if self.active == Some(*id) {
                         Some(&mut *history)
                     } else if doc.is_some() {
@@ -300,9 +373,9 @@ impl Pages {
                 }
                 self.unmatched = docs;
                 self.changed = !restore || relocated;
+                Ok(pending)
             }
         }
-        Ok(())
     }
 }
 
@@ -396,6 +469,86 @@ mod tests {
         assert_eq!(file.version, SESSION_VERSION);
         assert_eq!(file.pages[0].0.name, "Right");
         fs::remove_file(&path).unwrap();
+    }
+    #[test]
+    fn single_screen_restore_accepts_a_new_display_name_and_origin() {
+        let path =
+            std::env::temp_dir().join(format!("overink-renamed-{}.json", std::process::id()));
+        let mut source = Pages::new(Some(10));
+        let mut history = History::default();
+        source.sync(&mut history, &[screen(10, "eDP-1", 0)]);
+        draw(&mut history, 25.);
+        source.save(&history, &path).unwrap();
+
+        let mut restored = Pages::new(Some(20));
+        let mut history = History::default();
+        restored.sync(&mut history, &[screen(20, "BOE Panel", 300)]);
+        assert_eq!(restored.load(&mut history, &path, true).unwrap(), 0);
+        history.undo();
+        assert_eq!(history.doc.strokes[0].points[0].x, 25.);
+        assert!(restored.needs_save(&history));
+        fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn manual_open_imports_the_only_ink_page_onto_the_active_screen() {
+        let path = std::env::temp_dir().join(format!("overink-import-{}.json", std::process::id()));
+        let mut source = Pages::new(Some(20));
+        let mut history = History::default();
+        source.sync(
+            &mut history,
+            &[screen(10, "Blank", 0), screen(20, "Saved", 800)],
+        );
+        draw(&mut history, 22.);
+        source.save(&history, &path).unwrap();
+
+        let mut restored = Pages::new(Some(30));
+        let mut history = History::default();
+        restored.sync(&mut history, &[screen(30, "Laptop", 0)]);
+        draw(&mut history, 33.);
+        assert_eq!(restored.load(&mut history, &path, false).unwrap(), 0);
+        assert_eq!(history.doc.strokes[0].points[0].x, 22.);
+        history.undo();
+        assert_eq!(history.doc.strokes[0].points[0].x, 33.);
+        fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn renamed_layout_uses_origins_and_unassigned_pages_can_reconnect_by_name() {
+        let path =
+            std::env::temp_dir().join(format!("overink-pending-{}.json", std::process::id()));
+        let mut source = Pages::new(Some(10));
+        let mut history = History::default();
+        source.sync(
+            &mut history,
+            &[screen(10, "Left", 0), screen(20, "Right", 800)],
+        );
+        draw(&mut history, 11.);
+        source.switch(&mut history, 20);
+        draw(&mut history, 22.);
+        source.save(&history, &path).unwrap();
+
+        let mut restored = Pages::new(Some(40));
+        let mut history = History::default();
+        restored.sync(
+            &mut history,
+            &[screen(30, "Display A", 0), screen(40, "Display B", 800)],
+        );
+        assert_eq!(restored.load(&mut history, &path, true).unwrap(), 0);
+        assert_eq!(history.doc.strokes[0].points[0].x, 22.);
+        restored.switch(&mut history, 30);
+        assert_eq!(history.doc.strokes[0].points[0].x, 11.);
+
+        let mut imported = Pages::new(Some(50));
+        let mut history = History::default();
+        let laptop = screen(50, "Laptop", 0);
+        imported.sync(&mut history, std::slice::from_ref(&laptop));
+        draw(&mut history, 55.);
+        assert_eq!(imported.load(&mut history, &path, false).unwrap(), 2);
+        assert_eq!(history.doc.strokes[0].points[0].x, 55.);
+        imported.sync(&mut history, &[laptop, screen(60, "Right", 1200)]);
+        assert_eq!(imported.unmatched.len(), 1);
+        imported.switch(&mut history, 60);
+        assert_eq!(history.doc.strokes[0].points[0].x, 22.);
+        fs::remove_file(path).unwrap();
     }
     #[test]
     fn switching_screens_keeps_separate_ink_and_undo() {
