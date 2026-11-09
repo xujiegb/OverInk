@@ -169,6 +169,26 @@ jobs:
           work="$RUNNER_TEMP/overink-linux"
           mkdir -p "$work"/{sysroot,lists/partial,archives/partial,tools}
           cp "$(command -v wayland-scanner)" "$work/tools/"
+          if [[ $TARGET_ARCH == loong64 ]]; then
+            # UBI's LLVM build only enables the targets supported by RHEL.
+            # Carry the x64 LLVM tools from the upstream Ubuntu repository into UBI.
+            curl -fsSL --retry 3 https://apt.llvm.org/llvm-snapshot.gpg.key -o "$work/llvm.asc"
+            sudo install -m 0644 "$work/llvm.asc" /usr/share/keyrings/overink-llvm.asc
+            echo 'deb [signed-by=/usr/share/keyrings/overink-llvm.asc] https://apt.llvm.org/noble/ llvm-toolchain-noble-20 main' |
+              sudo tee /etc/apt/sources.list.d/overink-llvm.list >/dev/null
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends clang-20 lld-20
+            clang-20 --print-targets | grep -i loongarch
+            mkdir -p "$work/llvm/bin" "$work/llvm/lib/clang"
+            for tool in clang clang++ ld.lld; do cp -L "/usr/lib/llvm-20/bin/$tool" "$work/llvm/bin/"; done
+            cp -R "$(clang-20 -print-resource-dir)" "$work/llvm/lib/clang/"
+            ldd "$work/llvm/bin/clang" "$work/llvm/bin/ld.lld" |
+              awk '/ => \/.* / {print $1, $3}' | sort -u |
+              while read -r soname path; do
+                case "$soname" in libc.so.*|libm.so.*|libdl.so.*|libpthread.so.*|librt.so.*) continue;; esac
+                cp -L "$path" "$work/llvm/lib/$soname"
+              done
+          fi
           : > "$work/status"
           if [[ $TARGET_SUITE == noble ]]; then
             keyring=/usr/share/keyrings/ubuntu-archive-keyring.gpg
@@ -198,8 +218,18 @@ jobs:
             libwayland-dev libxkbcommon-dev libegl-dev libgl-dev
           for package in "$work/archives/"*.deb; do dpkg-deb -x "$package" "$work/sysroot"; done
           python3 - "$work/sysroot" <<'PY'
-          import os, pathlib, sys
+          import os, pathlib, shutil, sys
           root = pathlib.Path(sys.argv[1])
+          # A package-only SDK does not include the merged-/usr layout created
+          # by the distribution installer. GNU libc linker scripts use /lib.
+          for name in ('lib', 'lib64', 'lib32', 'libx32'):
+              old = root / name
+              new = root / 'usr' / name
+              if old.is_dir() and not old.is_symlink():
+                  shutil.copytree(old, new, dirs_exist_ok=True, symlinks=True)
+                  shutil.rmtree(old)
+              if not old.is_symlink() and not old.exists() and new.is_dir():
+                  old.symlink_to('usr/' + name)
           for directory, dirs, files in os.walk(root, followlinks=False):
               for name in dirs + files:
                   path = pathlib.Path(directory) / name
@@ -246,9 +276,17 @@ jobs:
           gcc_dir=${gcc_dir%/*}
           mkdir /tmp/overink-cc
           for compiler in clang clang++; do
+            driver="/usr/bin/$compiler"
+            linker=lld
+            compiler_env=
+            if [[ -x /sdk/llvm/bin/$compiler ]]; then
+              driver="/sdk/llvm/bin/$compiler"
+              linker=/sdk/llvm/bin/ld.lld
+              compiler_env=LD_LIBRARY_PATH=/sdk/llvm/lib
+            fi
             cat > "/tmp/overink-cc/$compiler" <<WRAPPER
           #!/bin/sh
-          exec /usr/bin/$compiler --target=$TARGET_TRIPLE --sysroot=/sdk/sysroot --gcc-install-dir=$gcc_dir -fuse-ld=lld -Qunused-arguments "\$@"
+          exec env $compiler_env "$driver" --target=$TARGET_TRIPLE --sysroot=/sdk/sysroot --gcc-install-dir=$gcc_dir -fuse-ld=$linker -Qunused-arguments "\$@"
           WRAPPER
             chmod +x "/tmp/overink-cc/$compiler"
           done
@@ -338,7 +376,7 @@ jobs:
           mem: 8192
           cpu: 3
           prepare: |
-            pkg install -y cmake ninja pkgconf python3 libX11 libXext libXi libXrandr \
+            pkg install -y curl cmake ninja pkgconf python3 libX11 libXext libXi libXrandr \
               libXcursor libXfixes libXrender libXScrnSaver libXtst wayland wayland-protocols libxkbcommon mesa-libs
           run: |
             set -eu

@@ -34,46 +34,67 @@ impl App {
             if let Some(panel) = opened {
                 let width = (available.x - toolbar::WIDTH).max(0.);
                 if width > 48. {
-                    egui::Frame::new()
-                        .fill(egui::Color32::WHITE)
-                        .inner_margin(egui::Margin::same(13))
-                        .show(ui, |ui| {
-                            ui.set_width((width - 26.).max(0.));
-                            ui.set_min_height((available.y - 26.).max(0.));
-                            ui.horizontal(|ui| {
-                                ui.heading(panel.title());
-                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    if toolbar::button(ui, Icon::Close, "Close panel", false)
-                                        .clicked()
-                                    {
-                                        self.panel = None;
-                                    }
-                                });
-                            });
-                            ui.separator();
-                            egui::ScrollArea::vertical()
-                                .id_salt(panel.title())
-                                .auto_shrink([false, false])
+                    ui.allocate_ui_with_layout(
+                        vec2(width, available.y),
+                        Layout::top_down(Align::Min),
+                        |ui| {
+                            egui::Frame::new()
+                                .fill(egui::Color32::WHITE)
+                                .inner_margin(egui::Margin::same(13))
                                 .show(ui, |ui| {
-                                    match panel {
-                                        Panel::Shapes => self.shapes(ui, &mut commands),
-                                        Panel::Brush => self.brush(ui),
-                                        Panel::Colors => self.palette(ui, &mut commands),
-                                        Panel::Background => self.background_controls(
-                                            ui,
-                                            freeze_unavailable,
-                                            &mut commands,
-                                        ),
-                                        Panel::Settings => {
-                                            self.settings(ui, render, color, video, &mut commands)
-                                        }
-                                    }
-                                    ui.add_space(12.);
-                                    ui.label(
-                                        RichText::new(&self.status).small().color(toolbar::MUTED),
-                                    );
+                                    ui.spacing_mut().item_spacing = vec2(8., 7.);
+                                    ui.set_width((width - 26.).max(0.));
+                                    ui.set_min_height((available.y - 26.).max(0.));
+                                    ui.horizontal(|ui| {
+                                        ui.heading(panel.title());
+                                        ui.with_layout(
+                                            Layout::right_to_left(Align::Center),
+                                            |ui| {
+                                                if toolbar::button(
+                                                    ui,
+                                                    Icon::Close,
+                                                    "Close panel",
+                                                    false,
+                                                )
+                                                .clicked()
+                                                {
+                                                    self.panel = None;
+                                                }
+                                            },
+                                        );
+                                    });
+                                    ui.separator();
+                                    egui::ScrollArea::vertical()
+                                        .id_salt(panel.title())
+                                        .auto_shrink([false, false])
+                                        .show(ui, |ui| {
+                                            match panel {
+                                                Panel::Shapes => self.shapes(ui, &mut commands),
+                                                Panel::Brush => self.brush(ui),
+                                                Panel::Colors => self.palette(ui, &mut commands),
+                                                Panel::Background => self.background_controls(
+                                                    ui,
+                                                    freeze_unavailable,
+                                                    &mut commands,
+                                                ),
+                                                Panel::Settings => self.settings(
+                                                    ui,
+                                                    render,
+                                                    color,
+                                                    video,
+                                                    &mut commands,
+                                                ),
+                                            }
+                                            ui.add_space(12.);
+                                            ui.label(
+                                                RichText::new(&self.status)
+                                                    .small()
+                                                    .color(toolbar::MUTED),
+                                            );
+                                        });
                                 });
-                        });
+                        },
+                    );
                 }
             }
         });
