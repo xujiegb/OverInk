@@ -4,6 +4,7 @@ use libloading::Library;
 use std::{
     ffi::{CStr, c_char, c_int, c_ulong},
     ptr,
+    sync::OnceLock,
 };
 fn library(names: &[&str]) -> Result<Library, String> {
     for name in names {
@@ -250,8 +251,6 @@ struct InputRegion {
 }
 
 struct X11 {
-    _x11: Library,
-    _ext: Library,
     rectangles: CombineRectangles,
     mask: CombineMask,
     raise: unsafe extern "C" fn(*mut c_void, c_ulong) -> c_int,
@@ -275,8 +274,18 @@ fn x11_window(w: &Window) -> Result<(*mut c_void, c_ulong), String> {
 impl X11 {
     fn new(w: &Window) -> Result<Self, String> {
         unsafe {
-            let x11 = library(&["libX11.so.6", "libX11.so"])?;
-            let ext = library(&["libXext.so.6", "libXext.so"])?;
+            // XShape adds hooks to SDL's X Display. Keep their code loaded
+            // until after SDL has closed that connection.
+            static LIBRARIES: OnceLock<Result<(Library, Library), String>> = OnceLock::new();
+            let (x11, ext) = LIBRARIES
+                .get_or_init(|| {
+                    Ok((
+                        library(&["libX11.so.6", "libX11.so"])?,
+                        library(&["libXext.so.6", "libXext.so"])?,
+                    ))
+                })
+                .as_ref()
+                .map_err(Clone::clone)?;
             let (display, _) = x11_window(w)?;
             let query: unsafe extern "C" fn(*mut c_void, *mut c_int, *mut c_int) -> c_int = *ext
                 .get(b"XShapeQueryExtension\0")
@@ -292,8 +301,6 @@ impl X11 {
                 mask: *ext.get(b"XShapeCombineMask\0").map_err(|e| e.to_string())?,
                 raise: *x11.get(b"XRaiseWindow\0").map_err(|e| e.to_string())?,
                 flush: *x11.get(b"XFlush\0").map_err(|e| e.to_string())?,
-                _x11: x11,
-                _ext: ext,
                 applied: None,
             })
         }

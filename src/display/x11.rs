@@ -3,6 +3,7 @@ use libloading::{Library, Symbol};
 use std::{
     ffi::{c_int, c_ulong, c_void},
     ptr,
+    sync::OnceLock,
 };
 #[repr(C)]
 struct Resources {
@@ -27,7 +28,12 @@ pub struct Randr {
     randr: Library,
 }
 impl Randr {
-    pub fn new() -> Option<Self> {
+    pub fn get() -> Option<&'static Self> {
+        // Xlib may call extension hooks when SDL closes the borrowed Display.
+        static API: OnceLock<Option<Randr>> = OnceLock::new();
+        API.get_or_init(Self::new).as_ref()
+    }
+    fn new() -> Option<Self> {
         unsafe {
             Some(Self {
                 x11: Library::new("libX11.so.6")

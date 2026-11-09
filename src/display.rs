@@ -24,13 +24,13 @@ pub struct Display {
 }
 pub struct Topology {
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    randr: Option<x11::Randr>,
+    randr: Option<&'static x11::Randr>,
 }
 impl Topology {
     pub fn new(_video: &str) -> Self {
         Self {
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-            randr: (_video == "x11").then(x11::Randr::new).flatten(),
+            randr: (_video == "x11").then(x11::Randr::get).flatten(),
         }
     }
     pub fn connected(&self, _window: &Window) -> Result<Vec<Display>, String> {
