@@ -484,7 +484,8 @@ jobs:
             grep -q '^#define SDL_VIDEO_DRIVER_X11 1' "$config"
             grep -q '^#define SDL_VIDEO_DRIVER_WAYLAND 1' "$config"
             readelf -h "$output/overink" | grep -iE "Machine:.*$machine"
-            readelf -h "$output/overink" | grep -iq 'OS/ABI:.*FreeBSD'
+            # FreeBSD AArch64 and RISC-V identify the ABI in the ELF note.
+            readelf -n "$output/overink" | grep -E 'FreeBSD[[:space:]].*NT_FREEBSD_ABI_TAG'
             if [ "$target" != "$host" ]; then
               grep -q '^#define SDL_VIDEO_DRIVER_X11_DYNAMIC "libX11\.so' "$config"
               grep -q '^#define SDL_VIDEO_DRIVER_WAYLAND_DYNAMIC "libwayland-client\.so' "$config"
