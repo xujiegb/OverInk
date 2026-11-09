@@ -1,6 +1,9 @@
 use crate::color::InkColor;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, VecDeque};
+use std::{borrow::Cow, collections::VecDeque};
+
+mod eraser;
+pub use eraser::Erasure;
 
 pub const MAX_POINTS: usize = 1_000_000;
 pub const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
@@ -72,6 +75,17 @@ impl Point {
     pub fn dist(self, b: Self) -> f32 {
         (self.x - b.x).hypot(self.y - b.y)
     }
+    pub fn interpolate(self, b: Self, t: f32) -> Self {
+        Self::new(
+            self.x + (b.x - self.x) * t,
+            self.y + (b.y - self.y) * t,
+            self.pressure + (b.pressure - self.pressure) * t,
+            [
+                self.tilt[0] + (b.tilt[0] - self.tilt[0]) * t,
+                self.tilt[1] + (b.tilt[1] - self.tilt[1]) * t,
+            ],
+        )
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Stroke {
@@ -97,23 +111,14 @@ impl Stroke {
         };
         self.width * scale * tilt * 0.5
     }
-    pub fn hit(&self, p: Point, radius: f32) -> bool {
-        let radius = radius + self.width * 0.5;
-        let points = self.polyline();
-        points.iter().any(|a| a.dist(p) <= radius)
-            || points
-                .windows(2)
-                .any(|ab| segment_distance(p, ab[0], ab[1]) <= radius)
-    }
-    pub fn polyline(&self) -> Vec<Point> {
-        if self.points.is_empty() {
-            return vec![];
-        }
-        let a = self.points[0];
-        let b = *self.points.last().unwrap();
+    pub fn polyline(&self) -> Cow<'_, [Point]> {
+        let Some(a) = self.points.first() else {
+            return Cow::Borrowed(&self.points);
+        };
+        let b = self.points.last().unwrap();
         let point = |x, y| Point::new(x, y, 1., [0.; 2]);
-        match self.tool {
-            Tool::Line | Tool::Arrow => vec![a, b],
+        Cow::Owned(match self.tool {
+            Tool::Line | Tool::Arrow => vec![*a, *b],
             Tool::Rectangle => vec![
                 point(a.x, a.y),
                 point(b.x, a.y),
@@ -133,8 +138,27 @@ impl Stroke {
                     })
                     .collect()
             }
-            _ => self.points.clone(),
+            _ => return Cow::Borrowed(&self.points),
+        })
+    }
+    pub fn arrow_head(&self) -> Option<[Point; 3]> {
+        let [a, .., b] = self.points.as_slice() else {
+            return None;
+        };
+        if self.tool != Tool::Arrow {
+            return None;
         }
+        let angle = (b.y - a.y).atan2(b.x - a.x);
+        let length = (self.width * 3.5).max(14.).min(a.dist(*b) * 0.65);
+        let tip = |offset: f32| {
+            Point::new(
+                b.x - length * (angle + offset).cos(),
+                b.y - length * (angle + offset).sin(),
+                1.,
+                [0.; 2],
+            )
+        };
+        Some([tip(0.5), *b, tip(-0.5)])
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -206,18 +230,6 @@ impl History {
             self.snapshot();
             self.doc.strokes.clear()
         }
-    }
-    pub fn erase(&mut self, hits: &BTreeSet<usize>) {
-        if hits.is_empty() {
-            return;
-        }
-        self.snapshot();
-        let mut index = 0;
-        self.doc.strokes.retain(|_| {
-            let keep = !hits.contains(&index);
-            index += 1;
-            keep
-        });
     }
     pub fn set_document(&mut self, doc: Document, restore: bool) {
         if restore {
@@ -313,21 +325,6 @@ mod tests {
             assert!(v > prev);
             prev = v
         }
-    }
-    #[test]
-    fn erase_middle_and_undo() {
-        let mut h = History {
-            active: Some(stroke()),
-            ..History::default()
-        };
-        h.commit();
-        assert!(h.doc.strokes[0].hit(Point::new(50., 0., 1., [0.; 2]), 3.));
-        h.erase(&BTreeSet::from([0]));
-        assert!(h.doc.strokes.is_empty());
-        h.undo();
-        assert_eq!(h.doc.strokes.len(), 1);
-        h.redo();
-        assert!(h.doc.strokes.is_empty())
     }
     #[test]
     fn rejects_nonfinite_and_unknown_version() {

@@ -119,12 +119,12 @@ impl Passthrough {
 #[cfg(target_os = "macos")]
 impl Passthrough {
     pub fn set(&mut self, window: &Window, pass: bool) -> Result<(), String> {
+        use objc2::{
+            msg_send,
+            runtime::{AnyObject, Bool},
+        };
+
         unsafe {
-            #[link(name = "objc")]
-            unsafe extern "C" {
-                fn sel_registerName(name: *const std::ffi::c_char) -> *mut c_void;
-                fn objc_msgSend();
-            }
             let ns = SDL_GetPointerProperty(
                 SDL_GetWindowProperties(window.raw),
                 SDL_PROP_WINDOW_COCOA_WINDOW_POINTER,
@@ -133,16 +133,19 @@ impl Passthrough {
             if ns.is_null() {
                 return Err("No Cocoa window handle".into());
             }
-            if self.applied == Some((ns, pass)) {
-                return Ok(());
+            let cocoa = ns.cast::<AnyObject>();
+            if self.applied != Some((ns, pass)) {
+                // SDL's Cocoa listener can reset ignoresMouseEvents when it
+                // handles motion for a transparent window. Disable that motion
+                // while passing input through, as Cocoa does for tooltips.
+                let _: () = msg_send![cocoa, setAcceptsMouseMovedEvents: Bool::new(!pass)];
             }
-            let send: unsafe extern "C" fn(*mut c_void, *mut c_void, bool) =
-                std::mem::transmute(objc_msgSend as *const ());
-            send(
-                ns,
-                sel_registerName(c"setIgnoresMouseEvents:".as_ptr()),
-                pass,
-            );
+            // A window-shape change or a queued event may have reset the
+            // property even if the requested mode is unchanged.
+            let ignoring: Bool = msg_send![cocoa, ignoresMouseEvents];
+            if ignoring.as_bool() != pass {
+                let _: () = msg_send![cocoa, setIgnoresMouseEvents: Bool::new(pass)];
+            }
             self.applied = Some((ns, pass));
             Ok(())
         }

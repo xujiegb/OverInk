@@ -1,5 +1,6 @@
 //! One pressure ribbon per stroke. No series of overlapping translucent stamps.
 use crate::model::{Point, Stroke, Tool};
+use std::borrow::Cow;
 #[derive(Clone, Copy, Debug)]
 pub struct Vertex {
     pub xy: [f32; 2],
@@ -151,23 +152,13 @@ pub fn mesh(stroke: &Stroke, aa: f32) -> Mesh {
             let steps = (pair[0].dist(pair[1]) / 2.0).ceil().clamp(1.0, 32.0) as usize;
             for i in 1..=steps {
                 let t = i as f32 / steps as f32;
-                let a = pair[0];
-                let b = pair[1];
-                samples.push(Point::new(
-                    a.x + (b.x - a.x) * t,
-                    a.y + (b.y - a.y) * t,
-                    a.pressure + (b.pressure - a.pressure) * t,
-                    [
-                        a.tilt[0] + (b.tilt[0] - a.tilt[0]) * t,
-                        a.tilt[1] + (b.tilt[1] - a.tilt[1]) * t,
-                    ],
-                ));
+                samples.push(pair[0].interpolate(pair[1], t));
             }
             if samples.len() >= 100_000 {
                 break;
             }
         }
-        points = samples;
+        points = Cow::Owned(samples);
     }
     ribbon(&mut m, &points, stroke, aa);
     if stroke.tool == Tool::Pencil {
@@ -179,22 +170,10 @@ pub fn mesh(stroke: &Stroke, aa: f32) -> Mesh {
             vertex.coverage *= 0.32 + 0.68 * (hash & 255) as f32 / 255.0;
         }
     }
-    if stroke.tool == Tool::Arrow && stroke.points.len() >= 2 {
-        let a = stroke.points[0];
-        let b = *stroke.points.last().unwrap();
-        let angle = (b.y - a.y).atan2(b.x - a.x);
-        let length = (stroke.width * 3.5).max(14.).min(a.dist(b) * 0.65);
-        let p = |offset: f32| {
-            Point::new(
-                b.x - length * (angle + offset).cos(),
-                b.y - length * (angle + offset).sin(),
-                1.,
-                [0.; 2],
-            )
-        };
+    if let Some(points) = stroke.arrow_head() {
         let mut head = stroke.clone();
         head.pressure_enabled = false;
-        ribbon(&mut m, &[p(0.5), b, p(-0.5)], &head, aa);
+        ribbon(&mut m, &points, &head, aa);
     }
     m
 }

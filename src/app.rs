@@ -7,7 +7,7 @@ use crate::{
     frame_rate::{FramePacer, FrameRate},
     geometry, gui,
     icc::ColorManager,
-    model::{History, MAX_POINTS, Point, Stroke, Tool},
+    model::{Erasure, History, MAX_POINTS, Point, Stroke, Tool},
     native::Passthrough,
     sdl::*,
     touch::{self, TouchKey},
@@ -98,7 +98,7 @@ struct App {
     contact: Option<Contact>,
     laser: BTreeMap<u64, VecDeque<(Point, Instant)>>,
     next_gesture: u64,
-    pending_erasures: BTreeMap<u64, BTreeSet<usize>>,
+    pending_erasures: BTreeMap<u64, Erasure>,
     status: String,
     path: String,
     save_path: PathBuf,
@@ -196,32 +196,19 @@ impl App {
     }
     fn erase_sample(&mut self, id: u64, point: Point) {
         let radius = self.width.max(12.) * self.canvas_units;
-        let hits = self.pending_erasures.entry(id).or_default();
-        for (index, stroke) in self.history.doc.strokes.iter().enumerate() {
-            if !hits.contains(&index) && stroke.hit(point, radius) {
-                hits.insert(index);
-            }
-        }
+        self.pending_erasures.entry(id).or_default().sample(
+            &self.history.doc.strokes,
+            point,
+            radius,
+        );
     }
     fn commit_erase(&mut self, id: u64) {
-        let Some(hits) = self
-            .pending_erasures
-            .remove(&id)
-            .filter(|hits| !hits.is_empty())
-        else {
+        let Some(erase) = self.pending_erasures.remove(&id) else {
             return;
         };
-        self.history.erase(&hits);
-        // Other contacts still refer to the same strokes after this deletion.
-        let removed: Vec<_> = hits.into_iter().collect();
-        for preview in self.pending_erasures.values_mut() {
-            *preview = std::mem::take(preview)
-                .into_iter()
-                .filter_map(|index| match removed.binary_search(&index) {
-                    Ok(_) => None,
-                    Err(earlier) => Some(index - earlier),
-                })
-                .collect();
+        let points = self.draft_point_count();
+        if let Err(error) = erase.commit(&mut self.history, &mut self.pending_erasures, points) {
+            self.status = error.into();
         }
     }
     fn cancel_gesture(&mut self, gesture: Gesture) {
@@ -451,12 +438,17 @@ impl App {
         }
     }
     fn commit_touches(&mut self) {
-        for (_, finger) in std::mem::take(&mut self.touches) {
+        while let Some((_, finger)) = self.touches.pop_first() {
             self.commit_touch(finger);
         }
     }
     fn touch_motion(&mut self, key: TouchKey, point: Point) {
         if self.protected.is_some_and(|r| r.contains(point.x, point.y)) {
+            if let Some(Gesture::Erase(id)) = self.touches.get(&key).map(|finger| finger.gesture)
+                && let Some(erase) = self.pending_erasures.get_mut(&id)
+            {
+                erase.last = None;
+            }
             return;
         }
         let can_append = self.draft_point_count() < MAX_POINTS;
@@ -575,7 +567,14 @@ impl App {
                 }
                 SDL_EVENT_MOUSE_BUTTON_UP if e.button.windowID == overlay => {
                     if e.button.which != SDL_PEN_MOUSEID && e.button.which != SDL_TOUCH_MOUSEID {
-                        self.end(Source::Mouse(e.button.button));
+                        let b = e.button;
+                        let source = Source::Mouse(b.button);
+                        if self.contact.is_some_and(|contact| {
+                            contact.source == source && matches!(contact.gesture, Gesture::Erase(_))
+                        }) {
+                            self.motion(source, Point::new(b.x, b.y, 1., [0.; 2]));
+                        }
+                        self.end(source);
                     }
                 }
                 SDL_EVENT_MOUSE_MOTION if e.motion.windowID == overlay => {
@@ -805,12 +804,9 @@ impl App {
         }
         let aa = 0.8 / scale[0].max(scale[1]);
         for (index, stroke) in self.history.doc.strokes.iter().enumerate() {
-            if self
-                .pending_erasures
-                .values()
-                .all(|preview| !preview.contains(&index))
-            {
-                paint_stroke(r, stroke, color, aa, &clips)?;
+            let preview = Erasure::preview(stroke, index, self.pending_erasures.values());
+            for fragment in preview.iter() {
+                paint_stroke(r, fragment, color, aa, &clips)?;
             }
         }
         if let Some(ref s) = self.history.active {
@@ -971,10 +967,17 @@ fn apply_mode(
 }
 
 fn mouse_released() -> bool {
-    // Keep the native input region until SDL receives the matching button-up.
-    // Removing it during a drag can lose that release and make SDL discard the
-    // next controller button-down as a duplicate of the unfinished drag.
-    unsafe { SDL_GetMouseState(ptr::null_mut(), ptr::null_mut()).0 == 0 }
+    // Cocoa can route the release to a different application during a focus
+    // change. Its global state reflects the physical buttons in that case.
+    #[cfg(target_os = "macos")]
+    unsafe {
+        SDL_GetGlobalMouseState(ptr::null_mut(), ptr::null_mut()).0 == 0
+    }
+    // Other backends keep the input region until SDL sees the matching up.
+    #[cfg(not(target_os = "macos"))]
+    unsafe {
+        SDL_GetMouseState(ptr::null_mut(), ptr::null_mut()).0 == 0
+    }
 }
 
 pub struct Options {
@@ -1704,9 +1707,8 @@ mod touch_tests {
             Point::new(80., 60., 1., [0.; 2]),
             false,
         );
-        assert_eq!(
-            a.pending_erasures.values().next().unwrap(),
-            &BTreeSet::from([0])
+        assert!(
+            Erasure::preview(&a.history.doc.strokes[0], 0, a.pending_erasures.values()).is_empty()
         );
         assert_eq!(a.history.doc.strokes.len(), 1);
         a.keyboard(
@@ -1774,14 +1776,48 @@ mod touch_tests {
         a.use_tool(Tool::Eraser);
         finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 1, 0.1, 0.1);
         finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 2, 0.6, 0.1);
-        // Lift away from all strokes so the release itself cannot erase them.
-        finger(&mut a, SDL_EVENT_FINGER_UP, 1, 1, 0.9, 0.1);
-        finger(&mut a, SDL_EVENT_FINGER_UP, 1, 2, 0.9, 0.1);
+        finger(&mut a, SDL_EVENT_FINGER_UP, 1, 1, 0.1, 0.1);
+        finger(&mut a, SDL_EVENT_FINGER_UP, 1, 2, 0.6, 0.1);
         assert_eq!(a.history.doc.strokes.len(), 1);
         assert_eq!(a.history.doc.strokes[0].points[0].x, 240.);
         a.history.undo();
         assert_eq!(a.history.doc.strokes.len(), 2);
         a.history.undo();
+        assert_eq!(a.history.doc.strokes.len(), 3);
+    }
+    #[test]
+    fn concurrent_erases_split_one_stroke_and_undo_independently() {
+        let mut a = app();
+        let mouse = Source::Mouse(LEFT_BUTTON);
+        a.begin(mouse, Point::new(10., 60., 0.2, [0.; 2]), false);
+        a.motion(mouse, Point::new(700., 60., 0.8, [45., 0.]));
+        a.end(mouse);
+        a.use_tool(Tool::Eraser);
+        finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 1, 0.1, 0.1);
+        finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 2, 0.6, 0.1);
+        assert_eq!(
+            Erasure::preview(&a.history.doc.strokes[0], 0, a.pending_erasures.values()).len(),
+            3
+        );
+        finger(&mut a, SDL_EVENT_FINGER_UP, 1, 1, 0.1, 0.1);
+        assert_eq!(a.history.doc.strokes.len(), 2);
+        finger(&mut a, SDL_EVENT_FINGER_UP, 1, 2, 0.6, 0.1);
+        let strokes = &a.history.doc.strokes;
+        assert_eq!(strokes.len(), 3);
+        assert_eq!(strokes[0].points[0].x, 10.);
+        assert_eq!(strokes[2].points.last().unwrap().x, 700.);
+        for (left, right, x) in [
+            (&strokes[0], &strokes[1], 80.),
+            (&strokes[1], &strokes[2], 480.),
+        ] {
+            assert!(left.points.last().unwrap().x < x && right.points[0].x > x);
+        }
+        a.history.undo();
+        assert_eq!(a.history.doc.strokes.len(), 2);
+        a.history.undo();
+        assert_eq!(a.history.doc.strokes.len(), 1);
+        a.history.redo();
+        a.history.redo();
         assert_eq!(a.history.doc.strokes.len(), 3);
     }
     #[test]
