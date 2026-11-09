@@ -797,6 +797,23 @@ impl App {
                             self.use_tool(tool); c.mode=true;
                         }
                     }
+                    ui.separator();
+                    if ui
+                        .button("Undo")
+                        .on_hover_text("Undo the last change (Ctrl/Cmd+Z)")
+                        .clicked()
+                    {
+                        self.touches.clear();
+                        self.history.undo();
+                    }
+                    if ui
+                        .button("Redo")
+                        .on_hover_text("Redo the last undone change (Ctrl/Cmd+Shift+Z)")
+                        .clicked()
+                    {
+                        self.touches.clear();
+                        self.history.redo();
+                    }
                 });
                 self.color_controls(ui, &mut c);
                 ui.horizontal(|ui| {
@@ -825,8 +842,6 @@ impl App {
                     ui.add(egui::Slider::new(&mut self.opacity, 0.1..=1.).text("Opacity"));
                 });
                 ui.horizontal(|ui| {
-                    if ui.button("Undo").clicked() { self.touches.clear(); self.history.undo(); }
-                    if ui.button("Redo").clicked() { self.touches.clear(); self.history.redo(); }
                     if ui.button("Clear page").clicked() { self.reset_contacts(); self.history.clear(); }
                     ui.separator();
                     if ui.checkbox(&mut self.board, "Whiteboard").changed() {
