@@ -126,6 +126,11 @@ impl Guard {
         shape_rendering: bool,
     ) -> Result<Option<Rect>, String> {
         let hole = rectangle(canvas, toolbar);
+        // X11 has a dedicated input region. Rendering already clips the
+        // transparent canvas, so an SDL shape would overwrite XShape.
+        if crate::sdl::driver() == "x11" {
+            return Ok(hole);
+        }
         if unsafe { SDL_GetWindowFlags(canvas.raw) } & SDL_WINDOW_TRANSPARENT == 0 {
             return Ok(None);
         }

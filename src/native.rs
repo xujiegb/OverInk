@@ -141,7 +141,7 @@ impl Passthrough {
     }
 }
 
-pub fn keep_controller_above(canvas: &Window, controller: &Window) {
+pub fn keep_controller_above(canvas: &Window, controller: &Window, _native: &Passthrough) {
     let _ = canvas;
     #[cfg(target_os = "windows")]
     unsafe {
@@ -213,7 +213,7 @@ pub fn keep_controller_above(canvas: &Window, controller: &Window) {
         }
     }
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    let _ = unix::raise_controller(controller);
+    _native.raise_controller(controller);
 }
 
 pub fn show_canvas(canvas: &Window, controller: &Window, shown: bool) -> Result<(), String> {

@@ -18,38 +18,26 @@ fn add(m: &mut Mesh, p: [f32; 2], coverage: f32) -> u32 {
 fn tri(m: &mut Mesh, a: u32, b: u32, c: u32) {
     m.indices.extend([a, b, c])
 }
-fn disk(m: &mut Mesh, p: Point, r: f32, aa: f32) {
-    let c = add(m, [p.x, p.y], 1.);
-    let n = 32;
+fn fan(m: &mut Mesh, p: Point, r: f32, arc: [f32; 2], n: u32, aa: f32, alpha: f32) {
+    let center = add(m, [p.x, p.y], alpha);
     let base = m.vertices.len() as u32;
+    let stride = if aa > 0. { 2 } else { 1 };
     for i in 0..=n {
-        let a = i as f32 / n as f32 * std::f32::consts::TAU;
-        for (rr, alpha) in [(r, 1.), (r + aa, 0.)] {
-            add(m, [p.x + rr * a.cos(), p.y + rr * a.sin()], alpha);
+        let angle = arc[0] + i as f32 / n as f32 * arc[1];
+        let point = |radius| [p.x + radius * angle.cos(), p.y + radius * angle.sin()];
+        add(m, point(r), alpha);
+        if aa > 0. {
+            add(m, point(r + aa), 0.);
         }
     }
     for i in 0..n {
-        let a = base + i * 2;
-        tri(m, c, a, a + 2);
-        tri(m, a, a + 1, a + 3);
-        tri(m, a, a + 3, a + 2);
-    }
-}
-fn cap(m: &mut Mesh, p: Point, r: f32, angle: f32, aa: f32) {
-    let c = add(m, [p.x, p.y], 1.);
-    let base = m.vertices.len() as u32;
-    let n = 16;
-    for i in 0..=n {
-        let a = angle + i as f32 / n as f32 * std::f32::consts::PI;
-        for (rr, alpha) in [(r, 1.), (r + aa, 0.)] {
-            add(m, [p.x + rr * a.cos(), p.y + rr * a.sin()], alpha);
+        let a = base + i * stride;
+        let b = a + stride;
+        tri(m, center, a, b);
+        if aa > 0. {
+            tri(m, a, a + 1, b + 1);
+            tri(m, a, b + 1, b);
         }
-    }
-    for i in 0..n {
-        let a = base + i * 2;
-        tri(m, c, a, a + 2);
-        tri(m, a, a + 1, a + 3);
-        tri(m, a, a + 3, a + 2);
     }
 }
 fn ribbon(m: &mut Mesh, points: &[Point], stroke: &Stroke, aa: f32) {
@@ -59,14 +47,30 @@ fn ribbon(m: &mut Mesh, points: &[Point], stroke: &Stroke, aa: f32) {
             p.push(v)
         }
     }
+    let coverage = |p: Point| {
+        if stroke.tool == Tool::Laser {
+            p.pressure
+        } else {
+            1.
+        }
+    };
     if p.len() == 1 {
-        disk(m, p[0], stroke.radius(p[0]), aa);
+        fan(
+            m,
+            p[0],
+            stroke.radius(p[0]),
+            [0., std::f32::consts::TAU],
+            32,
+            aa,
+            coverage(p[0]),
+        );
         return;
     }
     if p.is_empty() {
         return;
     }
     let base = m.vertices.len() as u32;
+    let stride = if aa > 0. { 4 } else { 2 };
     for (i, &q) in p.iter().enumerate() {
         let direction = |a: Point, b: Point| {
             let l = a.dist(b).max(1e-6);
@@ -90,7 +94,10 @@ fn ribbon(m: &mut Mesh, points: &[Point], stroke: &Stroke, aa: f32) {
             }
         };
         let r = stroke.radius(q) * factor;
-        for (distance, alpha) in [(r + aa, 0.), (r, 1.), (-r, 1.), (-r - aa, 0.)] {
+        let alpha = coverage(q);
+        let lanes = [(r + aa, 0.), (r, alpha), (-r, alpha), (-r - aa, 0.)];
+        let lanes = if aa > 0. { &lanes[..] } else { &lanes[1..3] };
+        for &(distance, alpha) in lanes {
             add(
                 m,
                 [q.x + normal[0] * distance, q.y + normal[1] * distance],
@@ -98,9 +105,9 @@ fn ribbon(m: &mut Mesh, points: &[Point], stroke: &Stroke, aa: f32) {
             );
         }
         if i > 0 {
-            let a = base + (i as u32 - 1) * 4;
-            let b = a + 4;
-            for j in 0..3 {
+            let a = base + (i as u32 - 1) * stride;
+            let b = a + stride;
+            for j in 0..stride - 1 {
                 tri(m, a + j, b + j, a + j + 1);
                 tri(m, a + j + 1, b + j, b + j + 1);
             }
@@ -110,19 +117,29 @@ fn ribbon(m: &mut Mesh, points: &[Point], stroke: &Stroke, aa: f32) {
     let b = p[1];
     let end = *p.last().unwrap();
     let prev = p[p.len() - 2];
-    cap(
+    fan(
         m,
         a,
         stroke.radius(a),
-        (b.y - a.y).atan2(b.x - a.x) + std::f32::consts::FRAC_PI_2,
+        [
+            (b.y - a.y).atan2(b.x - a.x) + std::f32::consts::FRAC_PI_2,
+            std::f32::consts::PI,
+        ],
+        16,
         aa,
+        coverage(a),
     );
-    cap(
+    fan(
         m,
         end,
         stroke.radius(end),
-        (end.y - prev.y).atan2(end.x - prev.x) - std::f32::consts::FRAC_PI_2,
+        [
+            (end.y - prev.y).atan2(end.x - prev.x) - std::f32::consts::FRAC_PI_2,
+            std::f32::consts::PI,
+        ],
+        16,
         aa,
+        coverage(end),
     );
 }
 pub fn mesh(stroke: &Stroke, aa: f32) -> Mesh {

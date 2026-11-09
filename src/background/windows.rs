@@ -119,11 +119,15 @@ fn capture(monitor: HMONITOR, cancelled: &AtomicBool) -> Result<Option<Image>, B
                 match frames.recv_timeout(Duration::from_millis(25)) {
                     Ok(()) => {
                         let frame = pool.TryGetNextFrame()?;
-                        let size = frame.ContentSize()?;
-                        if size.Width != image.width as i32 || size.Height != image.height as i32 {
-                            return Err("The display size changed during capture".into());
-                        }
-                        let copied = copy_frame(&device, &context, &frame, &mut image);
+                        let copied = (|| {
+                            let size = frame.ContentSize()?;
+                            if size.Width != image.width as i32
+                                || size.Height != image.height as i32
+                            {
+                                return Err("The display size changed during capture".into());
+                            }
+                            copy_frame(&device, &context, &frame, &mut image)
+                        })();
                         let _ = frame.Close();
                         copied?;
                         return Ok(Some(image));

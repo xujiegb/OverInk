@@ -27,9 +27,31 @@ impl Default for InkColor {
 }
 impl InkColor {
     pub fn from_rgb8(rgb: [u8; 3]) -> Self {
+        Self::from_channels(rgb, Space::Srgb)
+    }
+    pub fn from_channels(rgb: [u8; 3], space: Space) -> Self {
         Self {
-            rgb: rgb.map(|v| v as f32 / 255.0),
-            space: Space::Srgb,
+            rgb: rgb.map(|v| v as f32 / 255.),
+            space,
+        }
+    }
+    pub fn converted(self, space: Space) -> Self {
+        if self.space == space {
+            return self;
+        }
+        let [r, g, b] = self.linear_srgb();
+        let linear = match space {
+            Space::Srgb => gamut_map([r, g, b]),
+            // Inverse of the Display P3 to linear sRGB matrix below.
+            Space::DisplayP3 => [
+                0.822462 * r + 0.1775381 * g,
+                0.0331942 * r + 0.9668058 * g,
+                0.0170827 * r + 0.0723975 * g + 0.91052 * b,
+            ],
+        };
+        Self {
+            rgb: linear.map(|v| encode(v.clamp(0., 1.))),
+            space,
         }
     }
     pub fn linear_srgb(self) -> [f32; 3] {
@@ -56,14 +78,24 @@ impl InkColor {
             }
         })
     }
+    pub fn channels8(self) -> [u8; 3] {
+        bytes(self.rgb)
+    }
     pub fn srgb8(self) -> [u8; 3] {
-        self.output_rgb(false)
-            .map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)
+        bytes(self.output_rgb(false))
+    }
+    pub fn hex(self) -> String {
+        hex(self.channels8())
     }
     pub fn css(self) -> String {
-        let [r, g, b] = self.srgb8();
-        format!("#{r:02X}{g:02X}{b:02X}")
+        hex(self.srgb8())
     }
+}
+fn bytes(rgb: [f32; 3]) -> [u8; 3] {
+    rgb.map(|v| (v.clamp(0., 1.) * 255.).round() as u8)
+}
+fn hex([r, g, b]: [u8; 3]) -> String {
+    format!("#{r:02X}{g:02X}{b:02X}")
 }
 pub fn decode(v: f32) -> f32 {
     if v.abs() <= 0.04045 {
@@ -144,7 +176,7 @@ mod tests {
     }
 }
 
-pub fn parse_hex(text: &str) -> Result<InkColor, &'static str> {
+fn parse_hex(text: &str, space: Space) -> Result<InkColor, &'static str> {
     let value = text.trim();
     let digits = value.strip_prefix('#').unwrap_or(value);
     if !digits.is_ascii()
@@ -161,7 +193,7 @@ pub fn parse_hex(text: &str) -> Result<InkColor, &'static str> {
             u8::from_str_radix(&digits[i * 2..i * 2 + 2], 16).unwrap()
         };
     }
-    Ok(InkColor::from_rgb8(rgb))
+    Ok(InkColor::from_channels(rgb, space))
 }
 
 pub struct HexEntry {
@@ -171,7 +203,7 @@ pub struct HexEntry {
 }
 impl HexEntry {
     pub fn new(color: InkColor) -> Self {
-        let text = color.css();
+        let text = color.hex();
         Self {
             last_color: text.clone(),
             text,
@@ -179,18 +211,18 @@ impl HexEntry {
         }
     }
     pub fn sync(&mut self, color: InkColor) {
-        let hex = color.css();
+        let hex = color.hex();
         if self.last_color != hex {
             self.text = hex.clone();
             self.last_color = hex;
             self.invalid = false;
         }
     }
-    pub fn apply(&mut self) -> Option<InkColor> {
-        match parse_hex(&self.text) {
+    pub fn apply(&mut self, space: Space) -> Option<InkColor> {
+        match parse_hex(&self.text, space) {
             Ok(color) => {
                 self.invalid = false;
-                self.last_color = color.css();
+                self.last_color = color.hex();
                 Some(color)
             }
             Err(_) => {
@@ -222,10 +254,30 @@ mod hex_tests {
             ("000", [0; 3]),
             ("#3C775E", PRESETS[1]),
         ] {
-            let color = parse_hex(text).unwrap();
+            let color = parse_hex(text, Space::Srgb).unwrap();
             assert_eq!(color.srgb8(), expected);
-            assert_eq!(parse_hex(&color.css()).unwrap().srgb8(), expected);
+            assert_eq!(
+                parse_hex(&color.css(), Space::Srgb).unwrap().srgb8(),
+                expected
+            );
             assert_eq!(color.space, Space::Srgb);
+        }
+    }
+    #[test]
+    fn p3_hex_and_srgb_presets_keep_the_selected_space() {
+        let color = InkColor::from_channels([255, 0, 0], Space::DisplayP3);
+        let mut entry = HexEntry::new(color);
+        assert_eq!(entry.text, "#FF0000");
+        assert_ne!(color.css(), entry.text);
+        entry.text = "#00FF00".into();
+        let green = entry.apply(Space::DisplayP3).unwrap();
+        assert_eq!(green.space, Space::DisplayP3);
+        assert_eq!(green.channels8(), [0, 255, 0]);
+        assert_eq!(green.hex(), entry.text);
+        for rgb in PRESETS {
+            let preset = InkColor::from_rgb8(rgb).converted(Space::DisplayP3);
+            assert_eq!(preset.space, Space::DisplayP3);
+            assert_eq!(preset.srgb8(), rgb);
         }
     }
     #[test]
@@ -242,7 +294,7 @@ mod hex_tests {
             "12 345",
             "red",
         ] {
-            assert!(parse_hex(text).is_err(), "{text}");
+            assert!(parse_hex(text, Space::Srgb).is_err(), "{text}");
         }
     }
     #[test]
@@ -250,12 +302,12 @@ mod hex_tests {
         let initial = InkColor::default();
         let mut entry = HexEntry::new(initial);
         entry.text = "#12".into();
-        assert!(entry.apply().is_none());
+        assert!(entry.apply(Space::Srgb).is_none());
         assert!(entry.invalid);
         entry.revert();
         assert_eq!(entry.text, initial.css());
         entry.text = "#abc".into();
-        let color = entry.apply().unwrap();
+        let color = entry.apply(Space::Srgb).unwrap();
         entry.sync(color);
         assert_eq!(entry.text, "#abc");
         entry.normalize();

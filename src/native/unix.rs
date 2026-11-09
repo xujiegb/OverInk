@@ -1,4 +1,5 @@
 use super::*;
+use crate::controller::Rect;
 use libloading::Library;
 use std::{
     ffi::{CStr, c_char, c_int, c_ulong},
@@ -16,10 +17,11 @@ type Marshal = unsafe extern "C" fn(*mut c_void, u32, *const c_void, u32, u32, .
 type Version = unsafe extern "C" fn(*mut c_void) -> u32;
 type Destroy = unsafe extern "C" fn(*mut c_void);
 struct Wayland {
-    lib: Library,
+    _lib: Library,
     queue: *mut c_void,
-    registry: *mut c_void,
     compositor: *mut c_void,
+    region_interface: *const c_void,
+    applied: Option<(*mut c_void, bool)>,
     marshal: Marshal,
     version: Version,
     destroy: Destroy,
@@ -94,6 +96,9 @@ impl Wayland {
             let compositor_interface: *const c_void = *lib
                 .get(b"wl_compositor_interface\0")
                 .map_err(|e| e.to_string())?;
+            let region_interface = *lib
+                .get(b"wl_region_interface\0")
+                .map_err(|e| e.to_string())?;
             let display = SDL_GetPointerProperty(
                 SDL_GetWindowProperties(w.raw),
                 SDL_PROP_WINDOW_WAYLAND_DISPLAY_POINTER,
@@ -156,10 +161,11 @@ impl Wayland {
                 return Err("Cannot bind Wayland compositor".into());
             }
             Ok(Self {
-                lib,
+                _lib: lib,
                 queue,
-                registry: ptr::null_mut(),
                 compositor,
+                region_interface,
+                applied: None,
                 marshal,
                 version,
                 destroy,
@@ -167,7 +173,7 @@ impl Wayland {
             })
         }
     }
-    fn set(&self, w: &Window, pass: bool) -> Result<(), String> {
+    fn set(&mut self, w: &Window, pass: bool) -> Result<(), String> {
         unsafe {
             let surface = SDL_GetPointerProperty(
                 SDL_GetWindowProperties(w.raw),
@@ -177,15 +183,14 @@ impl Wayland {
             if surface.is_null() {
                 return Err("No Wayland surface".into());
             }
+            if self.applied == Some((surface, pass)) {
+                return Ok(());
+            }
             let region = if pass {
-                let interface: *const c_void = *self
-                    .lib
-                    .get(b"wl_region_interface\0")
-                    .map_err(|e| e.to_string())?;
                 let p = (self.marshal)(
                     self.compositor,
                     1,
-                    interface,
+                    self.region_interface,
                     (self.version)(self.compositor),
                     0,
                     ptr::null_mut::<c_void>(),
@@ -202,6 +207,7 @@ impl Wayland {
             if !region.is_null() {
                 (self.marshal)(region, 0, ptr::null(), (self.version)(region), 1);
             }
+            self.applied = Some((surface, pass));
             Ok(())
         }
     }
@@ -210,121 +216,122 @@ impl Drop for Wayland {
     fn drop(&mut self) {
         unsafe {
             (self.destroy)(self.compositor);
-            if !self.registry.is_null() {
-                (self.destroy)(self.registry)
-            }
             (self.queue_destroy)(self.queue)
         }
     }
 }
-pub struct Passthrough {
-    wayland: Option<Wayland>,
-    failure: Option<String>,
+#[repr(C)]
+struct Rectangle {
+    x: i16,
+    y: i16,
+    width: u16,
+    height: u16,
 }
-impl Passthrough {
-    pub fn new(w: &Window) -> Self {
-        let (wayland, failure) = if crate::sdl::driver() == "wayland" {
-            match Wayland::new(w) {
-                Ok(v) => (Some(v), None),
-                Err(e) => (None, Some(e)),
-            }
-        } else {
-            (None, None)
-        };
-        Self { wayland, failure }
+type CombineRectangles = unsafe extern "C" fn(
+    *mut c_void,
+    c_ulong,
+    c_int,
+    c_int,
+    c_int,
+    *const Rectangle,
+    c_int,
+    c_int,
+    c_int,
+);
+type CombineMask = unsafe extern "C" fn(*mut c_void, c_ulong, c_int, c_int, c_int, c_ulong, c_int);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct InputRegion {
+    display: *mut c_void,
+    window: c_ulong,
+    size: [i32; 2],
+    pass: bool,
+    hole: Option<Rect>,
+}
+
+struct X11 {
+    _x11: Library,
+    _ext: Library,
+    rectangles: CombineRectangles,
+    mask: CombineMask,
+    raise: unsafe extern "C" fn(*mut c_void, c_ulong) -> c_int,
+    flush: unsafe extern "C" fn(*mut c_void) -> c_int,
+    applied: Option<InputRegion>,
+}
+
+fn x11_window(w: &Window) -> Result<(*mut c_void, c_ulong), String> {
+    unsafe {
+        let props = SDL_GetWindowProperties(w.raw);
+        let display =
+            SDL_GetPointerProperty(props, SDL_PROP_WINDOW_X11_DISPLAY_POINTER, ptr::null_mut());
+        let window = SDL_GetNumberProperty(props, SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0) as c_ulong;
+        if display.is_null() || window == 0 {
+            return Err("No X11 window".into());
+        }
+        Ok((display, window))
     }
-    pub fn set(&mut self, w: &Window, pass: bool) -> Result<(), String> {
-        self.set_guarded(w, pass, None)
-    }
-    pub fn set_guarded(
-        &mut self,
-        w: &Window,
-        pass: bool,
-        hole: Option<crate::controller::Rect>,
-    ) -> Result<(), String> {
-        if let Some(ref wl) = self.wayland {
-            return wl.set(w, pass);
-        }
-        if let Some(ref e) = self.failure {
-            return Err(e.clone());
-        }
-        if crate::sdl::driver() != "x11" {
-            return if pass {
-                Err("Input passthrough needs X11 or Wayland".into())
-            } else {
-                Ok(())
-            };
-        }
+}
+
+impl X11 {
+    fn new(w: &Window) -> Result<Self, String> {
         unsafe {
-            let x = library(&["libX11.so.6", "libX11.so"])?;
+            let x11 = library(&["libX11.so.6", "libX11.so"])?;
             let ext = library(&["libXext.so.6", "libXext.so"])?;
-            let props = SDL_GetWindowProperties(w.raw);
-            let display =
-                SDL_GetPointerProperty(props, SDL_PROP_WINDOW_X11_DISPLAY_POINTER, ptr::null_mut());
-            let window =
-                SDL_GetNumberProperty(props, SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0) as c_ulong;
-            if display.is_null() || window == 0 {
-                return Err("No X11 window".into());
-            }
-            let query: libloading::Symbol<
-                unsafe extern "C" fn(*mut c_void, *mut c_int, *mut c_int) -> c_int,
-            > = ext
+            let (display, _) = x11_window(w)?;
+            let query: unsafe extern "C" fn(*mut c_void, *mut c_int, *mut c_int) -> c_int = *ext
                 .get(b"XShapeQueryExtension\0")
                 .map_err(|e| e.to_string())?;
             let (mut event, mut error) = (0, 0);
             if query(display, &mut event, &mut error) == 0 {
                 return Err("X11 Shape extension unavailable".into());
             }
-            if pass {
-                let f: libloading::Symbol<
-                    unsafe extern "C" fn(
-                        *mut c_void,
-                        c_ulong,
-                        c_int,
-                        c_int,
-                        c_int,
-                        *const c_void,
-                        c_int,
-                        c_int,
-                        c_int,
-                    ),
-                > = ext
+            Ok(Self {
+                rectangles: *ext
                     .get(b"XShapeCombineRectangles\0")
-                    .map_err(|e| e.to_string())?;
-                f(display, window, 2, 0, 0, ptr::null(), 0, 0, 0);
-            } else if let Some(hole) = hole {
-                #[repr(C)]
-                struct Rectangle {
-                    x: i16,
-                    y: i16,
-                    width: u16,
-                    height: u16,
-                }
+                    .map_err(|e| e.to_string())?,
+                mask: *ext.get(b"XShapeCombineMask\0").map_err(|e| e.to_string())?,
+                raise: *x11.get(b"XRaiseWindow\0").map_err(|e| e.to_string())?,
+                flush: *x11.get(b"XFlush\0").map_err(|e| e.to_string())?,
+                _x11: x11,
+                _ext: ext,
+                applied: None,
+            })
+        }
+    }
+
+    fn set(&mut self, w: &Window, pass: bool, hole: Option<Rect>) -> Result<(), String> {
+        let (display, window) = x11_window(w)?;
+        let size = w.pixel_size();
+        let hole = if pass {
+            None
+        } else {
+            hole.and_then(|hole| hole.pixels(w).clipped(size))
+        };
+        let region = InputRegion {
+            display,
+            window,
+            size,
+            pass,
+            hole,
+        };
+        if self.applied == Some(region) {
+            return Ok(());
+        }
+        // ShapeInput = 2, ShapeSet = 0, Unsorted = 0.
+        unsafe {
+            if pass || hole.is_some() {
                 let mut rectangles = Vec::new();
-                for area in crate::controller::outside(w.pixel_size(), Some(hole.pixels(w))) {
-                    rectangles.push(Rectangle {
-                        x: area.x.try_into().map_err(|_| "Input region is too large")?,
-                        y: area.y.try_into().map_err(|_| "Input region is too large")?,
-                        width: area.w.try_into().map_err(|_| "Input region is too large")?,
-                        height: area.h.try_into().map_err(|_| "Input region is too large")?,
-                    });
+                if hole.is_some() {
+                    for area in crate::controller::outside(size, hole) {
+                        rectangles.push(Rectangle {
+                            x: area.x.try_into().map_err(|_| "Input region is too large")?,
+                            y: area.y.try_into().map_err(|_| "Input region is too large")?,
+                            width: area.w.try_into().map_err(|_| "Input region is too large")?,
+                            height: area.h.try_into().map_err(|_| "Input region is too large")?,
+                        });
+                    }
                 }
-                let f: libloading::Symbol<
-                    unsafe extern "C" fn(
-                        *mut c_void,
-                        c_ulong,
-                        c_int,
-                        c_int,
-                        c_int,
-                        *const Rectangle,
-                        c_int,
-                        c_int,
-                        c_int,
-                    ),
-                > = ext
-                    .get(b"XShapeCombineRectangles\0")
-                    .map_err(|e| e.to_string())?;
-                f(
+                (self.rectangles)(
                     display,
                     window,
                     2,
@@ -336,39 +343,67 @@ impl Passthrough {
                     0,
                 );
             } else {
-                let f: libloading::Symbol<
-                    unsafe extern "C" fn(*mut c_void, c_ulong, c_int, c_int, c_int, c_ulong, c_int),
-                > = ext.get(b"XShapeCombineMask\0").map_err(|e| e.to_string())?;
-                f(display, window, 2, 0, 0, 0, 0);
+                (self.mask)(display, window, 2, 0, 0, 0, 0);
             }
-            let flush: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> c_int> =
-                x.get(b"XFlush\0").map_err(|e| e.to_string())?;
-            flush(display);
-            Ok(())
+            (self.flush)(display);
         }
+        self.applied = Some(region);
+        Ok(())
     }
 }
 
-pub fn raise_controller(window: &Window) -> Result<(), String> {
-    if crate::sdl::driver() != "x11" {
-        return Ok(());
-    }
-    unsafe {
-        let lib = library(&["libX11.so.6", "libX11.so"])?;
-        let props = SDL_GetWindowProperties(window.raw);
-        let display =
-            SDL_GetPointerProperty(props, SDL_PROP_WINDOW_X11_DISPLAY_POINTER, ptr::null_mut());
-        let id = SDL_GetNumberProperty(props, SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0) as c_ulong;
-        if display.is_null() || id == 0 {
-            return Err("No X11 controller handle".into());
+enum Backend {
+    X11(X11),
+    Wayland(Wayland),
+    Unavailable(String),
+}
+
+pub struct Passthrough {
+    backend: Backend,
+}
+impl Passthrough {
+    pub fn new(w: &Window) -> Self {
+        let backend = match crate::sdl::driver().as_str() {
+            "x11" => X11::new(w).map(Backend::X11),
+            "wayland" => Wayland::new(w).map(Backend::Wayland),
+            _ => Err("Input passthrough needs X11 or Wayland".into()),
+        };
+        Self {
+            backend: backend.unwrap_or_else(Backend::Unavailable),
         }
-        let raise: libloading::Symbol<unsafe extern "C" fn(*mut c_void, c_ulong) -> c_int> =
-            lib.get(b"XRaiseWindow\0").map_err(|e| e.to_string())?;
-        let flush: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> c_int> =
-            lib.get(b"XFlush\0").map_err(|e| e.to_string())?;
-        // Raising without setting keyboard focus lets the pen keep drawing.
-        raise(display, id);
-        flush(display);
-        Ok(())
+    }
+    pub fn set(&mut self, w: &Window, pass: bool) -> Result<(), String> {
+        self.set_guarded(w, pass, None)
+    }
+    pub fn set_guarded(
+        &mut self,
+        w: &Window,
+        pass: bool,
+        hole: Option<Rect>,
+    ) -> Result<(), String> {
+        match &mut self.backend {
+            Backend::X11(x11) => x11.set(w, pass, hole),
+            Backend::Wayland(wayland) => wayland.set(w, pass),
+            Backend::Unavailable(error) if pass || hole.is_some() => Err(error.clone()),
+            Backend::Unavailable(_) => Ok(()),
+        }
+    }
+    pub fn invalidate(&mut self) {
+        match &mut self.backend {
+            Backend::X11(x11) => x11.applied = None,
+            Backend::Wayland(wayland) => wayland.applied = None,
+            Backend::Unavailable(_) => {}
+        }
+    }
+    pub fn raise_controller(&self, w: &Window) {
+        if let Backend::X11(x11) = &self.backend
+            && let Ok((display, window)) = x11_window(w)
+        {
+            unsafe {
+                // Do not transfer keyboard focus away from an active canvas.
+                (x11.raise)(display, window);
+                (x11.flush)(display);
+            }
+        }
     }
 }

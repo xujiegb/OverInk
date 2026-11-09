@@ -26,19 +26,44 @@ struct Pen {
     has_pressure: bool,
     down: bool,
 }
+impl Pen {
+    fn point(self, x: f32, y: f32) -> Point {
+        let pressure = if self.has_pressure {
+            self.pressure
+        } else {
+            0.5
+        };
+        Point::new(x, y, pressure, self.tilt)
+    }
+}
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Source {
-    Mouse,
+    Mouse(u8),
     Pen(u32),
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Gesture {
+    Ink,
+    Erase,
+    Laser(u64),
+}
+#[derive(Clone, Copy)]
+struct Contact {
+    source: Source,
+    gesture: Gesture,
+}
 struct FingerStroke {
-    tool: Tool,
+    gesture: Gesture,
     stroke: Option<Stroke>,
 }
+const LEFT_BUTTON: u8 = SDL_BUTTON_LEFT as u8;
+const RIGHT_BUTTON: u8 = SDL_BUTTON_RIGHT as u8;
+const LASER_LIFETIME: Duration = Duration::from_millis(900);
+const MAX_LASER_SAMPLES: usize = 4096;
 #[derive(Default)]
 struct Commands {
     mode: bool,
-    display: bool,
+    display: Option<u32>,
     quit: bool,
     pick: bool,
     frame_rate: bool,
@@ -55,6 +80,7 @@ struct App {
     pressure: bool,
     curve: f32,
     pass: bool,
+    wait_for_mouse_up: bool,
     hidden: bool,
     board: bool,
     display: usize,
@@ -69,31 +95,30 @@ struct App {
     pen_proximity: BTreeSet<u32>,
     touches: BTreeMap<TouchKey, FingerStroke>,
     touch_enabled: bool,
-    source: Option<Source>,
-    pointer: Option<Point>,
-    laser: VecDeque<(Point, Instant)>,
+    contact: Option<Contact>,
+    laser: BTreeMap<u64, VecDeque<(Point, Instant)>>,
+    next_laser: u64,
     status: String,
     path: String,
     save_path: PathBuf,
     canvas_units: f32,
     last_save: Instant,
-    last_ink: Instant,
-    pen_seen: bool,
 }
 impl App {
-    fn new(board: bool, display: usize) -> Self {
+    fn new(board: bool, display: usize, displays: Vec<Display>) -> Self {
         let base = state_dir();
         let save_path = base.join("session.overink.json");
         let mut history = History::default();
+        let display = display.min(displays.len().saturating_sub(1));
+        let suspended = displays.is_empty();
+        let mut pages = Pages::new(displays.get(display).map(|d| d.id));
+        pages.sync(&mut history, &displays);
         let mut status = "Ready. Draw on the canvas. Space switches to passthrough.".to_string();
         if save_path.exists()
-            && let Err(e) = history.load(&save_path)
+            && let Err(e) = pages.load(&mut history, &save_path, true)
         {
             status = format!("Restore: {e}")
         }
-        let displays = crate::display::connected().unwrap_or_default();
-        let display = display.min(displays.len().saturating_sub(1));
-        let pages = Pages::new(displays.get(display).map(|d| d.id));
         Self {
             history,
             tool: Tool::Pen,
@@ -105,13 +130,14 @@ impl App {
             pressure: true,
             curve: 1.,
             pass: false,
+            wait_for_mouse_up: false,
             hidden: false,
             board,
             display,
             displays,
             pages,
             frame_rate: FrameRate::load(&base.join("frame-rate.json")),
-            suspended: false,
+            suspended,
             frozen: false,
             protected: None,
             panel: None,
@@ -119,16 +145,14 @@ impl App {
             pen_proximity: BTreeSet::new(),
             touches: BTreeMap::new(),
             touch_enabled: true,
-            source: None,
-            pointer: None,
-            laser: VecDeque::new(),
+            contact: None,
+            laser: BTreeMap::new(),
+            next_laser: 0,
             status,
             path: save_path.to_string_lossy().into_owned(),
             save_path,
             canvas_units: 1.,
             last_save: Instant::now(),
-            last_ink: Instant::now(),
-            pen_seen: false,
         }
     }
     fn stroke(&self, tool: Tool) -> Stroke {
@@ -153,6 +177,30 @@ impl App {
             points: vec![],
         }
     }
+    fn gesture(&mut self, tool: Tool) -> Gesture {
+        match tool {
+            Tool::Eraser => Gesture::Erase,
+            Tool::Laser => {
+                self.next_laser += 1;
+                Gesture::Laser(self.next_laser)
+            }
+            _ => Gesture::Ink,
+        }
+    }
+    fn laser_sample(&mut self, id: u64, point: Point) {
+        let trail = self.laser.entry(id).or_default();
+        let now = Instant::now();
+        if let Some((last, time)) = trail.back_mut()
+            && last.dist(point) <= 0.05
+        {
+            *time = now;
+            return;
+        }
+        if trail.len() >= MAX_LASER_SAMPLES {
+            trail.pop_front();
+        }
+        trail.push_back((point, now));
+    }
     fn begin(&mut self, source: Source, p: Point, eraser: bool) {
         if self.pass
             || self.hidden
@@ -161,101 +209,110 @@ impl App {
         {
             return;
         }
-        self.history.commit();
-        self.source = Some(source);
-        self.pointer = Some(p);
-        self.last_ink = Instant::now();
+        self.finish_contact();
         let tool = if eraser { Tool::Eraser } else { self.tool };
-        if tool == Tool::Eraser {
-            self.history
-                .erase(p, self.width.max(12.) * self.canvas_units);
-            return;
-        }
-        if tool == Tool::Laser {
-            self.laser.push_back((p, Instant::now()));
-            return;
-        }
-        if self
-            .history
-            .doc
-            .strokes
-            .iter()
-            .map(|s| s.points.len())
-            .sum::<usize>()
-            >= MAX_POINTS
-        {
-            self.status = "One million sample limit reached. Export and clear the canvas.".into();
-            self.source = None;
-            return;
-        }
-        let mut s = self.stroke(tool);
-        s.points.push(p);
-        self.history.active = Some(s);
-    }
-    fn motion(&mut self, source: Source, p: Point, eraser: bool) {
-        if self.protected.is_some_and(|r| r.contains(p.x, p.y)) {
-            self.end(source);
-            self.pointer = None;
-            return;
-        }
-        self.pointer = Some(p);
-        if self.source != Some(source) || self.pass || self.hidden || self.suspended {
-            return;
-        }
-        if eraser || self.tool == Tool::Eraser {
-            self.history
-                .erase(p, self.width.max(12.) * self.canvas_units);
-            return;
-        }
-        if self.tool == Tool::Laser {
-            self.laser.push_back((p, Instant::now()));
-            return;
-        }
-        let committed_points = self
-            .history
-            .doc
-            .strokes
-            .iter()
-            .map(|s| s.points.len())
-            .sum::<usize>();
-        if let Some(ref mut s) = self.history.active {
-            if matches!(
-                s.tool,
-                Tool::Line | Tool::Arrow | Tool::Rectangle | Tool::Ellipse
-            ) {
-                if s.points.len() == 1 {
-                    s.points.push(p)
-                } else {
-                    s.points[1] = p
+        let gesture = self.gesture(tool);
+        match gesture {
+            Gesture::Erase => self
+                .history
+                .erase(p, self.width.max(12.) * self.canvas_units),
+            Gesture::Laser(id) => self.laser_sample(id, p),
+            Gesture::Ink => {
+                if self.draft_point_count() >= MAX_POINTS {
+                    self.status =
+                        "One million sample limit reached. Export and clear the canvas.".into();
+                    return;
                 }
-            } else if s.points.len() < 100000
-                && committed_points + s.points.len() < MAX_POINTS
-                && s.points.last().is_none_or(|last| {
-                    last.dist(p) > 0.15 || (last.pressure - p.pressure).abs() > 0.00001
-                })
-            {
-                s.points.push(p)
+                let mut stroke = self.stroke(tool);
+                stroke.points.push(p);
+                self.history.active = Some(stroke);
+            }
+        }
+        self.contact = Some(Contact { source, gesture });
+    }
+    fn motion(&mut self, source: Source, p: Point) {
+        let Some(contact) = self.contact.filter(|contact| contact.source == source) else {
+            return;
+        };
+        if self.protected.is_some_and(|r| r.contains(p.x, p.y)) {
+            self.finish_contact();
+            return;
+        }
+        if self.pass || self.hidden || self.suspended {
+            return;
+        }
+        match contact.gesture {
+            Gesture::Erase => self
+                .history
+                .erase(p, self.width.max(12.) * self.canvas_units),
+            Gesture::Laser(id) => self.laser_sample(id, p),
+            Gesture::Ink => {
+                let can_append = self.draft_point_count() < MAX_POINTS;
+                if let Some(stroke) = &mut self.history.active {
+                    Self::append(stroke, p, can_append);
+                }
             }
         }
     }
-    fn end(&mut self, source: Source) {
-        if self.source == Some(source) {
-            self.history.commit();
-            self.source = None
+    fn append(stroke: &mut Stroke, p: Point, can_append: bool) {
+        if matches!(
+            stroke.tool,
+            Tool::Line | Tool::Arrow | Tool::Rectangle | Tool::Ellipse
+        ) {
+            if stroke.points.len() == 1 && can_append {
+                stroke.points.push(p);
+            } else if let Some(end) = stroke.points.get_mut(1) {
+                *end = p;
+            }
+        } else if can_append
+            && stroke.points.len() < 100_000
+            && stroke.points.last().is_none_or(|last| {
+                last.dist(p) > 0.15
+                    || (stroke.pressure_enabled && (last.pressure - p.pressure).abs() > 0.00001)
+            })
+        {
+            stroke.points.push(p);
         }
     }
-    fn stop(&mut self) {
+    fn end(&mut self, source: Source) {
+        if self.contact.is_some_and(|contact| contact.source == source) {
+            self.finish_contact();
+        }
+    }
+    fn finish_contact(&mut self) {
+        self.contact = None;
         self.history.commit();
+        self.end_erase_if_idle();
+    }
+    fn end_erase_if_idle(&mut self) {
+        if self
+            .contact
+            .is_none_or(|contact| contact.gesture != Gesture::Erase)
+            && self
+                .touches
+                .values()
+                .all(|finger| finger.gesture != Gesture::Erase)
+        {
+            self.history.end_erase();
+        }
+    }
+    fn discard_touches(&mut self) {
+        self.touches.clear();
+        self.end_erase_if_idle();
+    }
+    fn stop(&mut self) {
+        self.finish_contact();
         self.commit_touches();
-        self.source = None;
-        for p in self.pens.values_mut() {
-            p.down = false
+        self.history.end_erase();
+        for pen in self.pens.values_mut() {
+            pen.down = false;
         }
     }
     fn use_mouse(&mut self) {
         self.stop();
         self.reset_contacts();
         self.pass = true;
+        self.wait_for_mouse_up = true;
         self.panel = None;
         self.status = "Mouse mode: click the desktop. Select any drawing tool to resume.".into();
     }
@@ -264,6 +321,7 @@ impl App {
         self.reset_contacts();
         self.tool = tool;
         self.pass = false;
+        self.wait_for_mouse_up = false;
         self.hidden = false;
     }
     fn toggle_mouse(&mut self) {
@@ -273,34 +331,34 @@ impl App {
             self.use_mouse();
         }
     }
+    fn mouse_ready(&mut self) -> bool {
+        if self.wait_for_mouse_up && mouse_released() {
+            self.wait_for_mouse_up = false;
+        }
+        self.pass && !self.wait_for_mouse_up
+    }
     fn reset_contacts(&mut self) {
         self.history.active = None;
-        self.source = None;
-        self.touches.clear();
-        self.pens.clear();
-        self.pen_proximity.clear();
-        self.pointer = None;
+        self.contact = None;
+        self.discard_touches();
+        for pen in self.pens.values_mut() {
+            pen.down = false;
+        }
         self.laser.clear();
     }
-    fn refresh_displays(
-        &mut self,
-        displays: Vec<Display>,
-        controller: Option<u32>,
-    ) -> (bool, bool) {
-        let ids: BTreeSet<u32> = displays.iter().map(|d| d.id).collect();
+    fn refresh_displays(&mut self, displays: Vec<Display>, preferred: Option<u32>) -> (bool, bool) {
         let old = self
             .displays
             .iter()
             .find(|d| Some(d.id) == self.pages.active)
             .cloned();
-        let removed = self.pages.active.is_some_and(|id| !ids.contains(&id));
+        let removed = self.pages.sync(&mut self.history, &displays);
         if removed {
             self.reset_contacts();
         }
-        self.pages.retain(&mut self.history, &ids);
-        let target = controller
-            .filter(|id| ids.contains(id))
-            .or(self.pages.active.filter(|id| ids.contains(id)))
+        let target = preferred
+            .filter(|id| displays.iter().any(|d| d.id == *id))
+            .or(self.pages.active)
             .or_else(|| displays.first().map(|d| d.id));
         if let Some(id) = target {
             if self.pages.active != Some(id) {
@@ -364,29 +422,14 @@ impl App {
         let Some(finger) = self.touches.get_mut(&key) else {
             return;
         };
-        match finger.tool {
-            Tool::Eraser => self
+        match finger.gesture {
+            Gesture::Erase => self
                 .history
                 .erase(point, self.width.max(12.) * self.canvas_units),
-            Tool::Laser => self.laser.push_back((point, Instant::now())),
-            _ => {
-                let Some(stroke) = finger.stroke.as_mut() else {
-                    return;
-                };
-                if matches!(
-                    stroke.tool,
-                    Tool::Line | Tool::Arrow | Tool::Rectangle | Tool::Ellipse
-                ) {
-                    if stroke.points.len() == 1 {
-                        stroke.points.push(point);
-                    } else {
-                        stroke.points[1] = point;
-                    }
-                } else if can_append
-                    && stroke.points.len() < 100_000
-                    && stroke.points.last().is_none_or(|p| p.dist(point) > 0.15)
-                {
-                    stroke.points.push(point);
+            Gesture::Laser(id) => self.laser_sample(id, point),
+            Gesture::Ink => {
+                if let Some(stroke) = &mut finger.stroke {
+                    Self::append(stroke, point, can_append);
                 }
             }
         }
@@ -394,7 +437,12 @@ impl App {
     fn touch_event(&mut self, event: SDL_TouchFingerEvent, size: [f32; 2]) {
         let key = TouchKey::from(event);
         if event.r#type == SDL_EVENT_FINGER_CANCELED {
-            self.touches.remove(&key);
+            if let Some(finger) = self.touches.remove(&key)
+                && let Gesture::Laser(id) = finger.gesture
+            {
+                self.laser.remove(&id);
+            }
+            self.end_erase_if_idle();
             return;
         }
         if event.r#type == SDL_EVENT_FINGER_UP {
@@ -404,6 +452,7 @@ impl App {
             if let Some(finger) = self.touches.remove(&key) {
                 self.commit_touch(finger);
             }
+            self.end_erase_if_idle();
             return;
         }
         if !self.touch_enabled
@@ -430,26 +479,44 @@ impl App {
             {
                 return;
             }
-            let stroke = if matches!(self.tool, Tool::Eraser | Tool::Laser) {
-                None
-            } else {
+            let gesture = self.gesture(self.tool);
+            let stroke = if gesture == Gesture::Ink {
                 let mut stroke = self.stroke(self.tool);
                 // Capacitive contact pressure is often absent or contact area, not pen force.
                 stroke.pressure_enabled = false;
                 stroke.points.push(point);
                 Some(stroke)
+            } else {
+                None
             };
-            self.touches.insert(
-                key,
-                FingerStroke {
-                    tool: self.tool,
-                    stroke,
-                },
-            );
+            self.touches.insert(key, FingerStroke { gesture, stroke });
         }
         self.touch_motion(key, point);
     }
+    // Device proximity is independent of the current tool or modal picker.
+    fn track_pen(&mut self, event: &SDL_Event) {
+        let id = unsafe {
+            match SDL_EventType(event.r#type) {
+                SDL_EVENT_PEN_PROXIMITY_IN => event.pproximity.which.0,
+                SDL_EVENT_PEN_PROXIMITY_OUT => {
+                    let id = event.pproximity.which.0;
+                    self.end(Source::Pen(id));
+                    self.pens.remove(&id);
+                    self.pen_proximity.remove(&id);
+                    return;
+                }
+                SDL_EVENT_PEN_AXIS => event.paxis.which.0,
+                SDL_EVENT_PEN_MOTION => event.pmotion.which.0,
+                SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP => event.ptouch.which.0,
+                _ => return,
+            }
+        };
+        if self.pen_proximity.insert(id) {
+            self.discard_touches();
+        }
+    }
     fn event(&mut self, e: &SDL_Event, overlay: SDL_WindowID, size: [f32; 2]) {
+        self.track_pen(e);
         unsafe {
             let ty = SDL_EventType(e.r#type);
             match ty {
@@ -458,27 +525,32 @@ impl App {
                     if b.which == SDL_PEN_MOUSEID || b.which == SDL_TOUCH_MOUSEID {
                         return;
                     }
-                    if b.button == 1 || b.button == 3 {
+                    if b.button == RIGHT_BUTTON
+                        || (b.button == LEFT_BUTTON
+                            && self
+                                .contact
+                                .is_none_or(|c| c.source != Source::Mouse(RIGHT_BUTTON)))
+                    {
                         self.begin(
-                            Source::Mouse,
+                            Source::Mouse(b.button),
                             Point::new(b.x, b.y, 1., [0.; 2]),
-                            b.button == 3,
-                        )
+                            b.button == RIGHT_BUTTON,
+                        );
                     }
                 }
                 SDL_EVENT_MOUSE_BUTTON_UP if e.button.windowID == overlay => {
                     if e.button.which != SDL_PEN_MOUSEID && e.button.which != SDL_TOUCH_MOUSEID {
-                        self.end(Source::Mouse)
+                        self.end(Source::Mouse(e.button.button));
                     }
                 }
                 SDL_EVENT_MOUSE_MOTION if e.motion.windowID == overlay => {
                     let m = e.motion;
-                    if m.which != SDL_PEN_MOUSEID && m.which != SDL_TOUCH_MOUSEID {
-                        self.motion(
-                            Source::Mouse,
-                            Point::new(m.x, m.y, 1., [0.; 2]),
-                            m.state & SDL_BUTTON_RMASK != 0,
-                        )
+                    if m.which != SDL_PEN_MOUSEID
+                        && m.which != SDL_TOUCH_MOUSEID
+                        && let Some(contact) = self.contact
+                        && matches!(contact.source, Source::Mouse(_))
+                    {
+                        self.motion(contact.source, Point::new(m.x, m.y, 1., [0.; 2]));
                     }
                 }
                 SDL_EVENT_FINGER_DOWN
@@ -489,91 +561,53 @@ impl App {
                 {
                     self.touch_event(e.tfinger, size);
                 }
-                SDL_EVENT_PEN_PROXIMITY_IN => {
-                    self.pen_proximity.insert(e.pproximity.which.0);
-                    self.touches.clear();
-                }
                 SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP if e.ptouch.windowID == overlay => {
                     let t = e.ptouch;
-                    self.pen_seen = true;
-                    self.pen_proximity.insert(t.which.0);
-                    self.touches.clear();
                     let pen = self.pens.entry(t.which.0).or_default();
                     pen.down = t.down;
-                    let p = Point::new(
-                        t.x,
-                        t.y,
-                        if pen.has_pressure { pen.pressure } else { 0.5 },
-                        pen.tilt,
-                    );
+                    let p = pen.point(t.x, t.y);
                     if t.down {
-                        self.begin(Source::Pen(t.which.0), p, t.eraser)
+                        self.begin(Source::Pen(t.which.0), p, t.eraser);
                     } else {
-                        self.motion(Source::Pen(t.which.0), p, t.eraser);
+                        self.motion(Source::Pen(t.which.0), p);
                         self.end(Source::Pen(t.which.0));
-                        if let Some(p) = self.pens.get_mut(&t.which.0) {
-                            p.pressure = 0.;
-                            p.has_pressure = false;
+                        if let Some(pen) = self.pens.get_mut(&t.which.0) {
+                            pen.pressure = 0.;
+                            pen.has_pressure = false;
                         }
                     }
                 }
                 SDL_EVENT_PEN_AXIS if e.paxis.windowID == overlay => {
                     let a = e.paxis;
-                    self.pen_seen = true;
-                    self.pen_proximity.insert(a.which.0);
-                    self.touches.clear();
                     let pen = self.pens.entry(a.which.0).or_default();
                     match a.axis {
-                        SDL_PEN_AXIS_PRESSURE => {
-                            pen.pressure = if a.value.is_finite() {
-                                a.value.clamp(0., 1.)
-                            } else {
-                                0.
-                            };
-                            pen.has_pressure = true
+                        SDL_PEN_AXIS_PRESSURE if a.value.is_finite() => {
+                            pen.pressure = a.value.clamp(0., 1.);
+                            pen.has_pressure = true;
                         }
                         SDL_PEN_AXIS_XTILT => pen.tilt[0] = a.value.clamp(-90., 90.),
                         SDL_PEN_AXIS_YTILT => pen.tilt[1] = a.value.clamp(-90., 90.),
                         _ => {}
                     }
-                    let p = Point::new(a.x, a.y, pen.pressure, pen.tilt);
-                    let eraser = a.pen_state & SDL_PEN_INPUT_ERASER_TIP != 0;
-                    self.motion(Source::Pen(a.which.0), p, eraser);
+                    let point = pen.point(a.x, a.y);
+                    self.motion(Source::Pen(a.which.0), point);
                 }
                 SDL_EVENT_PEN_MOTION if e.pmotion.windowID == overlay => {
                     let m = e.pmotion;
-                    self.pen_seen = true;
-                    self.pen_proximity.insert(m.which.0);
-                    self.touches.clear();
-                    let pen = self.pens.entry(m.which.0).or_default();
-                    let p = Point::new(
-                        m.x,
-                        m.y,
-                        if pen.has_pressure { pen.pressure } else { 0.5 },
-                        pen.tilt,
-                    );
-                    self.motion(
-                        Source::Pen(m.which.0),
-                        p,
-                        m.pen_state & SDL_PEN_INPUT_ERASER_TIP != 0,
-                    );
-                }
-                SDL_EVENT_PEN_PROXIMITY_OUT => {
-                    let id = e.pproximity.which.0;
-                    self.end(Source::Pen(id));
-                    self.pens.remove(&id);
-                    self.pen_proximity.remove(&id);
+                    let point = self.pens.entry(m.which.0).or_default().point(m.x, m.y);
+                    self.motion(Source::Pen(m.which.0), point);
                 }
                 SDL_EVENT_WINDOW_FOCUS_LOST if e.window.windowID == overlay => {
-                    self.touches.clear();
-                    self.pen_proximity.clear();
+                    self.discard_touches();
                     self.stop();
                 }
-                SDL_EVENT_WINDOW_MOUSE_LEAVE if e.window.windowID == overlay => {
-                    if self.source == Some(Source::Mouse) {
-                        self.end(Source::Mouse)
-                    }
-                    self.pointer = None
+                SDL_EVENT_WINDOW_MOUSE_LEAVE
+                    if e.window.windowID == overlay
+                        && self
+                            .contact
+                            .is_some_and(|contact| matches!(contact.source, Source::Mouse(_))) =>
+                {
+                    self.finish_contact();
                 }
                 _ => {}
             }
@@ -594,10 +628,8 @@ impl App {
                 return c;
             }
             if k.key == SDLK_ESCAPE {
-                if self.history.active.is_some() || !self.touches.is_empty() {
-                    self.history.active = None;
-                    self.touches.clear();
-                    self.source = None
+                if self.contact.is_some() || !self.touches.is_empty() {
+                    self.reset_contacts();
                 } else {
                     self.use_mouse();
                     c.mode = true
@@ -607,15 +639,15 @@ impl App {
             if m.command {
                 match k.key {
                     SDLK_Z if m.shift => {
-                        self.touches.clear();
+                        self.reset_contacts();
                         self.history.redo()
                     }
                     SDLK_Z => {
-                        self.touches.clear();
+                        self.reset_contacts();
                         self.history.undo()
                     }
                     SDLK_Y => {
-                        self.touches.clear();
+                        self.reset_contacts();
                         self.history.redo()
                     }
                     SDLK_S if m.shift => self.export(),
@@ -651,10 +683,10 @@ impl App {
                     self.use_tool(tool);
                     c.mode = true;
                 }
-                SDLK_1 => self.select_color(InkColor::from_rgb8(PRESETS[0])),
-                SDLK_2 => self.select_color(InkColor::from_rgb8(PRESETS[1])),
-                SDLK_3 => self.select_color(InkColor::from_rgb8(PRESETS[2])),
-                SDLK_4 => self.select_color(InkColor::from_rgb8(PRESETS[3])),
+                SDLK_1 => self.select_preset(PRESETS[0]),
+                SDLK_2 => self.select_preset(PRESETS[1]),
+                SDLK_3 => self.select_preset(PRESETS[2]),
+                SDLK_4 => self.select_preset(PRESETS[3]),
                 _ => {}
             }
         }
@@ -663,15 +695,25 @@ impl App {
     fn save(&mut self) {
         self.stop();
         let p = PathBuf::from(&self.path);
-        match self.history.save(&p) {
+        let result = if p == self.save_path {
+            self.save_session()
+        } else {
+            self.pages.save(&self.history, &p)
+        };
+        match result {
             Ok(()) => self.status = format!("Saved {}", p.display()),
             Err(e) => self.status = format!("Save: {e}"),
         }
     }
+    fn save_session(&mut self) -> Result<(), String> {
+        self.pages.save(&self.history, &self.save_path)?;
+        self.pages.mark_saved(&mut self.history);
+        Ok(())
+    }
     fn load(&mut self) {
         self.stop();
         let p = PathBuf::from(&self.path);
-        match self.history.load(&p) {
+        match self.pages.load(&mut self.history, &p, false) {
             Ok(()) => self.status = "Session loaded".into(),
             Err(e) => self.status = format!("Open: {e}"),
         }
@@ -684,6 +726,9 @@ impl App {
             Ok(()) => self.status = format!("Exported {}", p.display()),
             Err(e) => self.status = format!("Export: {e}"),
         }
+    }
+    fn select_preset(&mut self, rgb: [u8; 3]) {
+        self.select_color(InkColor::from_rgb8(rgb).converted(self.color.space));
     }
     fn select_color(&mut self, color: InkColor) {
         self.color = color;
@@ -726,39 +771,43 @@ impl App {
         }
         let aa = 0.8 / scale[0].max(scale[1]);
         for s in &self.history.doc.strokes {
-            paint_stroke(r, s, color, aa, 1., &clips)?
+            paint_stroke(r, s, color, aa, &clips)?
         }
         if let Some(ref s) = self.history.active {
-            paint_stroke(r, s, color, aa, 1., &clips)?
+            paint_stroke(r, s, color, aa, &clips)?
         }
         for finger in self.touches.values() {
             if let Some(ref stroke) = finger.stroke {
-                paint_stroke(r, stroke, color, aa, 1., &clips)?;
+                paint_stroke(r, stroke, color, aa, &clips)?;
             }
         }
         let now = Instant::now();
-        while self
-            .laser
-            .front()
-            .is_some_and(|(_, t)| now.duration_since(*t) > Duration::from_millis(900))
-        {
-            self.laser.pop_front();
-        }
-        let laser_template = self.stroke(Tool::Pen);
-        for pair in self.laser.make_contiguous().windows(2) {
-            let mut s = laser_template.clone();
-            s.pressure_enabled = false;
-            s.width = 4.;
-            s.color = InkColor::from_rgb8([246, 72, 99]);
-            s.points = vec![pair[0].0, pair[1].0];
-            paint_stroke(
-                r,
-                &s,
-                color,
-                aa,
-                1. - now.duration_since(pair[0].1).as_secs_f32() / 0.9,
-                &clips,
-            )?
+        self.laser.retain(|_, trail| {
+            while trail
+                .front()
+                .is_some_and(|(_, at)| now.duration_since(*at) >= LASER_LIFETIME)
+            {
+                trail.pop_front();
+            }
+            !trail.is_empty()
+        });
+        let mut laser = Stroke {
+            tool: Tool::Laser,
+            color: InkColor::from_rgb8([246, 72, 99]),
+            width: 4. * self.canvas_units,
+            opacity: 1.,
+            pressure_curve: 1.,
+            pressure_enabled: false,
+            points: Vec::new(),
+        };
+        for trail in self.laser.values() {
+            laser.points.clear();
+            laser.points.extend(trail.iter().map(|(point, at)| Point {
+                // The laser ribbon uses pressure as its per-sample fade.
+                pressure: 1. - now.duration_since(*at).as_secs_f32() / LASER_LIFETIME.as_secs_f32(),
+                ..*point
+            }));
+            paint_stroke(r, &laser, color, aa, &clips)?;
         }
         r.present()
     }
@@ -768,7 +817,6 @@ fn paint_stroke(
     s: &Stroke,
     color: &ColorManager,
     aa: f32,
-    fade: f32,
     clips: &[crate::controller::Rect],
 ) -> Result<(), String> {
     let m = geometry::mesh(s, aa);
@@ -785,7 +833,7 @@ fn paint_stroke(
                 r: rgb[0],
                 g: rgb[1],
                 b: rgb[2],
-                a: s.opacity * v.coverage * fade.clamp(0., 1.),
+                a: s.opacity * v.coverage,
             },
             tex_coord: SDL_FPoint { x: 0., y: 0. },
         })
@@ -857,7 +905,12 @@ fn apply_mode(
         return crate::native::show_canvas(w, toolbar, false);
     }
     crate::native::show_canvas(w, toolbar, true)?;
-    if let Err(e) = pass.set(w, a.pass && mouse_released()) {
+    let mouse = a.mouse_ready();
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    let result = pass.set_guarded(w, mouse, a.protected);
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    let result = pass.set(w, mouse);
+    if let Err(e) = result {
         a.pass = false;
         a.status = format!("Passthrough unavailable: {e}. Use Hide.");
     }
@@ -869,7 +922,7 @@ fn apply_mode(
         // Keep the controller above the drawing input region after resuming.
         SDL_RaiseWindow(toolbar.raw);
     }
-    crate::native::keep_controller_above(w, toolbar);
+    crate::native::keep_controller_above(w, toolbar, pass);
     Ok(())
 }
 
@@ -895,8 +948,10 @@ pub fn run(options: Options) -> Result<(), String> {
     }
     let _runtime = Runtime::new(options.x11)?;
     let video = crate::sdl::driver();
-    let mut app = App::new(options.board || options.smoke, options.display);
     let canvas = Window::new("OverInk - canvas", 1100, 720, !options.smoke)?;
+    let topology = crate::display::Topology::new(&video);
+    let displays = topology.connected(&canvas).unwrap_or_default();
+    let mut app = App::new(options.board || options.smoke, options.display, displays);
     if !options.smoke
         && let Some(id) = app.pages.active
         && let Err(e) = canvas.place_on_display(id, true)
@@ -956,11 +1011,15 @@ pub fn run(options: Options) -> Result<(), String> {
     let mut frame = 0;
     let mut last_color = Instant::now();
     let mut last_displays = Instant::now();
+    let mut controller_display = None;
+    let mut follow_controller = false;
+    let mut requested_display = None;
     let mut topology_dirty = !options.smoke;
     let mut pacer = FramePacer::new(app.frame_rate, app.refresh_hz(), Instant::now());
     while running {
         let mut disconnected = BTreeSet::new();
         let mut controller_scale_changed = false;
+        let mut controller_moved = false;
         let mut canvas_surface_changed = false;
         let mut event = SDL_Event::default();
         while unsafe { SDL_PollEvent(&mut event) } {
@@ -984,6 +1043,7 @@ pub fn run(options: Options) -> Result<(), String> {
             {
                 topology_dirty = !options.smoke;
                 controller_scale_changed |= ty == SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED;
+                controller_moved |= ty != SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED;
             }
             if matches!(
                 ty,
@@ -994,6 +1054,10 @@ pub fn run(options: Options) -> Result<(), String> {
             ) && unsafe { event.window.windowID } == canvas.id
             {
                 canvas_surface_changed = true;
+            }
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            if ty == SDL_EVENT_WINDOW_SHOWN && unsafe { event.window.windowID } == canvas.id {
+                native.invalidate();
             }
             if ty == SDL_EVENT_WINDOW_CLOSE_REQUESTED {
                 let id = unsafe { event.window.windowID };
@@ -1010,11 +1074,12 @@ pub fn run(options: Options) -> Result<(), String> {
             gui.event(&event, toolbar.id, toolbar.size());
             if !was_picking
                 && !background.pending()
-                && !topology_dirty
                 && !app.suspended
                 && (options.smoke || canvas.display_id() == app.pages.active)
             {
                 app.event(&event, canvas.id, canvas.size());
+            } else {
+                app.track_pen(&event);
             }
             let canvas_activated = unsafe {
                 (ty == SDL_EVENT_WINDOW_FOCUS_GAINED && event.window.windowID == canvas.id)
@@ -1023,7 +1088,7 @@ pub fn run(options: Options) -> Result<(), String> {
                     || (ty == SDL_EVENT_FINGER_DOWN && event.tfinger.windowID == canvas.id)
             };
             if canvas_activated {
-                crate::native::keep_controller_above(&canvas, &toolbar);
+                crate::native::keep_controller_above(&canvas, &toolbar, &native);
             }
             if ty == SDL_EVENT_KEY_DOWN && !was_picking && !background.pending() {
                 let id = unsafe { event.key.windowID };
@@ -1047,9 +1112,20 @@ pub fn run(options: Options) -> Result<(), String> {
             break;
         }
         if !options.smoke
-            && (topology_dirty || last_displays.elapsed() > Duration::from_millis(500))
+            && (topology_dirty
+                || (video == "x11" && last_displays.elapsed() > Duration::from_millis(500)))
         {
-            let displays = crate::display::connected()
+            let moved_to = if follow_controller && controller_moved {
+                let reported = toolbar.display_id();
+                (std::mem::replace(&mut controller_display, reported) != reported)
+                    .then_some(reported)
+                    .flatten()
+            } else {
+                None
+            };
+            let requested = requested_display.take();
+            let displays = topology
+                .connected(&canvas)
                 .unwrap_or_else(|error| {
                     app.status = format!("Display query: {error}");
                     app.displays.clone()
@@ -1057,7 +1133,17 @@ pub fn run(options: Options) -> Result<(), String> {
                 .into_iter()
                 .filter(|d| !disconnected.contains(&d.id))
                 .collect::<Vec<_>>();
-            let (layout, removed) = app.refresh_displays(displays, toolbar.display_id());
+            let disconnected = app
+                .displays
+                .iter()
+                .any(|old| !displays.iter().any(|d| d.id == old.id));
+            let (layout, removed) = app.refresh_displays(displays, requested.or(moved_to));
+            if requested.is_some()
+                && video != "wayland"
+                && let Err(error) = toolbar.arrange_toolbar(toolbar_expanded, app.pages.active)
+            {
+                app.status = error;
+            }
             if layout || removed || canvas.display_id() != app.pages.active {
                 if picker.active() {
                     picker.cancel();
@@ -1077,7 +1163,10 @@ pub fn run(options: Options) -> Result<(), String> {
                     apply_mode(&mut app, &canvas, &toolbar, &mut native)?;
                 }
             }
-            if removed && let Err(error) = app.history.save(&app.save_path) {
+            if disconnected
+                && app.pages.needs_save(&app.history)
+                && let Err(error) = app.save_session()
+            {
                 app.status = format!("Save after display removal: {error}");
             }
             topology_dirty = false;
@@ -1108,11 +1197,10 @@ pub fn run(options: Options) -> Result<(), String> {
         }
         if let Some(result) = picker.poll(&canvas) {
             app.picking = false;
-            app.pen_proximity.clear();
             match result {
                 Ok(Some(color)) => {
                     app.select_color(color);
-                    app.status = format!("Picked {}", color.css());
+                    app.status = format!("Picked {}", color.hex());
                 }
                 Ok(None) => app.status = "Color selection cancelled".into(),
                 Err(error) => app.status = error,
@@ -1191,7 +1279,6 @@ pub fn run(options: Options) -> Result<(), String> {
                 picker.cancel();
             } else {
                 app.stop();
-                app.pen_proximity.clear();
                 app.picking = true;
                 picker.start(&video);
                 if picker.choosing() {
@@ -1209,13 +1296,8 @@ pub fn run(options: Options) -> Result<(), String> {
                 }
             }
         }
-        if cmd.display {
-            app.stop();
-            if let Some(display) = app.displays.get(app.display)
-                && let Err(error) = toolbar.arrange_toolbar(toolbar_expanded, Some(display.id))
-            {
-                app.status = error;
-            }
+        if let Some(id) = cmd.display {
+            requested_display = Some(id);
             topology_dirty = true;
         }
         if cmd.frame_rate {
@@ -1244,7 +1326,17 @@ pub fn run(options: Options) -> Result<(), String> {
         toolbar_render.begin(&toolbar, [246. / 255., 250. / 255., 253. / 255., 1.])?;
         gui.paint(&toolbar_render, &toolbar, &toolbar_color, output)?;
         toolbar_render.present()?;
-        let mouse = app.pass && !picker.choosing() && mouse_released();
+        if !follow_controller {
+            // Establish the baseline after the first map/configure, without
+            // letting the compositor's initial placement override --display.
+            unsafe {
+                SDL_SyncWindow(toolbar.raw);
+                SDL_PumpEvents();
+            }
+            controller_display = toolbar.display_id();
+            follow_controller = true;
+        }
+        let mouse = !picker.choosing() && app.mouse_ready();
         match controller_guard.update(&canvas, &toolbar, mouse, canvas_render.name != "software") {
             Ok(rect) => app.protected = rect,
             Err(error) => {
@@ -1263,31 +1355,32 @@ pub fn run(options: Options) -> Result<(), String> {
             app.history.doc.size = canvas.size();
             app.paint(&canvas_render, &canvas, &canvas_color, &mut background)?;
         }
-        // A software present can replace the X11 input shape. The protected
-        // controller region must remain excluded in every drawing tool.
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        if video == "x11"
+        if !options.smoke
+            && !app.hidden
+            && !app.suspended
             && let Err(error) = native.set_guarded(&canvas, mouse, app.protected)
         {
-            app.status = format!("Controller input protection: {error}");
+            app.pass = false;
+            app.status = format!("Input region: {error}");
+            if video == "x11" && app.protected.is_some() {
+                app.hidden = true;
+                crate::native::show_canvas(&canvas, &toolbar, false)?;
+            }
         }
-        if mouse
-            && video != "x11"
-            && let Err(error) = native.set(&canvas, true)
-        {
+        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+        if mouse && let Err(error) = native.set(&canvas, true) {
             app.status = format!("Mouse mode: {error}");
         }
-        crate::native::keep_controller_above(&canvas, &toolbar);
         if !options.smoke
             && app.last_save.elapsed() > Duration::from_secs(10)
             && app.history.active.is_none()
             && app.touches.is_empty()
         {
-            if app.history.changed {
-                match app.history.save(&app.save_path) {
-                    Ok(()) => {}
-                    Err(e) => app.status = format!("Autosave: {e}"),
-                }
+            if app.pages.needs_save(&app.history)
+                && let Err(e) = app.save_session()
+            {
+                app.status = format!("Autosave: {e}");
             }
             app.last_save = Instant::now();
         }
@@ -1327,7 +1420,9 @@ pub fn run(options: Options) -> Result<(), String> {
     }
     if !options.smoke {
         app.stop();
-        if let Err(e) = app.history.save(&app.save_path) {
+        if app.pages.needs_save(&app.history)
+            && let Err(e) = app.save_session()
+        {
             return Err(format!("Autosave on exit: {e}"));
         }
     }
@@ -1379,16 +1474,15 @@ fn smoke_events(app: &mut App, id: SDL_WindowID) -> Result<(), String> {
         app.tool = tool;
         app.color = InkColor::from_rgb8(PRESETS[i]);
         app.begin(
-            Source::Mouse,
+            Source::Mouse(LEFT_BUTTON),
             Point::new(100. + i as f32 * 200., 300., 1., [0.; 2]),
             false,
         );
         app.motion(
-            Source::Mouse,
+            Source::Mouse(LEFT_BUTTON),
             Point::new(250. + i as f32 * 200., 500., 1., [0.; 2]),
-            false,
         );
-        app.end(Source::Mouse);
+        app.end(Source::Mouse(LEFT_BUTTON));
     }
     let mut proximity = SDL_Event::default();
     proximity.pproximity = SDL_PenProximityEvent {
@@ -1450,6 +1544,7 @@ mod touch_tests {
             pressure: true,
             curve: 1.,
             pass: false,
+            wait_for_mouse_up: false,
             hidden: false,
             board: true,
             display: 0,
@@ -1464,16 +1559,14 @@ mod touch_tests {
             pen_proximity: BTreeSet::new(),
             touches: BTreeMap::new(),
             touch_enabled: true,
-            source: None,
-            pointer: None,
-            laser: VecDeque::new(),
+            contact: None,
+            laser: BTreeMap::new(),
+            next_laser: 0,
             status: String::new(),
             path: String::new(),
             save_path: PathBuf::new(),
             canvas_units: 1.,
             last_save: Instant::now(),
-            last_ink: Instant::now(),
-            pen_seen: false,
         }
     }
     fn finger(app: &mut App, ty: SDL_EventType, device: u64, id: u64, x: f32, y: f32) {
@@ -1491,18 +1584,144 @@ mod touch_tests {
         app.event(&event, SDL_WindowID(1), [800., 600.]);
     }
     #[test]
+    fn mouse_buttons_own_their_contacts_and_erase_is_one_edit() {
+        fn button(a: &mut App, kind: SDL_EventType, button: u8, x: f32) {
+            a.event(
+                &SDL_Event {
+                    button: SDL_MouseButtonEvent {
+                        r#type: kind,
+                        windowID: SDL_WindowID(1),
+                        button,
+                        x,
+                        y: 80.,
+                        ..Default::default()
+                    },
+                },
+                SDL_WindowID(1),
+                [800., 600.],
+            );
+        }
+        let mut a = app();
+        button(&mut a, SDL_EVENT_MOUSE_BUTTON_DOWN, LEFT_BUTTON, 250.);
+        button(
+            &mut a,
+            SDL_EVENT_MOUSE_BUTTON_UP,
+            SDL_BUTTON_MIDDLE as u8,
+            250.,
+        );
+        assert!(a.history.active.is_some());
+        button(&mut a, SDL_EVENT_MOUSE_BUTTON_UP, LEFT_BUTTON, 250.);
+        button(&mut a, SDL_EVENT_MOUSE_BUTTON_DOWN, LEFT_BUTTON, 100.);
+        // The right button commits the open left stroke before erasing.
+        button(&mut a, SDL_EVENT_MOUSE_BUTTON_DOWN, RIGHT_BUTTON, 100.);
+        button(&mut a, SDL_EVENT_MOUSE_BUTTON_UP, LEFT_BUTTON, 100.);
+        a.motion(
+            Source::Mouse(RIGHT_BUTTON),
+            Point::new(250., 80., 1., [0.; 2]),
+        );
+        a.end(Source::Mouse(RIGHT_BUTTON));
+        assert!(a.history.active.is_none() && a.history.doc.strokes.is_empty());
+        a.history.undo();
+        assert_eq!(a.history.doc.strokes.len(), 2);
+        a.history.undo();
+        assert_eq!(a.history.doc.strokes.len(), 1);
+    }
+    #[test]
+    fn pen_tilt_before_pressure_and_tool_changes_keep_proximity() {
+        let mut a = app();
+        let id = SDL_WindowID(1);
+        let size = [800., 600.];
+        a.event(
+            &SDL_Event {
+                ptouch: SDL_PenTouchEvent {
+                    r#type: SDL_EVENT_PEN_DOWN,
+                    windowID: id,
+                    which: SDL_PenID(4),
+                    x: 100.,
+                    y: 80.,
+                    down: true,
+                    ..Default::default()
+                },
+            },
+            id,
+            size,
+        );
+        a.event(
+            &SDL_Event {
+                paxis: SDL_PenAxisEvent {
+                    r#type: SDL_EVENT_PEN_AXIS,
+                    windowID: id,
+                    which: SDL_PenID(4),
+                    x: 200.,
+                    y: 80.,
+                    axis: SDL_PEN_AXIS_XTILT,
+                    value: 20.,
+                    ..Default::default()
+                },
+            },
+            id,
+            size,
+        );
+        let points = &a.history.active.as_ref().unwrap().points;
+        assert_eq!(points.len(), 2);
+        assert!(points.iter().all(|p| p.pressure == 0.5));
+        a.use_tool(Tool::Pencil);
+        a.reset_contacts();
+        a.history.clear();
+        finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 5, 0.4, 0.4);
+        assert!(a.touches.is_empty() && a.pen_proximity.contains(&4));
+    }
+    #[test]
+    fn laser_trails_are_separate_across_releases_and_fingers() {
+        let mut a = app();
+        a.tool = Tool::Laser;
+        for x in [20., 400.] {
+            let mouse = Source::Mouse(LEFT_BUTTON);
+            a.begin(mouse, Point::new(x, 10., 1., [0.; 2]), false);
+            a.motion(mouse, Point::new(x, 20., 1., [0.; 2]));
+            a.end(mouse);
+        }
+        finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 1, 0.3, 0.1);
+        finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 2, 0.8, 0.1);
+        finger(&mut a, SDL_EVENT_FINGER_MOTION, 1, 1, 0.3, 0.3);
+        finger(&mut a, SDL_EVENT_FINGER_MOTION, 1, 2, 0.8, 0.3);
+        finger(&mut a, SDL_EVENT_FINGER_UP, 1, 1, 0.3, 0.5);
+        finger(&mut a, SDL_EVENT_FINGER_UP, 1, 2, 0.8, 0.5);
+        assert_eq!(a.laser.len(), 4);
+        assert!(
+            a.laser.values().all(|trail| {
+                trail.len() >= 2 && trail.iter().all(|(p, _)| p.x == trail[0].0.x)
+            })
+        );
+        assert!(a.history.doc.strokes.is_empty());
+    }
+    #[test]
     fn mouse_commits_the_unfinished_stroke_and_any_tool_resumes_drawing() {
         let mut a = app();
-        a.begin(Source::Mouse, Point::new(10., 20., 0.5, [0.; 2]), false);
-        a.motion(Source::Mouse, Point::new(50., 60., 0.7, [0.; 2]), false);
+        a.begin(
+            Source::Mouse(LEFT_BUTTON),
+            Point::new(10., 20., 0.5, [0.; 2]),
+            false,
+        );
+        a.motion(
+            Source::Mouse(LEFT_BUTTON),
+            Point::new(50., 60., 0.7, [0.; 2]),
+        );
         a.use_mouse();
         assert!(a.pass);
         assert!(a.history.active.is_none());
-        assert!(a.source.is_none());
+        assert!(a.contact.is_none());
         assert_eq!(a.history.doc.strokes.len(), 1);
         assert_eq!(a.history.doc.strokes[0].points.len(), 2);
-        a.motion(Source::Mouse, Point::new(90., 90., 1., [0.; 2]), false);
-        a.begin(Source::Mouse, Point::new(100., 100., 1., [0.; 2]), false);
+        a.motion(
+            Source::Mouse(LEFT_BUTTON),
+            Point::new(90., 90., 1., [0.; 2]),
+        );
+        a.begin(
+            Source::Mouse(LEFT_BUTTON),
+            Point::new(100., 100., 1., [0.; 2]),
+            false,
+        );
         assert!(a.history.active.is_none());
         for tool in Tool::ALL {
             a.hidden = true;
@@ -1527,14 +1746,25 @@ mod touch_tests {
         assert!(a.history.active.is_none());
         finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 1, 0.2, 0.3);
         assert!(a.touches.is_empty());
-        a.begin(Source::Mouse, Point::new(50., 150., 1., [0.; 2]), false);
-        a.motion(Source::Mouse, Point::new(150., 150., 1., [0.; 2]), false);
+        a.begin(
+            Source::Mouse(LEFT_BUTTON),
+            Point::new(50., 150., 1., [0.; 2]),
+            false,
+        );
+        a.motion(
+            Source::Mouse(LEFT_BUTTON),
+            Point::new(150., 150., 1., [0.; 2]),
+        );
         assert!(a.history.active.is_none());
         assert_eq!(a.history.doc.strokes.len(), 1);
         assert!(a.history.doc.strokes[0].points.iter().all(|p| p.x < 100.));
         a.use_tool(Tool::Eraser);
         let count = a.history.doc.strokes.len();
-        a.begin(Source::Mouse, Point::new(150., 150., 1., [0.; 2]), true);
+        a.begin(
+            Source::Mouse(LEFT_BUTTON),
+            Point::new(150., 150., 1., [0.; 2]),
+            true,
+        );
         assert_eq!(a.history.doc.strokes.len(), count);
     }
     #[test]
@@ -1575,6 +1805,20 @@ mod touch_tests {
             refresh,
             scale: 1.0,
         }
+    }
+    #[test]
+    fn display_selection_survives_a_refresh_without_controller_movement() {
+        let mut a = app();
+        let displays = vec![screen(10, 0, 60.0), screen(20, 1920, 120.0)];
+        a.displays = displays.clone();
+        a.pages = Pages::new(Some(20)); // selected by --display 2
+        a.refresh_displays(displays.clone(), None);
+        assert_eq!(a.pages.active, Some(20));
+        a.refresh_displays(displays.clone(), Some(10)); // settings selection
+        a.refresh_displays(displays.clone(), None);
+        assert_eq!(a.pages.active, Some(10));
+        a.refresh_displays(displays, Some(20)); // toolbar actually crosses screens
+        assert_eq!(a.pages.active, Some(20));
     }
     #[test]
     fn controller_moves_between_pages_and_refresh_rates_without_mixing_strokes() {

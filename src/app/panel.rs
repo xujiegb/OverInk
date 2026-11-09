@@ -174,11 +174,11 @@ impl App {
                     ui.separator();
                     self.panel_button(ui, Icon::Brush, Panel::Brush, "Brush width and opacity");
                     if toolbar::button(ui, Icon::Undo, "Undo (Ctrl/Cmd+Z)", false).clicked() {
-                        self.touches.clear();
+                        self.reset_contacts();
                         self.history.undo();
                     }
                     if toolbar::button(ui, Icon::Redo, "Redo (Ctrl/Cmd+Shift+Z)", false).clicked() {
-                        self.touches.clear();
+                        self.reset_contacts();
                         self.history.redo();
                     }
                     if toolbar::button(ui, Icon::Clear, "Clear this page", false).clicked() {
@@ -202,12 +202,12 @@ impl App {
                                 )
                                 .clicked()
                                 {
-                                    self.select_color(color);
+                                    self.select_preset(*rgb);
                                 }
                             }
                         });
                     }
-                    let label = format!("{} · palette and screen picker", self.color.css());
+                    let label = format!("{} · palette and screen picker", self.color.hex());
                     if toolbar::swatch(
                         ui,
                         vec2(44., 24.),
@@ -277,9 +277,9 @@ impl App {
     fn palette(&mut self, ui: &mut Ui, commands: &mut Commands) {
         ui.horizontal_wrapped(|ui| {
             ui.label("Palette");
-            let mut rgb = self.color.srgb8();
+            let mut rgb = self.color.channels8();
             if ui.color_edit_button_srgb(&mut rgb).changed() {
-                self.select_color(InkColor::from_rgb8(rgb));
+                self.select_color(InkColor::from_channels(rgb, self.color.space));
             }
             if ui
                 .button("Pick screen")
@@ -306,7 +306,7 @@ impl App {
                 self.hex_entry.revert();
             } else {
                 if (response.changed() || accept)
-                    && let Some(color) = self.hex_entry.apply()
+                    && let Some(color) = self.hex_entry.apply(self.color.space)
                 {
                     self.color = color;
                 }
@@ -386,12 +386,13 @@ impl App {
                     .unwrap_or("No display"),
             )
             .show_ui(ui, |ui| {
-                for (i, display) in self.displays.iter().enumerate() {
+                for display in &self.displays {
                     if ui
-                        .selectable_value(&mut self.display, i, &display.name)
-                        .changed()
+                        .selectable_label(self.pages.active == Some(display.id), &display.name)
+                        .clicked()
                     {
-                        commands.display = true;
+                        commands.display = Some(display.id);
+                        ui.close();
                     }
                 }
             });
@@ -416,7 +417,7 @@ impl App {
                 });
         });
         if ui.checkbox(&mut self.touch_enabled, "Touch draw").changed() {
-            self.touches.clear();
+            self.discard_touches();
         }
         ui.separator();
         ui.label(RichText::new("Session").strong());

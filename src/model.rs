@@ -1,6 +1,6 @@
 use crate::color::InkColor;
 use serde::{Deserialize, Serialize};
-use std::{collections::VecDeque, path::Path};
+use std::collections::VecDeque;
 
 pub const MAX_POINTS: usize = 1_000_000;
 pub const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
@@ -150,10 +150,12 @@ pub struct History {
     pub active: Option<Stroke>,
     undo: VecDeque<Vec<Stroke>>,
     redo: Vec<Vec<Stroke>>,
+    erasing: bool,
     pub changed: bool,
 }
 impl History {
     pub fn snapshot(&mut self) {
+        self.end_erase();
         self.undo.push_back(self.doc.strokes.clone());
         while self.undo.len() > 64
             || self
@@ -178,6 +180,7 @@ impl History {
         }
     }
     pub fn undo(&mut self) {
+        self.end_erase();
         self.active = None;
         if let Some(s) = self.undo.pop_back() {
             self.redo.push(std::mem::replace(&mut self.doc.strokes, s));
@@ -185,6 +188,7 @@ impl History {
         }
     }
     pub fn redo(&mut self) {
+        self.end_erase();
         self.active = None;
         if let Some(s) = self.redo.pop() {
             self.undo
@@ -193,6 +197,7 @@ impl History {
         }
     }
     pub fn clear(&mut self) {
+        self.end_erase();
         self.active = None;
         if !self.doc.strokes.is_empty() {
             self.snapshot();
@@ -213,7 +218,10 @@ impl History {
             })
             .collect();
         if keep.iter().any(|k| !*k) {
-            self.snapshot();
+            if !self.erasing {
+                self.snapshot();
+                self.erasing = true;
+            }
             let mut i = 0;
             self.doc.strokes.retain(|_| {
                 let k = keep[i];
@@ -222,31 +230,20 @@ impl History {
             })
         }
     }
-    pub fn save(&mut self, path: &Path) -> Result<(), String> {
-        if let Some(parent) = path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?
-        }
-        let data = serde_json::to_vec(&self.doc).map_err(|e| e.to_string())?;
-        // Write a sibling first. A failed write never truncates the previous session.
-        let tmp = path.with_extension("overink.tmp");
-        std::fs::write(&tmp, &data).map_err(|e| e.to_string())?;
-        std::fs::rename(&tmp, path).map_err(|e| e.to_string())?;
-        self.changed = false;
-        Ok(())
+    pub fn end_erase(&mut self) {
+        self.erasing = false;
     }
-    pub fn load(&mut self, path: &Path) -> Result<(), String> {
-        if std::fs::metadata(path).map_err(|e| e.to_string())?.len() > MAX_FILE_BYTES {
-            return Err("Session exceeds 64 MiB".into());
+    pub fn set_document(&mut self, doc: Document, restore: bool) {
+        if restore {
+            *self = Self {
+                doc,
+                ..Self::default()
+            };
+        } else {
+            self.snapshot();
+            self.doc = doc;
+            self.active = None;
         }
-        let data = std::fs::read(path).map_err(|e| e.to_string())?;
-        let doc: Document = serde_json::from_slice(&data).map_err(|e| e.to_string())?;
-        doc.validate()?;
-        self.snapshot();
-        self.doc = doc;
-        self.active = None;
-        Ok(())
     }
 }
 impl Document {
