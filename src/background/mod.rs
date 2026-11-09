@@ -1,6 +1,9 @@
-mod desktop;
-#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
-pub(crate) mod system;
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+mod system;
+#[cfg(target_os = "windows")]
+mod windows;
 use crate::{icc::ColorManager, sdl::*};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -8,32 +11,78 @@ use std::{
     time::{Duration, Instant},
 };
 
+const MAX_SNAPSHOT_BYTES: usize = 256 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Encoding {
+    Srgb8,
+    LinearRgba16,
+}
+
 pub struct Image {
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
+    encoding: Encoding,
 }
 impl Image {
     #[cfg(any(
-        target_os = "windows",
         target_os = "linux",
         target_os = "freebsd",
         test
     ))]
     pub fn buffer(width: u32, height: u32) -> Result<Self, String> {
-        let pixels = (width as usize)
+        Self::allocate(width, height, Encoding::Srgb8)
+    }
+    #[cfg(any(target_os = "windows", target_os = "macos", test))]
+    fn hdr_buffer(width: u32, height: u32) -> Result<Self, String> {
+        Self::allocate(width, height, Encoding::LinearRgba16)
+    }
+    fn allocate(width: u32, height: u32, encoding: Encoding) -> Result<Self, String> {
+        let bytes_per_pixel = if encoding == Encoding::LinearRgba16 { 8 } else { 4 };
+        let size = (width as usize)
             .checked_mul(height as usize)
+            .and_then(|pixels| pixels.checked_mul(bytes_per_pixel))
             .ok_or("Capture is too large")?;
-        if pixels == 0 || pixels > 64 * 1024 * 1024 {
-            return Err("Capture exceeds the 64 megapixel limit".into());
+        if size == 0 || size > MAX_SNAPSHOT_BYTES {
+            return Err("Capture exceeds the 256 MiB limit".into());
         }
+        let mut rgba = Vec::new();
+        rgba.try_reserve_exact(size).map_err(|error| error.to_string())?;
+        rgba.resize(size, 0);
         Ok(Self {
             width,
             height,
-            rgba: vec![0; pixels * 4],
+            rgba,
+            encoding,
         })
     }
-    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd", test))]
+    #[cfg(any(target_os = "windows", target_os = "macos", test))]
+    /// The source must contain initialized pixels in each row. Padding is never read.
+    unsafe fn copy_hdr_rows(
+        &mut self,
+        bytes: *const u8,
+        len: usize,
+        stride: usize,
+    ) -> Result<(), String> {
+        let row_bytes = self.width as usize * 8;
+        let needed = stride
+            .checked_mul(self.height as usize - 1)
+            .and_then(|offset| offset.checked_add(row_bytes));
+        if bytes.is_null() || stride < row_bytes || needed.is_none_or(|size| size > len) {
+            return Err("Invalid HDR capture row pitch".into());
+        }
+        for (y, row) in self.rgba.chunks_exact_mut(row_bytes).enumerate() {
+            unsafe { ptr::copy_nonoverlapping(bytes.add(y * stride), row.as_mut_ptr(), row_bytes) };
+            for pixel in row.as_chunks_mut::<8>().0 {
+                // A display snapshot is opaque. Leave the three FP16 color
+                // channels intact, including negative values and values above 1.
+                pixel[6..].copy_from_slice(&0x3c00_u16.to_ne_bytes());
+            }
+        }
+        Ok(())
+    }
+    #[cfg(any(target_os = "macos", test))]
     pub fn load(path: &std::path::Path) -> Result<Self, String> {
         use image::ImageDecoder;
         let mut reader = image::ImageReader::open(path)
@@ -54,6 +103,7 @@ impl Image {
             width: pixels.width(),
             height: pixels.height(),
             rgba: pixels.into_raw(),
+            encoding: Encoding::Srgb8,
         };
         if let Some(profile) = profile {
             result.convert_to_srgb(&profile);
@@ -95,7 +145,127 @@ impl Image {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnapshotMode {
+    Sdr,
+    Linear,
+    LiveOnly(&'static str),
+}
+impl SnapshotMode {
+    pub fn unavailable(self) -> Option<&'static str> {
+        match self {
+            Self::LiveOnly(reason) => Some(reason),
+            _ => None,
+        }
+    }
+    fn accepts(self, image: &Image) -> bool {
+        matches!(
+            (self, image.encoding),
+            (Self::Sdr, Encoding::Srgb8) | (Self::Linear, Encoding::LinearRgba16)
+        )
+    }
+}
+
+pub fn is_xwayland(window: &Window, driver: &str) -> bool {
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    if driver == "x11" {
+        return crate::picker::desktop::is_xwayland(window);
+    }
+    let _ = (window, driver);
+    false
+}
+
+pub fn snapshot_mode(window: &Window, render: &Renderer, driver: &str, xwayland: bool) -> SnapshotMode {
+    if driver == "wayland" || xwayland {
+        return SnapshotMode::LiveOnly("This session cannot guarantee HDR in a desktop screenshot");
+    }
+    let hdr = unsafe {
+        SDL_GetBooleanProperty(
+            SDL_GetWindowProperties(window.raw),
+            SDL_PROP_WINDOW_HDR_ENABLED_BOOLEAN,
+            false,
+        ) || window.display_id().is_some_and(|id| {
+            SDL_GetBooleanProperty(
+                SDL_GetDisplayProperties(SDL_DisplayID(id)),
+                SDL_PROP_DISPLAY_HDR_ENABLED_BOOLEAN,
+                false,
+            )
+        })
+    };
+    if cfg!(target_os = "windows") || (cfg!(target_os = "macos") && hdr) {
+        if render.extended {
+            SnapshotMode::Linear
+        } else {
+            SnapshotMode::LiveOnly("Freezing this desktop requires an extended-linear-sRGB renderer")
+        }
+    } else if hdr {
+        SnapshotMode::LiveOnly("HDR desktop capture is unavailable on this backend")
+    } else {
+        SnapshotMode::Sdr
+    }
+}
+
 struct Texture(*mut SDL_Texture);
+impl Texture {
+    fn new(render: &Renderer, image: &Image, color: &ColorManager) -> Result<Self, String> {
+        unsafe {
+            let linear = image.encoding == Encoding::LinearRgba16;
+            let raw = if linear {
+                if !render.extended {
+                    return Err("The renderer cannot display the captured HDR range".into());
+                }
+                let props = SDL_CreateProperties();
+                SDL_SetNumberProperty(
+                    props,
+                    SDL_PROP_TEXTURE_CREATE_FORMAT_NUMBER,
+                    SDL_PIXELFORMAT_RGBA64_FLOAT.0 as i64,
+                );
+                SDL_SetNumberProperty(
+                    props,
+                    SDL_PROP_TEXTURE_CREATE_COLORSPACE_NUMBER,
+                    SDL_COLORSPACE_SRGB_LINEAR.0 as i64,
+                );
+                SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_WIDTH_NUMBER, image.width as i64);
+                SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_HEIGHT_NUMBER, image.height as i64);
+                // A local-display capture is already mapped to this display.
+                // A positive content headroom could ask SDL to tone map it again.
+                SDL_SetFloatProperty(props, SDL_PROP_TEXTURE_CREATE_HDR_HEADROOM_FLOAT, 0.);
+                let texture = SDL_CreateTextureWithProperties(render.raw, props);
+                SDL_DestroyProperties(props);
+                texture
+            } else {
+                SDL_CreateTexture(
+                    render.raw,
+                    SDL_PIXELFORMAT_RGBA32,
+                    SDL_TEXTUREACCESS_STATIC,
+                    image.width as i32,
+                    image.height as i32,
+                )
+            };
+            if raw.is_null() {
+                return Err(crate::sdl::error());
+            }
+            let texture = Self(raw);
+            let mut mapped;
+            let (bytes, bytes_per_pixel) = if linear {
+                (&image.rgba, 8)
+            } else {
+                mapped = image.rgba.clone();
+                color.map_rgba8(&mut mapped);
+                (&mapped, 4)
+            };
+            check(SDL_UpdateTexture(
+                texture.0,
+                ptr::null(),
+                bytes.as_ptr().cast(),
+                (image.width * bytes_per_pixel) as i32,
+            ))?;
+            check(SDL_SetTextureBlendMode(texture.0, SDL_BLENDMODE_NONE))?;
+            check(SDL_SetTextureScaleMode(texture.0, SDL_SCALEMODE_LINEAR))?;
+            Ok(texture)
+        }
+    }
+}
 impl Drop for Texture {
     fn drop(&mut self) {
         unsafe {
@@ -106,7 +276,7 @@ impl Drop for Texture {
 enum Capture {
     Idle,
     Wait(Instant),
-    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     System(system::Job),
 }
 pub struct Background {
@@ -117,7 +287,7 @@ pub struct Background {
     texture: Option<Texture>,
     capture: Capture,
     started: Instant,
-    driver: String,
+    mode: SnapshotMode,
 }
 impl Default for Background {
     fn default() -> Self {
@@ -129,7 +299,7 @@ impl Default for Background {
             texture: None,
             capture: Capture::Idle,
             started: Instant::now(),
-            driver: String::new(),
+            mode: SnapshotMode::Sdr,
         }
     }
 }
@@ -159,13 +329,13 @@ impl Background {
         &mut self,
         display: Option<&crate::display::Display>,
         connected: &BTreeSet<u32>,
-        driver: &str,
+        mode: SnapshotMode,
         drawing: bool,
-    ) {
+    ) -> Result<(), &'static str> {
         self.images.retain(|id, _| connected.contains(id));
         let id = display.map(|d| d.id);
         let bounds = display.map_or([0; 4], |d| d.bounds);
-        if id != self.display || bounds != self.bounds {
+        if id != self.display || bounds != self.bounds || self.mode != mode {
             let resized = id == self.display && bounds != self.bounds;
             if resized && let Some(id) = id {
                 self.images.remove(&id);
@@ -174,6 +344,17 @@ impl Background {
             self.texture = None;
             self.display = id;
             self.bounds = bounds;
+            self.mode = mode;
+        }
+        if let Some(id) = id
+            && self.images.get(&id).is_some_and(|image| !mode.accepts(image))
+        {
+            self.images.remove(&id);
+            self.texture = None;
+        }
+        if self.frozen && let Some(reason) = mode.unavailable() {
+            self.live();
+            return Err(reason);
         }
         if !drawing {
             self.pause_capture();
@@ -184,7 +365,7 @@ impl Background {
             self.capture = Capture::Wait(Instant::now() + Duration::from_millis(120));
             self.started = Instant::now();
         }
-        self.driver = driver.into();
+        Ok(())
     }
     pub fn invalidate_texture(&mut self) {
         self.texture = None;
@@ -196,42 +377,21 @@ impl Background {
         }
         let result = match &mut self.capture {
             Capture::Wait(due) if Instant::now() >= *due => {
-                if self.display.is_none() {
-                    Some(Err("No display to freeze".into()))
-                } else if cfg!(target_os = "macos") || self.driver == "wayland" {
-                    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
-                    match system::Job::start(self.bounds) {
-                        Ok(job) => {
-                            self.capture = Capture::System(job);
-                            None
-                        }
-                        Err(error) => Some(Err(error)),
-                    }
-                    #[cfg(not(any(
-                        target_os = "linux",
-                        target_os = "freebsd",
-                        target_os = "macos"
-                    )))]
-                    {
-                        Some(Err("No system capture backend".into()))
-                    }
-                } else {
-                    Some(desktop::capture(window).map(Some))
-                }
+                self.start_capture(window)
             }
-            #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
             Capture::System(job) => job.poll(),
             _ => None,
         };
         let result = result?;
         self.capture = Capture::Idle;
         match result {
-            Ok(Some(image)) => {
+            Ok(Some(image)) if self.mode.accepts(&image) => {
                 if let Some(id) = self.display {
                     // Bound retained screenshots to 256 MiB across displays.
                     while self.images.values().map(|v| v.rgba.len()).sum::<usize>()
                         + image.rgba.len()
-                        > 256 * 1024 * 1024
+                        > MAX_SNAPSHOT_BYTES
                     {
                         let Some(key) = self.images.keys().next().copied() else {
                             break;
@@ -243,6 +403,10 @@ impl Background {
                 }
                 Some(Ok(()))
             }
+            Ok(Some(_)) => {
+                self.live();
+                Some(Err("The screenshot did not preserve the desktop's color range".into()))
+            }
             Ok(None) => {
                 self.live();
                 Some(Err("Desktop capture cancelled".into()))
@@ -251,6 +415,37 @@ impl Background {
                 self.live();
                 Some(Err(error))
             }
+        }
+    }
+    fn start_capture(&mut self, window: &Window) -> Option<Result<Option<Image>, String>> {
+        let Some(id) = self.display.filter(|id| window.display_id() == Some(*id)) else {
+            return Some(Err("The drawing surface is not on the selected display".into()));
+        };
+        if let Some(reason) = self.mode.unavailable() {
+            return Some(Err(reason.into()));
+        }
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
+        {
+            #[cfg(target_os = "windows")]
+            let job = windows::start(id);
+            #[cfg(target_os = "macos")]
+            let job = macos::start(self.bounds, window.pixel_size(), self.mode);
+            let _ = id;
+            match job {
+                Ok(job) => {
+                    self.capture = Capture::System(job);
+                    None
+                }
+                Err(error) => Some(Err(error)),
+            }
+        }
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        {
+            let _ = id;
+            if self.mode != SnapshotMode::Sdr {
+                return Some(Err("HDR desktop capture is unavailable on this backend".into()));
+            }
+            Some(crate::picker::desktop::capture(window).map(Some))
         }
     }
     pub fn draw(
@@ -265,54 +460,32 @@ impl Background {
         let Some(image) = self.display.and_then(|id| self.images.get(&id)) else {
             return Ok(());
         };
+        if self.texture.is_none() {
+            self.texture = Some(Texture::new(render, image, color)?);
+        }
+        let texture = self.texture.as_ref().unwrap().0;
+        let [w, h] = window.size();
+        let dst = SDL_FRect { x: 0., y: 0., w, h };
         unsafe {
-            if self.texture.is_none() {
-                let texture = Texture(SDL_CreateTexture(
-                    render.raw,
-                    SDL_PIXELFORMAT_RGBA32,
-                    SDL_TEXTUREACCESS_STATIC,
-                    image.width as i32,
-                    image.height as i32,
-                ));
-                if texture.0.is_null() {
-                    return Err(crate::sdl::error());
-                }
-                let mut bytes = image.rgba.clone();
-                color.map_rgba8(&mut bytes);
-                check(SDL_UpdateTexture(
-                    texture.0,
-                    ptr::null(),
-                    bytes.as_ptr().cast(),
-                    (image.width * 4) as i32,
-                ))?;
-                SDL_SetTextureBlendMode(texture.0, SDL_BLENDMODE_NONE);
-                SDL_SetTextureScaleMode(texture.0, SDL_SCALEMODE_LINEAR);
-                self.texture = Some(texture);
+            if image.encoding == Encoding::Srgb8 {
+                return check(SDL_RenderTexture(render.raw, texture, ptr::null(), &dst));
             }
-            let [w, h] = window.size();
-            let vertices: Vec<_> = [
-                (0., 0., 0., 0.),
-                (w, 0., 1., 0.),
-                (w, h, 1., 1.),
-                (0., h, 0., 1.),
-            ]
-            .into_iter()
-            .map(|(x, y, u, v)| SDL_Vertex {
-                position: SDL_FPoint { x, y },
-                color: SDL_FColor {
-                    r: 1.,
-                    g: 1.,
-                    b: 1.,
-                    a: 1.,
-                },
-                tex_coord: SDL_FPoint { x: u, y: v },
-            })
-            .collect();
-            render.geometry(
-                self.texture.as_ref().unwrap().0,
-                &vertices,
-                &[0, 1, 2, 0, 2, 3],
-            )
+            let mut previous = 1.;
+            check(SDL_GetRenderColorScale(render.raw, &mut previous))?;
+            let white = SDL_GetFloatProperty(
+                SDL_GetRendererProperties(render.raw),
+                SDL_PROP_RENDERER_SDR_WHITE_POINT_FLOAT,
+                1.,
+            );
+            if !white.is_finite() || white <= 0. {
+                return Err("Invalid SDR reference white level".into());
+            }
+            // SDL multiplies all draw calls by its current SDR white level.
+            // Cancel that multiplier just for the captured linear pixels.
+            check(SDL_SetRenderColorScale(render.raw, 1. / white))?;
+            let draw = check(SDL_RenderTexture(render.raw, texture, ptr::null(), &dst));
+            let restore = check(SDL_SetRenderColorScale(render.raw, previous));
+            draw.and(restore)
         }
     }
 }
@@ -326,7 +499,8 @@ mod tests {
         bg.images.insert(7, Image::buffer(2, 2).unwrap());
         bg.display = Some(7);
         bg.frozen = true;
-        bg.display(None, &BTreeSet::new(), "x11", true);
+        bg.display(None, &BTreeSet::new(), SnapshotMode::Sdr, true)
+            .unwrap();
         assert!(bg.images.is_empty());
         assert!(!bg.pending());
         bg.freeze();
@@ -372,14 +546,58 @@ mod tests {
             refresh: 60.,
             scale: 1.,
         };
-        bg.display(Some(&screen), &BTreeSet::from([7]), "x11", true);
+        let connected = BTreeSet::from([7]);
+        bg.display(Some(&screen), &connected, SnapshotMode::Sdr, true)
+            .unwrap();
         bg.freeze();
-        bg.display(Some(&screen), &BTreeSet::from([7]), "x11", false);
+        bg.display(Some(&screen), &connected, SnapshotMode::Sdr, false)
+            .unwrap();
         assert!(!bg.pending());
         assert!(bg.frozen);
         bg.images.insert(7, Image::buffer(2, 2).unwrap());
-        bg.display(Some(&screen), &BTreeSet::from([7]), "x11", true);
+        bg.display(Some(&screen), &connected, SnapshotMode::Sdr, true)
+            .unwrap();
         assert!(!bg.pending());
         assert!(bg.images.contains_key(&7));
+    }
+    #[test]
+    fn enabling_hdr_replaces_the_cached_sdr_capture() {
+        let mut bg = Background::default();
+        let screen = crate::display::Display {
+            id: 7,
+            name: "Display".into(),
+            bounds: [0, 0, 100, 100],
+            refresh: 60.,
+            scale: 1.,
+        };
+        let connected = BTreeSet::from([7]);
+        bg.display(Some(&screen), &connected, SnapshotMode::Sdr, true)
+            .unwrap();
+        bg.images.insert(7, Image::buffer(2, 2).unwrap());
+        bg.frozen = true;
+        bg.display(Some(&screen), &connected, SnapshotMode::Linear, true)
+            .unwrap();
+        assert!(bg.images.is_empty());
+        assert!(bg.pending());
+        let unavailable = SnapshotMode::LiveOnly("No HDR screenshot backend");
+        assert!(
+            bg.display(Some(&screen), &connected, unavailable, true)
+                .is_err()
+        );
+        assert!(!bg.pending());
+        assert!(!bg.frozen);
+    }
+    #[test]
+    fn fp16_capture_keeps_highlights_and_negative_color_components() {
+        let mut image = Image::hdr_buffer(1, 2).unwrap();
+        let mut padded = [0; 24];
+        padded[..2].copy_from_slice(&0x4800_u16.to_ne_bytes()); // 8.0
+        padded[2..4].copy_from_slice(&0xb800_u16.to_ne_bytes()); // -0.5
+        padded[12..14].copy_from_slice(&0x4000_u16.to_ne_bytes()); // 2.0
+        unsafe { image.copy_hdr_rows(padded.as_ptr(), padded.len(), 12) }.unwrap();
+        assert_eq!(&image.rgba[..6], &padded[..6]);
+        assert_eq!(&image.rgba[8..14], &padded[12..18]);
+        assert_eq!(&image.rgba[6..8], &0x3c00_u16.to_ne_bytes());
+        assert_eq!(&image.rgba[14..16], &0x3c00_u16.to_ne_bytes());
     }
 }

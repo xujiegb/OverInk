@@ -116,6 +116,30 @@ mod x11 {
             Ok(display)
         }
     }
+    pub fn is_xwayland(window: &Window) -> bool {
+        if std::env::var_os("WAYLAND_DISPLAY").is_some()
+            || std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland")
+        {
+            return true;
+        }
+        unsafe {
+            let Ok(lib) = library() else { return false };
+            let Ok(display) = display(window) else {
+                return false;
+            };
+            let query = lib.get::<unsafe extern "C" fn(
+                *mut c_void,
+                *const c_char,
+                *mut c_int,
+                *mut c_int,
+                *mut c_int,
+            ) -> c_int>(b"XQueryExtension\0");
+            let (mut opcode, mut event, mut error) = (0, 0, 0);
+            query.is_ok_and(|query| {
+                query(display, c"XWAYLAND".as_ptr(), &mut opcode, &mut event, &mut error) != 0
+            })
+        }
+    }
     pub fn position(window: &Window, local: [f32; 2]) -> Result<ScreenPoint, String> {
         unsafe {
             let lib = library()?;
@@ -379,7 +403,7 @@ mod x11 {
     }
 }
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-pub use x11::{capture, position, sample};
+pub use x11::{capture, is_xwayland, position, sample};
 
 #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "freebsd")))]
 pub fn position(_window: &Window, _local: [f32; 2]) -> Result<ScreenPoint, String> {

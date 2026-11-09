@@ -761,6 +761,7 @@ impl App {
         render: &Renderer,
         color: &ColorManager,
         video: &str,
+        freeze_unavailable: Option<&'static str>,
     ) -> Commands {
         let mut c = Commands::default();
         egui::Frame::new()
@@ -861,11 +862,14 @@ impl App {
                     if ui.selectable_label(!self.board && !self.frozen, "Live desktop").clicked() {
                         c.background = self.board || self.frozen; self.frozen = false; self.board = false;
                     }
-                    if ui.selectable_label(self.frozen, "Frozen desktop").clicked() && !self.frozen {
+                    let freeze = ui.add_enabled_ui(freeze_unavailable.is_none(), |ui| {
+                        ui.selectable_label(self.frozen, "Frozen desktop")
+                            .on_disabled_hover_text(freeze_unavailable.unwrap_or_default())
+                    }).inner;
+                    if freeze.clicked() && !self.frozen {
                         c.background = true; self.frozen = true; self.board = false;
                     }
                     if self.frozen && ui.button("Refresh snapshot").clicked() { c.background = true; }
-                    if video == "wayland" { ui.small("Choose this display in the system screenshot dialog."); }
                 });
                 ui.horizontal(|ui| {
                     ui.label("File");
@@ -1111,6 +1115,7 @@ pub fn run(options: Options) -> Result<(), String> {
     }
     app.canvas_units = canvas.scale() / unsafe { SDL_GetWindowPixelDensity(canvas.raw) }.max(0.1);
     let canvas_render = Renderer::new(&canvas, options.sdr)?;
+    let xwayland = crate::background::is_xwayland(&canvas, &video);
     // Declare renderers before GUI texture owners, so textures are destroyed first.
     let toolbar = Window::new("OverInk", 820, 500, false)?;
     let toolbar_render = Renderer::new(&toolbar, options.sdr)?;
@@ -1308,12 +1313,16 @@ pub fn run(options: Options) -> Result<(), String> {
         app.canvas_units =
             canvas.scale() / unsafe { SDL_GetWindowPixelDensity(canvas.raw) }.max(0.1);
         pacer.configure(app.frame_rate, app.refresh_hz(), Instant::now());
-        background.display(
+        let snapshot_mode = crate::background::snapshot_mode(&canvas, &canvas_render, &video, xwayland);
+        if let Err(reason) = background.display(
             app.displays.get(app.display).filter(|_| !app.suspended),
             &app.displays.iter().map(|d| d.id).collect(),
-            &video,
+            snapshot_mode,
             !app.pass,
-        );
+        ) {
+            app.frozen = false;
+            app.status = format!("{reason}. Showing the live desktop.");
+        }
         if (picker.hides_windows() || background.pending()) && !picker_windows_hidden {
             crate::native::show_canvas(&canvas, &toolbar, false)?;
             toolbar.show(false)?;
@@ -1333,7 +1342,10 @@ pub fn run(options: Options) -> Result<(), String> {
         }
         if let Some(result) = background.poll(&canvas) {
             app.frozen = background.frozen;
-            app.status = match result { Ok(()) => "Desktop frozen. Ink remains editable; switch to Live desktop to resume the background.".into(), Err(error) => error };
+            app.status = match result {
+                Ok(()) => "Desktop frozen. Select Live desktop to resume the background.".into(),
+                Err(error) => format!("{error}. Showing the live desktop."),
+            };
         }
         if picker_windows_hidden && !picker.hides_windows() && !background.pending() {
             toolbar.show(true)?;
@@ -1362,7 +1374,13 @@ pub fn run(options: Options) -> Result<(), String> {
         let ctx = gui.ctx.clone();
         let mut cmd = Commands::default();
         let output = ctx.run_ui(input, |ui| {
-            cmd = app.ui(ui, &canvas_render, &canvas_color, &video)
+            cmd = app.ui(
+                ui,
+                &canvas_render,
+                &canvas_color,
+                &video,
+                snapshot_mode.unavailable(),
+            )
         });
         if cmd.quit {
             running = false

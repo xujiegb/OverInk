@@ -172,47 +172,9 @@ pub(crate) fn request(
 #[cfg(test)]
 mod tests {
     use super::*;
-    struct MockScreenshot {
-        screenshot: std::path::PathBuf,
-    }
+    struct MockScreenshot;
     #[zbus::interface(name = "org.freedesktop.portal.Screenshot")]
     impl MockScreenshot {
-        #[zbus(property, name = "version")]
-        fn version(&self) -> u32 {
-            2
-        }
-        async fn screenshot(
-            &self,
-            _parent: &str,
-            options: HashMap<String, OwnedValue>,
-            #[zbus(header)] header: zbus::message::Header<'_>,
-            #[zbus(connection)] connection: &zbus::Connection,
-        ) -> zbus::fdo::Result<OwnedObjectPath> {
-            assert!(bool::try_from(options.get("interactive").unwrap()).unwrap());
-            image::RgbaImage::from_pixel(3, 2, image::Rgba([18, 171, 239, 255]))
-                .save(&self.screenshot)
-                .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
-            let token = <&str>::try_from(options.get("handle_token").unwrap()).unwrap();
-            let sender = header.sender().unwrap();
-            let path = format!(
-                "/org/freedesktop/portal/desktop/request/{}/{}",
-                sender.as_str().trim_start_matches(':').replace('.', "_"),
-                token
-            );
-            let uri =
-                OwnedValue::try_from(Value::from(format!("file://{}", self.screenshot.display())))
-                    .unwrap();
-            connection
-                .emit_signal(
-                    Some(sender.as_str()),
-                    path.as_str(),
-                    "org.freedesktop.portal.Request",
-                    "Response",
-                    &(0u32, HashMap::from([("uri", uri)])),
-                )
-                .await?;
-            Ok(OwnedObjectPath::try_from(path).unwrap())
-        }
         async fn pick_color(
             &self,
             _parent: &str,
@@ -247,23 +209,13 @@ mod tests {
     #[test]
     #[ignore = "requires an isolated session bus: dbus-run-session cargo test portal_response -- --ignored"]
     fn portal_response_before_method_reply_is_received() {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "overink-portal-test-{}-{unique}.png",
-            std::process::id()
-        ));
         let _service = zbus::blocking::connection::Builder::session()
             .unwrap()
             .name("org.freedesktop.portal.Desktop")
             .unwrap()
             .serve_at(
                 "/org/freedesktop/portal/desktop",
-                MockScreenshot {
-                    screenshot: path.clone(),
-                },
+                MockScreenshot,
             )
             .unwrap()
             .build()
@@ -283,28 +235,5 @@ mod tests {
             );
             thread::sleep(std::time::Duration::from_millis(10));
         }
-        let mut screenshot = crate::background::system::Job::start([0, 0, 3, 2]).unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            if let Some(result) = screenshot.poll() {
-                let image = result.unwrap().unwrap();
-                assert_eq!((image.width, image.height), (3, 2));
-                assert!(
-                    image
-                        .rgba
-                        .as_chunks::<4>()
-                        .0
-                        .iter()
-                        .all(|v| *v == [18, 171, 239, 255])
-                );
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "Screenshot response was lost"
-            );
-            thread::sleep(std::time::Duration::from_millis(10));
-        }
-        std::fs::remove_file(path).unwrap();
     }
 }
