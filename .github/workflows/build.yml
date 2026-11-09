@@ -377,7 +377,8 @@ jobs:
           cpu: 3
           prepare: |
             pkg install -y curl cmake ninja pkgconf python3 libX11 libXext libXi libXrandr \
-              libXcursor libXfixes libXrender libXScrnSaver libXtst wayland wayland-protocols libxkbcommon mesa-libs
+              libXcursor libXfixes libXrender libXScrnSaver libXtst libxcb libglvnd \
+              wayland wayland-protocols libxkbcommon mesa-libs
           run: |
             set -eu
             export PATH="/usr/local/bin:$PATH"
@@ -414,7 +415,7 @@ jobs:
               # X11/Wayland are dynamic SDL backends. Their public headers are
               # shared across FreeBSD ABIs. Native libraries supply SONAMEs only.
               mkdir -p "$sysroot/usr/local/include"
-              for header in /usr/local/include/X11 /usr/local/include/wayland*.h \
+              for header in /usr/local/include/X11 /usr/local/include/xcb /usr/local/include/wayland*.h \
                   /usr/local/include/xkbcommon /usr/local/include/GL /usr/local/include/EGL \
                   /usr/local/include/GLES* /usr/local/include/KHR; do
                 if [ -e "$header" ]; then cp -RL "$header" "$sysroot/usr/local/include/"; fi
@@ -441,13 +442,16 @@ jobs:
             WRAPPER
                 chmod +x "$work/$compiler"
               done
+              # Probe this header without trying to link the native X11 ELF.
+              printf '#include <X11/XKBlib.h>\n' |
+                "$work/clang" -isystem "$sysroot/usr/local/include" -x c -fsyntax-only -
               key=$(printf '%s' "$target" | tr '-' '_')
               upper=$(printf '%s' "$key" | tr '[:lower:]' '[:upper:]')
               export "CC_$key=$work/clang" "CXX_$key=$work/clang++" "AR_$key=ar"
               export "CARGO_TARGET_${upper}_LINKER=$work/clang"
               export PKG_CONFIG_ALLOW_CROSS=1
               export PKG_CONFIG_SYSROOT_DIR="$sysroot"
-              export PKG_CONFIG_LIBDIR=/usr/local/libdata/pkgconfig
+              export PKG_CONFIG_LIBDIR=/usr/local/libdata/pkgconfig:/usr/local/lib/pkgconfig:/usr/local/share/pkgconfig
               export CMAKE_TOOLCHAIN_FILE="$work/toolchain.cmake"
               cat > "$CMAKE_TOOLCHAIN_FILE" <<CMAKE
             set(CMAKE_SYSTEM_NAME FreeBSD)
@@ -459,6 +463,7 @@ jobs:
             set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
             set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY BOTH)
             set(CMAKE_LIBRARY_PATH /usr/local/lib)
+            set(HAVE_XKBLIB_H ON CACHE INTERNAL "Cross-checked XKB header")
             set(SDL_X11_SHARED ON CACHE BOOL "" FORCE)
             set(SDL_WAYLAND_SHARED ON CACHE BOOL "" FORCE)
             set(SDL_WAYLAND_LIBDECOR OFF CACHE BOOL "" FORCE)
