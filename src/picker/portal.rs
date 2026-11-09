@@ -175,6 +175,10 @@ mod tests {
     struct MockScreenshot;
     #[zbus::interface(name = "org.freedesktop.portal.Screenshot")]
     impl MockScreenshot {
+        #[zbus(property, name = "version")]
+        fn version(&self) -> u32 {
+            2
+        }
         async fn pick_color(
             &self,
             _parent: &str,
