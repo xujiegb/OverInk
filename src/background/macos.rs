@@ -1,4 +1,7 @@
-use super::{Image, SnapshotMode, system::{CaptureResult, Job}};
+use super::{
+    Image, SnapshotMode,
+    system::{CaptureResult, Job},
+};
 use libloading::Library;
 use objc2::{
     msg_send,
@@ -81,25 +84,27 @@ fn hdr_capture(bounds: [i32; 4], pixels: [i32; 2], cancelled: &AtomicBool) -> Ca
     let id = display_id(bounds)?;
     let (sender, receiver) = mpsc::channel();
     autoreleasepool(|_| {
-        let shareable = AnyClass::get("SCShareableContent")
-            .ok_or("ScreenCaptureKit is unavailable")?;
-        let configuration = AnyClass::get("SCStreamConfiguration")
-            .ok_or("ScreenCaptureKit is unavailable")?;
+        let shareable =
+            AnyClass::get("SCShareableContent").ok_or("ScreenCaptureKit is unavailable")?;
+        let configuration =
+            AnyClass::get("SCStreamConfiguration").ok_or("ScreenCaptureKit is unavailable")?;
         let supported: bool = unsafe {
             msg_send![configuration, respondsToSelector: sel!(streamConfigurationWithPreset:)]
         };
         if !supported || AnyClass::get("SCScreenshotManager").is_none() {
             return Err("HDR screenshots require macOS 15 or later".to_string());
         }
-        let completion = block2::RcBlock::new(move |content: *mut AnyObject, error: *mut AnyObject| {
-            autoreleasepool(|_| {
-                if content.is_null() {
-                    let _ = sender.send(Err(capture_error(error)));
-                } else if let Err(error) = begin_screenshot(content, id, pixels, sender.clone()) {
-                    let _ = sender.send(Err(error));
-                }
+        let completion =
+            block2::RcBlock::new(move |content: *mut AnyObject, error: *mut AnyObject| {
+                autoreleasepool(|_| {
+                    if content.is_null() {
+                        let _ = sender.send(Err(capture_error(error)));
+                    } else if let Err(error) = begin_screenshot(content, id, pixels, sender.clone())
+                    {
+                        let _ = sender.send(Err(error));
+                    }
+                });
             });
-        });
         unsafe {
             let _: () = msg_send![shareable, getShareableContentExcludingDesktopWindows: false,
                 onScreenWindowsOnly: true, completionHandler: &*completion];
@@ -142,8 +147,8 @@ fn begin_screenshot(
     sender: mpsc::Sender<CaptureResult>,
 ) -> Result<(), String> {
     let filter_class = AnyClass::get("SCContentFilter").ok_or("ScreenCaptureKit is unavailable")?;
-    let configuration = AnyClass::get("SCStreamConfiguration")
-        .ok_or("ScreenCaptureKit is unavailable")?;
+    let configuration =
+        AnyClass::get("SCStreamConfiguration").ok_or("ScreenCaptureKit is unavailable")?;
     let manager = AnyClass::get("SCScreenshotManager").ok_or("ScreenCaptureKit is unavailable")?;
     let array = AnyClass::get("NSArray").ok_or("NSArray is unavailable")?;
     unsafe {
@@ -163,10 +168,12 @@ fn begin_screenshot(
         }
         let empty: *mut AnyObject = msg_send![array, array];
         let filter: *mut AnyObject = msg_send![filter_class, alloc];
-        let filter: *mut AnyObject = msg_send![filter, initWithDisplay: display, excludingWindows: empty];
+        let filter: *mut AnyObject =
+            msg_send![filter, initWithDisplay: display, excludingWindows: empty];
         let filter = Retained::from_raw(filter).ok_or("Cannot configure the selected display")?;
         // SCStreamConfigurationPresetCaptureHDRScreenshotLocalDisplay.
-        let config: *mut AnyObject = msg_send![configuration, streamConfigurationWithPreset: 2_isize];
+        let config: *mut AnyObject =
+            msg_send![configuration, streamConfigurationWithPreset: 2_isize];
         if config.is_null() {
             return Err("Cannot configure an HDR screenshot".into());
         }
@@ -175,14 +182,15 @@ fn begin_screenshot(
         let _: () = msg_send![config, setShowsCursor: false];
         let _: () = msg_send![config, setPixelFormat: u32::from_be_bytes(*b"RGhA")];
         let _: () = msg_send![config, setColorSpaceName: kCGColorSpaceExtendedLinearSRGB];
-        let completion = block2::RcBlock::new(move |image: *const c_void, error: *mut AnyObject| {
-            let result = if image.is_null() {
-                Err(capture_error(error))
-            } else {
-                copy_screenshot(image).map(Some)
-            };
-            let _ = sender.send(result);
-        });
+        let completion =
+            block2::RcBlock::new(move |image: *const c_void, error: *mut AnyObject| {
+                let result = if image.is_null() {
+                    Err(capture_error(error))
+                } else {
+                    copy_screenshot(image).map(Some)
+                };
+                let _ = sender.send(result);
+            });
         let _: () = msg_send![manager, captureImageWithFilter: &*filter, configuration: config,
             completionHandler: &*completion];
     }
@@ -211,7 +219,11 @@ fn copy_screenshot(image: *const c_void) -> Result<Image, String> {
             return Err("ScreenCaptureKit did not return an FP16 HDR screenshot".into());
         }
         let space = CGImageGetColorSpace(image);
-        let name = if space.is_null() { ptr::null() } else { CGColorSpaceGetName(space) };
+        let name = if space.is_null() {
+            ptr::null()
+        } else {
+            CGColorSpaceGetName(space)
+        };
         if name.is_null() || CFEqual(name, kCGColorSpaceExtendedLinearSRGB) == 0 {
             return Err("The HDR screenshot did not use extended linear sRGB".into());
         }
@@ -227,7 +239,8 @@ fn copy_screenshot(image: *const c_void) -> Result<Image, String> {
             return Err("Cannot read the HDR screenshot".into());
         }
         let data = Data(data);
-        let len = usize::try_from(CFDataGetLength(data.0)).map_err(|_| "Invalid screenshot data")?;
+        let len =
+            usize::try_from(CFDataGetLength(data.0)).map_err(|_| "Invalid screenshot data")?;
         snapshot.copy_hdr_rows(CFDataGetBytePtr(data.0), len, CGImageGetBytesPerRow(image))?;
         Ok(snapshot)
     }

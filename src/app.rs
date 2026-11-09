@@ -1313,7 +1313,8 @@ pub fn run(options: Options) -> Result<(), String> {
         app.canvas_units =
             canvas.scale() / unsafe { SDL_GetWindowPixelDensity(canvas.raw) }.max(0.1);
         pacer.configure(app.frame_rate, app.refresh_hz(), Instant::now());
-        let snapshot_mode = crate::background::snapshot_mode(&canvas, &canvas_render, &video, xwayland);
+        let snapshot_mode =
+            crate::background::snapshot_mode(&canvas, &canvas_render, &video, xwayland);
         if let Err(reason) = background.display(
             app.displays.get(app.display).filter(|_| !app.suspended),
             &app.displays.iter().map(|d| d.id).collect(),

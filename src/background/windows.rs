@@ -1,18 +1,12 @@
 use super::{Image, system::Job};
 use crate::sdl::*;
-use std::{
-    error::Error,
-    ptr,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        mpsc,
-    },
-    time::{Duration, Instant},
-};
 use ::windows::{
     Foundation::TypedEventHandler,
     Graphics::{
-        Capture::{Direct3D11CaptureFrame, Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession},
+        Capture::{
+            Direct3D11CaptureFrame, Direct3D11CaptureFramePool, GraphicsCaptureItem,
+            GraphicsCaptureSession,
+        },
         DirectX::{Direct3D11::IDirect3DDevice, DirectXPixelFormat},
     },
     Win32::{
@@ -34,6 +28,15 @@ use ::windows::{
         },
     },
     core::{IInspectable, Interface, factory},
+};
+use std::{
+    error::Error,
+    ptr,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
+    time::{Duration, Instant},
 };
 
 pub fn start(display: u32) -> Result<Job, String> {
@@ -87,7 +90,8 @@ fn capture(monitor: HMONITOR, cancelled: &AtomicBool) -> Result<Option<Image>, B
         let device = device.ok_or("Could not create the capture device")?;
         let context = context.ok_or("Could not create the capture context")?;
         let dxgi: IDXGIDevice = device.cast()?;
-        let capture_device: IDirect3DDevice = CreateDirect3D11DeviceFromDXGIDevice(&dxgi)?.cast()?;
+        let capture_device: IDirect3DDevice =
+            CreateDirect3D11DeviceFromDXGIDevice(&dxgi)?.cast()?;
         // The WGC FP16 format is linear scRGB. Its reference is 80 nits,
         // including when the user's SDR white level differs from that value.
         let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
@@ -99,12 +103,11 @@ fn capture(monitor: HMONITOR, cancelled: &AtomicBool) -> Result<Option<Image>, B
         let session = pool.CreateCaptureSession(&item)?;
         let _ = session.SetIsCursorCaptureEnabled(false);
         let (ready, frames) = mpsc::sync_channel(1);
-        let handler = TypedEventHandler::<Direct3D11CaptureFramePool, IInspectable>::new(
-            move |_, _| {
+        let handler =
+            TypedEventHandler::<Direct3D11CaptureFramePool, IInspectable>::new(move |_, _| {
                 let _ = ready.try_send(());
                 Ok(())
-            },
-        );
+            });
         let token = pool.FrameArrived(&handler)?;
         let result = (|| {
             session.StartCapture()?;
@@ -172,9 +175,7 @@ fn copy_frame(
             .checked_mul(image.height as usize)
             .filter(|size| *size <= isize::MAX as usize)
             .ok_or_else(|| "Invalid mapped desktop frame".to_string())
-            .and_then(|size| {
-                image.copy_hdr_rows(mapped.pData.cast(), size, stride)
-            });
+            .and_then(|size| image.copy_hdr_rows(mapped.pData.cast(), size, stride));
         context.Unmap(&staging, 0);
         result.map_err(Into::into)
     }

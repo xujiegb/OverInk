@@ -213,10 +213,7 @@ mod tests {
             .unwrap()
             .name("org.freedesktop.portal.Desktop")
             .unwrap()
-            .serve_at(
-                "/org/freedesktop/portal/desktop",
-                MockScreenshot,
-            )
+            .serve_at("/org/freedesktop/portal/desktop", MockScreenshot)
             .unwrap()
             .build()
             .unwrap();

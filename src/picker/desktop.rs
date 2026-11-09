@@ -136,7 +136,13 @@ mod x11 {
             ) -> c_int>(b"XQueryExtension\0");
             let (mut opcode, mut event, mut error) = (0, 0, 0);
             query.is_ok_and(|query| {
-                query(display, c"XWAYLAND".as_ptr(), &mut opcode, &mut event, &mut error) != 0
+                query(
+                    display,
+                    c"XWAYLAND".as_ptr(),
+                    &mut opcode,
+                    &mut event,
+                    &mut error,
+                ) != 0
             })
         }
     }

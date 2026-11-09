@@ -26,11 +26,7 @@ pub struct Image {
     encoding: Encoding,
 }
 impl Image {
-    #[cfg(any(
-        target_os = "linux",
-        target_os = "freebsd",
-        test
-    ))]
+    #[cfg(any(target_os = "linux", target_os = "freebsd", test))]
     pub fn buffer(width: u32, height: u32) -> Result<Self, String> {
         Self::allocate(width, height, Encoding::Srgb8)
     }
@@ -39,7 +35,11 @@ impl Image {
         Self::allocate(width, height, Encoding::LinearRgba16)
     }
     fn allocate(width: u32, height: u32, encoding: Encoding) -> Result<Self, String> {
-        let bytes_per_pixel = if encoding == Encoding::LinearRgba16 { 8 } else { 4 };
+        let bytes_per_pixel = if encoding == Encoding::LinearRgba16 {
+            8
+        } else {
+            4
+        };
         let size = (width as usize)
             .checked_mul(height as usize)
             .and_then(|pixels| pixels.checked_mul(bytes_per_pixel))
@@ -48,7 +48,8 @@ impl Image {
             return Err("Capture exceeds the 256 MiB limit".into());
         }
         let mut rgba = Vec::new();
-        rgba.try_reserve_exact(size).map_err(|error| error.to_string())?;
+        rgba.try_reserve_exact(size)
+            .map_err(|error| error.to_string())?;
         rgba.resize(size, 0);
         Ok(Self {
             width,
@@ -175,7 +176,12 @@ pub fn is_xwayland(window: &Window, driver: &str) -> bool {
     false
 }
 
-pub fn snapshot_mode(window: &Window, render: &Renderer, driver: &str, xwayland: bool) -> SnapshotMode {
+pub fn snapshot_mode(
+    window: &Window,
+    render: &Renderer,
+    driver: &str,
+    xwayland: bool,
+) -> SnapshotMode {
     if driver == "wayland" || xwayland {
         return SnapshotMode::LiveOnly("This session cannot guarantee HDR in a desktop screenshot");
     }
@@ -196,7 +202,9 @@ pub fn snapshot_mode(window: &Window, render: &Renderer, driver: &str, xwayland:
         if render.extended {
             SnapshotMode::Linear
         } else {
-            SnapshotMode::LiveOnly("Freezing this desktop requires an extended-linear-sRGB renderer")
+            SnapshotMode::LiveOnly(
+                "Freezing this desktop requires an extended-linear-sRGB renderer",
+            )
         }
     } else if hdr {
         SnapshotMode::LiveOnly("HDR desktop capture is unavailable on this backend")
@@ -225,8 +233,16 @@ impl Texture {
                     SDL_PROP_TEXTURE_CREATE_COLORSPACE_NUMBER,
                     SDL_COLORSPACE_SRGB_LINEAR.0 as i64,
                 );
-                SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_WIDTH_NUMBER, image.width as i64);
-                SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_HEIGHT_NUMBER, image.height as i64);
+                SDL_SetNumberProperty(
+                    props,
+                    SDL_PROP_TEXTURE_CREATE_WIDTH_NUMBER,
+                    image.width as i64,
+                );
+                SDL_SetNumberProperty(
+                    props,
+                    SDL_PROP_TEXTURE_CREATE_HEIGHT_NUMBER,
+                    image.height as i64,
+                );
                 // A local-display capture is already mapped to this display.
                 // A positive content headroom could ask SDL to tone map it again.
                 SDL_SetFloatProperty(props, SDL_PROP_TEXTURE_CREATE_HDR_HEADROOM_FLOAT, 0.);
@@ -347,12 +363,17 @@ impl Background {
             self.mode = mode;
         }
         if let Some(id) = id
-            && self.images.get(&id).is_some_and(|image| !mode.accepts(image))
+            && self
+                .images
+                .get(&id)
+                .is_some_and(|image| !mode.accepts(image))
         {
             self.images.remove(&id);
             self.texture = None;
         }
-        if self.frozen && let Some(reason) = mode.unavailable() {
+        if self.frozen
+            && let Some(reason) = mode.unavailable()
+        {
             self.live();
             return Err(reason);
         }
@@ -376,9 +397,7 @@ impl Background {
             return Some(Err("Desktop capture timed out".into()));
         }
         let result = match &mut self.capture {
-            Capture::Wait(due) if Instant::now() >= *due => {
-                self.start_capture(window)
-            }
+            Capture::Wait(due) if Instant::now() >= *due => self.start_capture(window),
             #[cfg(any(target_os = "windows", target_os = "macos"))]
             Capture::System(job) => job.poll(),
             _ => None,
@@ -405,7 +424,9 @@ impl Background {
             }
             Ok(Some(_)) => {
                 self.live();
-                Some(Err("The screenshot did not preserve the desktop's color range".into()))
+                Some(Err(
+                    "The screenshot did not preserve the desktop's color range".into(),
+                ))
             }
             Ok(None) => {
                 self.live();
@@ -419,7 +440,9 @@ impl Background {
     }
     fn start_capture(&mut self, window: &Window) -> Option<Result<Option<Image>, String>> {
         let Some(id) = self.display.filter(|id| window.display_id() == Some(*id)) else {
-            return Some(Err("The drawing surface is not on the selected display".into()));
+            return Some(Err(
+                "The drawing surface is not on the selected display".into()
+            ));
         };
         if let Some(reason) = self.mode.unavailable() {
             return Some(Err(reason.into()));
@@ -443,7 +466,9 @@ impl Background {
         {
             let _ = id;
             if self.mode != SnapshotMode::Sdr {
-                return Some(Err("HDR desktop capture is unavailable on this backend".into()));
+                return Some(Err(
+                    "HDR desktop capture is unavailable on this backend".into()
+                ));
             }
             Some(crate::picker::desktop::capture(window).map(Some))
         }
