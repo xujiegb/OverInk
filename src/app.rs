@@ -1,13 +1,14 @@
 mod panel;
 
 use crate::{
+    appearance::{Language, Preferences, Status, ThemeMonitor, text},
     color::{InkColor, PRESETS},
     display::{Display, Pages},
     export,
     frame_rate::{FramePacer, FrameRate},
     geometry, gui,
     icc::ColorManager,
-    model::{History, MAX_POINTS, Point, Stroke, Tool},
+    model::{Erasure, History, MAX_POINTS, Point, Stroke, Tool},
     native::Passthrough,
     sdl::*,
     touch::{self, TouchKey},
@@ -68,6 +69,7 @@ struct Commands {
     pick: bool,
     frame_rate: bool,
     background: bool,
+    preferences: bool,
 }
 struct App {
     history: History,
@@ -87,6 +89,8 @@ struct App {
     displays: Vec<Display>,
     pages: Pages,
     frame_rate: FrameRate,
+    preferences: Preferences,
+    language: Language,
     suspended: bool,
     frozen: bool,
     protected: Option<crate::controller::Rect>,
@@ -98,8 +102,8 @@ struct App {
     contact: Option<Contact>,
     laser: BTreeMap<u64, VecDeque<(Point, Instant)>>,
     next_gesture: u64,
-    pending_erasures: BTreeMap<u64, BTreeSet<usize>>,
-    status: String,
+    pending_erasures: BTreeMap<u64, Erasure>,
+    status: Status,
     path: String,
     save_path: PathBuf,
     canvas_units: f32,
@@ -109,17 +113,26 @@ impl App {
     fn new(board: bool, display: usize, displays: Vec<Display>) -> Self {
         let base = state_dir();
         let save_path = base.join("session.overink.json");
+        let preferences = Preferences::load(&base.join("ui.json"));
         let mut history = History::default();
         let display = display.min(displays.len().saturating_sub(1));
         let suspended = displays.is_empty();
         let mut pages = Pages::new(displays.get(display).map(|d| d.id));
         pages.sync(&mut history, &displays);
-        let mut status = "Ready. Draw on the canvas. Space switches to passthrough.".to_string();
+        let mut status = text(
+            "Ready. Draw on the canvas. Space switches to mouse mode.",
+            "就绪。可在屏幕上书写，按空格键切换到鼠标模式。",
+            "就緒。可在螢幕上書寫，按空白鍵切換至滑鼠模式。",
+        )
+        .into();
         if save_path.exists() {
             match pages.load(&mut history, &save_path, true) {
                 Ok(0) => {}
                 Ok(pending) => status = pending_pages(pending),
-                Err(error) => status = format!("Restore: {error}"),
+                Err(error) => {
+                    status = text("Session restore failed", "恢复会话失败", "還原工作階段失敗")
+                        .detail(error)
+                }
             }
         }
         Self {
@@ -140,6 +153,8 @@ impl App {
             displays,
             pages,
             frame_rate: FrameRate::load(&base.join("frame-rate.json")),
+            preferences,
+            language: preferences.language.unwrap_or_else(Language::system),
             suspended,
             frozen: false,
             protected: None,
@@ -196,32 +211,19 @@ impl App {
     }
     fn erase_sample(&mut self, id: u64, point: Point) {
         let radius = self.width.max(12.) * self.canvas_units;
-        let hits = self.pending_erasures.entry(id).or_default();
-        for (index, stroke) in self.history.doc.strokes.iter().enumerate() {
-            if !hits.contains(&index) && stroke.hit(point, radius) {
-                hits.insert(index);
-            }
-        }
+        self.pending_erasures.entry(id).or_default().sample(
+            &self.history.doc.strokes,
+            point,
+            radius,
+        );
     }
     fn commit_erase(&mut self, id: u64) {
-        let Some(hits) = self
-            .pending_erasures
-            .remove(&id)
-            .filter(|hits| !hits.is_empty())
-        else {
+        let Some(erase) = self.pending_erasures.remove(&id) else {
             return;
         };
-        self.history.erase(&hits);
-        // Other contacts still refer to the same strokes after this deletion.
-        let removed: Vec<_> = hits.into_iter().collect();
-        for preview in self.pending_erasures.values_mut() {
-            *preview = std::mem::take(preview)
-                .into_iter()
-                .filter_map(|index| match removed.binary_search(&index) {
-                    Ok(_) => None,
-                    Err(earlier) => Some(index - earlier),
-                })
-                .collect();
+        let points = self.draft_point_count();
+        if let Err(error) = erase.commit(&mut self.history, &mut self.pending_erasures, points) {
+            self.status = text("Erase failed", "擦除失败", "擦除失敗").detail(error);
         }
     }
     fn cancel_gesture(&mut self, gesture: Gesture) {
@@ -265,8 +267,12 @@ impl App {
             Gesture::Laser(id) => self.laser_sample(id, p),
             Gesture::Ink => {
                 if self.draft_point_count() >= MAX_POINTS {
-                    self.status =
-                        "One million sample limit reached. Export and clear the canvas.".into();
+                    self.status = text(
+                        "One million sample limit reached. Export and clear the canvas.",
+                        "已达到一百万采样点上限，请导出后清屏。",
+                        "已達一百萬取樣點上限，請匯出後清除頁面。",
+                    )
+                    .into();
                     return;
                 }
                 let mut stroke = self.stroke(tool);
@@ -351,7 +357,12 @@ impl App {
         self.pass = true;
         self.wait_for_mouse_up = true;
         self.panel = None;
-        self.status = "Mouse mode: click the desktop. Select any drawing tool to resume.".into();
+        self.status = text(
+            "Mouse mode. Click the desktop or select a drawing tool to resume.",
+            "鼠标模式。可点击桌面，选择任一画具即可继续书写。",
+            "滑鼠模式。可點按桌面，選擇任一繪圖工具即可繼續書寫。",
+        )
+        .into();
     }
     fn use_tool(&mut self, tool: Tool) {
         self.stop();
@@ -417,7 +428,12 @@ impl App {
             != new.map(|d| (d.id, d.bounds, d.scale));
         self.displays = displays;
         if removed {
-            self.status = "Display disconnected: its ink and undo history were cleared".into();
+            self.status = text(
+                "Display disconnected. Its ink and undo history were cleared.",
+                "显示器已断开，已清除其笔迹和撤销记录。",
+                "顯示器已中斷連線，已清除其筆跡與復原記錄。",
+            )
+            .into();
         }
         (layout, removed)
     }
@@ -451,12 +467,17 @@ impl App {
         }
     }
     fn commit_touches(&mut self) {
-        for (_, finger) in std::mem::take(&mut self.touches) {
+        while let Some((_, finger)) = self.touches.pop_first() {
             self.commit_touch(finger);
         }
     }
     fn touch_motion(&mut self, key: TouchKey, point: Point) {
         if self.protected.is_some_and(|r| r.contains(point.x, point.y)) {
+            if let Some(Gesture::Erase(id)) = self.touches.get(&key).map(|finger| finger.gesture)
+                && let Some(erase) = self.pending_erasures.get_mut(&id)
+            {
+                erase.last = None;
+            }
             return;
         }
         let can_append = self.draft_point_count() < MAX_POINTS;
@@ -575,7 +596,14 @@ impl App {
                 }
                 SDL_EVENT_MOUSE_BUTTON_UP if e.button.windowID == overlay => {
                     if e.button.which != SDL_PEN_MOUSEID && e.button.which != SDL_TOUCH_MOUSEID {
-                        self.end(Source::Mouse(e.button.button));
+                        let b = e.button;
+                        let source = Source::Mouse(b.button);
+                        if self.contact.is_some_and(|contact| {
+                            contact.source == source && matches!(contact.gesture, Gesture::Erase(_))
+                        }) {
+                            self.motion(source, Point::new(b.x, b.y, 1., [0.; 2]));
+                        }
+                        self.end(source);
                     }
                 }
                 SDL_EVENT_MOUSE_MOTION if e.motion.windowID == overlay => {
@@ -734,8 +762,8 @@ impl App {
             self.pages.save(&self.history, &p)
         };
         match result {
-            Ok(()) => self.status = format!("Saved {}", p.display()),
-            Err(e) => self.status = format!("Save: {e}"),
+            Ok(()) => self.status = text("Saved", "已保存", "已儲存").detail(p.display()),
+            Err(e) => self.status = text("Save failed", "保存失败", "儲存失敗").detail(e),
         }
     }
     fn save_session(&mut self) -> Result<(), String> {
@@ -747,9 +775,9 @@ impl App {
         self.stop();
         let p = PathBuf::from(&self.path);
         match self.pages.load(&mut self.history, &p, false) {
-            Ok(0) => self.status = "Session loaded".into(),
+            Ok(0) => self.status = text("Session loaded", "已打开会话", "已開啟工作階段").into(),
             Ok(pending) => self.status = pending_pages(pending),
-            Err(e) => self.status = format!("Open: {e}"),
+            Err(e) => self.status = text("Open failed", "打开失败", "開啟失敗").detail(e),
         }
     }
     fn export(&mut self) {
@@ -757,8 +785,8 @@ impl App {
         let p = PathBuf::from(&self.path).with_extension("svg");
         let data = export::svg(&self.history.doc);
         match std::fs::write(&p, data) {
-            Ok(()) => self.status = format!("Exported {}", p.display()),
-            Err(e) => self.status = format!("Export: {e}"),
+            Ok(()) => self.status = text("Exported", "已导出", "已匯出").detail(p.display()),
+            Err(e) => self.status = text("Export failed", "导出失败", "匯出失敗").detail(e),
         }
     }
     fn select_preset(&mut self, rgb: [u8; 3]) {
@@ -797,7 +825,8 @@ impl App {
             {
                 background.live();
                 self.frozen = false;
-                self.status = format!("Frozen background unavailable: {error}");
+                self.status = text("Frozen desktop unavailable", "无法冻结桌面", "無法凍結桌面")
+                    .detail(error);
             }
         }
         unsafe {
@@ -805,12 +834,9 @@ impl App {
         }
         let aa = 0.8 / scale[0].max(scale[1]);
         for (index, stroke) in self.history.doc.strokes.iter().enumerate() {
-            if self
-                .pending_erasures
-                .values()
-                .all(|preview| !preview.contains(&index))
-            {
-                paint_stroke(r, stroke, color, aa, &clips)?;
+            let preview = Erasure::preview(stroke, index, self.pending_erasures.values());
+            for fragment in preview.iter() {
+                paint_stroke(r, fragment, color, aa, &clips)?;
             }
         }
         if let Some(ref s) = self.history.active {
@@ -915,8 +941,13 @@ fn paint_stroke(
     }
     result
 }
-fn pending_pages(count: usize) -> String {
-    format!("{count} saved ink page(s) waiting for a matching display.")
+fn pending_pages(count: usize) -> Status {
+    text(
+        "Saved pages awaiting a matching display",
+        "等待匹配显示器的已保存页面",
+        "等待配對顯示器的已儲存頁面",
+    )
+    .detail(count)
 }
 
 fn state_dir() -> PathBuf {
@@ -956,7 +987,12 @@ fn apply_mode(
     let result = pass.set(w, mouse);
     if let Err(e) = result {
         a.pass = false;
-        a.status = format!("Passthrough unavailable: {e}. Use Hide.");
+        a.status = text(
+            "Mouse mode unavailable. Hide the drawing layer to click the desktop.",
+            "鼠标穿透不可用，可隐藏书写图层后点击桌面。",
+            "滑鼠穿透無法使用，可隱藏書寫圖層後點按桌面。",
+        )
+        .detail(e);
     }
     unsafe {
         SDL_SetWindowAlwaysOnTop(w.raw, true);
@@ -971,10 +1007,17 @@ fn apply_mode(
 }
 
 fn mouse_released() -> bool {
-    // Keep the native input region until SDL receives the matching button-up.
-    // Removing it during a drag can lose that release and make SDL discard the
-    // next controller button-down as a duplicate of the unfinished drag.
-    unsafe { SDL_GetMouseState(ptr::null_mut(), ptr::null_mut()).0 == 0 }
+    // Cocoa can route the release to a different application during a focus
+    // change. Its global state reflects the physical buttons in that case.
+    #[cfg(target_os = "macos")]
+    unsafe {
+        SDL_GetGlobalMouseState(ptr::null_mut(), ptr::null_mut()).0 == 0
+    }
+    // Other backends keep the input region until SDL sees the matching up.
+    #[cfg(not(target_os = "macos"))]
+    unsafe {
+        SDL_GetMouseState(ptr::null_mut(), ptr::null_mut()).0 == 0
+    }
 }
 
 pub struct Options {
@@ -1033,6 +1076,11 @@ pub fn run(options: Options) -> Result<(), String> {
         let _ = canvas.place_on_display(id, true);
     }
     toolbar.show(true)?;
+    if !options.smoke && video != "wayland" {
+        // The window system may place a newly shown toolbar using its
+        // original size. Position it once the compact size is visible.
+        let _ = toolbar.arrange_toolbar(false, app.pages.active);
+    }
     unsafe {
         SDL_StartTextInput(toolbar.raw);
         SDL_RaiseWindow(toolbar.raw);
@@ -1060,6 +1108,7 @@ pub fn run(options: Options) -> Result<(), String> {
     let mut requested_display = None;
     let mut topology_dirty = !options.smoke;
     let mut pacer = FramePacer::new(app.frame_rate, app.refresh_hz(), Instant::now());
+    let mut appearance = ThemeMonitor::default();
     while running {
         let mut disconnected = BTreeSet::new();
         let mut controller_scale_changed = false;
@@ -1071,6 +1120,9 @@ pub fn run(options: Options) -> Result<(), String> {
             if ty == SDL_EVENT_QUIT {
                 running = false;
                 break;
+            }
+            if ty == SDL_EVENT_LOCALE_CHANGED && app.preferences.language.is_none() {
+                app.language = Language::system();
             }
             if ty >= SDL_EVENT_DISPLAY_FIRST && ty <= SDL_EVENT_DISPLAY_LAST {
                 topology_dirty = !options.smoke;
@@ -1170,7 +1222,8 @@ pub fn run(options: Options) -> Result<(), String> {
             let displays = topology
                 .connected(&canvas)
                 .unwrap_or_else(|error| {
-                    app.status = format!("Display query: {error}");
+                    app.status = text("Display query failed", "查询显示器失败", "查詢顯示器失敗")
+                        .detail(error);
                     app.displays.clone()
                 })
                 .into_iter()
@@ -1186,7 +1239,8 @@ pub fn run(options: Options) -> Result<(), String> {
                 && video != "wayland"
                 && let Err(error) = toolbar.arrange_toolbar(toolbar_expanded, app.pages.active)
             {
-                app.status = error;
+                app.status =
+                    text("Toolbar layout failed", "工具栏布局失败", "工具列配置失敗").detail(error);
             }
             if layout || removed || canvas.display_id() != app.pages.active {
                 if picker.active() {
@@ -1195,7 +1249,12 @@ pub fn run(options: Options) -> Result<(), String> {
                 crate::native::show_canvas(&canvas, &toolbar, false)?;
                 if let Some(id) = app.pages.active {
                     if let Err(error) = canvas.place_on_display(id, true) {
-                        app.status = format!("Cannot move the drawing surface: {error}");
+                        app.status = text(
+                            "Cannot move the drawing layer",
+                            "无法移动书写图层",
+                            "無法移動書寫圖層",
+                        )
+                        .detail(error);
                         app.suspended = true;
                     }
                     if removed || was_suspended {
@@ -1211,7 +1270,12 @@ pub fn run(options: Options) -> Result<(), String> {
                 && app.pages.needs_save(&app.history)
                 && let Err(error) = app.save_session()
             {
-                app.status = format!("Save after display removal: {error}");
+                app.status = text(
+                    "Save after display removal failed",
+                    "断开显示器后保存失败",
+                    "中斷顯示器連線後儲存失敗",
+                )
+                .detail(error);
             }
             topology_dirty = false;
             last_displays = Instant::now();
@@ -1232,7 +1296,7 @@ pub fn run(options: Options) -> Result<(), String> {
             !app.pass,
         ) {
             app.frozen = false;
-            app.status = format!("{reason}. Showing the live desktop.");
+            app.status = reason.into();
         }
         if (picker.hides_windows() || background.pending()) && !picker_windows_hidden {
             crate::native::show_canvas(&canvas, &toolbar, false)?;
@@ -1245,17 +1309,33 @@ pub fn run(options: Options) -> Result<(), String> {
                 Ok(Some(color)) => {
                     let color = color.converted(app.color.space);
                     app.select_color(color);
-                    app.status = format!("Picked {}", color.hex());
+                    app.status = text("Picked", "已取色", "已取色").detail(color.hex());
                 }
-                Ok(None) => app.status = "Color selection cancelled".into(),
-                Err(error) => app.status = error,
+                Ok(None) => {
+                    app.status =
+                        text("Color selection cancelled", "已取消取色", "已取消取色").into()
+                }
+                Err(error) => {
+                    app.status = text("Screen color picker failed", "屏幕取色失败", "螢幕取色失敗")
+                        .detail(error)
+                }
             }
         }
         if let Some(result) = background.poll(&canvas) {
             app.frozen = background.frozen;
             app.status = match result {
-                Ok(()) => "Desktop frozen. Select Live desktop to resume the background.".into(),
-                Err(error) => format!("{error}. Showing the live desktop."),
+                Ok(()) => text(
+                    "Desktop frozen. Select Live desktop to resume the background.",
+                    "桌面已冻结，选择实时桌面即可恢复。",
+                    "桌面已凍結，選擇即時桌面即可恢復。",
+                )
+                .into(),
+                Err(error) => text(
+                    "Showing the live desktop",
+                    "已切回实时桌面",
+                    "已切回即時桌面",
+                )
+                .detail(error),
             };
         }
         if picker_windows_hidden && !picker.hides_windows() && !background.pending() {
@@ -1284,14 +1364,20 @@ pub fn run(options: Options) -> Result<(), String> {
         if expanded != toolbar_expanded || controller_scale_changed {
             toolbar_expanded = expanded;
             if let Err(error) = toolbar.arrange_toolbar(expanded, None) {
-                app.status = error;
+                app.status =
+                    text("Toolbar layout failed", "工具栏布局失败", "工具列配置失敗").detail(error);
             }
         }
+        let theme = appearance.theme(app.preferences.theme);
+        if gui.ctx.theme() != theme {
+            gui.ctx.set_theme(theme);
+        }
+        gui.set_language(app.language);
         let mut input = gui.input(&toolbar);
         input.predicted_dt = pacer.period.as_secs_f32();
         let ctx = gui.ctx.clone();
         let mut cmd = Commands::default();
-        let output = ctx.run_ui(input, |ui| {
+        let mut output = ctx.run_ui(input, |ui| {
             cmd = app.ui(
                 ui,
                 &canvas_render,
@@ -1302,7 +1388,19 @@ pub fn run(options: Options) -> Result<(), String> {
             )
         });
         if cmd.quit {
-            running = false
+            output.textures_delta.clear();
+            break;
+        }
+        if cmd.preferences {
+            app.language = app.preferences.language.unwrap_or_else(Language::system);
+            if let Err(error) = app.preferences.save(&state_dir().join("ui.json")) {
+                app.status = text(
+                    "UI settings save failed",
+                    "保存界面设置失败",
+                    "儲存介面設定失敗",
+                )
+                .detail(error);
+            }
         }
         if cmd.background {
             if picker.active() {
@@ -1347,7 +1445,12 @@ pub fn run(options: Options) -> Result<(), String> {
         }
         if cmd.frame_rate {
             if let Err(error) = app.frame_rate.save(&state_dir().join("frame-rate.json")) {
-                app.status = format!("Frame-rate setting: {error}");
+                app.status = text(
+                    "Frame-rate setting save failed",
+                    "保存帧率设置失败",
+                    "儲存影格率設定失敗",
+                )
+                .detail(error);
             }
             pacer.configure(app.frame_rate, app.refresh_hz(), Instant::now());
         }
@@ -1368,7 +1471,8 @@ pub fn run(options: Options) -> Result<(), String> {
             }
             continue;
         }
-        toolbar_render.begin(&toolbar, [246. / 255., 250. / 255., 253. / 255., 1.])?;
+        let rail = crate::toolbar::colors(theme == egui::Theme::Dark).rail;
+        toolbar_render.begin(&toolbar, rail.to_array().map(|c| f32::from(c) / 255.))?;
         gui.paint(&toolbar_render, &toolbar, &toolbar_color, output)?;
         toolbar_render.present()?;
         if !follow_controller {
@@ -1392,7 +1496,12 @@ pub fn run(options: Options) -> Result<(), String> {
             Err(error) => {
                 app.hidden = true;
                 crate::native::show_canvas(&canvas, &toolbar, false)?;
-                app.status = format!("Drawing layer hidden to keep the controls usable: {error}");
+                app.status = text(
+                    "Drawing layer hidden to keep the toolbar accessible",
+                    "已隐藏书写图层，工具栏仍可使用",
+                    "已隱藏書寫圖層，工具列仍可使用",
+                )
+                .detail(error);
             }
         }
         if picker.choosing() {
@@ -1412,7 +1521,12 @@ pub fn run(options: Options) -> Result<(), String> {
             && let Err(error) = native.set_guarded(&canvas, mouse, app.protected)
         {
             app.pass = false;
-            app.status = format!("Input region: {error}");
+            app.status = text(
+                "Input region update failed",
+                "更新输入区域失败",
+                "更新輸入區域失敗",
+            )
+            .detail(error);
             if video == "x11" && app.protected.is_some() {
                 app.hidden = true;
                 crate::native::show_canvas(&canvas, &toolbar, false)?;
@@ -1424,7 +1538,8 @@ pub fn run(options: Options) -> Result<(), String> {
             && !app.suspended
             && let Err(error) = native.set(&canvas, true)
         {
-            app.status = format!("Mouse mode: {error}");
+            app.status =
+                text("Mouse mode failed", "鼠标模式切换失败", "滑鼠模式切換失敗").detail(error);
         }
         if !options.smoke
             && app.last_save.elapsed() > Duration::from_secs(10)
@@ -1434,7 +1549,7 @@ pub fn run(options: Options) -> Result<(), String> {
             if app.pages.needs_save(&app.history)
                 && let Err(e) = app.save_session()
             {
-                app.status = format!("Autosave: {e}");
+                app.status = text("Autosave failed", "自动保存失败", "自動儲存失敗").detail(e);
             }
             app.last_save = Instant::now();
         }
@@ -1605,6 +1720,8 @@ mod touch_tests {
             displays: vec![],
             pages: Pages::default(),
             frame_rate: FrameRate::Auto,
+            preferences: Preferences::default(),
+            language: Language::English,
             suspended: false,
             frozen: false,
             protected: None,
@@ -1617,7 +1734,7 @@ mod touch_tests {
             laser: BTreeMap::new(),
             next_gesture: 0,
             pending_erasures: BTreeMap::new(),
-            status: String::new(),
+            status: Status::default(),
             path: String::new(),
             save_path: PathBuf::new(),
             canvas_units: 1.,
@@ -1704,9 +1821,8 @@ mod touch_tests {
             Point::new(80., 60., 1., [0.; 2]),
             false,
         );
-        assert_eq!(
-            a.pending_erasures.values().next().unwrap(),
-            &BTreeSet::from([0])
+        assert!(
+            Erasure::preview(&a.history.doc.strokes[0], 0, a.pending_erasures.values()).is_empty()
         );
         assert_eq!(a.history.doc.strokes.len(), 1);
         a.keyboard(
@@ -1774,14 +1890,48 @@ mod touch_tests {
         a.use_tool(Tool::Eraser);
         finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 1, 0.1, 0.1);
         finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 2, 0.6, 0.1);
-        // Lift away from all strokes so the release itself cannot erase them.
-        finger(&mut a, SDL_EVENT_FINGER_UP, 1, 1, 0.9, 0.1);
-        finger(&mut a, SDL_EVENT_FINGER_UP, 1, 2, 0.9, 0.1);
+        finger(&mut a, SDL_EVENT_FINGER_UP, 1, 1, 0.1, 0.1);
+        finger(&mut a, SDL_EVENT_FINGER_UP, 1, 2, 0.6, 0.1);
         assert_eq!(a.history.doc.strokes.len(), 1);
         assert_eq!(a.history.doc.strokes[0].points[0].x, 240.);
         a.history.undo();
         assert_eq!(a.history.doc.strokes.len(), 2);
         a.history.undo();
+        assert_eq!(a.history.doc.strokes.len(), 3);
+    }
+    #[test]
+    fn concurrent_erases_split_one_stroke_and_undo_independently() {
+        let mut a = app();
+        let mouse = Source::Mouse(LEFT_BUTTON);
+        a.begin(mouse, Point::new(10., 60., 0.2, [0.; 2]), false);
+        a.motion(mouse, Point::new(700., 60., 0.8, [45., 0.]));
+        a.end(mouse);
+        a.use_tool(Tool::Eraser);
+        finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 1, 0.1, 0.1);
+        finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 2, 0.6, 0.1);
+        assert_eq!(
+            Erasure::preview(&a.history.doc.strokes[0], 0, a.pending_erasures.values()).len(),
+            3
+        );
+        finger(&mut a, SDL_EVENT_FINGER_UP, 1, 1, 0.1, 0.1);
+        assert_eq!(a.history.doc.strokes.len(), 2);
+        finger(&mut a, SDL_EVENT_FINGER_UP, 1, 2, 0.6, 0.1);
+        let strokes = &a.history.doc.strokes;
+        assert_eq!(strokes.len(), 3);
+        assert_eq!(strokes[0].points[0].x, 10.);
+        assert_eq!(strokes[2].points.last().unwrap().x, 700.);
+        for (left, right, x) in [
+            (&strokes[0], &strokes[1], 80.),
+            (&strokes[1], &strokes[2], 480.),
+        ] {
+            assert!(left.points.last().unwrap().x < x && right.points[0].x > x);
+        }
+        a.history.undo();
+        assert_eq!(a.history.doc.strokes.len(), 2);
+        a.history.undo();
+        assert_eq!(a.history.doc.strokes.len(), 1);
+        a.history.redo();
+        a.history.redo();
         assert_eq!(a.history.doc.strokes.len(), 3);
     }
     #[test]

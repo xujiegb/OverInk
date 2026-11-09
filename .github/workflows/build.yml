@@ -131,6 +131,7 @@ jobs:
               (contents / 'MacOS').mkdir(parents=True, exist_ok=True)
               (contents / 'Resources').mkdir(exist_ok=True)
               shutil.copy2('LICENSE', contents / 'Resources' / 'LICENSE')
+              shutil.copy2('assets/fonts/OFL.txt', contents / 'Resources' / 'OFL.txt')
               iconset = dist / 'OverInk.iconset'
               iconset.mkdir(exist_ok=True)
               for size in (16, 32, 128, 256, 512):
@@ -150,6 +151,7 @@ jobs:
                           CFBundlePackageType='APPL',
                           CFBundleShortVersionString=os.environ.get('OVERINK_RELEASE_VERSION') or '0.1.0',
                           CFBundleVersion='1', LSMinimumSystemVersion='11.0',
+                          CFBundleDevelopmentRegion='en', CFBundleLocalizations=['en', 'zh-Hans', 'zh-Hant'],
                           CFBundleIconFile='OverInk.icns',
                           NSHighResolutionCapable=True, NSPrincipalClass='NSApplication')
               with (contents / 'Info.plist').open('wb') as stream:
@@ -161,6 +163,7 @@ jobs:
               with zipfile.ZipFile(dist / f'OverInk-{target}.zip', 'w', zipfile.ZIP_DEFLATED) as archive:
                   archive.write(binary, exe)
                   archive.write('LICENSE', 'LICENSE')
+                  archive.write('assets/fonts/OFL.txt', 'OFL.txt')
           PY
       - uses: actions/upload-artifact@v4
         with:
@@ -373,7 +376,7 @@ jobs:
             OVERINK_STATE_DIR=/tmp/overink-smoke /tmp/overink-cc/run-native "$output/overink" --smoke-test
           fi
           mkdir -p dist
-          tar -czf "dist/OverInk-$OVERINK_TARGET.tar.gz" -C "$output" overink -C /src LICENSE
+          tar -czf "dist/OverInk-$OVERINK_TARGET.tar.gz" -C "$output" overink -C /src LICENSE assets/fonts/OFL.txt
           CONTAINER
       - uses: actions/upload-artifact@v4
         with:
@@ -528,7 +531,7 @@ jobs:
               OVERINK_STATE_DIR=/tmp/overink-smoke "$output/overink" --smoke-test
             fi
             mkdir -p dist
-            tar -czf "dist/OverInk-$target.tar.gz" -C "$output" overink -C "$PWD" LICENSE
+            tar -czf "dist/OverInk-$target.tar.gz" -C "$output" overink -C "$PWD" LICENSE assets/fonts/OFL.txt
       - uses: actions/upload-artifact@v4
         with:
           name: OverInk-${{ matrix.target }}

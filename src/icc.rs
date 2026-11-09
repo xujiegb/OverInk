@@ -1,20 +1,28 @@
 //! On X11 the display usually does not transform sRGB windows. Use SDL's
 //! current-display ICC profile there. Other backends retain OS-managed sRGB /
 //! scRGB surfaces; applying an ICC transform there would double-manage color.
-use crate::sdl::*;
+use crate::{
+    appearance::{Text, text},
+    sdl::*,
+};
 use lcms2_sys as cms;
 use std::hash::{Hash, Hasher};
 use std::ptr;
 pub struct ColorManager {
     transform: cms::HTRANSFORM,
-    pub status: String,
+    pub status: Text,
     pub revision: u64,
 }
+const SYSTEM_SRGB: Text = text(
+    "sRGB surface / system compositor",
+    "sRGB 表面 / 系统合成",
+    "sRGB 表面 / 系統合成",
+);
 impl Default for ColorManager {
     fn default() -> Self {
         Self {
             transform: ptr::null_mut(),
-            status: "sRGB surface / system compositor".into(),
+            status: SYSTEM_SRGB,
             revision: 0,
         }
     }
@@ -27,9 +35,13 @@ impl ColorManager {
             self.transform = ptr::null_mut()
         }
         self.status = if extended {
-            "Extended linear sRGB / system display mapping".into()
+            text(
+                "Extended linear sRGB / system display mapping",
+                "扩展线性 sRGB / 系统显示映射",
+                "延伸線性 sRGB / 系統顯示映射",
+            )
         } else {
-            "sRGB surface / system compositor".into()
+            SYSTEM_SRGB
         };
         if crate::sdl::driver() != "x11" {
             return;
@@ -41,7 +53,11 @@ impl ColorManager {
                 if !data.is_null() {
                     SDL_free(data)
                 }
-                self.status = "X11: no ICC profile; sRGB assumption".into();
+                self.status = text(
+                    "X11 uses sRGB when an ICC profile is unavailable",
+                    "X11 未找到 ICC 配置文件，按 sRGB 显示",
+                    "X11 找不到 ICC 色彩描述檔，以 sRGB 顯示",
+                );
                 return;
             }
             let mut hash = std::collections::hash_map::DefaultHasher::new();
@@ -50,7 +66,11 @@ impl ColorManager {
             let output = cms::cmsOpenProfileFromMem(data, size as u32);
             SDL_free(data);
             if output.is_null() {
-                self.status = "X11: invalid ICC profile; sRGB assumption".into();
+                self.status = text(
+                    "Invalid ICC profile. X11 is using sRGB.",
+                    "ICC 配置文件无效，X11 按 sRGB 显示",
+                    "ICC 色彩描述檔無效，X11 以 sRGB 顯示",
+                );
                 return;
             }
             let input = cms::cmsCreate_sRGBProfile();
@@ -65,9 +85,17 @@ impl ColorManager {
             cms::cmsCloseProfile(input);
             cms::cmsCloseProfile(output);
             self.status = if self.transform.is_null() {
-                "X11: ICC transform failed; sRGB assumption".into()
+                text(
+                    "ICC conversion failed. X11 is using sRGB.",
+                    "ICC 转换失败，X11 按 sRGB 显示",
+                    "ICC 轉換失敗，X11 以 sRGB 顯示",
+                )
             } else {
-                "X11: display ICC / Little CMS".into()
+                text(
+                    "X11 display ICC / Little CMS",
+                    "X11 显示器 ICC / Little CMS",
+                    "X11 顯示器 ICC / Little CMS",
+                )
             };
         }
     }

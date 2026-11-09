@@ -1,16 +1,38 @@
-use crate::model::Tool;
+use crate::{appearance::Language, model::Tool};
 use egui::{Color32, Pos2, Rect, Response, Sense, Stroke, Ui, Vec2, vec2};
 
 pub const WIDTH: f32 = 64.;
-pub const HEIGHT: f32 = 620.;
+pub const HEIGHT: f32 = 660.;
 pub const PANEL_WIDTH: f32 = 328.;
 pub const GRIP_HEIGHT: f32 = 47.;
-pub const FILL: Color32 = Color32::from_rgb(246, 250, 253);
-pub const INK: Color32 = Color32::from_rgb(26, 52, 77);
-pub const MUTED: Color32 = Color32::from_rgb(84, 109, 130);
 const ACTIVE: Color32 = Color32::from_rgb(0, 122, 157);
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Colors {
+    pub rail: Color32,
+    pub panel: Color32,
+    ink: Color32,
+    hover: Color32,
+}
+
+pub fn colors(dark: bool) -> Colors {
+    if dark {
+        Colors {
+            rail: Color32::from_rgb(27, 36, 46),
+            panel: Color32::from_rgb(34, 45, 58),
+            ink: Color32::from_rgb(220, 234, 246),
+            hover: Color32::from_rgb(52, 69, 88),
+        }
+    } else {
+        Colors {
+            rail: Color32::from_rgb(246, 250, 253),
+            panel: Color32::WHITE,
+            ink: Color32::from_rgb(26, 52, 77),
+            hover: Color32::from_rgb(224, 239, 249),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Panel {
     Shapes,
     Brush,
@@ -20,13 +42,13 @@ pub enum Panel {
 }
 
 impl Panel {
-    pub fn title(self) -> &'static str {
+    pub fn title(self, language: Language) -> &'static str {
         match self {
-            Self::Shapes => "Shapes",
-            Self::Brush => "Brush",
-            Self::Colors => "Color",
-            Self::Background => "Background",
-            Self::Settings => "Settings",
+            Self::Shapes => language.text("Shapes", "形状", "圖形"),
+            Self::Brush => language.text("Brush", "笔刷", "筆刷"),
+            Self::Colors => language.text("Color", "颜色", "色彩"),
+            Self::Background => language.text("Background", "背景", "背景"),
+            Self::Settings => language.text("Settings", "设置", "設定"),
         }
     }
 }
@@ -45,6 +67,7 @@ pub enum Icon {
     Display,
     Settings,
     Close,
+    Quit,
 }
 
 pub fn image() -> image::RgbaImage {
@@ -71,15 +94,16 @@ pub fn button(ui: &mut Ui, icon: Icon, label: &str, selected: bool) -> Response 
         egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), selected, label)
     });
     let painter = ui.painter();
+    let colors = colors(ui.visuals().dark_mode);
     let bg = if selected {
         ACTIVE
     } else if response.hovered() || response.has_focus() {
-        Color32::from_rgb(224, 239, 249)
+        colors.hover
     } else {
         Color32::TRANSPARENT
     };
     painter.rect_filled(rect, 8., bg);
-    let color = if selected { Color32::WHITE } else { INK };
+    let color = if selected { Color32::WHITE } else { colors.ink };
     paint(icon, painter, rect.center(), color);
     response.on_hover_text(label)
 }
@@ -263,6 +287,22 @@ fn paint(icon: Icon, p: &egui::Painter, center: Pos2, color: Color32) {
         Icon::Close => {
             line(&[(6., 6.), (18., 18.)]);
             line(&[(18., 6.), (6., 18.)]);
+        }
+        Icon::Quit => {
+            line(&[(12., 3.), (12., 12.)]);
+            line(&[
+                (8., 5.),
+                (5., 8.),
+                (4., 12.),
+                (5., 16.),
+                (8., 19.),
+                (12., 20.),
+                (16., 19.),
+                (19., 16.),
+                (20., 12.),
+                (19., 8.),
+                (16., 5.),
+            ]);
         }
     }
 }

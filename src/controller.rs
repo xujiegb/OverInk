@@ -135,8 +135,8 @@ impl Guard {
             return Ok((None, false));
         }
         let size = canvas.pixel_size();
-        // Cocoa derives ignoresMouseEvents from an active shape. Remove that
-        // per-pixel shape in Mouse mode so whole-window passthrough stays set.
+        // Remove the drawing mask in Mouse mode. Cocoa passthrough is
+        // applied separately after SDL updates the window shape.
         let pixels = if mouse || !shape_rendering {
             None
         } else {
