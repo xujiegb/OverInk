@@ -5,17 +5,44 @@ on:
     tags: ['v*']
   pull_request:
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version, e.g. 0.1.1 or v0.1.1'
+        required: true
+        type: string
 permissions:
   contents: read
 concurrency:
-  group: overink-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: overink-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && format('release-{0}', github.run_id) || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 env:
   CARGO_TERM_COLOR: always
   RUST_VERSION: '1.99.1'
 
 jobs:
+  prepare:
+    name: Validate release version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - id: version
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          RELEASE_INPUT: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          version=${RELEASE_INPUT#v}
+          if [[ ! $version =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ || ${#version} -gt 64 ]]; then
+            echo "::error::Enter a version such as 0.1.1 or v0.1.1."
+            exit 1
+          fi
+          printf 'version=%s\ntag=v%s\n' "$version" "$version" >> "$GITHUB_OUTPUT"
+
   desktop:
+    needs: prepare
     name: ${{ matrix.target }}
     strategy:
       fail-fast: false
@@ -89,6 +116,7 @@ jobs:
         shell: bash
         env:
           OVERINK_TARGET: ${{ matrix.target }}
+          OVERINK_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           python3 - <<'PY'
           import os, pathlib, plistlib, shutil, subprocess, zipfile
@@ -119,7 +147,8 @@ jobs:
               destination.chmod(0o755)
               info = dict(CFBundleName='OverInk', CFBundleDisplayName='OverInk',
                           CFBundleExecutable='overink', CFBundleIdentifier='org.overink.OverInk',
-                          CFBundlePackageType='APPL', CFBundleShortVersionString='0.1.0',
+                          CFBundlePackageType='APPL',
+                          CFBundleShortVersionString=os.environ.get('OVERINK_RELEASE_VERSION') or '0.1.0',
                           CFBundleVersion='1', LSMinimumSystemVersion='11.0',
                           CFBundleIconFile='OverInk.icns',
                           NSHighResolutionCapable=True, NSPrincipalClass='NSApplication')
@@ -140,6 +169,7 @@ jobs:
           if-no-files-found: error
 
   linux:
+    needs: prepare
     name: Linux ${{ matrix.target }} · UBI 10 ${{ matrix.mode }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
@@ -352,6 +382,7 @@ jobs:
           if-no-files-found: error
 
   freebsd:
+    needs: prepare
     name: FreeBSD ${{ matrix.target }} · x64 VM
     runs-on: ubuntu-24.04
     timeout-minutes: 100
@@ -503,3 +534,79 @@ jobs:
           name: OverInk-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
+
+  publish:
+    name: Publish ${{ needs.prepare.outputs.tag }}
+    if: github.event_name == 'workflow_dispatch'
+    needs: [prepare, desktop, linux, freebsd]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    concurrency:
+      group: overink-publish-${{ needs.prepare.outputs.tag }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: OverInk-*
+          path: release-input
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          artifact_dirs=(release-input/OverInk-*)
+          if (( ${#artifact_dirs[@]} != 17 )); then
+            echo "::error::Expected 17 build artifacts. Found ${#artifact_dirs[@]}."
+            exit 1
+          fi
+          mkdir release-assets
+          for dir in "${artifact_dirs[@]}"; do
+            name=${dir##*/}
+            archives=("$dir/$name".*)
+            if (( ${#archives[@]} != 1 )); then
+              echo "::error::Expected one package in $dir."
+              exit 1
+            fi
+            archive=${archives[0]}
+            case "$archive" in
+              "$dir/$name.zip"|"$dir/$name.tar.gz") ;;
+              *) echo "::error::Unexpected package $archive."; exit 1 ;;
+            esac
+            test -s "$archive"
+            file=${archive##*/}
+            cp -- "$archive" "release-assets/OverInk-$RELEASE_VERSION-${file#OverInk-}"
+          done
+
+          # A failed upload can be retried using this workflow's draft.
+          marker="<!-- overink-build:$GITHUB_SHA -->"
+          releases=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" |
+            jq -cs --arg tag "$RELEASE_TAG" '[.[][] | select(.tag_name == $tag)]')
+          count=$(jq length <<< "$releases")
+          if (( count > 1 )) || { (( count == 1 )) &&
+              ! jq -e --arg marker "$marker" '.[0] | .draft and ((.body // "") | startswith($marker))' <<< "$releases" >/dev/null; }; then
+            echo "::error::Release $RELEASE_TAG already exists or has a draft from another source."
+            exit 1
+          fi
+
+          # Git rejects a non-forced push to a tag on a different commit.
+          git push origin "$GITHUB_SHA:refs/tags/$RELEASE_TAG"
+          if (( count == 0 )); then
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+              --draft --verify-tag --target "$GITHUB_SHA" --generate-notes \
+              --title "OverInk $RELEASE_TAG" --notes "$marker"
+          fi
+          gh release upload "$RELEASE_TAG" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber
+          tag_sha=$(git ls-remote --exit-code origin "refs/tags/$RELEASE_TAG" | cut -f1)
+          if [[ $tag_sha != "$GITHUB_SHA" ]]; then
+            echo "::error::Tag $RELEASE_TAG no longer points to the built commit."
+            exit 1
+          fi
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false
