@@ -18,6 +18,7 @@ mod model;
 mod native;
 mod picker;
 mod sdl;
+mod toolbar;
 mod touch;
 fn main() {
     if let Err(e) = start() {

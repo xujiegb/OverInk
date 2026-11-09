@@ -5,15 +5,6 @@ on:
     tags: ['v*']
   pull_request:
   workflow_dispatch:
-    inputs:
-      extra_linux:
-        description: Also build x86, ppc64le, riscv64, s390x and loong64 using QEMU
-        type: boolean
-        default: true
-      extra_freebsd:
-        description: Also build i386, ppc64le and riscv64 on configured native SSH hosts
-        type: boolean
-        default: false
 permissions:
   contents: read
 concurrency:
@@ -30,8 +21,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {os: ubuntu-24.04, target: x86_64-unknown-linux-gnu}
-          - {os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu}
           - {os: windows-2022, target: x86_64-pc-windows-msvc, msvc: x64}
           - {os: windows-2022, target: i686-pc-windows-msvc, msvc: x86}
           - {os: windows-11-arm, target: aarch64-pc-windows-msvc, msvc: arm64}
@@ -41,11 +30,6 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v5
-      - if: runner.os == 'Linux'
-        name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake ninja-build pkg-config dbus libx11-dev libxext-dev libxi-dev libxrandr-dev libxcursor-dev libxfixes-dev libxrender-dev libxss-dev libxtst-dev libwayland-dev wayland-protocols libxkbcommon-dev libegl1-mesa-dev libgl1-mesa-dev
       - if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
         with:
@@ -94,24 +78,20 @@ jobs:
           cargo fmt --all -- --check
           cargo clippy --locked --target $env:OVERINK_TARGET --all-targets -- -D warnings
           cargo test --locked --release --target $env:OVERINK_TARGET
-          cargo build --locked --release --target $env:OVERINK_TARGET
-      - name: Check Wayland color and screenshot protocols
-        if: runner.os == 'Linux'
-        env:
-          OVERINK_TARGET: ${{ matrix.target }}
-        run: dbus-run-session -- cargo test --locked --release --target "$OVERINK_TARGET" portal_response -- --ignored
-      - name: Render input smoke test
-        if: runner.os == 'Linux'
-        env:
-          OVERINK_STATE_DIR: ${{ runner.temp }}/overink-smoke
-        run: target/${{ matrix.target }}/release/overink --smoke-test
+          $icon = Join-Path $env:RUNNER_TEMP 'overink.ico'
+          $rc = Join-Path $env:RUNNER_TEMP 'overink.rc'
+          $res = Join-Path $env:RUNNER_TEMP 'overink.res'
+          python -c "import pathlib,struct,sys; p=pathlib.Path('assets/overink.png').read_bytes(); pathlib.Path(sys.argv[1]).write_bytes(struct.pack('<HHHBBBBHHII',0,1,1,0,0,0,0,1,32,len(p),22)+p)" $icon
+          ('1 ICON "' + $icon.Replace('\', '/') + '"') | Set-Content -Encoding ascii $rc
+          & rc.exe /nologo /fo $res $rc
+          cargo rustc --locked --release --target $env:OVERINK_TARGET --bin overink -- -C "link-arg=$res"
       - name: Package executable
         shell: bash
         env:
           OVERINK_TARGET: ${{ matrix.target }}
         run: |
           python3 - <<'PY'
-          import os, pathlib, plistlib, shutil, subprocess, sys, tarfile, zipfile
+          import os, pathlib, plistlib, shutil, subprocess, zipfile
           target = os.environ['OVERINK_TARGET']
           dist = pathlib.Path('dist')
           dist.mkdir(exist_ok=True)
@@ -123,6 +103,17 @@ jobs:
               (contents / 'MacOS').mkdir(parents=True, exist_ok=True)
               (contents / 'Resources').mkdir(exist_ok=True)
               shutil.copy2('LICENSE', contents / 'Resources' / 'LICENSE')
+              iconset = dist / 'OverInk.iconset'
+              iconset.mkdir(exist_ok=True)
+              for size in (16, 32, 128, 256, 512):
+                  for scale in (1, 2):
+                      suffix = '@2x' if scale == 2 else ''
+                      pixels = str(size * scale)
+                      subprocess.run(['sips', '-z', pixels, pixels, 'assets/overink.png', '--out',
+                                      str(iconset / f'icon_{size}x{size}{suffix}.png')], check=True)
+              subprocess.run(['iconutil', '-c', 'icns', str(iconset), '-o',
+                              str(contents / 'Resources' / 'OverInk.icns')], check=True)
+              shutil.rmtree(iconset)
               destination = contents / 'MacOS' / 'overink'
               shutil.copy2(binary, destination)
               destination.chmod(0o755)
@@ -130,6 +121,7 @@ jobs:
                           CFBundleExecutable='overink', CFBundleIdentifier='org.overink.OverInk',
                           CFBundlePackageType='APPL', CFBundleShortVersionString='0.1.0',
                           CFBundleVersion='1', LSMinimumSystemVersion='11.0',
+                          CFBundleIconFile='OverInk.icns',
                           NSHighResolutionCapable=True, NSPrincipalClass='NSApplication')
               with (contents / 'Info.plist').open('wb') as stream:
                   plistlib.dump(info, stream)
@@ -140,10 +132,6 @@ jobs:
               with zipfile.ZipFile(dist / f'OverInk-{target}.zip', 'w', zipfile.ZIP_DEFLATED) as archive:
                   archive.write(binary, exe)
                   archive.write('LICENSE', 'LICENSE')
-          else:
-              with tarfile.open(dist / f'OverInk-{target}.tar.gz', 'w:gz') as archive:
-                  archive.add(binary, arcname=exe)
-                  archive.add('LICENSE', arcname='LICENSE')
           PY
       - uses: actions/upload-artifact@v4
         with:
@@ -151,48 +139,173 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-  linux-qemu:
-    name: Linux ${{ matrix.target }} (QEMU)
-    if: github.event_name == 'workflow_dispatch' && inputs.extra_linux
-    runs-on: ubuntu-24.04
-    timeout-minutes: 350
+  linux:
+    name: Linux ${{ matrix.target }} · UBI 10 ${{ matrix.mode }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include:
-          - {platform: linux/386, target: i686-unknown-linux-gnu}
-          - {platform: linux/ppc64le, target: powerpc64le-unknown-linux-gnu}
-          - {platform: linux/riscv64, target: riscv64gc-unknown-linux-gnu}
-          - {platform: linux/s390x, target: s390x-unknown-linux-gnu}
+          - {runner: ubuntu-24.04, platform: linux/amd64, mode: native, target: x86_64-unknown-linux-gnu, deb: amd64, triple: x86_64-linux-gnu, suite: noble, gcc: 13, machine: X86-64}
+          - {runner: ubuntu-24.04-arm, platform: linux/arm64, mode: native, target: aarch64-unknown-linux-gnu, deb: arm64, triple: aarch64-linux-gnu, suite: noble, gcc: 13, machine: AArch64}
+          - {runner: ubuntu-24.04, platform: linux/amd64, mode: cross, target: i686-unknown-linux-gnu, deb: i386, triple: i686-linux-gnu, suite: trixie, gcc: 14, machine: 'Intel 80386'}
+          - {runner: ubuntu-24.04, platform: linux/amd64, mode: cross, target: powerpc64le-unknown-linux-gnu, deb: ppc64el, triple: powerpc64le-linux-gnu, suite: trixie, gcc: 14, machine: PowerPC64}
+          - {runner: ubuntu-24.04, platform: linux/amd64, mode: cross, target: loongarch64-unknown-linux-gnu, deb: loong64, triple: loongarch64-linux-gnu, suite: forky, gcc: 15, machine: LoongArch}
+          - {runner: ubuntu-24.04, platform: linux/amd64, mode: cross, target: riscv64gc-unknown-linux-gnu, deb: riscv64, triple: riscv64-linux-gnu, suite: trixie, gcc: 14, machine: RISC-V}
+          - {runner: ubuntu-24.04, platform: linux/amd64, mode: cross, target: s390x-unknown-linux-gnu, deb: s390x, triple: s390x-linux-gnu, suite: trixie, gcc: 14, machine: S/390}
     steps:
       - uses: actions/checkout@v5
-      - uses: docker/setup-qemu-action@v3
-        with:
-          platforms: all
-      - name: Build, test and package
+      - name: Stage the target SDK without executing target binaries
+        shell: bash
+        env:
+          TARGET_ARCH: ${{ matrix.deb }}
+          TARGET_SUITE: ${{ matrix.suite }}
+          TARGET_GCC: ${{ matrix.gcc }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwayland-bin
+          work="$RUNNER_TEMP/overink-linux"
+          mkdir -p "$work"/{sysroot,lists/partial,archives/partial,tools}
+          cp "$(command -v wayland-scanner)" "$work/tools/"
+          : > "$work/status"
+          if [[ $TARGET_SUITE == noble ]]; then
+            keyring=/usr/share/keyrings/ubuntu-archive-keyring.gpg
+            repo=https://archive.ubuntu.com/ubuntu
+            if [[ $TARGET_ARCH == arm64 ]]; then repo=https://ports.ubuntu.com/ubuntu-ports; fi
+          else
+            keyring="$work/debian.asc"
+            curl -fsSL --retry 3 https://ftp-master.debian.org/keys/archive-key-13.asc -o "$keyring"
+            repo=https://deb.debian.org/debian
+          fi
+          printf 'deb [arch=%s signed-by=%s] %s %s main\n' "$TARGET_ARCH" "$keyring" "$repo" "$TARGET_SUITE" > "$work/sources.list"
+          apt_options=(
+            -o "APT::Architecture=$TARGET_ARCH"
+            -o "APT::Architectures::=$TARGET_ARCH"
+            -o "Dir::Etc::sourcelist=$work/sources.list"
+            -o Dir::Etc::sourceparts=-
+            -o "Dir::State::lists=$work/lists"
+            -o "Dir::State::status=$work/status"
+            -o "Dir::Cache::archives=$work/archives"
+            -o Acquire::Retries=3
+          )
+          apt-get "${apt_options[@]}" update
+          apt-get "${apt_options[@]}" -y --download-only --no-install-recommends install \
+            libc6-dev "libgcc-$TARGET_GCC-dev" "libstdc++-$TARGET_GCC-dev" \
+            libx11-dev libxext-dev libxi-dev libxrandr-dev libxcursor-dev \
+            libxfixes-dev libxrender-dev libxss-dev libxtst-dev \
+            libwayland-dev libxkbcommon-dev libegl-dev libgl-dev
+          for package in "$work/archives/"*.deb; do dpkg-deb -x "$package" "$work/sysroot"; done
+          python3 - "$work/sysroot" <<'PY'
+          import os, pathlib, sys
+          root = pathlib.Path(sys.argv[1])
+          for directory, dirs, files in os.walk(root, followlinks=False):
+              for name in dirs + files:
+                  path = pathlib.Path(directory) / name
+                  if path.is_symlink():
+                      target = os.readlink(path)
+                      if target.startswith('/'):
+                          path.unlink()
+                          path.symlink_to(os.path.relpath(root / target.lstrip('/'), path.parent))
+          PY
+      - name: Compile and package in Red Hat UBI 10
         shell: bash
         env:
           OVERINK_TARGET: ${{ matrix.target }}
+          TARGET_TRIPLE: ${{ matrix.triple }}
+          TARGET_MODE: ${{ matrix.mode }}
+          ELF_MACHINE: ${{ matrix.machine }}
         run: |
-          set -eu
+          set -euo pipefail
           docker run --rm -i --platform '${{ matrix.platform }}' \
-            -e RUST_VERSION -e OVERINK_TARGET -v "$GITHUB_WORKSPACE:/src" -w /src \
-            debian:trixie-slim sh -s <<'CONTAINER'
-          set -eu
-          export DEBIAN_FRONTEND=noninteractive
-          apt-get update
-          apt-get install -y --no-install-recommends ca-certificates curl build-essential cmake ninja-build pkg-config libx11-dev libxext-dev libxi-dev libxrandr-dev libxcursor-dev libxfixes-dev libxrender-dev libxss-dev libxtst-dev libwayland-dev wayland-protocols libxkbcommon-dev libegl1-mesa-dev libgl1-mesa-dev
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/overink-rustup.sh
-          sh /tmp/overink-rustup.sh -y --profile minimal --default-toolchain "$RUST_VERSION"
+            -e RUST_VERSION -e OVERINK_TARGET -e TARGET_TRIPLE -e TARGET_MODE -e ELF_MACHINE \
+            -v "$GITHUB_WORKSPACE:/src" -v "$RUNNER_TEMP/overink-linux:/sdk:ro" -w /src \
+            registry.access.redhat.com/ubi10/ubi:latest bash -s <<'CONTAINER'
+          set -euo pipefail
+          dnf install -y --enablerepo='ubi-10-*' --setopt=install_weak_deps=False \
+            gcc gcc-c++ clang lld llvm cmake make pkgconf-pkg-config \
+            findutils diffutils binutils tar gzip xz expat libxml2 dbus-daemon
+          export PATH="/sdk/tools:$PATH"
+          wayland-scanner --version
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 3 https://sh.rustup.rs -o /tmp/overink-rustup.sh
+          sh /tmp/overink-rustup.sh -y --profile minimal --default-toolchain "$RUST_VERSION" --component rustfmt --component clippy
           . "$HOME/.cargo/env"
-          actual=$(rustc -vV | sed -n 's/^host: //p')
-          test "$actual" = "$OVERINK_TARGET"
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          if [[ $TARGET_MODE == native ]]; then test "$host" = "$OVERINK_TARGET"; else test "$host" != "$OVERINK_TARGET"; fi
+          rustup target add "$OVERINK_TARGET"
           export CARGO_BUILD_JOBS=2
-          cargo test --locked --release
-          cargo build --locked --release
-          OVERINK_STATE_DIR=/tmp/overink-smoke target/release/overink --smoke-test
+          export CARGO_TARGET_DIR=/tmp/overink-target
+          export PKG_CONFIG_ALLOW_CROSS=1
+          export PKG_CONFIG_SYSROOT_DIR=/sdk/sysroot
+          multiarch=$TARGET_TRIPLE
+          if [[ $TARGET_TRIPLE == i686-linux-gnu ]]; then multiarch=i386-linux-gnu; fi
+          export PKG_CONFIG_LIBDIR="/sdk/sysroot/usr/lib/$multiarch/pkgconfig:/sdk/sysroot/usr/share/pkgconfig"
+          gcc_dir=$(find /sdk/sysroot/usr/lib/gcc -name crtbeginS.o -print -quit)
+          test -n "$gcc_dir"
+          gcc_dir=${gcc_dir%/*}
+          mkdir /tmp/overink-cc
+          for compiler in clang clang++; do
+            cat > "/tmp/overink-cc/$compiler" <<WRAPPER
+          #!/bin/sh
+          exec /usr/bin/$compiler --target=$TARGET_TRIPLE --sysroot=/sdk/sysroot --gcc-install-dir=$gcc_dir -fuse-ld=lld -Qunused-arguments "\$@"
+          WRAPPER
+            chmod +x "/tmp/overink-cc/$compiler"
+          done
+          key=${OVERINK_TARGET//-/_}
+          upper=${key^^}
+          export "CC_$key=/tmp/overink-cc/clang" "CXX_$key=/tmp/overink-cc/clang++" "AR_$key=llvm-ar"
+          export "CARGO_TARGET_${upper}_LINKER=/tmp/overink-cc/clang"
+          export CMAKE_TOOLCHAIN_FILE=/tmp/overink-toolchain.cmake
+          if [[ $TARGET_MODE == cross ]]; then
+            printf 'set(CMAKE_SYSTEM_NAME Linux)\nset(CMAKE_SYSTEM_PROCESSOR %s)\n' "${TARGET_TRIPLE%%-*}" > "$CMAKE_TOOLCHAIN_FILE"
+          fi
+          cat >> "$CMAKE_TOOLCHAIN_FILE" <<'CMAKE'
+          set(CMAKE_SYSROOT /sdk/sysroot)
+          set(CMAKE_C_COMPILER /tmp/overink-cc/clang)
+          set(CMAKE_CXX_COMPILER /tmp/overink-cc/clang++)
+          set(CMAKE_AR /usr/bin/llvm-ar)
+          set(CMAKE_RANLIB /usr/bin/llvm-ranlib)
+          set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+          set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+          set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+          set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+          set(SDL_X11_SHARED ON CACHE BOOL "" FORCE)
+          set(SDL_WAYLAND_SHARED ON CACHE BOOL "" FORCE)
+          CMAKE
+          if [[ $TARGET_MODE == native ]]; then
+            loader=$(find "/sdk/sysroot/usr/lib/$multiarch" -type f -name 'ld-linux*.so*' -print -quit)
+            test -n "$loader"
+            cat > /tmp/overink-cc/run-native <<WRAPPER
+          #!/bin/sh
+          exec "$loader" --library-path "/sdk/sysroot/usr/lib/$multiarch:/sdk/sysroot/lib/$multiarch" "\$@"
+          WRAPPER
+            chmod +x /tmp/overink-cc/run-native
+            export "CARGO_TARGET_${upper}_RUNNER=/tmp/overink-cc/run-native"
+            cargo fmt --all -- --check
+            cargo clippy --locked --target "$OVERINK_TARGET" --all-targets -- -D warnings
+            cargo test --locked --release --target "$OVERINK_TARGET"
+            dbus-run-session -- cargo test --locked --release --target "$OVERINK_TARGET" portal_response -- --ignored
+          fi
+          cargo build --locked --release --target "$OVERINK_TARGET"
+          output="$CARGO_TARGET_DIR/$OVERINK_TARGET/release"
+          config=$(find "$output/build" -name SDL_build_config.h -print -quit)
+          test -n "$config"
+          grep -q '^#define SDL_VIDEO_DRIVER_X11 1' "$config"
+          grep -q '^#define SDL_VIDEO_DRIVER_WAYLAND 1' "$config"
+          grep -q '^#define SDL_VIDEO_DRIVER_X11_DYNAMIC "libX11\.so' "$config"
+          grep -q '^#define SDL_VIDEO_DRIVER_WAYLAND_DYNAMIC "libwayland-client\.so' "$config"
+          readelf -h "$output/overink" | grep -iE "Machine:.*$ELF_MACHINE"
+          case "$OVERINK_TARGET" in
+            i686-*) readelf -h "$output/overink" | grep -q 'Class:.*ELF32' ;;
+            s390x-*) readelf -h "$output/overink" | grep -q 'Data:.*big endian' ;;
+            *) readelf -h "$output/overink" | grep -q 'Data:.*little endian' ;;
+          esac
+          if [[ $TARGET_MODE == native ]]; then
+            OVERINK_STATE_DIR=/tmp/overink-smoke /tmp/overink-cc/run-native "$output/overink" --smoke-test
+          fi
           mkdir -p dist
-          tar -czf "dist/OverInk-$actual.tar.gz" -C target/release overink -C ../.. LICENSE
+          tar -czf "dist/OverInk-$OVERINK_TARGET.tar.gz" -C "$output" overink -C /src LICENSE
           CONTAINER
       - uses: actions/upload-artifact@v4
         with:
@@ -200,127 +313,147 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-  linux-loong64:
-    name: Linux loong64 musl (QEMU)
-    if: github.event_name == 'workflow_dispatch' && inputs.extra_linux
-    runs-on: ubuntu-24.04
-    timeout-minutes: 350
-    steps:
-      - uses: actions/checkout@v5
-      - uses: uraimo/run-on-arch-action@v3.2.0
-        with:
-          arch: loongarch64
-          distro: alpine_latest
-          install: |
-            apk add --no-cache build-base cmake ninja pkgconf rust cargo linux-headers libx11-dev libxext-dev libxi-dev libxrandr-dev libxcursor-dev libxfixes-dev libxrender-dev libxscrnsaver-dev libxtst-dev wayland-dev wayland-protocols libxkbcommon-dev mesa-dev
-          run: |
-            set -eu
-            actual=$(rustc -vV | sed -n 's/^host: //p')
-            test "$actual" = loongarch64-unknown-linux-musl
-            CARGO_BUILD_JOBS=2 cargo test --locked --release
-            CARGO_BUILD_JOBS=2 cargo build --locked --release
-            OVERINK_STATE_DIR=/tmp/overink-smoke target/release/overink --smoke-test
-            mkdir -p dist
-            tar -czf "dist/OverInk-$actual.tar.gz" -C target/release overink -C ../.. LICENSE
-      - uses: actions/upload-artifact@v4
-        with:
-          name: OverInk-loongarch64-unknown-linux-musl
-          path: dist/*
-          if-no-files-found: error
-
   freebsd:
-    name: FreeBSD ${{ matrix.target }} (VM)
+    name: FreeBSD ${{ matrix.target }} · x64 VM
     runs-on: ubuntu-24.04
-    timeout-minutes: 350
+    timeout-minutes: 100
     strategy:
       fail-fast: false
       matrix:
         include:
-          - {arch: x86_64, target: x86_64-unknown-freebsd}
-          - {arch: aarch64, target: aarch64-unknown-freebsd}
+          - {target: x86_64-unknown-freebsd, cpu: x86_64, abi: amd64, layout: amd64/amd64, release: '15.1', machine: x86-64}
+          - {target: i686-unknown-freebsd, cpu: i686, abi: i386, layout: i386/i386, release: '14.4', machine: '80386'}
+          - {target: powerpc64le-unknown-freebsd, cpu: powerpc64le, abi: powerpc64le, layout: powerpc/powerpc64le, release: '15.1', machine: PowerPC64}
+          - {target: aarch64-unknown-freebsd, cpu: aarch64, abi: aarch64, layout: arm64/aarch64, release: '15.1', machine: AArch64}
+          - {target: riscv64gc-unknown-freebsd, cpu: riscv64, abi: riscv64, layout: riscv/riscv64, release: '15.1', machine: RISC-V}
     steps:
       - uses: actions/checkout@v5
       - uses: vmactions/freebsd-vm@v1
         with:
-          arch: ${{ matrix.arch }}
+          arch: x86_64
           release: '15.1'
           usesh: true
           sync: scp
+          envs: RUST_VERSION
           mem: 8192
+          cpu: 3
           prepare: |
-            pkg install -y rust cmake ninja pkgconf libX11 libXext libXi libXrandr libXcursor libXfixes libXrender libXScrnSaver libXtst wayland wayland-protocols libxkbcommon mesa-libs
+            pkg install -y cmake ninja pkgconf python3 libX11 libXext libXi libXrandr \
+              libXcursor libXfixes libXrender libXScrnSaver libXtst wayland wayland-protocols libxkbcommon mesa-libs
           run: |
             set -eu
             export PATH="/usr/local/bin:$PATH"
-            actual=$(rustc -vV | sed -n 's/^host: //p')
-            test "$actual" = '${{ matrix.target }}'
+            target='${{ matrix.target }}'
+            machine='${{ matrix.machine }}'
+            release='${{ matrix.release }}'
+            test "$(uname -m)" = amd64
+            fetch -qo /tmp/overink-rustup.sh https://sh.rustup.rs
+            sh /tmp/overink-rustup.sh -y --profile minimal --default-toolchain "$RUST_VERSION"
+            . "$HOME/.cargo/env"
+            host=$(rustc -vV | sed -n 's/^host: //p')
+            test "$host" = x86_64-unknown-freebsd
             export CARGO_BUILD_JOBS=2
-            cargo test --locked --release
-            cargo build --locked --release
-            OVERINK_STATE_DIR=/tmp/overink-smoke target/release/overink --smoke-test
+            export CARGO_TARGET_DIR=/tmp/overink-target
+            build_std=false
+            if rustup target list | awk '{print $1}' | grep -qx "$target"; then
+              rustup target add "$target"
+            else
+              rustc --print target-list | grep -qx "$target"
+              rustup component add rust-src
+              build_std=true
+            fi
+            if [ "$target" != "$host" ]; then
+              work=$(mktemp -d)
+              sysroot="$work/sysroot"
+              mkdir -p "$sysroot"
+              url="https://download.freebsd.org/releases/${{ matrix.layout }}/$release-RELEASE"
+              fetch -qo "$work/MANIFEST" "$url/MANIFEST"
+              fetch -qo "$work/base.txz" "$url/base.txz"
+              expected=$(awk '$1 == "base.txz" { print $2 }' "$work/MANIFEST")
+              test -n "$expected"
+              test "$(sha256 -q "$work/base.txz")" = "$expected"
+              tar -xf "$work/base.txz" -C "$sysroot"
+              # X11/Wayland are dynamic SDL backends. Their public headers are
+              # shared across FreeBSD ABIs. Native libraries supply SONAMEs only.
+              mkdir -p "$sysroot/usr/local/include"
+              for header in /usr/local/include/X11 /usr/local/include/wayland*.h \
+                  /usr/local/include/xkbcommon /usr/local/include/GL /usr/local/include/EGL \
+                  /usr/local/include/GLES* /usr/local/include/KHR; do
+                if [ -e "$header" ]; then cp -RL "$header" "$sysroot/usr/local/include/"; fi
+              done
+              python3 - "$sysroot" <<'PY'
+            import os, pathlib, sys
+            root = pathlib.Path(sys.argv[1])
+            for directory, dirs, files in os.walk(root, followlinks=False):
+                for name in dirs + files:
+                    path = pathlib.Path(directory) / name
+                    if path.is_symlink():
+                        target = os.readlink(path)
+                        if target.startswith('/'):
+                            path.unlink()
+                            path.symlink_to(os.path.relpath(root / target.lstrip('/'), path.parent))
+            PY
+              triple="${{ matrix.cpu }}-unknown-freebsd$release"
+              extra=
+              if [ '${{ matrix.cpu }}' = riscv64 ]; then extra='-march=rv64gc -mabi=lp64d'; fi
+              for compiler in clang clang++; do
+                cat > "$work/$compiler" <<WRAPPER
+            #!/bin/sh
+            exec /usr/bin/$compiler --target=$triple --sysroot="$sysroot" -fuse-ld=lld -Qunused-arguments $extra "\$@"
+            WRAPPER
+                chmod +x "$work/$compiler"
+              done
+              key=$(printf '%s' "$target" | tr '-' '_')
+              upper=$(printf '%s' "$key" | tr '[:lower:]' '[:upper:]')
+              export "CC_$key=$work/clang" "CXX_$key=$work/clang++" "AR_$key=ar"
+              export "CARGO_TARGET_${upper}_LINKER=$work/clang"
+              export PKG_CONFIG_ALLOW_CROSS=1
+              export PKG_CONFIG_SYSROOT_DIR="$sysroot"
+              export PKG_CONFIG_LIBDIR=/usr/local/libdata/pkgconfig
+              export CMAKE_TOOLCHAIN_FILE="$work/toolchain.cmake"
+              cat > "$CMAKE_TOOLCHAIN_FILE" <<CMAKE
+            set(CMAKE_SYSTEM_NAME FreeBSD)
+            set(CMAKE_SYSTEM_PROCESSOR ${{ matrix.cpu }})
+            set(CMAKE_SYSROOT "$sysroot")
+            set(CMAKE_C_COMPILER "$work/clang")
+            set(CMAKE_CXX_COMPILER "$work/clang++")
+            set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+            set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+            set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY BOTH)
+            set(CMAKE_LIBRARY_PATH /usr/local/lib)
+            set(SDL_X11_SHARED ON CACHE BOOL "" FORCE)
+            set(SDL_WAYLAND_SHARED ON CACHE BOOL "" FORCE)
+            set(SDL_WAYLAND_LIBDECOR OFF CACHE BOOL "" FORCE)
+            set(SDL_KMSDRM OFF CACHE BOOL "" FORCE)
+            CMAKE
+            else
+              cargo test --locked --release --target "$target"
+            fi
+            if [ "$build_std" = true ]; then
+              RUSTC_BOOTSTRAP=1 CARGO_PROFILE_RELEASE_PANIC=abort cargo build \
+                -Z build-std=std,panic_abort --locked --release --target "$target"
+            else
+              cargo build --locked --release --target "$target"
+            fi
+            output="$CARGO_TARGET_DIR/$target/release"
+            config=$(find "$output/build" -name SDL_build_config.h -print -quit)
+            test -n "$config"
+            grep -q '^#define SDL_VIDEO_DRIVER_X11 1' "$config"
+            grep -q '^#define SDL_VIDEO_DRIVER_WAYLAND 1' "$config"
+            readelf -h "$output/overink" | grep -iE "Machine:.*$machine"
+            readelf -h "$output/overink" | grep -iq 'OS/ABI:.*FreeBSD'
+            if [ "$target" != "$host" ]; then
+              grep -q '^#define SDL_VIDEO_DRIVER_X11_DYNAMIC "libX11\.so' "$config"
+              grep -q '^#define SDL_VIDEO_DRIVER_WAYLAND_DYNAMIC "libwayland-client\.so' "$config"
+              if readelf -d "$output/overink" | grep -E 'NEEDED.*(libX|libwayland|libxkbcommon|libEGL|libGL)'; then
+                echo "Graphics libraries must be loaded dynamically on the target"
+                exit 1
+              fi
+            else
+              OVERINK_STATE_DIR=/tmp/overink-smoke "$output/overink" --smoke-test
+            fi
             mkdir -p dist
-            tar -czf "dist/OverInk-$actual.tar.gz" -C target/release overink -C ../.. LICENSE
-      - uses: actions/upload-artifact@v4
-        with:
-          name: OverInk-${{ matrix.target }}
-          path: dist/*
-          if-no-files-found: error
-
-  freebsd-native-extra:
-    # Native hosts need a working matching Rust compiler and SDL3 build dependencies.
-    # Variables: FREEBSD_I686_HOST, FREEBSD_PPC64LE_HOST, FREEBSD_RISCV64_HOST (user@host).
-    # Secrets: OVERINK_FREEBSD_SSH_KEY, OVERINK_FREEBSD_KNOWN_HOSTS (verified host keys).
-    name: FreeBSD ${{ matrix.target }} (native SSH)
-    if: github.event_name == 'workflow_dispatch' && inputs.extra_freebsd
-    runs-on: ubuntu-24.04
-    timeout-minutes: 350
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - {target: i686-unknown-freebsd, host_var: FREEBSD_I686_HOST}
-          - {target: powerpc64le-unknown-freebsd, host_var: FREEBSD_PPC64LE_HOST}
-          - {target: riscv64gc-unknown-freebsd, host_var: FREEBSD_RISCV64_HOST}
-    steps:
-      - uses: actions/checkout@v5
-      - name: Build, test and retrieve packages
-        shell: bash
-        env:
-          OVERINK_SSH_HOST: ${{ vars[matrix.host_var] }}
-          OVERINK_SSH_KEY: ${{ secrets.OVERINK_FREEBSD_SSH_KEY }}
-          OVERINK_KNOWN_HOSTS: ${{ secrets.OVERINK_FREEBSD_KNOWN_HOSTS }}
-          OVERINK_TARGET: ${{ matrix.target }}
-        run: |
-          set -euo pipefail
-          : "${OVERINK_SSH_HOST:?Set the FREEBSD_*_HOST repository variables}"
-          : "${OVERINK_SSH_KEY:?Set OVERINK_FREEBSD_SSH_KEY}"
-          : "${OVERINK_KNOWN_HOSTS:?Set OVERINK_FREEBSD_KNOWN_HOSTS}"
-          case "$OVERINK_SSH_HOST" in *[!a-zA-Z0-9_.@-]*) exit 1;; esac
-          case "$OVERINK_TARGET" in i686-unknown-freebsd|powerpc64le-unknown-freebsd|riscv64gc-unknown-freebsd) ;; *) exit 1;; esac
-          key_dir=$(mktemp -d)
-          trap 'rm -rf "$key_dir"' EXIT
-          chmod 700 "$key_dir"
-          printf '%s\n' "$OVERINK_SSH_KEY" > "$key_dir/key"
-          printf '%s\n' "$OVERINK_KNOWN_HOSTS" > "$key_dir/known_hosts"
-          chmod 600 "$key_dir/key" "$key_dir/known_hosts"
-          ssh_args=(-o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$key_dir/known_hosts" -i "$key_dir/key")
-          remote="overink-ci-${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}"
-          ssh "${ssh_args[@]}" "$OVERINK_SSH_HOST" "mkdir -p '$remote'"
-          tar --exclude=target --exclude=.git --exclude=dist -czf - . | ssh "${ssh_args[@]}" "$OVERINK_SSH_HOST" "tar -xzf - -C '$remote'"
-          ssh "${ssh_args[@]}" "$OVERINK_SSH_HOST" "cd '$remote' && expected='$OVERINK_TARGET' sh -s" <<'REMOTE'
-          set -eu
-          export PATH="/usr/local/bin:$PATH"
-          actual=$(rustc -vV | sed -n 's/^host: //p')
-          test "$actual" = "$expected"
-          export CARGO_BUILD_JOBS=2
-          cargo test --locked --release
-          cargo build --locked --release
-          OVERINK_STATE_DIR=/tmp/overink-smoke target/release/overink --smoke-test
-          mkdir -p dist
-          tar -czf "dist/OverInk-$actual.tar.gz" -C target/release overink -C ../.. LICENSE
-          REMOTE
-          mkdir -p dist
-          scp -O "${ssh_args[@]}" "$OVERINK_SSH_HOST:$remote/dist/*" dist/
+            tar -czf "dist/OverInk-$target.tar.gz" -C "$output" overink -C "$PWD" LICENSE
       - uses: actions/upload-artifact@v4
         with:
           name: OverInk-${{ matrix.target }}

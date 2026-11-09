@@ -1,5 +1,7 @@
+mod panel;
+
 use crate::{
-    color::{InkColor, PRESETS, Space},
+    color::{InkColor, PRESETS},
     display::{Display, Pages},
     export,
     frame_rate::{FramePacer, FrameRate},
@@ -62,6 +64,7 @@ struct App {
     suspended: bool,
     frozen: bool,
     protected: Option<crate::controller::Rect>,
+    panel: Option<crate::toolbar::Panel>,
     pens: HashMap<u32, Pen>,
     pen_proximity: BTreeSet<u32>,
     touches: BTreeMap<TouchKey, FingerStroke>,
@@ -111,6 +114,7 @@ impl App {
             suspended: false,
             frozen: false,
             protected: None,
+            panel: None,
             pens: HashMap::new(),
             pen_proximity: BTreeSet::new(),
             touches: BTreeMap::new(),
@@ -252,6 +256,7 @@ impl App {
         self.stop();
         self.reset_contacts();
         self.pass = true;
+        self.panel = None;
         self.status = "Mouse mode: click the desktop. Select any drawing tool to resume.".into();
     }
     fn use_tool(&mut self, tool: Tool) {
@@ -684,220 +689,6 @@ impl App {
         self.color = color;
         self.hex_entry = crate::color::HexEntry::new(color);
     }
-    fn color_controls(&mut self, ui: &mut egui::Ui, commands: &mut Commands) {
-        ui.horizontal_wrapped(|ui| {
-            for (i, rgb) in PRESETS.iter().enumerate() {
-                let color = egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
-                let selected = self.color.srgb8() == *rgb;
-                let button = egui::Button::new(
-                    egui::RichText::new((i + 1).to_string()).color(egui::Color32::WHITE),
-                )
-                .fill(color)
-                .stroke(egui::Stroke::new(
-                    if selected { 2. } else { 0. },
-                    egui::Color32::WHITE,
-                ))
-                .min_size(egui::vec2(32., 30.));
-                if ui
-                    .add(button)
-                    .on_hover_text(format!("{}  (sRGB)", InkColor::from_rgb8(*rgb).css()))
-                    .clicked()
-                {
-                    self.select_color(InkColor::from_rgb8(*rgb));
-                }
-            }
-            ui.separator();
-            ui.label("Palette");
-            let mut rgb = self.color.srgb8();
-            if ui
-                .color_edit_button_srgb(&mut rgb)
-                .on_hover_text("Choose a color from the palette")
-                .changed()
-            {
-                self.select_color(InkColor::from_rgb8(rgb));
-            }
-            if ui
-                .button("Pick screen")
-                .on_hover_text("Choose a desktop pixel; Esc cancels")
-                .clicked()
-            {
-                commands.pick = true;
-            }
-            self.hex_entry.sync(self.color);
-            ui.label("HEX");
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut self.hex_entry.text)
-                    .desired_width(90.)
-                    .char_limit(16)
-                    .hint_text("#FFFFFF"),
-            );
-            let accept = ui.button("Apply").clicked()
-                || (response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)));
-            if (response.has_focus() || response.lost_focus())
-                && ui.input(|input| input.key_pressed(egui::Key::Escape))
-            {
-                self.hex_entry.revert();
-            } else {
-                if (response.changed() || accept)
-                    && let Some(color) = self.hex_entry.apply()
-                {
-                    self.color = color;
-                }
-                if response.lost_focus() || accept {
-                    self.hex_entry.normalize();
-                }
-            }
-            if self.hex_entry.invalid {
-                ui.colored_label(
-                    egui::Color32::from_rgb(236, 113, 125),
-                    "Use #RRGGBB or #RGB",
-                );
-            }
-        });
-    }
-    fn ui(
-        &mut self,
-        ui: &mut egui::Ui,
-        render: &Renderer,
-        color: &ColorManager,
-        video: &str,
-        freeze_unavailable: Option<&'static str>,
-    ) -> Commands {
-        let mut c = Commands::default();
-        egui::Frame::new()
-            .fill(egui::Color32::from_rgb(24, 28, 38))
-            .inner_margin(16)
-            .show(ui, |ui| {
-                if self.picking {
-                    ui.heading("OverInk - pick a screen color");
-                    ui.label("Click a desktop pixel on this display. Esc or right-click cancels.");
-                    if ui.button("Cancel picker").clicked() { c.pick = true; }
-                    return;
-                }
-                ui.horizontal(|ui| {
-                    ui.heading(egui::RichText::new("OverInk").color(egui::Color32::from_rgb(224, 227, 240)));
-                    ui.label(egui::RichText::new("DRAW OVER YOUR IDEAS").size(10.).color(egui::Color32::GRAY));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Quit").clicked() { c.quit = true; }
-                        if ui.button(if self.hidden { "Show" } else { "Hide" }).clicked() {
-                            self.stop(); self.hidden = !self.hidden; c.mode = true;
-                        }
-                        let label = if self.pass { "Resume drawing" } else { "Mouse mode" };
-                        let button = egui::Button::new(label).fill(egui::Color32::from_rgb(73, 86, 128));
-                        if ui.add(button).clicked() { self.toggle_mouse(); c.mode = true; }
-                    });
-                });
-                ui.add_space(3.);
-                ui.horizontal_wrapped(|ui| {
-                    if ui.selectable_label(self.pass, "Mouse")
-                        .on_hover_text("Click underlying apps while keeping your ink. A drawing tool resumes drawing.").clicked() {
-                        self.use_mouse(); c.mode=true;
-                    }
-                    for tool in Tool::ALL {
-                        if ui.selectable_label(!self.pass && self.tool == tool, tool.label()).clicked() {
-                            self.use_tool(tool); c.mode=true;
-                        }
-                    }
-                    ui.separator();
-                    if ui
-                        .button("Undo")
-                        .on_hover_text("Undo the last change (Ctrl/Cmd+Z)")
-                        .clicked()
-                    {
-                        self.touches.clear();
-                        self.history.undo();
-                    }
-                    if ui
-                        .button("Redo")
-                        .on_hover_text("Redo the last undone change (Ctrl/Cmd+Shift+Z)")
-                        .clicked()
-                    {
-                        self.touches.clear();
-                        self.history.redo();
-                    }
-                });
-                self.color_controls(ui, &mut c);
-                ui.horizontal(|ui| {
-                    egui::ComboBox::from_id_salt("source-gamut")
-                        .selected_text(match self.color.space { Space::Srgb => "sRGB color", Space::DisplayP3 => "Display P3 color" })
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.color.space, Space::Srgb, "sRGB color");
-                            ui.selectable_value(&mut self.color.space, Space::DisplayP3, "Display P3 color");
-                        });
-                    ui.add(egui::Slider::new(&mut self.width, 1.0..=48.0).text("Size"));
-                    ui.label("Frame rate");
-                    egui::ComboBox::from_id_salt("frame-rate")
-                        .selected_text(if self.frame_rate == FrameRate::Auto {
-                            format!("Auto ({:.2} FPS)", self.frame_rate.hz(self.refresh_hz()))
-                        } else { self.frame_rate.label().into() })
-                        .show_ui(ui, |ui| {
-                            for rate in FrameRate::ALL {
-                                if ui.selectable_value(&mut self.frame_rate, rate, rate.label()).changed() { c.frame_rate = true; }
-                            }
-                        }).response.on_hover_text("Auto follows the display containing the control window. Actual output is limited by the display and renderer.");
-                });
-                ui.horizontal(|ui| {
-                    ui.checkbox(&mut self.pressure, "Pen pressure");
-                    if ui.checkbox(&mut self.touch_enabled, "Touch draw").changed() { self.touches.clear(); }
-                    ui.add(egui::Slider::new(&mut self.curve, 0.2..=3.).text("Curve"));
-                    ui.add(egui::Slider::new(&mut self.opacity, 0.1..=1.).text("Opacity"));
-                });
-                ui.horizontal(|ui| {
-                    if ui.button("Clear page").clicked() { self.reset_contacts(); self.history.clear(); }
-                    ui.separator();
-                    if ui.checkbox(&mut self.board, "Whiteboard").changed() {
-                        c.mode = true;
-                        if self.board { self.frozen = false; c.background = true; }
-                    }
-                    egui::ComboBox::from_id_salt("display")
-                        .selected_text(self.displays.get(self.display).map(|d| d.name.clone()).unwrap_or_else(|| "No display".into()))
-                        .show_ui(ui, |ui| {
-                            for (i, display) in self.displays.iter().enumerate() {
-                                if ui.selectable_value(&mut self.display, i, &display.name).changed() { c.display = true; }
-                            }
-                        }).response.on_hover_text("Drag this control window to another display to draw there; each display has its own page.");
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Background");
-                    if ui.selectable_label(!self.board && !self.frozen, "Live desktop").clicked() {
-                        c.background = self.board || self.frozen; self.frozen = false; self.board = false;
-                    }
-                    let freeze = ui.add_enabled_ui(freeze_unavailable.is_none(), |ui| {
-                        ui.selectable_label(self.frozen, "Frozen desktop")
-                            .on_disabled_hover_text(freeze_unavailable.unwrap_or_default())
-                    }).inner;
-                    if freeze.clicked() && !self.frozen {
-                        c.background = true; self.frozen = true; self.board = false;
-                    }
-                    if self.frozen && ui.button("Refresh snapshot").clicked() { c.background = true; }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("File");
-                    ui.add(egui::TextEdit::singleline(&mut self.path).desired_width(410.));
-                    if ui.button("Save").clicked() { self.save(); }
-                    if ui.button("Open").clicked() { self.load(); }
-                    if ui.button("SVG").clicked() { self.export(); }
-                });
-                ui.separator();
-                let p = self.pens.values().find(|p| p.down).or_else(|| self.pens.values().next()).copied().unwrap_or_default();
-                ui.horizontal(|ui| {
-                    ui.label(if self.pen_seen { "Native pen" } else if !self.touches.is_empty() { "Touchscreen" } else { "Mouse / waiting for pen" });
-                    ui.add(egui::ProgressBar::new(p.pressure).desired_width(100.).text(format!("{:.1}%", p.pressure * 100.)));
-                    ui.label(format!("tilt {:.0} / {:.0}   |   {} strokes", p.tilt[0], p.tilt[1], self.history.doc.strokes.len()));
-                });
-                let (hdr, headroom) = render.hdr();
-                let encoding = if hdr { "HDR: SDR-white mapped" } else if render.extended { "linear sRGB" } else { "SDR sRGB" };
-                ui.small(format!("{video} / {} / {encoding} / headroom {headroom:.2}x", render.name));
-                ui.small(&color.status);
-                if video == "wayland" {
-                    ui.colored_label(egui::Color32::from_rgb(236, 173, 69),
-                        "Wayland: compositor controls overlay position and stacking. Use --x11 for desktop overlay if needed.");
-                }
-                ui.small("Mouse: desktop clicks   Space: mouse / draw   P: pen   E: erase   Ctrl/Cmd+Z: undo");
-                ui.label(egui::RichText::new(&self.status).size(11.).color(egui::Color32::from_rgb(165, 178, 211)));
-            });
-        c
-    }
     fn paint(
         &mut self,
         r: &Renderer,
@@ -1117,22 +908,20 @@ pub fn run(options: Options) -> Result<(), String> {
     let canvas_render = Renderer::new(&canvas, options.sdr)?;
     let xwayland = crate::background::is_xwayland(&canvas, &video);
     // Declare renderers before GUI texture owners, so textures are destroyed first.
-    let toolbar = Window::new("OverInk", 820, 500, false)?;
+    let toolbar = Window::new(
+        "OverInk",
+        crate::toolbar::WIDTH as i32,
+        crate::toolbar::HEIGHT as i32,
+        false,
+    )?;
+    toolbar.setup_toolbar();
+    if !options.smoke {
+        let _ = toolbar.arrange_toolbar(false, app.pages.active);
+    }
     let toolbar_render = Renderer::new(&toolbar, options.sdr)?;
-    let units = toolbar.scale() / unsafe { SDL_GetWindowPixelDensity(toolbar.raw) }.max(0.1);
-    unsafe {
-        SDL_SetWindowSize(
-            toolbar.raw,
-            (820. * units).round() as i32,
-            (500. * units).round() as i32,
-        );
-    }
-    if !options.smoke
-        && let Some(id) = app.pages.active
-    {
-        let _ = toolbar.place_on_display(id, false);
-    }
     let mut gui = gui::Gui::new();
+    let mark = crate::toolbar::brand(&gui.ctx);
+    let mut toolbar_expanded = false;
     let mut native = Passthrough::new(&canvas);
     let mut canvas_color = ColorManager::default();
     canvas_color.refresh(&canvas, canvas_render.extended);
@@ -1257,18 +1046,6 @@ pub fn run(options: Options) -> Result<(), String> {
         if !running {
             break;
         }
-        if controller_scale_changed {
-            let units =
-                toolbar.scale() / unsafe { SDL_GetWindowPixelDensity(toolbar.raw) }.max(0.1);
-            gui.units = units;
-            unsafe {
-                SDL_SetWindowSize(
-                    toolbar.raw,
-                    (820. * units).round() as i32,
-                    (500. * units).round() as i32,
-                );
-            }
-        }
         if !options.smoke
             && (topology_dirty || last_displays.elapsed() > Duration::from_millis(500))
         {
@@ -1370,6 +1147,13 @@ pub fn run(options: Options) -> Result<(), String> {
             }
             last_color = Instant::now();
         }
+        let expanded = app.panel.is_some() && !app.picking;
+        if expanded != toolbar_expanded || controller_scale_changed {
+            toolbar_expanded = expanded;
+            if let Err(error) = toolbar.arrange_toolbar(expanded, None) {
+                app.status = error;
+            }
+        }
         let mut input = gui.input(&toolbar);
         input.predicted_dt = pacer.period.as_secs_f32();
         let ctx = gui.ctx.clone();
@@ -1381,6 +1165,7 @@ pub fn run(options: Options) -> Result<(), String> {
                 &canvas_color,
                 &video,
                 snapshot_mode.unavailable(),
+                mark.id(),
             )
         });
         if cmd.quit {
@@ -1427,7 +1212,7 @@ pub fn run(options: Options) -> Result<(), String> {
         if cmd.display {
             app.stop();
             if let Some(display) = app.displays.get(app.display)
-                && let Err(error) = toolbar.place_on_display(display.id, false)
+                && let Err(error) = toolbar.arrange_toolbar(toolbar_expanded, Some(display.id))
             {
                 app.status = error;
             }
@@ -1456,7 +1241,7 @@ pub fn run(options: Options) -> Result<(), String> {
             }
             continue;
         }
-        toolbar_render.begin(&toolbar, [0.094, 0.11, 0.149, 1.])?;
+        toolbar_render.begin(&toolbar, [246. / 255., 250. / 255., 253. / 255., 1.])?;
         gui.paint(&toolbar_render, &toolbar, &toolbar_color, output)?;
         toolbar_render.present()?;
         let mouse = app.pass && !picker.choosing() && mouse_released();
@@ -1674,6 +1459,7 @@ mod touch_tests {
             suspended: false,
             frozen: false,
             protected: None,
+            panel: None,
             pens: HashMap::new(),
             pen_proximity: BTreeSet::new(),
             touches: BTreeMap::new(),

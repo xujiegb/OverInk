@@ -26,13 +26,14 @@ impl Gui {
         let ctx = Context::default();
         // Apply input actions once per native frame, including mode toggles.
         ctx.options_mut(|options| options.max_passes = std::num::NonZeroUsize::new(1).unwrap());
-        let mut v = egui::Visuals::dark();
-        v.panel_fill = egui::Color32::from_rgb(24, 28, 38);
+        ctx.set_theme(egui::Theme::Light);
+        let mut v = egui::Visuals::light();
+        v.panel_fill = crate::toolbar::FILL;
         v.window_fill = v.panel_fill;
-        v.selection.bg_fill = egui::Color32::from_rgb(80, 91, 142);
+        v.selection.bg_fill = egui::Color32::from_rgb(208, 236, 249);
         v.widgets.active.bg_fill = v.selection.bg_fill;
         ctx.set_visuals(v);
-        ctx.style_mut_of(egui::Theme::Dark, |s| {
+        ctx.style_mut_of(egui::Theme::Light, |s| {
             s.spacing.item_spacing = egui::vec2(8., 9.);
             s.spacing.button_padding = egui::vec2(10., 7.);
         });

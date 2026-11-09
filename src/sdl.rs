@@ -5,7 +5,7 @@ pub use sdl3_sys::{
     timer::*, touch::*, video::*,
 };
 use std::{
-    ffi::{CStr, CString},
+    ffi::{CStr, CString, c_void},
     ptr,
 };
 
@@ -70,6 +70,27 @@ pub struct Window {
     pub raw: *mut SDL_Window,
     pub id: SDL_WindowID,
 }
+unsafe extern "C" fn toolbar_hit_test(
+    window: *mut SDL_Window,
+    point: *const SDL_Point,
+    _: *mut c_void,
+) -> SDL_HitTestResult {
+    unsafe {
+        if let Some(point) = point.as_ref() {
+            let scale =
+                SDL_GetWindowDisplayScale(window) / SDL_GetWindowPixelDensity(window).max(0.1);
+            if point.x >= 0
+                && (point.x as f32) < crate::toolbar::WIDTH * scale
+                && point.y >= 0
+                && (point.y as f32) < crate::toolbar::GRIP_HEIGHT * scale
+            {
+                return SDL_HITTEST_DRAGGABLE;
+            }
+        }
+    }
+    SDL_HITTEST_NORMAL
+}
+
 impl Window {
     pub fn new(title: &str, w: i32, h: i32, overlay: bool) -> Result<Self, String> {
         unsafe {
@@ -96,6 +117,64 @@ impl Window {
             let (mut w, mut h) = (0, 0);
             SDL_GetWindowSize(self.raw, &mut w, &mut h);
             [w.max(1) as f32, h.max(1) as f32]
+        }
+    }
+    pub fn setup_toolbar(&self) {
+        unsafe {
+            SDL_SetWindowResizable(self.raw, false);
+            if SDL_SetWindowHitTest(self.raw, Some(toolbar_hit_test), ptr::null_mut()) {
+                SDL_SetWindowBordered(self.raw, false);
+            }
+            let icon = crate::toolbar::image();
+            let (w, h) = (icon.width() as i32, icon.height() as i32);
+            let mut pixels = icon.into_raw();
+            let surface = SDL_CreateSurfaceFrom(
+                w,
+                h,
+                SDL_PIXELFORMAT_RGBA32,
+                pixels.as_mut_ptr().cast(),
+                w * 4,
+            );
+            if !surface.is_null() {
+                SDL_SetWindowIcon(self.raw, surface);
+                SDL_DestroySurface(surface);
+            }
+        }
+    }
+    pub fn arrange_toolbar(&self, expanded: bool, on_display: Option<u32>) -> Result<(), String> {
+        unsafe {
+            let units = self.scale() / SDL_GetWindowPixelDensity(self.raw).max(0.1);
+            let width = crate::toolbar::WIDTH
+                + if expanded {
+                    crate::toolbar::PANEL_WIDTH
+                } else {
+                    0.
+                };
+            let (mut w, mut h) = (
+                (width * units).round() as i32,
+                (crate::toolbar::HEIGHT * units).round() as i32,
+            );
+            let mut bounds = SDL_Rect::default();
+            let display = on_display.or_else(|| self.display_id());
+            let bounded = display
+                .is_some_and(|id| SDL_GetDisplayUsableBounds(SDL_DisplayID(id), &mut bounds));
+            if bounded {
+                w = w.min((bounds.w - 16).max(1));
+                h = h.min((bounds.h - 16).max(1));
+            }
+            check(SDL_SetWindowSize(self.raw, w, h))?;
+            if bounded && driver() != "wayland" {
+                let (mut x, mut y) = (0, 0);
+                if on_display.is_some() || !SDL_GetWindowPosition(self.raw, &mut x, &mut y) {
+                    x = bounds.x + 8;
+                    y = bounds.y + (bounds.h - h) / 2;
+                }
+                x = x.clamp(bounds.x, bounds.x + (bounds.w - w).max(0));
+                y = y.clamp(bounds.y, bounds.y + (bounds.h - h).max(0));
+                check(SDL_SetWindowPosition(self.raw, x, y))?;
+                check(SDL_SyncWindow(self.raw))?;
+            }
+            Ok(())
         }
     }
     pub fn pixel_size(&self) -> [i32; 2] {
