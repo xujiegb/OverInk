@@ -5,6 +5,7 @@
     windows_subsystem = "windows"
 )]
 mod app;
+mod appearance;
 mod background;
 mod color;
 mod controller;

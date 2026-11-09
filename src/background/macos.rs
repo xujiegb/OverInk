@@ -25,7 +25,9 @@ pub fn start(bounds: [i32; 4], pixels: [i32; 2], mode: SnapshotMode) -> Result<J
     match mode {
         SnapshotMode::Sdr => Job::start(move |cancelled| sdr_capture(bounds, cancelled)),
         SnapshotMode::Linear => Job::start(move |cancelled| hdr_capture(bounds, pixels, cancelled)),
-        SnapshotMode::LiveOnly(reason) => Err(reason.into()),
+        SnapshotMode::LiveOnly(reason) => {
+            Err(reason.get(crate::appearance::Language::English).into())
+        }
     }
 }
 

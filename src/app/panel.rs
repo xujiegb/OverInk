@@ -1,5 +1,6 @@
 use super::{App, Commands};
 use crate::{
+    appearance::{Language, Text, ThemeMode},
     color::{InkColor, PRESETS, Space},
     frame_rate::FrameRate,
     icc::ColorManager,
@@ -18,10 +19,11 @@ impl App {
         render: &Renderer,
         color: &ColorManager,
         video: &str,
-        freeze_unavailable: Option<&'static str>,
+        freeze_unavailable: Option<Text>,
         mark: egui::TextureId,
     ) -> Commands {
         let mut commands = Commands::default();
+        let tr = self.language;
         let available = ui.available_size();
         let opened = self.panel.filter(|_| !self.picking);
         ui.horizontal_top(|ui| {
@@ -39,21 +41,21 @@ impl App {
                         Layout::top_down(Align::Min),
                         |ui| {
                             egui::Frame::new()
-                                .fill(egui::Color32::WHITE)
+                                .fill(ui.visuals().window_fill())
                                 .inner_margin(egui::Margin::same(13))
                                 .show(ui, |ui| {
                                     ui.spacing_mut().item_spacing = vec2(8., 7.);
                                     ui.set_width((width - 26.).max(0.));
                                     ui.set_min_height((available.y - 26.).max(0.));
                                     ui.horizontal(|ui| {
-                                        ui.heading(panel.title());
+                                        ui.heading(panel.title(tr));
                                         ui.with_layout(
                                             Layout::right_to_left(Align::Center),
                                             |ui| {
                                                 if toolbar::button(
                                                     ui,
                                                     Icon::Close,
-                                                    "Close panel",
+                                                    tr.text("Close panel", "关闭面板", "關閉面板"),
                                                     false,
                                                 )
                                                 .clicked()
@@ -65,7 +67,7 @@ impl App {
                                     });
                                     ui.separator();
                                     egui::ScrollArea::vertical()
-                                        .id_salt(panel.title())
+                                        .id_salt(panel)
                                         .auto_shrink([false, false])
                                         .show(ui, |ui| {
                                             match panel {
@@ -87,9 +89,7 @@ impl App {
                                             }
                                             ui.add_space(12.);
                                             ui.label(
-                                                RichText::new(&self.status)
-                                                    .small()
-                                                    .color(toolbar::MUTED),
+                                                RichText::new(self.status.get(tr)).small().weak(),
                                             );
                                         });
                                 });
@@ -102,28 +102,68 @@ impl App {
     }
 
     fn rail(&mut self, ui: &mut Ui, mark: egui::TextureId, commands: &mut Commands) {
+        let tr = self.language;
         ui.spacing_mut().item_spacing = vec2(4., 2.);
         ui.add_space(5.);
         ui.add(egui::Image::new((mark, vec2(33., 33.))))
-            .on_hover_text("OverInk · drag to move to another display");
+            .on_hover_text(tr.text(
+                "OverInk · drag to move to another display",
+                "OverInk · 拖动切换显示器",
+                "OverInk · 拖曳切換顯示器",
+            ));
         ui.add_space(5.);
         if self.picking {
-            if toolbar::button(ui, Icon::Close, "Cancel screen color picker (Esc)", true).clicked()
+            if toolbar::button(
+                ui,
+                Icon::Close,
+                tr.text(
+                    "Cancel screen color picker (Esc)",
+                    "取消屏幕取色 (Esc)",
+                    "取消螢幕取色 (Esc)",
+                ),
+                true,
+            )
+            .clicked()
             {
                 commands.pick = true;
             }
-            return;
+        } else {
+            self.rail_tools(ui, commands);
         }
+        ui.add_space(2.);
+        if toolbar::button(
+            ui,
+            Icon::Quit,
+            tr.text("Quit OverInk", "退出 OverInk", "結束 OverInk"),
+            false,
+        )
+        .clicked()
+        {
+            commands.quit = true;
+        }
+    }
+
+    fn rail_tools(&mut self, ui: &mut Ui, commands: &mut Commands) {
+        let tr = self.language;
         egui::ScrollArea::vertical()
             .id_salt("tool-rail")
+            .max_height((ui.available_height() - 40.).max(0.))
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.vertical_centered(|ui| {
                     let eye = if self.hidden { Icon::EyeOff } else { Icon::Eye };
                     let label = if self.hidden {
-                        "Show drawing layer (H)"
+                        tr.text(
+                            "Show drawing layer (H)",
+                            "显示书写图层 (H)",
+                            "顯示書寫圖層 (H)",
+                        )
                     } else {
-                        "Hide drawing layer (H)"
+                        tr.text(
+                            "Hide drawing layer (H)",
+                            "隐藏书写图层 (H)",
+                            "隱藏書寫圖層 (H)",
+                        )
                     };
                     if toolbar::button(ui, eye, label, self.hidden).clicked() {
                         self.stop();
@@ -133,7 +173,11 @@ impl App {
                     if toolbar::button(
                         ui,
                         Icon::Pointer,
-                        "Mouse · click desktop (Space)",
+                        tr.text(
+                            "Mouse · click desktop (Space)",
+                            "鼠标 · 点击桌面（空格键）",
+                            "滑鼠 · 點按桌面（空白鍵）",
+                        ),
                         self.pass,
                     )
                     .clicked()
@@ -145,7 +189,7 @@ impl App {
                         if toolbar::button(
                             ui,
                             Icon::Tool(tool),
-                            tool.label(),
+                            tool_label(tool, tr),
                             !self.pass && self.tool == tool,
                         )
                         .clicked()
@@ -164,7 +208,11 @@ impl App {
                     if toolbar::button(
                         ui,
                         shapes,
-                        "Lines, shapes and laser",
+                        tr.text(
+                            "Lines, shapes and laser",
+                            "线条、形状与激光笔",
+                            "線條、圖形與雷射筆",
+                        ),
                         shape_selected || self.panel == Some(Panel::Shapes),
                     )
                     .clicked()
@@ -172,21 +220,69 @@ impl App {
                         self.toggle_panel(Panel::Shapes);
                     }
                     ui.separator();
-                    self.panel_button(ui, Icon::Brush, Panel::Brush, "Brush width and opacity");
-                    if toolbar::button(ui, Icon::Undo, "Undo (Ctrl/Cmd+Z)", false).clicked() {
+                    self.panel_button(
+                        ui,
+                        Icon::Brush,
+                        Panel::Brush,
+                        tr.text(
+                            "Brush width and opacity",
+                            "笔刷粗细与不透明度",
+                            "筆刷粗細與不透明度",
+                        ),
+                    );
+                    if toolbar::button(
+                        ui,
+                        Icon::Undo,
+                        tr.text(
+                            "Undo (Ctrl/Cmd+Z)",
+                            "撤销 (Ctrl/Cmd+Z)",
+                            "復原 (Ctrl/Cmd+Z)",
+                        ),
+                        false,
+                    )
+                    .clicked()
+                    {
                         self.reset_contacts();
                         self.history.undo();
                     }
-                    if toolbar::button(ui, Icon::Redo, "Redo (Ctrl/Cmd+Shift+Z)", false).clicked() {
+                    if toolbar::button(
+                        ui,
+                        Icon::Redo,
+                        tr.text(
+                            "Redo (Ctrl/Cmd+Shift+Z)",
+                            "重做 (Ctrl/Cmd+Shift+Z)",
+                            "重做 (Ctrl/Cmd+Shift+Z)",
+                        ),
+                        false,
+                    )
+                    .clicked()
+                    {
                         self.reset_contacts();
                         self.history.redo();
                     }
-                    if toolbar::button(ui, Icon::Clear, "Clear this page", false).clicked() {
+                    if toolbar::button(
+                        ui,
+                        Icon::Clear,
+                        tr.text("Clear this page", "清除当前页面", "清除目前頁面"),
+                        false,
+                    )
+                    .clicked()
+                    {
                         self.reset_contacts();
                         self.history.clear();
                     }
-                    self.panel_button(ui, Icon::Display, Panel::Background, "Desktop background");
-                    self.panel_button(ui, Icon::Settings, Panel::Settings, "Settings and files");
+                    self.panel_button(
+                        ui,
+                        Icon::Display,
+                        Panel::Background,
+                        tr.text("Desktop background", "桌面背景", "桌面背景"),
+                    );
+                    self.panel_button(
+                        ui,
+                        Icon::Settings,
+                        Panel::Settings,
+                        tr.text("Settings and files", "设置与文件", "設定與檔案"),
+                    );
                     ui.separator();
                     for row in PRESETS.as_chunks::<2>().0 {
                         ui.horizontal(|ui| {
@@ -207,7 +303,15 @@ impl App {
                             }
                         });
                     }
-                    let label = format!("{} · palette and screen picker", self.color.hex());
+                    let label = format!(
+                        "{} · {}",
+                        self.color.hex(),
+                        tr.text(
+                            "Palette and screen picker",
+                            "色盘与屏幕取色",
+                            "調色盤與螢幕取色",
+                        )
+                    );
                     if toolbar::swatch(
                         ui,
                         vec2(44., 24.),
@@ -235,6 +339,7 @@ impl App {
     }
 
     fn shapes(&mut self, ui: &mut Ui, commands: &mut Commands) {
+        let tr = self.language;
         ui.horizontal_wrapped(|ui| {
             for tool in Tool::ALL
                 .into_iter()
@@ -243,7 +348,7 @@ impl App {
                 if toolbar::button(
                     ui,
                     Icon::Tool(tool),
-                    tool.label(),
+                    tool_label(tool, tr),
                     !self.pass && self.tool == tool,
                 )
                 .clicked()
@@ -254,14 +359,32 @@ impl App {
                 }
             }
         });
-        ui.small("Line, arrow, box, ellipse and laser");
+        ui.small(tr.text(
+            "Line, arrow, box, ellipse and laser",
+            "直线、箭头、矩形、椭圆与激光笔",
+            "直線、箭頭、矩形、橢圓與雷射筆",
+        ));
     }
 
     fn brush(&mut self, ui: &mut Ui) {
-        ui.add(egui::Slider::new(&mut self.width, 1.0..=48.0).text("Width"));
-        ui.add(egui::Slider::new(&mut self.opacity, 0.1..=1.).text("Opacity"));
-        ui.checkbox(&mut self.pressure, "Pen pressure");
-        ui.add(egui::Slider::new(&mut self.curve, 0.2..=3.).text("Pressure curve"));
+        let tr = self.language;
+        ui.add(
+            egui::Slider::new(&mut self.width, 1.0..=48.0).text(tr.text("Width", "粗细", "粗細")),
+        );
+        ui.add(egui::Slider::new(&mut self.opacity, 0.1..=1.).text(tr.text(
+            "Opacity",
+            "不透明度",
+            "不透明度",
+        )));
+        ui.checkbox(
+            &mut self.pressure,
+            tr.text("Pen pressure", "笔尖压感", "筆尖感壓"),
+        );
+        ui.add(egui::Slider::new(&mut self.curve, 0.2..=3.).text(tr.text(
+            "Pressure curve",
+            "压感曲线",
+            "感壓曲線",
+        )));
         ui.separator();
         let pen = self
             .pens
@@ -271,19 +394,29 @@ impl App {
             .copied()
             .unwrap_or_default();
         ui.add(egui::ProgressBar::new(pen.pressure).text(format!("{:.1}%", pen.pressure * 100.)));
-        ui.small(format!("Tilt {:.0}° / {:.0}°", pen.tilt[0], pen.tilt[1]));
+        ui.small(format!(
+            "{} {:.0}° / {:.0}°",
+            tr.text("Tilt", "倾角", "傾角"),
+            pen.tilt[0],
+            pen.tilt[1]
+        ));
     }
 
     fn palette(&mut self, ui: &mut Ui, commands: &mut Commands) {
+        let tr = self.language;
         ui.horizontal_wrapped(|ui| {
-            ui.label("Palette");
+            ui.label(tr.text("Palette", "色盘", "調色盤"));
             let mut rgb = self.color.channels8();
             if ui.color_edit_button_srgb(&mut rgb).changed() {
                 self.select_color(InkColor::from_channels(rgb, self.color.space));
             }
             if ui
-                .button("Pick screen")
-                .on_hover_text("Choose a desktop pixel. Esc cancels.")
+                .button(tr.text("Pick screen", "屏幕取色", "螢幕取色"))
+                .on_hover_text(tr.text(
+                    "Choose a desktop pixel. Esc cancels.",
+                    "点击桌面任一点取色，按 Esc 取消。",
+                    "點按桌面任一點取色，按 Esc 取消。",
+                ))
                 .clicked()
             {
                 commands.pick = true;
@@ -298,7 +431,7 @@ impl App {
                     .char_limit(16)
                     .hint_text("#FFFFFF"),
             );
-            let accept = ui.button("Apply").clicked()
+            let accept = ui.button(tr.text("Apply", "应用", "套用")).clicked()
                 || (response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)));
             if (response.has_focus() || response.lost_focus())
                 && ui.input(|input| input.key_pressed(egui::Key::Escape))
@@ -316,27 +449,44 @@ impl App {
             }
         });
         if self.hex_entry.invalid {
-            ui.colored_label(egui::Color32::from_rgb(168, 45, 66), "Use #RRGGBB or #RGB");
+            ui.colored_label(
+                ui.visuals().error_fg_color,
+                tr.text(
+                    "Use #RRGGBB or #RGB",
+                    "请输入 #RRGGBB 或 #RGB",
+                    "請輸入 #RRGGBB 或 #RGB",
+                ),
+            );
         }
+        let label = |space| match space {
+            Space::Srgb => tr.text("sRGB color", "sRGB 颜色", "sRGB 色彩"),
+            Space::DisplayP3 => tr.text("Display P3 color", "Display P3 颜色", "Display P3 色彩"),
+        };
         egui::ComboBox::from_id_salt("source-gamut")
-            .selected_text(match self.color.space {
-                Space::Srgb => "sRGB color",
-                Space::DisplayP3 => "Display P3 color",
-            })
+            .selected_text(label(self.color.space))
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.color.space, Space::Srgb, "sRGB color");
-                ui.selectable_value(&mut self.color.space, Space::DisplayP3, "Display P3 color");
+                ui.selectable_value(&mut self.color.space, Space::Srgb, label(Space::Srgb));
+                ui.selectable_value(
+                    &mut self.color.space,
+                    Space::DisplayP3,
+                    label(Space::DisplayP3),
+                );
             });
     }
 
     fn background_controls(
         &mut self,
         ui: &mut Ui,
-        freeze_unavailable: Option<&'static str>,
+        freeze_unavailable: Option<Text>,
         commands: &mut Commands,
     ) {
+        let tr = self.language;
+        let freeze_unavailable = freeze_unavailable.map(|reason| reason.get(tr));
         if ui
-            .selectable_label(!self.board && !self.frozen, "Live desktop")
+            .selectable_label(
+                !self.board && !self.frozen,
+                tr.text("Live desktop", "实时桌面", "即時桌面"),
+            )
             .clicked()
         {
             commands.background = self.board || self.frozen;
@@ -345,8 +495,11 @@ impl App {
         }
         let freeze = ui
             .add_enabled_ui(freeze_unavailable.is_none(), |ui| {
-                ui.selectable_label(self.frozen, "Frozen desktop")
-                    .on_disabled_hover_text(freeze_unavailable.unwrap_or_default())
+                ui.selectable_label(
+                    self.frozen,
+                    tr.text("Frozen desktop", "冻结桌面", "凍結桌面"),
+                )
+                .on_disabled_hover_text(freeze_unavailable.unwrap_or_default())
             })
             .inner;
         if freeze.clicked() && !self.frozen {
@@ -357,10 +510,17 @@ impl App {
         if let Some(reason) = freeze_unavailable {
             ui.small(reason);
         }
-        if self.frozen && ui.button("Refresh snapshot").clicked() {
+        if self.frozen
+            && ui
+                .button(tr.text("Refresh snapshot", "刷新快照", "更新快照"))
+                .clicked()
+        {
             commands.background = true;
         }
-        if ui.checkbox(&mut self.board, "Whiteboard").changed() {
+        if ui
+            .checkbox(&mut self.board, tr.text("Whiteboard", "白板", "白板"))
+            .changed()
+        {
             commands.mode = true;
             if self.board {
                 self.frozen = false;
@@ -377,13 +537,43 @@ impl App {
         video: &str,
         commands: &mut Commands,
     ) {
-        ui.label(RichText::new("Display").strong());
+        let tr = self.language;
+        ui.horizontal(|ui| {
+            ui.label(tr.text("Language", "语言", "語言"));
+            let system = tr.text("Follow system", "跟随系统", "跟隨系統");
+            let choice = &mut self.preferences.language;
+            egui::ComboBox::from_id_salt("ui-language")
+                .selected_text(choice.map_or(system, Language::name))
+                .show_ui(ui, |ui| {
+                    commands.preferences |= ui.selectable_value(choice, None, system).changed();
+                    for language in Language::ALL {
+                        commands.preferences |= ui
+                            .selectable_value(choice, Some(language), language.name())
+                            .changed();
+                    }
+                });
+        });
+        ui.horizontal(|ui| {
+            ui.label(tr.text("Theme", "主题", "主題"));
+            let choice = &mut self.preferences.theme;
+            egui::ComboBox::from_id_salt("ui-theme")
+                .selected_text(choice.label(tr))
+                .show_ui(ui, |ui| {
+                    for theme in ThemeMode::ALL {
+                        commands.preferences |= ui
+                            .selectable_value(choice, theme, theme.label(tr))
+                            .changed();
+                    }
+                });
+        });
+        ui.separator();
+        ui.label(RichText::new(tr.text("Display", "显示器", "顯示器")).strong());
         egui::ComboBox::from_id_salt("display")
             .selected_text(
                 self.displays
                     .get(self.display)
                     .map(|d| d.name.as_str())
-                    .unwrap_or("No display"),
+                    .unwrap_or(tr.text("No display", "无显示器", "無顯示器")),
             )
             .show_ui(ui, |ui| {
                 for display in &self.displays {
@@ -396,19 +586,29 @@ impl App {
                     }
                 }
             });
-        ui.small("Drag the OverInk icon to move between screens.");
+        ui.small(tr.text(
+            "Drag the OverInk icon to move between screens.",
+            "拖动 OverInk 图标可切换显示器。",
+            "拖曳 OverInk 圖示可切換顯示器。",
+        ));
         ui.horizontal(|ui| {
-            ui.label("Frame rate");
+            ui.label(tr.text("Frame rate", "帧率", "影格率"));
+            let auto = tr.text("Auto", "自动", "自動");
             egui::ComboBox::from_id_salt("frame-rate")
                 .selected_text(if self.frame_rate == FrameRate::Auto {
-                    format!("Auto ({:.2} FPS)", self.frame_rate.hz(self.refresh_hz()))
+                    format!("{auto} ({:.2} FPS)", self.frame_rate.hz(self.refresh_hz()))
                 } else {
                     self.frame_rate.label().into()
                 })
                 .show_ui(ui, |ui| {
                     for rate in FrameRate::ALL {
+                        let label = if rate == FrameRate::Auto {
+                            auto
+                        } else {
+                            rate.label()
+                        };
                         if ui
-                            .selectable_value(&mut self.frame_rate, rate, rate.label())
+                            .selectable_value(&mut self.frame_rate, rate, label)
                             .changed()
                         {
                             commands.frame_rate = true;
@@ -416,33 +616,48 @@ impl App {
                     }
                 });
         });
-        if ui.checkbox(&mut self.touch_enabled, "Touch draw").changed() {
+        if ui
+            .checkbox(
+                &mut self.touch_enabled,
+                tr.text("Touch draw", "触屏书写", "觸控書寫"),
+            )
+            .changed()
+        {
             self.discard_touches();
         }
         ui.separator();
-        ui.label(RichText::new("Session").strong());
+        ui.label(RichText::new(tr.text("Session", "会话", "工作階段")).strong());
         ui.add(egui::TextEdit::singleline(&mut self.path).desired_width(f32::INFINITY));
         ui.horizontal(|ui| {
-            if ui.button("Save").clicked() {
+            if ui.button(tr.text("Save", "保存", "儲存")).clicked() {
                 self.save();
             }
-            if ui.button("Open").clicked() {
+            if ui.button(tr.text("Open", "打开", "開啟")).clicked() {
                 self.load();
             }
-            if ui.button("Export SVG").clicked() {
+            if ui
+                .button(tr.text("Export SVG", "导出 SVG", "匯出 SVG"))
+                .clicked()
+            {
                 self.export();
             }
         });
-        ui.small(format!(
-            "{} strokes on this screen",
-            self.history.doc.strokes.len()
-        ));
+        let count = self.history.doc.strokes.len();
+        ui.small(match tr {
+            Language::English => format!("{count} strokes on this screen"),
+            Language::Simplified => format!("当前屏幕有 {count} 条笔迹"),
+            Language::Traditional => format!("目前螢幕有 {count} 條筆跡"),
+        });
         ui.separator();
         let (hdr, headroom) = render.hdr();
         let encoding = if hdr {
-            "HDR output · SDR ink"
+            tr.text(
+                "HDR output · SDR ink",
+                "HDR 输出 · SDR 笔迹",
+                "HDR 輸出 · SDR 筆跡",
+            )
         } else if render.extended {
-            "Linear sRGB"
+            tr.text("Linear sRGB", "线性 sRGB", "線性 sRGB")
         } else {
             "SDR sRGB"
         };
@@ -450,13 +665,34 @@ impl App {
             "{video} / {} / {encoding} / {headroom:.2}×",
             render.name
         ));
-        ui.small(&color.status);
+        ui.small(color.status.get(tr));
         if video == "wayland" {
-            ui.small("Wayland stacking and placement are controlled by the compositor.");
+            ui.small(tr.text(
+                "The Wayland compositor controls window order and placement.",
+                "Wayland 窗口层级和位置由合成器控制。",
+                "Wayland 視窗層級與位置由合成器控制。",
+            ));
         }
         ui.add_space(6.);
-        if ui.button("Quit OverInk").clicked() {
+        if ui
+            .button(tr.text("Quit OverInk", "退出 OverInk", "結束 OverInk"))
+            .clicked()
+        {
             commands.quit = true;
         }
+    }
+}
+
+fn tool_label(tool: Tool, tr: Language) -> &'static str {
+    match tool {
+        Tool::Pen => tr.text("Pen", "笔", "筆"),
+        Tool::Pencil => tr.text("Pencil", "铅笔", "鉛筆"),
+        Tool::Marker => tr.text("Highlighter", "荧光笔", "螢光筆"),
+        Tool::Line => tr.text("Line", "直线", "直線"),
+        Tool::Arrow => tr.text("Arrow", "箭头", "箭頭"),
+        Tool::Rectangle => tr.text("Box", "矩形", "矩形"),
+        Tool::Ellipse => tr.text("Ellipse", "椭圆", "橢圓"),
+        Tool::Eraser => tr.text("Eraser", "橡皮擦", "橡皮擦"),
+        Tool::Laser => tr.text("Laser", "激光笔", "雷射筆"),
     }
 }

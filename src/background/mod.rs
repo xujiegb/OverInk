@@ -150,10 +150,10 @@ impl Image {
 pub enum SnapshotMode {
     Sdr,
     Linear,
-    LiveOnly(&'static str),
+    LiveOnly(crate::appearance::Text),
 }
 impl SnapshotMode {
-    pub fn unavailable(self) -> Option<&'static str> {
+    pub fn unavailable(self) -> Option<crate::appearance::Text> {
         match self {
             Self::LiveOnly(reason) => Some(reason),
             _ => None,
@@ -183,7 +183,11 @@ pub fn snapshot_mode(
     xwayland: bool,
 ) -> SnapshotMode {
     if driver == "wayland" || xwayland {
-        return SnapshotMode::LiveOnly("This session cannot guarantee HDR in a desktop screenshot");
+        return SnapshotMode::LiveOnly(crate::appearance::text(
+            "This session cannot guarantee HDR in a desktop screenshot",
+            "当前会话无法保证截屏保留 HDR",
+            "目前的工作階段無法保證螢幕擷取保留 HDR",
+        ));
     }
     let hdr = unsafe {
         SDL_GetBooleanProperty(
@@ -202,12 +206,18 @@ pub fn snapshot_mode(
         if render.extended {
             SnapshotMode::Linear
         } else {
-            SnapshotMode::LiveOnly(
+            SnapshotMode::LiveOnly(crate::appearance::text(
                 "Freezing this desktop requires an extended-linear-sRGB renderer",
-            )
+                "冻结此桌面需要支持扩展线性 sRGB 的渲染器",
+                "凍結此桌面需要支援延伸線性 sRGB 的繪圖引擎",
+            ))
         }
     } else if hdr {
-        SnapshotMode::LiveOnly("HDR desktop capture is unavailable on this backend")
+        SnapshotMode::LiveOnly(crate::appearance::text(
+            "HDR desktop capture is unavailable on this backend",
+            "当前显示后端不支持 HDR 截屏",
+            "目前的顯示後端不支援 HDR 螢幕擷取",
+        ))
     } else {
         SnapshotMode::Sdr
     }
@@ -347,7 +357,7 @@ impl Background {
         connected: &BTreeSet<u32>,
         mode: SnapshotMode,
         drawing: bool,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), crate::appearance::Text> {
         self.images.retain(|id, _| connected.contains(id));
         let id = display.map(|d| d.id);
         let bounds = display.map_or([0; 4], |d| d.bounds);
@@ -445,7 +455,7 @@ impl Background {
             ));
         };
         if let Some(reason) = self.mode.unavailable() {
-            return Some(Err(reason.into()));
+            return Some(Err(reason.get(crate::appearance::Language::English).into()));
         }
         #[cfg(any(target_os = "windows", target_os = "macos"))]
         {
@@ -604,7 +614,12 @@ mod tests {
             .unwrap();
         assert!(bg.images.is_empty());
         assert!(bg.pending());
-        let unavailable = SnapshotMode::LiveOnly("No HDR screenshot backend");
+        let reason = crate::appearance::text(
+            "No HDR screenshot backend",
+            "没有 HDR 截屏后端",
+            "沒有 HDR 螢幕擷取後端",
+        );
+        let unavailable = SnapshotMode::LiveOnly(reason);
         assert!(
             bg.display(Some(&screen), &connected, unavailable, true)
                 .is_err()

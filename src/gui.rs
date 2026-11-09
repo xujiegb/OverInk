@@ -1,6 +1,7 @@
 //! Small egui/SDL3 integration. SDL_RenderGeometry makes the same UI usable on
 //! s390x, LoongArch and FreeBSD without assuming a Vulkan driver.
 use crate::{
+    appearance::Language,
     icc::ColorManager,
     sdl::*,
     touch::{self, TouchKey},
@@ -20,6 +21,7 @@ pub struct Gui {
     pub units: f32,
     touch_primary: Option<TouchKey>,
     touch_positions: BTreeMap<TouchKey, egui::Pos2>,
+    font_language: Option<Language>,
 }
 impl Gui {
     pub fn new() -> Self {
@@ -27,13 +29,18 @@ impl Gui {
         // Apply input actions once per native frame, including mode toggles.
         ctx.options_mut(|options| options.max_passes = std::num::NonZeroUsize::new(1).unwrap());
         ctx.set_theme(egui::Theme::Light);
-        let mut v = egui::Visuals::light();
-        v.panel_fill = crate::toolbar::FILL;
-        v.window_fill = v.panel_fill;
-        v.selection.bg_fill = egui::Color32::from_rgb(208, 236, 249);
-        v.widgets.active.bg_fill = v.selection.bg_fill;
-        ctx.set_visuals(v);
-        ctx.style_mut_of(egui::Theme::Light, |s| {
+        ctx.all_styles_mut(|s| {
+            let colors = crate::toolbar::colors(s.visuals.dark_mode);
+            s.visuals.panel_fill = colors.rail;
+            s.visuals.window_fill = colors.panel;
+            if s.visuals.dark_mode {
+                s.visuals.widgets.noninteractive.fg_stroke.color =
+                    egui::Color32::from_rgb(192, 207, 223);
+                s.visuals.weak_text_color = Some(egui::Color32::from_rgb(155, 174, 192));
+            } else {
+                s.visuals.selection.bg_fill = egui::Color32::from_rgb(208, 236, 249);
+                s.visuals.widgets.active.bg_fill = s.visuals.selection.bg_fill;
+            }
             s.spacing.item_spacing = egui::vec2(8., 9.);
             s.spacing.button_padding = egui::vec2(10., 7.);
         });
@@ -45,7 +52,49 @@ impl Gui {
             units: 1.,
             touch_primary: None,
             touch_positions: BTreeMap::new(),
+            font_language: None,
         }
+    }
+    pub fn set_language(&mut self, language: Language) {
+        let font_language = if language == Language::Traditional {
+            Language::Traditional
+        } else {
+            Language::Simplified
+        };
+        if self.font_language == Some(font_language) {
+            return;
+        }
+        self.font_language = Some(font_language);
+        let mut fonts = egui::FontDefinitions::default();
+        let sc = "OverInk UI SC";
+        let tc = "OverInk UI TC";
+        for (name, data) in [
+            (
+                sc,
+                include_bytes!("../assets/fonts/OverInk-UI-SC.otf").as_slice(),
+            ),
+            (
+                tc,
+                include_bytes!("../assets/fonts/OverInk-UI-TC.otf").as_slice(),
+            ),
+        ] {
+            fonts
+                .font_data
+                .insert(name.into(), egui::FontData::from_static(data).into());
+        }
+        let order = if font_language == Language::Traditional {
+            [tc, sc]
+        } else {
+            [sc, tc]
+        };
+        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+            fonts
+                .families
+                .entry(family)
+                .or_default()
+                .extend(order.map(str::to_owned));
+        }
+        self.ctx.set_fonts(fonts);
     }
     pub fn input(&mut self, w: &Window) -> RawInput {
         let logical = w.size();
@@ -492,8 +541,33 @@ pub fn key(k: SDL_Keycode) -> Option<Key> {
 }
 
 #[cfg(test)]
-mod touch_tests {
+mod tests {
     use super::*;
+
+    #[test]
+    fn changing_ui_language_loads_chinese_glyphs() {
+        let mut gui = Gui::new();
+        for (language, sample) in [
+            (Language::Simplified, "简体中文 屏幕取色 退出"),
+            (Language::Traditional, "繁體中文 螢幕取色 結束"),
+        ] {
+            gui.set_language(language);
+            let mut output = gui.ctx.run_ui(RawInput::default(), |ui| {
+                ui.label(sample);
+                ui.ctx().fonts_mut(|fonts| {
+                    let font = egui::FontId::proportional(14.);
+                    assert!(
+                        sample
+                            .chars()
+                            .filter(|c| !c.is_whitespace())
+                            .all(|c| fonts.has_glyph(&font, c))
+                    );
+                });
+            });
+            output.textures_delta.clear();
+        }
+    }
+
     fn finger(gui: &mut Gui, ty: SDL_EventType, id: u64, x: f32, y: f32) {
         gui.event(
             &SDL_Event {

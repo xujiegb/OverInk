@@ -32,19 +32,6 @@ impl Tool {
         Self::Eraser,
         Self::Laser,
     ];
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Pen => "Pen",
-            Self::Pencil => "Pencil",
-            Self::Marker => "Highlighter",
-            Self::Line => "Line",
-            Self::Arrow => "Arrow",
-            Self::Rectangle => "Box",
-            Self::Ellipse => "Ellipse",
-            Self::Eraser => "Eraser",
-            Self::Laser => "Laser",
-        }
-    }
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct Point {

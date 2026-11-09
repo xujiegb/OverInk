@@ -1,8 +1,8 @@
 //! SDL is owned by the main thread. Window/renderer pointers never cross threads.
 pub use sdl3_sys::{
     blendmode::*, clipboard::*, error::*, events::*, hints::*, init::*, keyboard::*, keycode::*,
-    mouse::*, pen::*, pixels::*, properties::*, rect::*, render::*, stdinc::*, surface::*,
-    timer::*, touch::*, video::*,
+    locale::*, mouse::*, pen::*, pixels::*, properties::*, rect::*, render::*, stdinc::*,
+    surface::*, timer::*, touch::*, video::*,
 };
 use std::{
     ffi::{CStr, CString, c_void},
