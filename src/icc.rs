@@ -1,0 +1,168 @@
+//! On X11 the display usually does not transform sRGB windows. Use SDL's
+//! current-display ICC profile there. Other backends retain OS-managed sRGB /
+//! scRGB surfaces; applying an ICC transform there would double-manage color.
+use crate::sdl::*;
+use lcms2_sys as cms;
+use std::hash::{Hash, Hasher};
+use std::ptr;
+pub struct ColorManager {
+    transform: cms::HTRANSFORM,
+    pub status: String,
+    pub revision: u64,
+}
+impl Default for ColorManager {
+    fn default() -> Self {
+        Self {
+            transform: ptr::null_mut(),
+            status: "sRGB surface / system compositor".into(),
+            revision: 0,
+        }
+    }
+}
+impl ColorManager {
+    pub fn refresh(&mut self, window: &crate::sdl::Window, extended: bool) {
+        self.revision = if extended { 1 } else { 2 };
+        if !self.transform.is_null() {
+            unsafe { cms::cmsDeleteTransform(self.transform) };
+            self.transform = ptr::null_mut()
+        }
+        self.status = if extended {
+            "Extended linear sRGB / system display mapping".into()
+        } else {
+            "sRGB surface / system compositor".into()
+        };
+        if crate::sdl::driver() != "x11" {
+            return;
+        }
+        unsafe {
+            let mut size = 0;
+            let data = SDL_GetWindowICCProfile(window.raw, &mut size);
+            if data.is_null() || size == 0 || size > 16 * 1024 * 1024 {
+                if !data.is_null() {
+                    SDL_free(data)
+                }
+                self.status = "X11: no ICC profile; sRGB assumption".into();
+                return;
+            }
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            std::slice::from_raw_parts(data.cast::<u8>(), size).hash(&mut hash);
+            self.revision = hash.finish();
+            let output = cms::cmsOpenProfileFromMem(data, size as u32);
+            SDL_free(data);
+            if output.is_null() {
+                self.status = "X11: invalid ICC profile; sRGB assumption".into();
+                return;
+            }
+            let input = cms::cmsCreate_sRGBProfile();
+            self.transform = cms::cmsCreateTransform(
+                input,
+                cms::PixelFormat::RGB_FLT,
+                output,
+                cms::PixelFormat::RGB_FLT,
+                cms::Intent::RelativeColorimetric,
+                cms::FLAGS_BLACKPOINTCOMPENSATION,
+            );
+            cms::cmsCloseProfile(input);
+            cms::cmsCloseProfile(output);
+            self.status = if self.transform.is_null() {
+                "X11: ICC transform failed; sRGB assumption".into()
+            } else {
+                "X11: display ICC / Little CMS".into()
+            };
+        }
+    }
+    pub fn map(&self, rgb: [f32; 3]) -> [f32; 3] {
+        if self.transform.is_null() {
+            return rgb;
+        }
+        let mut out = [0.0_f32; 3];
+        unsafe {
+            cms::cmsDoTransform(
+                self.transform,
+                rgb.as_ptr().cast(),
+                out.as_mut_ptr().cast(),
+                1,
+            )
+        }
+        out.map(|v| v.clamp(0., 1.))
+    }
+    pub fn map_rgba8(&self, rgba: &mut [u8]) {
+        if self.transform.is_null() {
+            return;
+        }
+        for bytes in rgba.chunks_mut(4096 * 4) {
+            let mut rgb: Vec<[f32; 3]> = bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|v| [v[0] as f32 / 255., v[1] as f32 / 255., v[2] as f32 / 255.])
+                .collect();
+            unsafe {
+                cms::cmsDoTransform(
+                    self.transform,
+                    rgb.as_ptr().cast(),
+                    rgb.as_mut_ptr().cast(),
+                    rgb.len() as u32,
+                );
+            }
+            for (pixel, rgb) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(rgb) {
+                for i in 0..3 {
+                    pixel[i] = (rgb[i].clamp(0., 1.) * 255.).round() as u8;
+                }
+            }
+        }
+    }
+}
+impl Drop for ColorManager {
+    fn drop(&mut self) {
+        if !self.transform.is_null() {
+            unsafe { cms::cmsDeleteTransform(self.transform) }
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+pub fn display_sample_to_srgb(window: &Window, rgb: [f32; 3]) -> crate::color::InkColor {
+    let mut result = crate::color::InkColor {
+        rgb,
+        space: crate::color::Space::Srgb,
+    };
+    unsafe {
+        let mut size = 0;
+        let data = SDL_GetWindowICCProfile(window.raw, &mut size);
+        if data.is_null() {
+            return result;
+        }
+        let profile = if size > 0 && size <= 16 * 1024 * 1024 {
+            cms::cmsOpenProfileFromMem(data, size as u32)
+        } else {
+            ptr::null_mut()
+        };
+        SDL_free(data);
+        if profile.is_null() {
+            return result;
+        }
+        let srgb = cms::cmsCreate_sRGBProfile();
+        let transform = cms::cmsCreateTransform(
+            profile,
+            cms::PixelFormat::RGB_FLT,
+            srgb,
+            cms::PixelFormat::RGB_FLT,
+            cms::Intent::RelativeColorimetric,
+            cms::FLAGS_BLACKPOINTCOMPENSATION,
+        );
+        cms::cmsCloseProfile(profile);
+        cms::cmsCloseProfile(srgb);
+        if !transform.is_null() {
+            cms::cmsDoTransform(
+                transform,
+                rgb.as_ptr().cast(),
+                result.rgb.as_mut_ptr().cast(),
+                1,
+            );
+            cms::cmsDeleteTransform(transform);
+            result.rgb = result.rgb.map(|v| v.clamp(0., 1.));
+        }
+    }
+    result
+}

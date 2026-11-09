@@ -1,0 +1,48 @@
+[package]
+name = "overink"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Pressure-sensitive desktop annotation with egui and native SDL3 input"
+license = "BSD-3-Clause"
+
+[features]
+# For CI environments without a window system, never for release packages.
+headless-check = ["sdl3-sys/sdl-unix-console-build"]
+
+[dependencies]
+egui = { version = "=0.37.0", features = ["default_fonts"] }
+sdl3-sys = { version = "=0.7.3", default-features = false, features = ["build-from-source-static", "no-default-subsystems", "sdl-video", "sdl-render"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libloading = "0.8"
+lcms2-sys = { version = "=4.0.7", features = ["static"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
+
+[profile.dev]
+debug = 1
+
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+zbus = { version = "=5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "=0.5.3"
+objc2-app-kit = { version = "=0.2.2", default-features = false, features = ["std", "NSColor", "NSColorSpace", "NSColorSampler", "block2"] }
+block2 = "=0.5.1"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "=0.62.2", features = [
+    "Graphics_Capture",
+    "Graphics_DirectX_Direct3D11",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_System_WinRT_Direct3D11",
+    "Win32_System_WinRT_Graphics_Capture",
+] }
