@@ -61,11 +61,11 @@ impl Picker {
             Stage::SampleAfter(..) | Stage::LaunchAfter(..) | Stage::System(..)
         )
     }
-    pub fn start(&mut self, driver: &str) {
+    pub fn start(&mut self, wayland_session: bool) {
         self.cancel();
         self.result = None;
         self.started = Instant::now();
-        if cfg!(target_os = "macos") || driver == "wayland" {
+        if cfg!(target_os = "macos") || wayland_session {
             self.stage = Stage::LaunchAfter(Instant::now() + Duration::from_millis(100));
         } else {
             self.stage = Stage::Choosing;
@@ -181,13 +181,13 @@ mod tests {
     #[test]
     fn cancellation_resets_desktop_and_delayed_system_selection() {
         let mut picker = Picker::default();
-        picker.start("x11");
+        picker.start(false);
         assert_eq!(picker.choosing(), !cfg!(target_os = "macos"));
         assert_eq!(picker.hides_windows(), cfg!(target_os = "macos"));
         picker.cancel();
         assert!(!picker.active());
         assert!(matches!(picker.result, Some(Ok(None))));
-        picker.start("wayland");
+        picker.start(true);
         assert!(picker.hides_windows());
         picker.cancel();
         assert!(!picker.active());

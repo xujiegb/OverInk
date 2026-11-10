@@ -1561,7 +1561,7 @@ pub fn run(options: Options) -> Result<(), String> {
             } else {
                 app.stop();
                 app.picking = true;
-                picker.start(&video);
+                picker.start(wayland || xwayland);
                 if picker.choosing() {
                     crate::native::show_canvas(&canvas, &toolbar, true)?;
                     native.set(&canvas, false)?;
