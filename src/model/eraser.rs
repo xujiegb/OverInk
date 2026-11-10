@@ -342,6 +342,31 @@ mod tests {
     }
 
     #[test]
+    fn cut_ending_at_a_corner_preserves_the_next_segment() {
+        let corner = Point::new(10., 0., 0.7, [30., 0.]);
+        let end = Point::new(10., 20., 0.9, [40., 0.]);
+        let center = Point::new(6., 0., 1., [0.; 2]);
+        let sweep = Sweep {
+            from: center,
+            to: center,
+            radius: 4.,
+        };
+        let fragments = sweep
+            .cut_path(&[Point::new(0., 0., 1., [0.; 2]), corner, end], |_| 0.)
+            .unwrap();
+        assert_eq!(fragments.len(), 2);
+        assert_eq!(fragments[1].len(), 2);
+        let [start, last] = fragments[1].as_slice() else {
+            unreachable!();
+        };
+        assert_eq!(
+            (start.x, start.y, start.pressure, start.tilt),
+            (corner.x, corner.y, corner.pressure, corner.tilt)
+        );
+        assert_eq!((last.x, last.y), (end.x, end.y));
+    }
+
+    #[test]
     fn arrowhead_can_be_erased_without_losing_its_shaft() {
         let stroke = Stroke {
             tool: Tool::Arrow,

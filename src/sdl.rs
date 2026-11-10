@@ -126,6 +126,28 @@ impl Window {
             })
         }
     }
+    pub fn tooltip(parent: &Self, x: i32, y: i32, w: i32, h: i32) -> Result<Self, String> {
+        unsafe {
+            let raw = SDL_CreatePopupWindow(
+                parent.raw,
+                x,
+                y,
+                w,
+                h,
+                SDL_WINDOW_TOOLTIP
+                    | SDL_WINDOW_HIDDEN
+                    | SDL_WINDOW_HIGH_PIXEL_DENSITY
+                    | SDL_WINDOW_NOT_FOCUSABLE,
+            );
+            if raw.is_null() {
+                return Err(error());
+            }
+            Ok(Self {
+                raw,
+                id: SDL_GetWindowID(raw),
+            })
+        }
+    }
     pub fn size(&self) -> [f32; 2] {
         unsafe {
             let (mut w, mut h) = (0, 0);
@@ -215,6 +237,21 @@ impl Window {
         let id = unsafe { SDL_GetDisplayForWindow(self.raw) }.0;
         (id != 0).then_some(id)
     }
+    pub fn hdr_enabled(&self) -> bool {
+        unsafe {
+            SDL_GetBooleanProperty(
+                SDL_GetWindowProperties(self.raw),
+                SDL_PROP_WINDOW_HDR_ENABLED_BOOLEAN,
+                false,
+            ) || self.display_id().is_some_and(|id| {
+                SDL_GetBooleanProperty(
+                    SDL_GetDisplayProperties(SDL_DisplayID(id)),
+                    SDL_PROP_DISPLAY_HDR_ENABLED_BOOLEAN,
+                    false,
+                )
+            })
+        }
+    }
     pub fn place_on_display(&self, id: u32, overlay: bool) -> Result<(), String> {
         unsafe {
             let display = SDL_DisplayID(id);
@@ -271,6 +308,12 @@ pub struct Renderer {
 }
 impl Renderer {
     pub fn new(window: &Window, force_sdr: bool) -> Result<Self, String> {
+        Self::create(window, force_sdr, None)
+    }
+    pub fn software(window: &Window) -> Result<Self, String> {
+        Self::create(window, true, Some(c"software"))
+    }
+    fn create(window: &Window, force_sdr: bool, driver: Option<&CStr>) -> Result<Self, String> {
         unsafe {
             let props = SDL_CreateProperties();
             SDL_SetPointerProperty(
@@ -278,6 +321,9 @@ impl Renderer {
                 SDL_PROP_RENDERER_CREATE_WINDOW_POINTER,
                 window.raw.cast(),
             );
+            if let Some(driver) = driver {
+                SDL_SetStringProperty(props, SDL_PROP_RENDERER_CREATE_NAME_STRING, driver.as_ptr());
+            }
             let mut raw = ptr::null_mut();
             // SDL's transparent Win32 swap chain uses the DXGI bitblt model.
             // Submit sRGB ink to that path so DWM composites it as SDR.
@@ -291,6 +337,10 @@ impl Renderer {
                     SDL_COLORSPACE_SRGB_LINEAR.0 as i64,
                 );
                 raw = SDL_CreateRendererWithProperties(props);
+                #[cfg(target_os = "macos")]
+                if raw.is_null() {
+                    crate::native::macos::remove_metal_view(window);
+                }
             }
             if raw.is_null() {
                 SDL_SetNumberProperty(
@@ -310,6 +360,10 @@ impl Renderer {
             let name = CStr::from_ptr(SDL_GetRendererName(raw))
                 .to_string_lossy()
                 .into_owned();
+            #[cfg(target_os = "macos")]
+            if name == "metal" {
+                crate::native::macos::configure_metal(raw, extended);
+            }
             SDL_SetRenderDrawBlendMode(raw, SDL_BLENDMODE_BLEND);
             // One shared frame clock paces both windows. Two blocking presents
             // would halve the requested rate on some desktop drivers.
@@ -320,6 +374,18 @@ impl Renderer {
                 name,
             })
         }
+    }
+    #[cfg(target_os = "macos")]
+    pub fn change_color_output(&mut self, window: &Window, extended: bool) -> Result<(), String> {
+        unsafe { SDL_DestroyRenderer(self.raw) };
+        self.raw = ptr::null_mut();
+        // SDL keeps its view attached for reuse. A fresh view gives SDR its
+        // own BGRA8 drawable pool after previously presenting FP16.
+        if self.name == "metal" {
+            crate::native::macos::remove_metal_view(window);
+        }
+        *self = Self::new(window, !extended)?;
+        Ok(())
     }
     pub fn hdr(&self) -> (bool, f32) {
         unsafe {
@@ -370,6 +436,8 @@ impl Renderer {
 }
 impl Drop for Renderer {
     fn drop(&mut self) {
-        unsafe { SDL_DestroyRenderer(self.raw) }
+        if !self.raw.is_null() {
+            unsafe { SDL_DestroyRenderer(self.raw) }
+        }
     }
 }

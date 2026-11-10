@@ -65,6 +65,14 @@ impl InkColor {
             -0.0196376 * a[0] - 0.0786361 * a[1] + 1.0982735 * a[2],
         ]
     }
+    #[cfg(any(target_os = "macos", test))]
+    pub fn needs_wide_gamut(self) -> bool {
+        self.space == Space::DisplayP3
+            && self
+                .linear_srgb()
+                .into_iter()
+                .any(|value| !(-0.0001..=1.0001).contains(&value))
+    }
     /// Float sRGB encoding expected by SDL_RenderGeometry. Linear/HDR renderers
     /// decode this themselves; never apply the display's SDR-white scale twice.
     pub fn output_rgb(self, extended: bool) -> [f32; 3] {

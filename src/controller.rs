@@ -15,6 +15,30 @@ impl Rect {
             && x < (self.x + self.w) as f32
             && y < (self.y + self.h) as f32
     }
+    pub fn crosses(self, from: crate::model::Point, to: crate::model::Point) -> bool {
+        let (mut enter, mut exit) = (0.0_f32, 1.0_f32);
+        for (start, end, min, max) in [
+            (from.x, to.x, self.x, self.x + self.w),
+            (from.y, to.y, self.y, self.y + self.h),
+        ] {
+            let delta = end - start;
+            let (min, max) = (min as f32, max as f32);
+            if delta == 0. {
+                if start < min || start > max {
+                    return false;
+                }
+            } else {
+                let near = (min - start) / delta;
+                let far = (max - start) / delta;
+                enter = enter.max(near.min(far));
+                exit = exit.min(near.max(far));
+                if enter > exit {
+                    return false;
+                }
+            }
+        }
+        true
+    }
     pub fn clipped(self, size: [i32; 2]) -> Option<Self> {
         let x = self.x.max(0);
         let y = self.y.max(0);

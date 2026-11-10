@@ -114,6 +114,9 @@ impl ColorManager {
         }
         out.map(|v| v.clamp(0., 1.))
     }
+    pub fn is_identity(&self) -> bool {
+        self.transform.is_null()
+    }
     pub fn map_rgba8(&self, rgba: &mut [u8]) {
         if self.transform.is_null() {
             return;

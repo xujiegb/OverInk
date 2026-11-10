@@ -220,12 +220,15 @@ impl ThemeMonitor {
             },
         };
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        if theme.is_none() {
-            // Vendored SDL may be built without libdbus headers.
+        if mode == ThemeMode::System {
+            // The desktop portal supplies the user's preference even when
+            // vendored SDL was built without libdbus headers.
             return self
                 .portal
                 .get_or_insert_with(portal::Monitor::start)
-                .theme();
+                .theme()
+                .or(theme)
+                .unwrap_or(Theme::Light);
         } else {
             self.portal = None;
         }

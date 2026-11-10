@@ -172,6 +172,13 @@ pub struct History {
     pub changed: bool,
 }
 impl History {
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+
     pub fn snapshot(&mut self) {
         // Committed strokes are immutable, so snapshots share their samples.
         self.undo.push_back(self.doc.strokes.clone());

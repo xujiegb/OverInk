@@ -104,14 +104,16 @@ impl App {
     fn rail(&mut self, ui: &mut Ui, mark: egui::TextureId, commands: &mut Commands) {
         let tr = self.language;
         ui.spacing_mut().item_spacing = vec2(4., 2.);
-        ui.add_space(5.);
-        ui.add(egui::Image::new((mark, vec2(33., 33.))))
-            .on_hover_text(tr.text(
+        ui.add_space(4.);
+        toolbar::hint(
+            ui.add(egui::Image::new((mark, vec2(29., 29.)))),
+            tr.text(
                 "OverInk · drag to move to another display",
                 "OverInk · 拖动切换显示器",
                 "OverInk · 拖曳切換顯示器",
-            ));
-        ui.add_space(5.);
+            ),
+        );
+        ui.add_space(4.);
         if self.picking {
             if toolbar::button(
                 ui,
@@ -147,7 +149,7 @@ impl App {
         let tr = self.language;
         egui::ScrollArea::vertical()
             .id_salt("tool-rail")
-            .max_height((ui.available_height() - 40.).max(0.))
+            .max_height((ui.available_height() - 34.).max(0.))
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.vertical_centered(|ui| {
@@ -230,49 +232,42 @@ impl App {
                             "筆刷粗細與不透明度",
                         ),
                     );
-                    if toolbar::button(
-                        ui,
-                        Icon::Undo,
-                        tr.text(
-                            "Undo (Ctrl/Cmd+Z)",
-                            "撤销 (Ctrl/Cmd+Z)",
-                            "復原 (Ctrl/Cmd+Z)",
+                    let actions = [
+                        (
+                            Icon::Undo,
+                            tr.text(
+                                "Undo (Ctrl/Cmd+Z)",
+                                "撤销 (Ctrl/Cmd+Z)",
+                                "復原 (Ctrl/Cmd+Z)",
+                            ),
+                            crate::model::History::undo as fn(&mut crate::model::History),
                         ),
-                        false,
-                    )
-                    .clicked()
-                    {
-                        self.reset_contacts();
-                        self.history.undo();
-                        commands.redraw_canvas = true;
-                    }
-                    if toolbar::button(
-                        ui,
-                        Icon::Redo,
-                        tr.text(
-                            "Redo (Ctrl/Cmd+Shift+Z)",
-                            "重做 (Ctrl/Cmd+Shift+Z)",
-                            "重做 (Ctrl/Cmd+Shift+Z)",
+                        (
+                            Icon::Redo,
+                            tr.text(
+                                "Redo (Ctrl/Cmd+Shift+Z)",
+                                "重做 (Ctrl/Cmd+Shift+Z)",
+                                "重做 (Ctrl/Cmd+Shift+Z)",
+                            ),
+                            crate::model::History::redo,
                         ),
-                        false,
-                    )
-                    .clicked()
-                    {
-                        self.reset_contacts();
-                        self.history.redo();
-                        commands.redraw_canvas = true;
-                    }
-                    if toolbar::button(
-                        ui,
-                        Icon::Clear,
-                        tr.text("Clear this page", "清除当前页面", "清除目前頁面"),
-                        false,
-                    )
-                    .clicked()
-                    {
-                        self.reset_contacts();
-                        self.history.clear();
-                        commands.redraw_canvas = true;
+                        (
+                            Icon::Clear,
+                            tr.text("Clear this page", "清除当前页面", "清除目前頁面"),
+                            crate::model::History::clear,
+                        ),
+                    ];
+                    for (index, (icon, label, action)) in actions.into_iter().enumerate() {
+                        let enabled = self.history_buttons()[index];
+                        if ui
+                            .add_enabled_ui(enabled, |ui| toolbar::button(ui, icon, label, false))
+                            .inner
+                            .clicked()
+                        {
+                            self.reset_contacts();
+                            action(&mut self.history);
+                            commands.redraw_canvas = true;
+                        }
                     }
                     self.panel_button(
                         ui,
@@ -289,12 +284,12 @@ impl App {
                     ui.separator();
                     for row in PRESETS.as_chunks::<2>().0 {
                         ui.horizontal(|ui| {
-                            ui.add_space(((ui.available_width() - 44.) * 0.5).max(0.));
+                            ui.add_space(((ui.available_width() - 40.) * 0.5).max(0.));
                             for rgb in row {
                                 let color = InkColor::from_rgb8(*rgb);
                                 if toolbar::swatch(
                                     ui,
-                                    vec2(20., 20.),
+                                    vec2(18., 18.),
                                     *rgb,
                                     &color.css(),
                                     self.color.srgb8() == *rgb,
@@ -317,7 +312,7 @@ impl App {
                     );
                     if toolbar::swatch(
                         ui,
-                        vec2(44., 24.),
+                        vec2(40., 22.),
                         self.color.srgb8(),
                         &label,
                         self.panel == Some(Panel::Colors),
@@ -413,14 +408,15 @@ impl App {
             if ui.color_edit_button_srgb(&mut rgb).changed() {
                 self.select_color(InkColor::from_channels(rgb, self.color.space));
             }
-            if ui
-                .button(tr.text("Pick screen", "屏幕取色", "螢幕取色"))
-                .on_hover_text(tr.text(
+            if toolbar::hint(
+                ui.button(tr.text("Pick screen", "屏幕取色", "螢幕取色")),
+                tr.text(
                     "Choose a desktop pixel. Esc cancels.",
                     "点击桌面任一点取色，按 Esc 取消。",
                     "點按桌面任一點取色，按 Esc 取消。",
-                ))
-                .clicked()
+                ),
+            )
+            .clicked()
             {
                 commands.pick = true;
             }
@@ -498,11 +494,15 @@ impl App {
         }
         let freeze = ui
             .add_enabled_ui(freeze_unavailable.is_none(), |ui| {
-                ui.selectable_label(
+                let response = ui.selectable_label(
                     self.frozen,
                     tr.text("Frozen desktop", "冻结桌面", "凍結桌面"),
-                )
-                .on_disabled_hover_text(freeze_unavailable.unwrap_or_default())
+                );
+                if let Some(reason) = freeze_unavailable {
+                    toolbar::hint(response, reason)
+                } else {
+                    response
+                }
             })
             .inner;
         if freeze.clicked() && !self.frozen {
