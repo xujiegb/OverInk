@@ -31,6 +31,20 @@ impl Runtime {
         unsafe {
             if x11 {
                 SDL_SetHint(SDL_HINT_VIDEO_DRIVER, c"x11".as_ptr());
+            } else if cfg!(any(target_os = "linux", target_os = "freebsd"))
+                && SDL_GetHint(SDL_HINT_VIDEO_DRIVER).is_null()
+                && std::env::var_os("DISPLAY").is_some_and(|display| !display.is_empty())
+                && (std::env::var_os("WAYLAND_DISPLAY").is_some()
+                    || std::env::var_os("WAYLAND_SOCKET").is_some()
+                    || std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland"))
+            {
+                // XWayland can request stacking and positioning for these
+                // desktop overlays. Fall back to native Wayland if unavailable.
+                SDL_SetHintWithPriority(
+                    SDL_HINT_VIDEO_DRIVER,
+                    c"x11,wayland".as_ptr(),
+                    SDL_HINT_DEFAULT,
+                );
             }
             // Avoid a second mouse/touch stroke synthesized from the same pen packet.
             SDL_SetHint(SDL_HINT_PEN_MOUSE_EVENTS, c"0".as_ptr());
@@ -163,10 +177,11 @@ impl Window {
                 h = h.min((bounds.h - 16).max(1));
             }
             check(SDL_SetWindowSize(self.raw, w, h))?;
-            if bounded && driver() != "wayland" {
+            let driver = driver();
+            if bounded && driver != "wayland" {
                 let (mut x, mut y) = (0, 0);
                 if on_display.is_some() || !SDL_GetWindowPosition(self.raw, &mut x, &mut y) {
-                    x = bounds.x + 8;
+                    x = bounds.x + if driver == "x11" { 0 } else { 8 };
                     y = bounds.y + (bounds.h - h) / 2;
                 }
                 x = x.clamp(bounds.x, bounds.x + (bounds.w - w).max(0));
@@ -264,8 +279,12 @@ impl Renderer {
                 window.raw.cast(),
             );
             let mut raw = ptr::null_mut();
-            // SDL handles SDR white level and display changes inside the renderer.
-            if !force_sdr && (cfg!(target_os = "windows") || cfg!(target_os = "macos")) {
+            // SDL's transparent Win32 swap chain uses the DXGI bitblt model.
+            // Submit sRGB ink to that path so DWM composites it as SDR.
+            let transparent = SDL_GetWindowFlags(window.raw) & SDL_WINDOW_TRANSPARENT != 0;
+            let extended_output =
+                cfg!(target_os = "macos") || (cfg!(target_os = "windows") && !transparent);
+            if !force_sdr && extended_output {
                 SDL_SetNumberProperty(
                     props,
                     SDL_PROP_RENDERER_CREATE_OUTPUT_COLORSPACE_NUMBER,
