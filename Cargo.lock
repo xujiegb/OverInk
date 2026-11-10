@@ -919,8 +919,11 @@ dependencies = [
 name = "overink"
 version = "0.1.0"
 dependencies = [
+ "async-channel",
  "block2",
  "egui",
+ "flate2",
+ "futures-lite",
  "image",
  "lcms2-sys",
  "libloading",

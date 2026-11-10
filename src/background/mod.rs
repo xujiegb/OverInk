@@ -6,7 +6,9 @@ mod system;
 mod windows;
 use crate::{icc::ColorManager, sdl::*};
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet},
+    io::Read,
     ptr,
     time::{Duration, Instant},
 };
@@ -17,6 +19,15 @@ const MAX_SNAPSHOT_BYTES: usize = 256 * 1024 * 1024;
 enum Encoding {
     Srgb8,
     LinearRgba16,
+}
+
+impl Encoding {
+    fn bytes_per_pixel(self) -> usize {
+        match self {
+            Self::Srgb8 => 4,
+            Self::LinearRgba16 => 8,
+        }
+    }
 }
 
 pub struct Image {
@@ -35,14 +46,9 @@ impl Image {
         Self::allocate(width, height, Encoding::LinearRgba16)
     }
     fn allocate(width: u32, height: u32, encoding: Encoding) -> Result<Self, String> {
-        let bytes_per_pixel = if encoding == Encoding::LinearRgba16 {
-            8
-        } else {
-            4
-        };
         let size = (width as usize)
             .checked_mul(height as usize)
-            .and_then(|pixels| pixels.checked_mul(bytes_per_pixel))
+            .and_then(|pixels| pixels.checked_mul(encoding.bytes_per_pixel()))
             .ok_or("Capture is too large")?;
         if size == 0 || size > MAX_SNAPSHOT_BYTES {
             return Err("Capture exceeds the 256 MiB limit".into());
@@ -99,7 +105,7 @@ impl Image {
         let profile = decoder.icc_profile().ok().flatten();
         let pixels = image::DynamicImage::from_decoder(decoder)
             .map_err(|e| e.to_string())?
-            .to_rgba8();
+            .into_rgba8();
         let mut result = Self {
             width: pixels.width(),
             height: pixels.height(),
@@ -146,6 +152,62 @@ impl Image {
     }
 }
 
+// Keep the original channels available for a renderer reset without retaining
+// a second uncompressed copy of native captures beside the active texture.
+struct Snapshot {
+    width: u32,
+    height: u32,
+    encoding: Encoding,
+    bytes: Vec<u8>,
+    compressed: bool,
+}
+
+impl From<Image> for Snapshot {
+    fn from(image: Image) -> Self {
+        Self {
+            width: image.width,
+            height: image.height,
+            encoding: image.encoding,
+            bytes: image.rgba,
+            compressed: false,
+        }
+    }
+}
+
+impl Snapshot {
+    #[cfg(any(target_os = "macos", target_os = "windows", test))]
+    fn compress(image: Image) -> Result<Self, String> {
+        use std::io::Write;
+        let mut snapshot = Self::from(image);
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder
+            .write_all(&snapshot.bytes)
+            .map_err(|e| e.to_string())?;
+        let compressed = encoder.finish().map_err(|e| e.to_string())?;
+        if compressed.len() < snapshot.bytes.len() {
+            snapshot.bytes = compressed;
+            snapshot.compressed = true;
+        }
+        Ok(snapshot)
+    }
+
+    fn pixels(&self) -> Result<Cow<'_, [u8]>, String> {
+        if !self.compressed {
+            return Ok(Cow::Borrowed(&self.bytes));
+        }
+        let size = self.width as usize * self.height as usize * self.encoding.bytes_per_pixel();
+        let mut pixels = Vec::with_capacity(size);
+        flate2::read::ZlibDecoder::new(self.bytes.as_slice())
+            .take(size as u64 + 1)
+            .read_to_end(&mut pixels)
+            .map_err(|e| e.to_string())?;
+        if pixels.len() != size {
+            return Err("Invalid frozen desktop snapshot size".into());
+        }
+        Ok(Cow::Owned(pixels))
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SnapshotMode {
     Sdr,
@@ -159,9 +221,9 @@ impl SnapshotMode {
             _ => None,
         }
     }
-    fn accepts(self, image: &Image) -> bool {
+    fn accepts(self, encoding: Encoding) -> bool {
         matches!(
-            (self, image.encoding),
+            (self, encoding),
             (Self::Sdr, Encoding::Srgb8) | (Self::Linear, Encoding::LinearRgba16)
         )
     }
@@ -177,8 +239,8 @@ pub fn is_xwayland(window: &Window, driver: &str) -> bool {
 }
 
 pub fn snapshot_mode(
-    window: &Window,
-    render: &Renderer,
+    hdr: bool,
+    extended_available: bool,
     driver: &str,
     xwayland: bool,
 ) -> SnapshotMode {
@@ -189,21 +251,8 @@ pub fn snapshot_mode(
             "目前的工作階段無法保證螢幕擷取保留 HDR",
         ));
     }
-    let hdr = unsafe {
-        SDL_GetBooleanProperty(
-            SDL_GetWindowProperties(window.raw),
-            SDL_PROP_WINDOW_HDR_ENABLED_BOOLEAN,
-            false,
-        ) || window.display_id().is_some_and(|id| {
-            SDL_GetBooleanProperty(
-                SDL_GetDisplayProperties(SDL_DisplayID(id)),
-                SDL_PROP_DISPLAY_HDR_ENABLED_BOOLEAN,
-                false,
-            )
-        })
-    };
     if cfg!(target_os = "windows") || (cfg!(target_os = "macos") && hdr) {
-        if render.extended {
+        if extended_available {
             SnapshotMode::Linear
         } else {
             SnapshotMode::LiveOnly(crate::appearance::text(
@@ -225,7 +274,7 @@ pub fn snapshot_mode(
 
 struct Texture(*mut SDL_Texture);
 impl Texture {
-    fn new(render: &Renderer, image: &Image, color: &ColorManager) -> Result<Self, String> {
+    fn new(render: &Renderer, image: &Snapshot, color: &ColorManager) -> Result<Self, String> {
         unsafe {
             let linear = image.encoding == Encoding::LinearRgba16;
             let raw = if linear {
@@ -272,19 +321,15 @@ impl Texture {
                 return Err(crate::sdl::error());
             }
             let texture = Self(raw);
-            let mut mapped;
-            let (bytes, bytes_per_pixel) = if linear {
-                (&image.rgba, 8)
-            } else {
-                mapped = image.rgba.clone();
-                color.map_rgba8(&mut mapped);
-                (&mapped, 4)
-            };
+            let mut pixels = image.pixels()?;
+            if !linear && !color.is_identity() {
+                color.map_rgba8(pixels.to_mut());
+            }
             check(SDL_UpdateTexture(
                 texture.0,
                 ptr::null(),
-                bytes.as_ptr().cast(),
-                (image.width * bytes_per_pixel) as i32,
+                pixels.as_ptr().cast(),
+                (image.width as usize * image.encoding.bytes_per_pixel()) as i32,
             ))?;
             check(SDL_SetTextureBlendMode(texture.0, SDL_BLENDMODE_NONE))?;
             check(SDL_SetTextureScaleMode(texture.0, SDL_SCALEMODE_LINEAR))?;
@@ -309,7 +354,7 @@ pub struct Background {
     pub frozen: bool,
     display: Option<u32>,
     bounds: [i32; 4],
-    images: BTreeMap<u32, Image>,
+    images: BTreeMap<u32, Snapshot>,
     texture: Option<Texture>,
     capture: Capture,
     started: Instant,
@@ -376,7 +421,7 @@ impl Background {
             && self
                 .images
                 .get(&id)
-                .is_some_and(|image| !mode.accepts(image))
+                .is_some_and(|image| !mode.accepts(image.encoding))
         {
             self.images.remove(&id);
             self.texture = None;
@@ -412,14 +457,16 @@ impl Background {
             Capture::System(job) => job.poll(),
             _ => None,
         };
-        let result = result?;
+        Some(self.finish_capture(result?))
+    }
+    fn finish_capture(&mut self, result: Result<Option<Snapshot>, String>) -> Result<(), String> {
         self.capture = Capture::Idle;
         match result {
-            Ok(Some(image)) if self.mode.accepts(&image) => {
+            Ok(Some(image)) if self.mode.accepts(image.encoding) => {
                 if let Some(id) = self.display {
                     // Bound retained screenshots to 256 MiB across displays.
-                    while self.images.values().map(|v| v.rgba.len()).sum::<usize>()
-                        + image.rgba.len()
+                    while self.images.values().map(|v| v.bytes.len()).sum::<usize>()
+                        + image.bytes.len()
                         > MAX_SNAPSHOT_BYTES
                     {
                         let Some(key) = self.images.keys().next().copied() else {
@@ -430,25 +477,23 @@ impl Background {
                     self.images.insert(id, image);
                     self.texture = None;
                 }
-                Some(Ok(()))
+                Ok(())
             }
             Ok(Some(_)) => {
                 self.live();
-                Some(Err(
-                    "The screenshot did not preserve the desktop's color range".into(),
-                ))
+                Err("The screenshot did not preserve the desktop's color range".into())
             }
             Ok(None) => {
                 self.live();
-                Some(Err("Desktop capture cancelled".into()))
+                Err("Desktop capture cancelled".into())
             }
             Err(error) => {
                 self.live();
-                Some(Err(error))
+                Err(error)
             }
         }
     }
-    fn start_capture(&mut self, window: &Window) -> Option<Result<Option<Image>, String>> {
+    fn start_capture(&mut self, window: &Window) -> Option<Result<Option<Snapshot>, String>> {
         let Some(id) = self.display.filter(|id| window.display_id() == Some(*id)) else {
             return Some(Err(
                 "The drawing surface is not on the selected display".into()
@@ -480,7 +525,7 @@ impl Background {
                     "HDR desktop capture is unavailable on this backend".into()
                 ));
             }
-            Some(crate::picker::desktop::capture(window).map(Some))
+            Some(crate::picker::desktop::capture(window).map(|image| Some(image.into())))
         }
     }
     pub fn draw(
@@ -531,7 +576,7 @@ mod tests {
     #[test]
     fn disconnect_forgets_frozen_frames_and_live_mode_releases_images() {
         let mut bg = Background::default();
-        bg.images.insert(7, Image::buffer(2, 2).unwrap());
+        bg.images.insert(7, Image::buffer(2, 2).unwrap().into());
         bg.display = Some(7);
         bg.frozen = true;
         bg.display(None, &BTreeSet::new(), SnapshotMode::Sdr, true)
@@ -589,7 +634,7 @@ mod tests {
             .unwrap();
         assert!(!bg.pending());
         assert!(bg.frozen);
-        bg.images.insert(7, Image::buffer(2, 2).unwrap());
+        bg.images.insert(7, Image::buffer(2, 2).unwrap().into());
         bg.display(Some(&screen), &connected, SnapshotMode::Sdr, true)
             .unwrap();
         assert!(!bg.pending());
@@ -608,7 +653,7 @@ mod tests {
         let connected = BTreeSet::from([7]);
         bg.display(Some(&screen), &connected, SnapshotMode::Sdr, true)
             .unwrap();
-        bg.images.insert(7, Image::buffer(2, 2).unwrap());
+        bg.images.insert(7, Image::buffer(2, 2).unwrap().into());
         bg.frozen = true;
         bg.display(Some(&screen), &connected, SnapshotMode::Linear, true)
             .unwrap();
@@ -628,6 +673,20 @@ mod tests {
         assert!(!bg.frozen);
     }
     #[test]
+    fn completed_capture_exits_pending_and_exposes_the_snapshot() {
+        let mut bg = Background {
+            display: Some(7),
+            mode: SnapshotMode::Linear,
+            ..Default::default()
+        };
+        bg.freeze();
+        assert!(bg.pending());
+        let snapshot = Snapshot::compress(Image::hdr_buffer(128, 128).unwrap()).unwrap();
+        assert!(bg.finish_capture(Ok(Some(snapshot))).is_ok());
+        assert!(bg.frozen && !bg.pending());
+        assert_eq!(bg.images[&7].encoding, Encoding::LinearRgba16);
+    }
+    #[test]
     fn fp16_capture_keeps_highlights_and_negative_color_components() {
         let mut image = Image::hdr_buffer(1, 2).unwrap();
         let mut padded = [0; 24];
@@ -639,5 +698,27 @@ mod tests {
         assert_eq!(&image.rgba[8..14], &padded[12..18]);
         assert_eq!(&image.rgba[6..8], &0x3c00_u16.to_ne_bytes());
         assert_eq!(&image.rgba[14..16], &0x3c00_u16.to_ne_bytes());
+    }
+    #[test]
+    fn compressed_hdr_snapshot_can_rebuild_the_texture_losslessly() {
+        let mut image = Image::hdr_buffer(128, 64).unwrap();
+        let pixel = [0x4800_u16, 0xb800, 0x4000, 0x3c00].map(u16::to_ne_bytes);
+        for bytes in image.rgba.as_chunks_mut::<8>().0 {
+            bytes.copy_from_slice(pixel.as_flattened());
+        }
+        let snapshot = Snapshot::compress(image).unwrap();
+        assert!(snapshot.compressed);
+        assert_eq!(snapshot.encoding, Encoding::LinearRgba16);
+        assert!(snapshot.bytes.len() < 8192);
+        for _ in 0..2 {
+            let rgba = snapshot.pixels().unwrap();
+            assert_eq!(rgba.len(), 128 * 64 * 8);
+            assert!(
+                rgba.as_chunks::<8>()
+                    .0
+                    .iter()
+                    .all(|rgba| rgba == pixel.as_flattened())
+            );
+        }
     }
 }

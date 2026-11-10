@@ -1,10 +1,13 @@
 use crate::{appearance::Language, model::Tool};
 use egui::{Color32, Pos2, Rect, Response, Sense, Stroke, Ui, Vec2, vec2};
 
-pub const WIDTH: f32 = 64.;
-pub const HEIGHT: f32 = 660.;
-pub const PANEL_WIDTH: f32 = 328.;
-pub const GRIP_HEIGHT: f32 = 47.;
+mod tooltip;
+pub use tooltip::{Tooltips, hint};
+
+pub const WIDTH: f32 = 56.;
+pub const HEIGHT: f32 = 576.;
+pub const PANEL_WIDTH: f32 = 312.;
+pub const GRIP_HEIGHT: f32 = 39.;
 const ACTIVE: Color32 = Color32::from_rgb(0, 122, 157);
 
 pub struct Colors {
@@ -89,7 +92,7 @@ pub fn brand(ctx: &egui::Context) -> egui::TextureHandle {
 }
 
 pub fn button(ui: &mut Ui, icon: Icon, label: &str, selected: bool) -> Response {
-    let (rect, response) = ui.allocate_exact_size(vec2(42., 34.), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(vec2(38., 30.), Sense::click());
     response.widget_info(|| {
         egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), selected, label)
     });
@@ -103,9 +106,15 @@ pub fn button(ui: &mut Ui, icon: Icon, label: &str, selected: bool) -> Response 
         Color32::TRANSPARENT
     };
     painter.rect_filled(rect, 8., bg);
-    let color = if selected { Color32::WHITE } else { colors.ink };
+    let color = if !ui.is_enabled() {
+        colors.ink.gamma_multiply(0.4)
+    } else if selected {
+        Color32::WHITE
+    } else {
+        colors.ink
+    };
     paint(icon, painter, rect.center(), color);
-    response.on_hover_text(label)
+    hint(response, label)
 }
 
 pub fn swatch(ui: &mut Ui, size: Vec2, rgb: [u8; 3], label: &str, selected: bool) -> Response {
@@ -128,7 +137,7 @@ pub fn swatch(ui: &mut Ui, size: Vec2, rgb: [u8; 3], label: &str, selected: bool
             egui::StrokeKind::Inside,
         );
     }
-    response.on_hover_text(label)
+    hint(response, label)
 }
 
 fn paint(icon: Icon, p: &egui::Painter, center: Pos2, color: Color32) {

@@ -2,6 +2,8 @@
 //! the overlay alpha, so existing ink stays visible while clicks pass through.
 use crate::sdl::*;
 use std::ffi::c_void;
+#[cfg(target_os = "macos")]
+pub mod macos;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod unix;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]

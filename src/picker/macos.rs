@@ -1,6 +1,6 @@
 use super::PickResult;
 use crate::color::{InkColor, Space};
-use objc2::rc::Retained;
+use objc2::rc::{Retained, autoreleasepool};
 use objc2_app_kit::{NSColor, NSColorSampler, NSColorSpace};
 use std::sync::mpsc;
 
@@ -11,27 +11,29 @@ pub struct SystemJob {
 }
 impl SystemJob {
     pub fn start() -> Result<Self, String> {
-        unsafe {
+        autoreleasepool(|_| unsafe {
             let (sender, receiver) = mpsc::channel();
             let sampler = NSColorSampler::new();
             let callback = block2::RcBlock::new(move |color: *mut NSColor| {
-                let result = if let Some(color) = color.as_ref() {
-                    match color.colorUsingColorSpace(&NSColorSpace::sRGBColorSpace()) {
-                        Some(rgb) => Ok(Some(InkColor {
-                            rgb: [
-                                rgb.redComponent() as f32,
-                                rgb.greenComponent() as f32,
-                                rgb.blueComponent() as f32,
-                            ]
-                            .map(|v| v.clamp(0., 1.)),
-                            space: Space::Srgb,
-                        })),
-                        None => Err("Cannot convert the sampled color to sRGB".into()),
-                    }
-                } else {
-                    Ok(None)
-                };
-                let _ = sender.send(result);
+                autoreleasepool(|_| {
+                    let result = if let Some(color) = color.as_ref() {
+                        match color.colorUsingColorSpace(&NSColorSpace::sRGBColorSpace()) {
+                            Some(rgb) => Ok(Some(InkColor {
+                                rgb: [
+                                    rgb.redComponent() as f32,
+                                    rgb.greenComponent() as f32,
+                                    rgb.blueComponent() as f32,
+                                ]
+                                .map(|v| v.clamp(0., 1.)),
+                                space: Space::Srgb,
+                            })),
+                            None => Err("Cannot convert the sampled color to sRGB".into()),
+                        }
+                    } else {
+                        Ok(None)
+                    };
+                    let _ = sender.send(result);
+                })
             });
             sampler.showSamplerWithSelectionHandler(&callback);
             Ok(Self {
@@ -39,7 +41,7 @@ impl SystemJob {
                 _callback: callback,
                 receiver,
             })
-        }
+        })
     }
     pub fn poll(&mut self) -> Option<PickResult> {
         match self.receiver.try_recv() {

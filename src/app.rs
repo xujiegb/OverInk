@@ -56,6 +56,13 @@ struct Contact {
 struct FingerStroke {
     gesture: Gesture,
     stroke: Option<Stroke>,
+    fragments: Vec<Stroke>,
+    last: Option<Point>,
+}
+struct LaserSample {
+    point: Point,
+    at: Instant,
+    starts_segment: bool,
 }
 const LEFT_BUTTON: u8 = SDL_BUTTON_LEFT as u8;
 const RIGHT_BUTTON: u8 = SDL_BUTTON_RIGHT as u8;
@@ -101,7 +108,7 @@ struct App {
     touches: BTreeMap<TouchKey, FingerStroke>,
     touch_enabled: bool,
     contact: Option<Contact>,
-    laser: BTreeMap<u64, VecDeque<(Point, Instant)>>,
+    laser: BTreeMap<u64, VecDeque<LaserSample>>,
     next_gesture: u64,
     pending_erasures: BTreeMap<u64, Erasure>,
     status: Status,
@@ -238,19 +245,24 @@ impl App {
             Gesture::Ink => {}
         }
     }
-    fn laser_sample(&mut self, id: u64, point: Point) {
+    fn laser_sample(&mut self, id: u64, point: Point, starts_segment: bool) {
         let trail = self.laser.entry(id).or_default();
         let now = Instant::now();
-        if let Some((last, time)) = trail.back_mut()
-            && last.dist(point) <= 0.05
+        if !starts_segment
+            && let Some(last) = trail.back_mut()
+            && last.point.dist(point) <= 0.05
         {
-            *time = now;
+            last.at = now;
             return;
         }
         if trail.len() >= MAX_LASER_SAMPLES {
             trail.pop_front();
         }
-        trail.push_back((point, now));
+        trail.push_back(LaserSample {
+            point,
+            at: now,
+            starts_segment,
+        });
     }
     fn begin(&mut self, source: Source, p: Point, eraser: bool) {
         if self.pass
@@ -265,7 +277,7 @@ impl App {
         let gesture = self.gesture(tool);
         match gesture {
             Gesture::Erase(id) => self.erase_sample(id, p),
-            Gesture::Laser(id) => self.laser_sample(id, p),
+            Gesture::Laser(id) => self.laser_sample(id, p, true),
             Gesture::Ink => {
                 if self.draft_point_count() >= MAX_POINTS {
                     self.status = text(
@@ -296,7 +308,7 @@ impl App {
         }
         match contact.gesture {
             Gesture::Erase(id) => self.erase_sample(id, p),
-            Gesture::Laser(id) => self.laser_sample(id, p),
+            Gesture::Laser(id) => self.laser_sample(id, p, false),
             Gesture::Ink => {
                 let can_append = self.draft_point_count() < MAX_POINTS;
                 if let Some(stroke) = &mut self.history.active {
@@ -452,19 +464,51 @@ impl App {
             + self
                 .touches
                 .values()
-                .filter_map(|f| f.stroke.as_ref())
+                .flat_map(|f| f.fragments.iter().chain(f.stroke.iter()))
                 .map(|s| s.points.len())
                 .sum::<usize>()
+    }
+    fn history_buttons(&self) -> [bool; 3] {
+        [
+            self.history.can_undo(),
+            self.history.can_redo(),
+            !self.history.doc.strokes.is_empty()
+                || self.history.active.is_some()
+                || self.touches.values().any(|finger| finger.stroke.is_some()),
+        ]
+    }
+    #[cfg(any(target_os = "macos", test))]
+    fn has_wide_ink(&self) -> bool {
+        self.history
+            .doc
+            .strokes
+            .iter()
+            .map(|stroke| stroke.as_ref())
+            .chain(self.history.active.iter())
+            .chain(
+                self.touches
+                    .values()
+                    .flat_map(|finger| finger.fragments.iter().chain(finger.stroke.iter())),
+            )
+            .any(|stroke| !stroke.points.is_empty() && stroke.color.needs_wide_gamut())
     }
     fn commit_touch(&mut self, finger: FingerStroke) {
         if let Gesture::Erase(id) = finger.gesture {
             self.commit_erase(id);
         }
-        if let Some(stroke) = finger.stroke
-            && !stroke.points.is_empty()
-        {
+        let mut strokes = finger
+            .fragments
+            .into_iter()
+            .chain(
+                finger
+                    .stroke
+                    .into_iter()
+                    .filter(|stroke| !stroke.points.is_empty()),
+            )
+            .peekable();
+        if strokes.peek().is_some() {
             self.history.snapshot();
-            self.history.doc.strokes.push(stroke.into());
+            self.history.doc.strokes.extend(strokes.map(Into::into));
         }
     }
     fn commit_touches(&mut self) {
@@ -473,24 +517,45 @@ impl App {
         }
     }
     fn touch_motion(&mut self, key: TouchKey, point: Point) {
-        if self.protected.is_some_and(|r| r.contains(point.x, point.y)) {
-            if let Some(Gesture::Erase(id)) = self.touches.get(&key).map(|finger| finger.gesture)
-                && let Some(erase) = self.pending_erasures.get_mut(&id)
-            {
-                erase.last = None;
-            }
-            return;
-        }
         let can_append = self.draft_point_count() < MAX_POINTS;
         let Some(finger) = self.touches.get_mut(&key) else {
             return;
         };
+        let inside = self.protected.is_some_and(|r| r.contains(point.x, point.y));
+        let crosses = self
+            .protected
+            .is_some_and(|r| finger.last.is_some_and(|last| r.crosses(last, point)));
+        if inside || crosses {
+            if let Gesture::Erase(id) = finger.gesture
+                && let Some(erase) = self.pending_erasures.get_mut(&id)
+            {
+                erase.last = None;
+            }
+            if let Some(stroke) = &mut finger.stroke
+                && !stroke.points.is_empty()
+            {
+                let points = std::mem::take(&mut stroke.points);
+                finger.fragments.push(Stroke {
+                    points,
+                    ..stroke.clone()
+                });
+            }
+            finger.last = None;
+        }
+        if inside {
+            return;
+        }
+        let starts_segment = finger.last.replace(point).is_none();
         match finger.gesture {
             Gesture::Erase(id) => self.erase_sample(id, point),
-            Gesture::Laser(id) => self.laser_sample(id, point),
+            Gesture::Laser(id) => self.laser_sample(id, point, starts_segment),
             Gesture::Ink => {
                 if let Some(stroke) = &mut finger.stroke {
-                    Self::append(stroke, point, can_append);
+                    if stroke.points.is_empty() && can_append {
+                        stroke.points.push(point);
+                    } else {
+                        Self::append(stroke, point, can_append);
+                    }
                 }
             }
         }
@@ -546,7 +611,15 @@ impl App {
             } else {
                 None
             };
-            self.touches.insert(key, FingerStroke { gesture, stroke });
+            self.touches.insert(
+                key,
+                FingerStroke {
+                    gesture,
+                    stroke,
+                    fragments: Vec::new(),
+                    last: None,
+                },
+            );
         }
         self.touch_motion(key, point);
     }
@@ -854,7 +927,7 @@ impl App {
             paint_stroke(r, s, color, aa, &clips)?
         }
         for finger in self.touches.values() {
-            if let Some(ref stroke) = finger.stroke {
+            for stroke in finger.fragments.iter().chain(finger.stroke.iter()) {
                 paint_stroke(r, stroke, color, aa, &clips)?;
             }
         }
@@ -862,7 +935,7 @@ impl App {
         self.laser.retain(|_, trail| {
             while trail
                 .front()
-                .is_some_and(|(_, at)| now.duration_since(*at) >= LASER_LIFETIME)
+                .is_some_and(|sample| now.duration_since(sample.at) >= LASER_LIFETIME)
             {
                 trail.pop_front();
             }
@@ -879,11 +952,19 @@ impl App {
         };
         for trail in self.laser.values() {
             laser.points.clear();
-            laser.points.extend(trail.iter().map(|(point, at)| Point {
-                // The laser ribbon uses pressure as its per-sample fade.
-                pressure: 1. - now.duration_since(*at).as_secs_f32() / LASER_LIFETIME.as_secs_f32(),
-                ..*point
-            }));
+            for sample in trail {
+                if sample.starts_segment && !laser.points.is_empty() {
+                    paint_stroke(r, &laser, color, aa, &clips)?;
+                    laser.points.clear();
+                }
+                laser.points.push(Point {
+                    // The laser ribbon uses pressure as its per-sample fade.
+                    pressure: 1.
+                        - now.duration_since(sample.at).as_secs_f32()
+                            / LASER_LIFETIME.as_secs_f32(),
+                    ..sample.point
+                });
+            }
             paint_stroke(r, &laser, color, aa, &clips)?;
         }
         r.present()
@@ -1049,6 +1130,10 @@ pub struct Options {
     pub smoke: bool,
 }
 pub fn run(options: Options) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let _teardown_pool = crate::native::macos::AutoreleasePool::new();
+    #[cfg(target_os = "macos")]
+    let startup_pool = crate::native::macos::AutoreleasePool::new();
     if options.smoke {
         unsafe {
             SDL_SetHint(SDL_HINT_VIDEO_DRIVER, c"dummy".as_ptr());
@@ -1069,7 +1154,13 @@ pub fn run(options: Options) -> Result<(), String> {
         return Err(e);
     }
     app.canvas_units = canvas.scale() / unsafe { SDL_GetWindowPixelDensity(canvas.raw) }.max(0.1);
-    let canvas_render = Renderer::new(&canvas, options.sdr)?;
+    let canvas_render = Renderer::new(&canvas, options.sdr || cfg!(target_os = "macos"))?;
+    #[cfg(target_os = "macos")]
+    let mut canvas_render = canvas_render;
+    #[cfg(target_os = "macos")]
+    let mut extended_unavailable = false;
+    #[cfg(target_os = "macos")]
+    let (mut wide_ink, mut recheck_ink) = (false, true);
     let xwayland = crate::background::is_xwayland(&canvas, &video);
     // Declare renderers before GUI texture owners, so textures are destroyed first.
     let toolbar = Window::new(
@@ -1119,6 +1210,7 @@ pub fn run(options: Options) -> Result<(), String> {
     }
     let mut picker = crate::picker::Picker::default();
     let mut background = crate::background::Background::default();
+    let mut tooltips = crate::toolbar::Tooltips::default();
     let mut controller_guard = crate::controller::Guard::default();
     let mut picker_windows_hidden = false;
     let mut running = true;
@@ -1136,7 +1228,11 @@ pub fn run(options: Options) -> Result<(), String> {
     let mut guard_dirty = true;
     let mut last_mouse = false;
     let mut toolbar_repaint_at: Option<Instant> = None;
+    #[cfg(target_os = "macos")]
+    drop(startup_pool);
     while running {
+        #[cfg(target_os = "macos")]
+        let _frame_pool = crate::native::macos::AutoreleasePool::new();
         let mut disconnected = BTreeSet::new();
         let mut controller_scale_changed = false;
         let mut controller_moved = false;
@@ -1182,6 +1278,9 @@ pub fn run(options: Options) -> Result<(), String> {
                     || surface_changed
                     || matches!(ty, SDL_EVENT_WINDOW_EXPOSED | SDL_EVENT_WINDOW_RESTORED);
                 if id == toolbar.id {
+                    if bounds_changed {
+                        tooltips.clear();
+                    }
                     let moved = matches!(
                         ty,
                         SDL_EVENT_WINDOW_MOVED | SDL_EVENT_WINDOW_DISPLAY_CHANGED
@@ -1201,6 +1300,11 @@ pub fn run(options: Options) -> Result<(), String> {
                         native.invalidate();
                         crate::native::keep_controller_above(&canvas, &toolbar, &native);
                     }
+                } else if matches!(
+                    ty,
+                    SDL_EVENT_WINDOW_EXPOSED | SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED
+                ) {
+                    tooltips.expose(id, &toolbar_color);
                 }
             }
             if matches!(
@@ -1226,6 +1330,7 @@ pub fn run(options: Options) -> Result<(), String> {
             picker.event(&event, &canvas);
             gui.event(&event, toolbar.id, toolbar.size());
             let had_contacts = app.contact.is_some() || !app.touches.is_empty();
+            let history_buttons = app.history_buttons();
             if !was_picking
                 && !background.pending()
                 && !app.suspended
@@ -1237,6 +1342,7 @@ pub fn run(options: Options) -> Result<(), String> {
             }
             let has_contacts = app.contact.is_some() || !app.touches.is_empty();
             canvas_dirty |= had_contacts || has_contacts;
+            toolbar_dirty |= history_buttons != app.history_buttons();
             toolbar_dirty |= app.panel.is_some() && (had_contacts || has_contacts);
             toolbar_dirty |= app.panel == Some(crate::toolbar::Panel::Brush)
                 && matches!(ty, SDL_EVENT_PEN_AXIS | SDL_EVENT_PEN_PROXIMITY_OUT);
@@ -1246,6 +1352,7 @@ pub fn run(options: Options) -> Result<(), String> {
                     || (ty == SDL_EVENT_PEN_DOWN && event.ptouch.windowID == canvas.id)
                     || (ty == SDL_EVENT_FINGER_DOWN && event.tfinger.windowID == canvas.id)
             };
+            toolbar_dirty |= app.panel.is_some() && canvas_activated;
             if canvas_activated {
                 crate::native::keep_controller_above(&canvas, &toolbar, &native);
             }
@@ -1394,8 +1501,27 @@ pub fn run(options: Options) -> Result<(), String> {
         app.canvas_units =
             canvas.scale() / unsafe { SDL_GetWindowPixelDensity(canvas.raw) }.max(0.1);
         pacer.configure(app.frame_rate, app.refresh_hz(), Instant::now());
+        let hdr = canvas.hdr_enabled();
+        #[cfg(target_os = "macos")]
+        if !options.sdr && !extended_unavailable {
+            if canvas_dirty || recheck_ink {
+                wide_ink = app.has_wide_ink();
+                recheck_ink = false;
+            }
+            let extended = (app.frozen && hdr) || wide_ink;
+            if extended != canvas_render.extended {
+                background.invalidate_texture();
+                canvas_render.change_color_output(&canvas, extended)?;
+                extended_unavailable = extended && !canvas_render.extended;
+                canvas_color.refresh(&canvas, canvas_render.extended);
+                toolbar_dirty = true;
+            }
+        }
+        let extended_available = canvas_render.extended;
+        #[cfg(target_os = "macos")]
+        let extended_available = extended_available || (!options.sdr && !extended_unavailable);
         let snapshot_mode =
-            crate::background::snapshot_mode(&canvas, &canvas_render, &video, xwayland);
+            crate::background::snapshot_mode(hdr, extended_available, &video, xwayland);
         if let Err(reason) = background.display(
             app.displays.get(app.display).filter(|_| !app.suspended),
             &app.displays.iter().map(|d| d.id).collect(),
@@ -1408,6 +1534,7 @@ pub fn run(options: Options) -> Result<(), String> {
             toolbar_dirty = true;
         }
         if (picker.hides_windows() || background.pending()) && !picker_windows_hidden {
+            tooltips.clear();
             crate::native::show_canvas(&canvas, &toolbar, false)?;
             toolbar.show(false)?;
             picker_windows_hidden = true;
@@ -1527,6 +1654,10 @@ pub fn run(options: Options) -> Result<(), String> {
             break;
         }
         canvas_dirty |= cmd.redraw_canvas || cmd.mode || cmd.background || cmd.pick;
+        #[cfg(target_os = "macos")]
+        {
+            recheck_ink |= cmd.redraw_canvas || cmd.mode;
+        }
         if cmd.preferences {
             toolbar_dirty = true;
             app.language = app.preferences.language.unwrap_or_else(Language::system);
@@ -1572,6 +1703,7 @@ pub fn run(options: Options) -> Result<(), String> {
                     crate::native::keep_controller_above(&canvas, &toolbar, &native);
                 }
                 if picker.hides_windows() {
+                    tooltips.clear();
                     crate::native::show_canvas(&canvas, &toolbar, false)?;
                     toolbar.show(false)?;
                     picker_windows_hidden = true;
@@ -1599,6 +1731,7 @@ pub fn run(options: Options) -> Result<(), String> {
         }
         if picker.hides_windows() || background.pending() {
             if !picker_windows_hidden {
+                tooltips.clear();
                 crate::native::show_canvas(&canvas, &toolbar, false)?;
                 toolbar.show(false)?;
                 picker_windows_hidden = true;
@@ -1617,6 +1750,7 @@ pub fn run(options: Options) -> Result<(), String> {
             toolbar_render.begin(&toolbar, rail.to_array().map(|c| f32::from(c) / 255.))?;
             gui.paint(&toolbar_render, &toolbar, &toolbar_color, output)?;
             toolbar_render.present()?;
+            tooltips.update(&toolbar, &gui, app.language, &toolbar_color);
         }
         if !follow_controller {
             // Establish the baseline after the first map/configure, without
@@ -2024,6 +2158,54 @@ mod touch_tests {
         assert_eq!(a.history.doc.strokes.len(), 2);
     }
     #[test]
+    fn history_shortcuts_cancel_a_touch_erase_before_changing_indices() {
+        let mut a = app();
+        add_ink(&mut a, &[80., 240.]);
+        a.use_tool(Tool::Eraser);
+        for (key, expected) in [(SDLK_Z, 1), (SDLK_Y, 2)] {
+            finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 1, 0.1, 0.1);
+            assert_eq!(a.pending_erasures.len(), 1);
+            a.keyboard(
+                &SDL_Event {
+                    key: SDL_KeyboardEvent {
+                        r#type: SDL_EVENT_KEY_DOWN,
+                        key,
+                        r#mod: if cfg!(target_os = "macos") {
+                            SDL_KMOD_LGUI
+                        } else {
+                            SDL_KMOD_LCTRL
+                        },
+                        ..Default::default()
+                    },
+                },
+                false,
+            );
+            assert!(a.pending_erasures.is_empty());
+            finger(&mut a, SDL_EVENT_FINGER_UP, 1, 1, 0.1, 0.1);
+            assert_eq!(a.history.doc.strokes.len(), expected);
+            assert_eq!(a.history.doc.strokes[0].points[0].x, 80.);
+        }
+    }
+
+    #[test]
+    fn wide_output_tracks_visible_ink_through_commit_and_undo() {
+        use crate::color::Space;
+
+        let mut a = app();
+        assert!(!a.has_wide_ink());
+        add_ink(&mut a, &[80.]);
+        assert!(!a.has_wide_ink());
+        a.color = InkColor::from_channels([0, 255, 0], Space::DisplayP3);
+        a.begin(Source::Pen(1), Point::new(70., 80., 1., [0.; 2]), false);
+        assert!(a.has_wide_ink());
+        a.end(Source::Pen(1));
+        assert!(a.has_wide_ink());
+        a.history.undo();
+        assert!(!a.has_wide_ink());
+        a.history.redo();
+        assert!(a.has_wide_ink());
+    }
+    #[test]
     fn finger_cancel_and_palm_rejection_discard_only_their_erase_previews() {
         let mut a = app();
         add_ink(&mut a, &[80., 240., 480.]);
@@ -2179,11 +2361,12 @@ mod touch_tests {
         finger(&mut a, SDL_EVENT_FINGER_UP, 1, 1, 0.3, 0.5);
         finger(&mut a, SDL_EVENT_FINGER_UP, 1, 2, 0.8, 0.5);
         assert_eq!(a.laser.len(), 4);
-        assert!(
-            a.laser.values().all(|trail| {
-                trail.len() >= 2 && trail.iter().all(|(p, _)| p.x == trail[0].0.x)
-            })
-        );
+        assert!(a.laser.values().all(|trail| {
+            trail.len() >= 2
+                && trail
+                    .iter()
+                    .all(|sample| sample.point.x == trail[0].point.x)
+        }));
         assert!(a.history.doc.strokes.is_empty());
     }
     #[test]
@@ -2257,6 +2440,53 @@ mod touch_tests {
             true,
         );
         assert_eq!(a.history.doc.strokes.len(), count);
+    }
+    #[test]
+    fn touch_ink_crossing_the_controller_creates_two_fragments_and_one_undo() {
+        let mut a = app();
+        a.protected = Some(crate::controller::Rect {
+            x: 100,
+            y: 100,
+            w: 200,
+            h: 100,
+        });
+        finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 1, 0.05, 0.25);
+        finger(&mut a, SDL_EVENT_FINGER_MOTION, 1, 1, 0.1, 0.25);
+        // The touch jumps to the far side without a sample inside the toolbar.
+        finger(&mut a, SDL_EVENT_FINGER_MOTION, 1, 1, 0.45, 0.25);
+        finger(&mut a, SDL_EVENT_FINGER_UP, 1, 1, 0.5, 0.25);
+        let [left, right] = a.history.doc.strokes.as_slice() else {
+            panic!("expected two ink fragments");
+        };
+        assert_eq!(left.points.len(), 2);
+        assert_eq!(right.points.len(), 2);
+        assert!(left.points.iter().all(|p| p.x < 100.));
+        assert!(right.points.iter().all(|p| p.x > 300.));
+        assert_eq!(a.history_buttons(), [true, false, true]);
+        a.history.undo();
+        assert_eq!(a.history_buttons(), [false, true, false]);
+    }
+
+    #[test]
+    fn touch_laser_breaks_at_the_controller_without_losing_the_fading_trail() {
+        let mut a = app();
+        a.protected = Some(crate::controller::Rect {
+            x: 100,
+            y: 100,
+            w: 200,
+            h: 100,
+        });
+        a.use_tool(Tool::Laser);
+        finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 1, 0.05, 0.25);
+        finger(&mut a, SDL_EVENT_FINGER_MOTION, 1, 1, 0.1, 0.25);
+        finger(&mut a, SDL_EVENT_FINGER_MOTION, 1, 1, 0.2, 0.25);
+        finger(&mut a, SDL_EVENT_FINGER_MOTION, 1, 1, 0.45, 0.25);
+        finger(&mut a, SDL_EVENT_FINGER_UP, 1, 1, 0.5, 0.25);
+        let trail = a.laser.values().next().unwrap();
+        assert_eq!(trail.len(), 4);
+        assert!(trail[0].starts_segment && !trail[1].starts_segment);
+        assert!(trail[2].starts_segment && !trail[3].starts_segment);
+        assert!(trail[1].point.x < 100. && trail[2].point.x > 300.);
     }
     #[test]
     fn tool_hotkeys_and_space_switch_between_mouse_and_drawing() {
