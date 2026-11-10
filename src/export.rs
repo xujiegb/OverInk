@@ -65,7 +65,7 @@ mod tests {
         assert!(core.vertices.iter().all(|v| v.coverage > 0.));
         assert!(core.vertices.iter().any(|v| v.coverage < 0.5));
         let doc = Document {
-            strokes: vec![stroke],
+            strokes: vec![stroke.into()],
             ..Document::default()
         };
         let svg = svg(&doc);

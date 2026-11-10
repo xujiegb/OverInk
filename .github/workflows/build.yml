@@ -96,12 +96,19 @@ jobs:
         shell: pwsh
         env:
           OVERINK_TARGET: ${{ matrix.target }}
+          RUSTFLAGS: '-C target-feature=+crt-static'
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
           $tools = Join-Path $env:VCToolsInstallDir "bin/Host$env:VSCMD_ARG_HOST_ARCH/$env:VSCMD_ARG_TGT_ARCH"
           if (!(Test-Path (Join-Path $tools 'link.exe'))) { throw 'MSVC linker not found' }
           $env:PATH = "$tools;$env:PATH"
+          # SDL's CMake build and Rust must link the same static MSVC CRT.
+          $crt = Join-Path $env:RUNNER_TEMP 'overink-static-crt.cmake'
+          @('set(CMAKE_POLICY_DEFAULT_CMP0091 NEW)',
+            'set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded" CACHE STRING "")') |
+            Set-Content -Encoding ascii $crt
+          $env:CMAKE_TOOLCHAIN_FILE = $crt
           cargo fmt --all -- --check
           cargo clippy --locked --target $env:OVERINK_TARGET --all-targets -- -D warnings
           cargo test --locked --release --target $env:OVERINK_TARGET
@@ -112,6 +119,11 @@ jobs:
           ('1 ICON "' + $icon.Replace('\', '/') + '"') | Set-Content -Encoding ascii $rc
           & rc.exe /nologo /fo $res $rc
           cargo rustc --locked --release --target $env:OVERINK_TARGET --bin overink -- -C "link-arg=$res"
+          $imports = & dumpbin.exe /DEPENDENTS "target/$env:OVERINK_TARGET/release/overink.exe"
+          $imports
+          if ($imports -match '^\s*(?:VCRUNTIME|MSVCP|CONCRT)\d[^\s]*\.dll\s*$') {
+            throw 'The OverInk executable still requires the Visual C++ redistributable'
+          }
       - name: Package executable
         shell: bash
         env:

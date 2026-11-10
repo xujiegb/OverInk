@@ -126,9 +126,9 @@ impl Guard {
         shape_rendering: bool,
     ) -> Result<(Option<Rect>, bool), String> {
         let hole = rectangle(canvas, toolbar);
-        // X11 has a dedicated input region. Rendering already clips the
-        // transparent canvas, so an SDL shape would overwrite XShape.
-        if crate::sdl::driver() == "x11" {
+        // Cocoa uses a higher native toolbar level. X11 uses an input region.
+        // Both clip ink without a screen-sized SDL surface and texture.
+        if cfg!(target_os = "macos") || crate::sdl::driver() == "x11" {
             return Ok((hole, false));
         }
         if unsafe { SDL_GetWindowFlags(canvas.raw) } & SDL_WINDOW_TRANSPARENT == 0 {

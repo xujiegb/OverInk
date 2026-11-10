@@ -13,7 +13,7 @@ headless-check = ["sdl3-sys/sdl-unix-console-build"]
 [dependencies]
 egui = { version = "=0.37.0", features = ["default_fonts"] }
 sdl3-sys = { version = "=0.7.3", default-features = false, features = ["build-from-source-static", "no-default-subsystems", "sdl-video", "sdl-render"] }
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 libloading = "0.8"
 lcms2-sys = { version = "=4.0.7", features = ["static"] }
