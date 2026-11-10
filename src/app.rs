@@ -1,4 +1,5 @@
 mod canvas;
+mod ink;
 mod panel;
 
 use crate::{
@@ -7,7 +8,7 @@ use crate::{
     display::{Display, Pages},
     export,
     frame_rate::{FramePacer, FrameRate},
-    geometry, gui,
+    gui,
     icc::ColorManager,
     model::{Erasure, History, MAX_POINTS, Point, Stroke, Tool},
     sdl::*,
@@ -88,6 +89,7 @@ struct CanvasInput {
     laser: BTreeMap<u64, VecDeque<LaserSample>>,
     next_gesture: u64,
     pending_erasures: BTreeMap<u64, Erasure>,
+    eraser_revision: u64,
     canvas_units: f32,
 }
 
@@ -102,6 +104,7 @@ impl Default for CanvasInput {
             laser: BTreeMap::new(),
             next_gesture: 0,
             pending_erasures: BTreeMap::new(),
+            eraser_revision: 0,
             canvas_units: 1.,
         }
     }
@@ -110,6 +113,14 @@ impl Default for CanvasInput {
 impl CanvasInput {
     fn has_contacts(&self) -> bool {
         self.contact.is_some() || !self.touches.is_empty()
+    }
+
+    fn remove_erasure(&mut self, id: u64) -> Option<Erasure> {
+        let draft = self.pending_erasures.remove(&id);
+        if draft.as_ref().is_some_and(Erasure::has_edits) {
+            self.eraser_revision = self.eraser_revision.wrapping_add(1);
+        }
+        draft
     }
 }
 
@@ -243,14 +254,16 @@ impl App {
     }
     fn erase_sample(&mut self, id: u64, point: Point) {
         let radius = self.width.max(12.) * self.input.canvas_units;
-        self.input.pending_erasures.entry(id).or_default().sample(
+        if self.input.pending_erasures.entry(id).or_default().sample(
             &self.history.doc.strokes,
             point,
             radius,
-        );
+        ) {
+            self.input.eraser_revision = self.input.eraser_revision.wrapping_add(1);
+        }
     }
     fn commit_erase(&mut self, id: u64) {
-        let Some(erase) = self.input.pending_erasures.remove(&id) else {
+        let Some(erase) = self.input.remove_erasure(id) else {
             return;
         };
         let points = self.draft_point_count();
@@ -263,7 +276,7 @@ impl App {
     fn cancel_gesture(&mut self, gesture: Gesture) {
         match gesture {
             Gesture::Erase(id) => {
-                self.input.pending_erasures.remove(&id);
+                self.input.remove_erasure(id);
             }
             Gesture::Laser(id) => {
                 self.input.laser.remove(&id);
@@ -434,6 +447,9 @@ impl App {
         self.history.active = None;
         self.input.contact = None;
         self.input.touches.clear();
+        if self.input.pending_erasures.values().any(Erasure::has_edits) {
+            self.input.eraser_revision = self.input.eraser_revision.wrapping_add(1);
+        }
         self.input.pending_erasures.clear();
         for pen in self.input.pens.values_mut() {
             pen.down = false;
@@ -1015,168 +1031,6 @@ impl App {
         self.color = color;
         self.hex_entry = crate::color::HexEntry::new(color);
     }
-    fn paint(
-        &mut self,
-        r: &Renderer,
-        w: &Window,
-        color: &ColorManager,
-        background: &mut crate::background::Background,
-    ) -> Result<(), String> {
-        let bg = if self.board && !self.pass {
-            [0.97, 0.97, 0.96, 1.]
-        } else {
-            [0., 0., 0., if self.pass { 0. } else { 1. / 255. }]
-        };
-        // Clear the protected area to transparent even on software renderers,
-        // which cannot implement SDL's custom alpha-mask texture blend mode.
-        let has_hole = self.input.protected.is_some();
-        let scale = r.begin(w, if has_hole { [0.; 4] } else { bg })?;
-        let clips =
-            crate::controller::outside(w.size().map(|v| v.ceil() as i32), self.input.protected);
-        let fill = has_hole && bg[3] > 0.;
-        let draw_background = background.frozen && !self.pass;
-        if fill {
-            unsafe {
-                check(SDL_SetRenderDrawColorFloat(
-                    r.raw, bg[0], bg[1], bg[2], bg[3],
-                ))?;
-            }
-        }
-        if fill || draw_background {
-            for area in &clips {
-                unsafe {
-                    check(SDL_SetRenderClipRect(r.raw, &area.sdl()))?;
-                    if fill {
-                        check(SDL_RenderFillRect(r.raw, ptr::null()))?;
-                    }
-                }
-                if draw_background && let Err(error) = background.draw(r, w, color) {
-                    background.live();
-                    self.status =
-                        text("Frozen desktop unavailable", "无法冻结桌面", "無法凍結桌面")
-                            .detail(error);
-                }
-            }
-        }
-        unsafe {
-            SDL_SetRenderClipRect(r.raw, ptr::null());
-        }
-        let aa = 0.8 / scale[0].max(scale[1]);
-        for (index, stroke) in self.history.doc.strokes.iter().enumerate() {
-            let preview = Erasure::preview(stroke, index, self.input.pending_erasures.values());
-            for fragment in preview.iter() {
-                paint_stroke(r, fragment, color, aa, &clips)?;
-            }
-        }
-        if let Some(ref s) = self.history.active {
-            paint_stroke(r, s, color, aa, &clips)?
-        }
-        for finger in self.input.touches.values() {
-            for stroke in finger.fragments.iter().chain(finger.stroke.iter()) {
-                paint_stroke(r, stroke, color, aa, &clips)?;
-            }
-        }
-        let now = Instant::now();
-        self.input.laser.retain(|_, trail| {
-            while trail
-                .front()
-                .is_some_and(|sample| now.duration_since(sample.at) >= LASER_LIFETIME)
-            {
-                trail.pop_front();
-            }
-            !trail.is_empty()
-        });
-        let mut laser = Stroke {
-            tool: Tool::Laser,
-            color: InkColor::from_rgb8([246, 72, 99]),
-            width: 4. * self.input.canvas_units,
-            opacity: 1.,
-            pressure_curve: 1.,
-            pressure_enabled: false,
-            points: Vec::new(),
-        };
-        for trail in self.input.laser.values() {
-            laser.points.clear();
-            for sample in trail {
-                if sample.starts_segment && !laser.points.is_empty() {
-                    paint_stroke(r, &laser, color, aa, &clips)?;
-                    laser.points.clear();
-                }
-                laser.points.push(Point {
-                    // The laser ribbon uses pressure as its per-sample fade.
-                    pressure: 1.
-                        - now.duration_since(sample.at).as_secs_f32()
-                            / LASER_LIFETIME.as_secs_f32(),
-                    ..sample.point
-                });
-            }
-            paint_stroke(r, &laser, color, aa, &clips)?;
-        }
-        r.present()
-    }
-}
-fn paint_stroke(
-    r: &Renderer,
-    s: &Stroke,
-    color: &ColorManager,
-    aa: f32,
-    clips: &[crate::controller::Rect],
-) -> Result<(), String> {
-    let m = geometry::mesh(s, aa);
-    let rgb = color.map(s.color.output_rgb(r.extended));
-    let vertices: Vec<SDL_Vertex> = m
-        .vertices
-        .iter()
-        .map(|v| SDL_Vertex {
-            position: SDL_FPoint {
-                x: v.xy[0],
-                y: v.xy[1],
-            },
-            color: SDL_FColor {
-                r: rgb[0],
-                g: rgb[1],
-                b: rgb[2],
-                a: s.opacity * v.coverage,
-            },
-            tex_coord: SDL_FPoint { x: 0., y: 0. },
-        })
-        .collect();
-    let bounds = vertices.iter().fold(
-        [
-            f32::INFINITY,
-            f32::INFINITY,
-            f32::NEG_INFINITY,
-            f32::NEG_INFINITY,
-        ],
-        |b, v| {
-            [
-                b[0].min(v.position.x),
-                b[1].min(v.position.y),
-                b[2].max(v.position.x),
-                b[3].max(v.position.y),
-            ]
-        },
-    );
-    let result = (|| {
-        for area in clips {
-            if bounds[2] < area.x as f32
-                || bounds[3] < area.y as f32
-                || bounds[0] >= (area.x + area.w) as f32
-                || bounds[1] >= (area.y + area.h) as f32
-            {
-                continue;
-            }
-            unsafe {
-                check(SDL_SetRenderClipRect(r.raw, &area.sdl()))?;
-            }
-            r.geometry(ptr::null_mut(), &vertices, &m.indices)?;
-        }
-        Ok(())
-    })();
-    unsafe {
-        SDL_SetRenderClipRect(r.raw, ptr::null());
-    }
-    result
 }
 fn pending_pages(count: usize) -> Status {
     text(
@@ -1466,8 +1320,7 @@ pub fn run(options: Options) -> Result<(), String> {
                 SDL_EVENT_RENDER_TARGETS_RESET | SDL_EVENT_RENDER_DEVICE_RESET
             ) {
                 for canvas in &mut canvases {
-                    canvas.background.invalidate_texture();
-                    canvas.dirty = true;
+                    canvas.renderer_reset();
                 }
                 toolbar_dirty = true;
             }
@@ -2097,7 +1950,7 @@ fn smoke_events(app: &mut App, id: SDL_WindowID) -> Result<(), String> {
 #[cfg(test)]
 mod touch_tests {
     use super::*;
-    fn app() -> App {
+    pub(super) fn app() -> App {
         App {
             input: CanvasInput::default(),
             parked_input: BTreeMap::new(),

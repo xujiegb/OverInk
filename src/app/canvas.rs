@@ -1,4 +1,4 @@
-use super::{App, Options};
+use super::{App, Options, ink::Ink};
 use crate::{
     appearance::{Text, text},
     background::{self, Background, SnapshotMode},
@@ -13,6 +13,7 @@ use std::collections::BTreeSet;
 pub(super) struct Canvas {
     // SDL destroys textures with their renderer, and renderers with their window.
     pub background: Background,
+    ink: Ink,
     pub render: Renderer,
     pub window: Window,
     native: Passthrough,
@@ -48,6 +49,7 @@ impl Canvas {
         color.refresh(&window, render.extended);
         Ok(Self {
             background: Background::default(),
+            ink: Ink::default(),
             render,
             window,
             native,
@@ -86,6 +88,7 @@ impl Canvas {
         }
         self.output = output;
         self.bounds = bounds;
+        self.ink.invalidate_layer();
         self.surface_changed();
         self.guard_dirty = true;
         Ok(())
@@ -139,6 +142,12 @@ impl Canvas {
 
     pub fn surface_changed(&mut self) {
         self.color.refresh(&self.window, self.render.extended);
+        self.background.invalidate_texture();
+        self.dirty = true;
+    }
+
+    pub fn renderer_reset(&mut self) {
+        self.ink.reset_textures();
         self.background.invalidate_texture();
         self.dirty = true;
     }
@@ -220,7 +229,7 @@ impl Canvas {
                     let extended = (self.background.frozen && self.window.hdr_enabled())
                         || page.has_wide_ink();
                     if extended != self.render.extended {
-                        self.background.invalidate_texture();
+                        self.renderer_reset();
                         self.render.change_color_output(&self.window, extended)?;
                         self.extended_unavailable = extended && !self.render.extended;
                         self.color.refresh(&self.window, self.render.extended);
@@ -229,7 +238,8 @@ impl Canvas {
                     }
                 }
                 page.history.doc.size = self.window.size();
-                page.paint(
+                self.ink.paint(
+                    page,
                     &self.render,
                     &self.window,
                     &self.color,

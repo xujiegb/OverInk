@@ -404,11 +404,26 @@ impl Renderer {
             let scale = [pixel[0] as f32 / logical[0], pixel[1] as f32 / logical[1]];
             check(SDL_SetRenderScale(self.raw, scale[0], scale[1]))?;
             SDL_SetRenderClipRect(self.raw, ptr::null());
-            check(SDL_SetRenderDrawColorFloat(
-                self.raw, color[0], color[1], color[2], color[3],
-            ))?;
-            check(SDL_RenderClear(self.raw))?;
+            self.clear(color)?;
             Ok(scale)
+        }
+    }
+    pub fn clear(&self, [r, g, b, a]: [f32; 4]) -> Result<(), String> {
+        unsafe {
+            check(SDL_SetRenderDrawColorFloat(self.raw, r, g, b, a))?;
+            check(SDL_RenderClear(self.raw))
+        }
+    }
+    pub fn with_target(
+        &self,
+        target: *mut SDL_Texture,
+        draw: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        unsafe {
+            let previous = SDL_GetRenderTarget(self.raw);
+            let result = check(SDL_SetRenderTarget(self.raw, target)).and_then(|()| draw());
+            let restore = check(SDL_SetRenderTarget(self.raw, previous));
+            result.and(restore)
         }
     }
     pub fn geometry(

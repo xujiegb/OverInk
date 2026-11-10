@@ -13,9 +13,13 @@ struct Edit {
 }
 
 impl Erasure {
-    pub fn sample(&mut self, strokes: &[Arc<Stroke>], point: Point, radius: f32) {
+    pub fn has_edits(&self) -> bool {
+        !self.edits.is_empty()
+    }
+
+    pub fn sample(&mut self, strokes: &[Arc<Stroke>], point: Point, radius: f32) -> bool {
         if self.last.is_some_and(|last| last.dist(point) <= 0.05) {
-            return;
+            return false;
         }
         let from = self.last.replace(point).unwrap_or(point);
         let sweep = Sweep {
@@ -23,12 +27,14 @@ impl Erasure {
             to: point,
             radius,
         };
+        let mut changed = false;
         for (index, stroke) in strokes.iter().enumerate() {
             let remaining = self
                 .edits
                 .get(&index)
                 .map_or(slice::from_ref(stroke), |edit| edit.fragments.as_slice());
             if let Some(fragments) = sweep.cut_strokes(remaining) {
+                changed = true;
                 let edit = self.edits.entry(index).or_insert_with(|| Edit {
                     sweeps: Vec::new(),
                     fragments: Vec::new(),
@@ -37,6 +43,7 @@ impl Erasure {
                 edit.fragments = fragments;
             }
         }
+        changed
     }
 
     pub fn preview<'a>(
@@ -80,7 +87,7 @@ impl Erasure {
         if point_count - removed + added > MAX_POINTS {
             return Err("Erase would exceed the one million sample limit.");
         }
-        history.snapshot();
+        history.snapshot_replacement();
         let mut remap = Vec::new();
         for (index, stroke) in mem::take(&mut history.doc.strokes).into_iter().enumerate() {
             let start = history.doc.strokes.len();
