@@ -66,31 +66,26 @@ impl App {
                                         );
                                     });
                                     ui.separator();
+                                    ui.label(RichText::new(self.status.get(tr)).small().weak());
                                     egui::ScrollArea::vertical()
                                         .id_salt(panel)
                                         .auto_shrink([false, false])
-                                        .show(ui, |ui| {
-                                            match panel {
-                                                Panel::Shapes => self.shapes(ui, &mut commands),
-                                                Panel::Brush => self.brush(ui),
-                                                Panel::Colors => self.palette(ui, &mut commands),
-                                                Panel::Background => self.background_controls(
-                                                    ui,
-                                                    freeze_unavailable,
-                                                    &mut commands,
-                                                ),
-                                                Panel::Settings => self.settings(
-                                                    ui,
-                                                    render,
-                                                    color,
-                                                    video,
-                                                    &mut commands,
-                                                ),
-                                            }
-                                            ui.add_space(12.);
-                                            ui.label(
-                                                RichText::new(self.status.get(tr)).small().weak(),
-                                            );
+                                        .show(ui, |ui| match panel {
+                                            Panel::Shapes => self.shapes(ui, &mut commands),
+                                            Panel::Brush => self.brush(ui),
+                                            Panel::Colors => self.palette(ui, &mut commands),
+                                            Panel::Background => self.background_controls(
+                                                ui,
+                                                freeze_unavailable,
+                                                &mut commands,
+                                            ),
+                                            Panel::Settings => self.settings(
+                                                ui,
+                                                render,
+                                                color,
+                                                video,
+                                                &mut commands,
+                                            ),
                                         });
                                 });
                         },

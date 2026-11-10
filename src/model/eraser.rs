@@ -3,12 +3,14 @@ use std::{borrow::Cow, collections::BTreeMap, mem, slice, sync::Arc};
 
 #[derive(Default)]
 pub struct Erasure {
-    pub last: Option<Point>,
+    last: Option<Point>,
+    pending: Option<(Point, f32)>,
+    sweeps: Vec<Sweep>,
     edits: BTreeMap<usize, Edit>,
 }
 
 struct Edit {
-    sweeps: Vec<Sweep>,
+    sweeps: Vec<usize>,
     fragments: Vec<Arc<Stroke>>,
 }
 
@@ -18,15 +20,38 @@ impl Erasure {
     }
 
     pub fn sample(&mut self, strokes: &[Arc<Stroke>], point: Point, radius: f32) -> bool {
-        if self.last.is_some_and(|last| last.dist(point) <= 0.05) {
-            return false;
+        if let Some(last) = self.last {
+            let distance = last.dist(point);
+            if distance <= (radius * 0.1).clamp(1.0, 3.0) {
+                self.pending = (distance > 0.).then_some((point, radius));
+                return false;
+            }
         }
+        self.pending = None;
+        self.apply_sample(strokes, point, radius)
+    }
+
+    pub fn break_path(&mut self, strokes: &[Arc<Stroke>]) -> bool {
+        let changed = self.finish_sample(strokes);
+        self.last = None;
+        changed
+    }
+
+    fn finish_sample(&mut self, strokes: &[Arc<Stroke>]) -> bool {
+        let Some((point, radius)) = self.pending.take() else {
+            return false;
+        };
+        self.apply_sample(strokes, point, radius)
+    }
+
+    fn apply_sample(&mut self, strokes: &[Arc<Stroke>], point: Point, radius: f32) -> bool {
         let from = self.last.replace(point).unwrap_or(point);
         let sweep = Sweep {
             from,
             to: point,
             radius,
         };
+        let sweep_index = self.sweeps.len();
         let mut changed = false;
         for (index, stroke) in strokes.iter().enumerate() {
             let remaining = self
@@ -39,9 +64,12 @@ impl Erasure {
                     sweeps: Vec::new(),
                     fragments: Vec::new(),
                 });
-                edit.sweeps.push(sweep);
+                edit.sweeps.push(sweep_index);
                 edit.fragments = fragments;
             }
+        }
+        if changed {
+            self.sweeps.push(sweep);
         }
         changed
     }
@@ -51,14 +79,17 @@ impl Erasure {
         index: usize,
         drafts: impl Iterator<Item = &'a Self>,
     ) -> Cow<'a, [Arc<Stroke>]> {
-        let mut edits = drafts.filter_map(|draft| draft.edits.get(&index));
-        let Some(first) = edits.next() else {
+        let mut edits =
+            drafts.filter_map(|draft| draft.edits.get(&index).map(|edit| (draft, edit)));
+        let Some((_, first)) = edits.next() else {
             return Cow::Borrowed(slice::from_ref(stroke));
         };
         let mut remaining = Cow::Borrowed(first.fragments.as_slice());
-        for sweep in edits.flat_map(|edit| &edit.sweeps) {
-            if let Some(fragments) = sweep.cut_strokes(&remaining) {
-                remaining = Cow::Owned(fragments);
+        for (draft, edit) in edits {
+            for &sweep in &edit.sweeps {
+                if let Some(fragments) = draft.sweeps[sweep].cut_strokes(&remaining) {
+                    remaining = Cow::Owned(fragments);
+                }
             }
         }
         remaining
@@ -70,6 +101,7 @@ impl Erasure {
         other_drafts: &mut BTreeMap<u64, Self>,
         point_count: usize,
     ) -> Result<(), &'static str> {
+        self.finish_sample(&history.doc.strokes);
         if self.edits.is_empty() {
             return Ok(());
         }
@@ -113,19 +145,15 @@ impl Erasure {
                 }
                 for index in range.clone() {
                     let mut remaining = Cow::Borrowed(slice::from_ref(&history.doc.strokes[index]));
-                    for sweep in &edit.sweeps {
-                        if let Some(fragments) = sweep.cut_strokes(&remaining) {
+                    let mut sweeps = Vec::new();
+                    for &sweep in &edit.sweeps {
+                        if let Some(fragments) = draft.sweeps[sweep].cut_strokes(&remaining) {
+                            sweeps.push(sweep);
                             remaining = Cow::Owned(fragments);
                         }
                     }
                     if let Cow::Owned(fragments) = remaining {
-                        draft.edits.insert(
-                            index,
-                            Edit {
-                                sweeps: edit.sweeps.clone(),
-                                fragments,
-                            },
-                        );
+                        draft.edits.insert(index, Edit { sweeps, fragments });
                     }
                 }
             }
@@ -204,10 +232,12 @@ impl Sweep {
             return (segment_distance(*dot, self.from, self.to) < self.radius + ink_radius(*dot))
                 .then(Vec::new);
         }
+        let mut start_radius = points.first().copied().map_or(0., &ink_radius);
         let mut cuts = points.windows(2).enumerate().filter_map(|(index, pair)| {
             // Allow room for the round caps on the remaining fragments.
-            let radius = self.radius + ink_radius(pair[0]).max(ink_radius(pair[1]));
-            self.interval(pair[0], pair[1], radius)
+            let end_radius = ink_radius(pair[1]);
+            let radii = [mem::replace(&mut start_radius, end_radius), end_radius];
+            self.interval(pair[0], pair[1], radii)
                 .map(|cut| (index, cut))
         });
         let first = cuts.next()?;
@@ -224,7 +254,7 @@ impl Sweep {
                 if enter > 0. {
                     run.push(a.interpolate(b, enter));
                 }
-                fragments.push(run);
+                push_fragment(&mut fragments, run);
             }
             tail = (exit < 1.).then(|| a.interpolate(b, exit));
             next = index + 1;
@@ -233,23 +263,21 @@ impl Sweep {
         run.extend_from_slice(&points[next..]);
         // The last endpoint is erased if the last segment was cut to its end.
         if !run.is_empty() && (tail.is_some() || next + 1 < points.len()) {
-            fragments.push(run);
+            push_fragment(&mut fragments, run);
         }
         Some(fragments)
     }
 
     // A sweep is a rectangle with two round caps. Its intersection with a
     // stroke segment is a single interval, including between sparse samples.
-    fn interval(self, a: Point, b: Point, radius: f32) -> Option<[f32; 2]> {
+    fn interval(self, a: Point, b: Point, [start, end]: [f32; 2]) -> Option<[f32; 2]> {
+        let radius = self.radius + start.max(end);
         if a.x.min(b.x) > self.from.x.max(self.to.x) + radius
             || a.x.max(b.x) < self.from.x.min(self.to.x) - radius
             || a.y.min(b.y) > self.from.y.max(self.to.y) + radius
             || a.y.max(b.y) < self.from.y.min(self.to.y) - radius
         {
             return None;
-        }
-        if a.x == b.x && a.y == b.y {
-            return (segment_distance(a, self.from, self.to) < radius).then_some([0., 1.]);
         }
         let sx = f64::from(self.to.x) - f64::from(self.from.x);
         let sy = f64::from(self.to.y) - f64::from(self.from.y);
@@ -266,27 +294,75 @@ impl Sweep {
         let [x, y] = local(a);
         let [bx, by] = local(b);
         let (dx, dy) = (bx - x, by - y);
-        let radius = f64::from(radius);
-        let len_sq = dx * dx + dy * dy;
+        let radius = f64::from(self.radius) + f64::from(start);
+        let dr = f64::from(end) - f64::from(start);
+        let quadratic = dx * dx + dy * dy - dr * dr;
         let cap = |center: f64| {
             let x = x - center;
-            let cross = x * dy - y * dx;
-            let disc = radius * radius * len_sq - cross * cross;
-            if disc <= 0. {
-                return None;
-            }
-            let middle = -(x * dx + y * dy) / len_sq;
-            let half = disc.sqrt() / len_sq;
-            intersection([middle - half, middle + half], [0., 1.])
+            quadratic_below(
+                quadratic,
+                x * dx + y * dy - radius * dr,
+                x * x + y * y - radius * radius,
+            )
         };
-        let body = band(x, dx, 0., length)
-            .and_then(|along| intersection(along, band(y, dy, -radius, radius)?));
-        [body, cap(0.), cap(length)]
-            .into_iter()
-            .flatten()
-            .reduce(|a, b| [a[0].min(b[0]), a[1].max(b[1])])
-            .map(|cut| cut.map(|v| v as f32))
-            .filter(|[enter, exit]| enter < exit)
+        let cut = if length == 0. {
+            cap(0.)
+        } else {
+            let body = band(x, dx, 0., length)
+                .and_then(|along| intersection(along, linear_below(y - radius, dy - dr)?))
+                .and_then(|above| intersection(above, linear_below(-y - radius, -dy - dr)?));
+            [body, cap(0.), cap(length)]
+                .into_iter()
+                .flatten()
+                .reduce(|a, b| [a[0].min(b[0]), a[1].max(b[1])])
+        }?;
+        let [enter, exit] = cut.map(|v| v as f32);
+        (enter < exit).then_some([enter, exit])
+    }
+}
+
+fn push_fragment(fragments: &mut Vec<Vec<Point>>, run: Vec<Point>) {
+    let mut length = 0.;
+    if run.windows(2).any(|pair| {
+        length += pair[0].dist(pair[1]);
+        length >= 0.5
+    }) {
+        fragments.push(run);
+    }
+}
+
+fn linear_below(offset: f64, slope: f64) -> Option<[f64; 2]> {
+    if slope == 0. {
+        return (offset < 0.).then_some([0., 1.]);
+    }
+    let limit = -offset / slope;
+    let bound = if slope > 0. {
+        [f64::NEG_INFINITY, limit]
+    } else {
+        [limit, f64::INFINITY]
+    };
+    intersection(bound, [0., 1.])
+}
+
+// Intersect |p(t) - center| < r(t) after squaring a positive radius.
+// `half` is half the linear coefficient.
+fn quadratic_below(a: f64, half: f64, c: f64) -> Option<[f64; 2]> {
+    if a == 0. {
+        return linear_below(c, 2. * half);
+    }
+    let disc = half.mul_add(half, -a * c);
+    if disc <= 0. {
+        return (a < 0.).then_some([0., 1.]);
+    }
+    let q = -half - disc.sqrt().copysign(half);
+    let roots = [q / a, c / q];
+    let [low, high] = [roots[0].min(roots[1]), roots[0].max(roots[1])];
+    if a > 0. {
+        intersection([low, high], [0., 1.])
+    } else {
+        // Distance minus the interpolated radius is convex on [0, 1].
+        intersection([f64::NEG_INFINITY, low], [0., 1.])
+            .or_else(|| intersection([high, f64::INFINITY], [0., 1.]))
     }
 }
 
@@ -371,6 +447,97 @@ mod tests {
             (corner.x, corner.y, corner.pressure, corner.tilt)
         );
         assert_eq!((last.x, last.y), (end.x, end.y));
+    }
+
+    #[test]
+    fn adjacent_segments_agree_at_a_pressure_corner() {
+        let center = Point::new(0., 0., 1., [0.; 2]);
+        let sweep = Sweep {
+            from: center,
+            to: center,
+            radius: 1.,
+        };
+        let points = [
+            Point::new(4., -4., 0.1, [0.; 2]),
+            Point::new(4., 0., 0.1, [0.; 2]),
+            Point::new(4., 4., 1., [0.; 2]),
+        ];
+        let fragments = sweep
+            .cut_path(&points, |point| 5. * point.pressure)
+            .unwrap();
+        assert_eq!(fragments.len(), 1);
+        assert_eq!(fragments[0][1].y, 0.);
+        assert!(fragments[0].last().unwrap().y > 2.);
+    }
+
+    #[test]
+    fn cut_discards_only_the_subpixel_remnant() {
+        let center = Point::new(50., 0., 1., [0.; 2]);
+        let sweep = Sweep {
+            from: center,
+            to: center,
+            radius: 3.,
+        };
+        let points = [46.75, 70.].map(|x| Point::new(x, 0., 1., [0.; 2]));
+        let fragments = sweep.cut_path(&points, |_| 0.).unwrap();
+        assert_eq!(fragments.len(), 1);
+        assert_eq!(fragments[0][0].x, 53.);
+        assert_eq!(fragments[0][1].x, 70.);
+    }
+
+    #[test]
+    fn skipped_samples_still_reach_the_release_point() {
+        let mut history = History::default();
+        history.doc.strokes.push(Arc::new(Stroke {
+            width: 0.2,
+            pressure_enabled: false,
+            points: vec![Point::new(1.3, 0., 1., [0.; 2])],
+            ..pencil()
+        }));
+        let mut erase = Erasure::default();
+        for i in 0..=10 {
+            let p = Point::new(i as f32 * 0.05, 0., 1., [0.; 2]);
+            assert!(!erase.sample(&history.doc.strokes, p, 1.));
+        }
+        assert_eq!(erase.last.unwrap().x, 0.);
+        erase.commit(&mut history, &mut BTreeMap::new(), 1).unwrap();
+        assert!(history.doc.strokes.is_empty());
+        history.undo();
+        assert_eq!(history.doc.strokes.len(), 1);
+    }
+
+    #[test]
+    fn tapered_capsule_interval_agrees_with_distance_samples() {
+        let mut random = 0x49213a_u32;
+        let mut value = || {
+            random = random.wrapping_mul(1664525).wrapping_add(1013904223);
+            (random >> 16) as f32 / 2048. - 16.
+        };
+        for i in 0..512 {
+            let mut point = || Point::new(value(), value(), 1., [0.; 2]);
+            let from = point();
+            let to = if i % 2 == 0 { from } else { point() };
+            let a = point();
+            let b = if i % 5 == 0 { a } else { point() };
+            let [start, end] = [value().abs(), value().abs()];
+            let sweep = Sweep {
+                from,
+                to,
+                radius: 3.,
+            };
+            let interval = sweep.interval(a, b, [start, end]);
+            for step in 0..=32 {
+                let t = step as f32 / 32.;
+                let distance = segment_distance(a.interpolate(b, t), from, to);
+                let boundary = sweep.radius + start + (end - start) * t;
+                if (distance - boundary).abs() > 0.001 {
+                    assert_eq!(
+                        interval.is_some_and(|[lo, hi]| lo <= t && t <= hi),
+                        distance < boundary
+                    );
+                }
+            }
+        }
     }
 
     #[test]

@@ -7,6 +7,7 @@ pub use eraser::Erasure;
 
 pub const MAX_POINTS: usize = 1_000_000;
 pub const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_HISTORY_BYTES: usize = 64 * 1024 * 1024;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Tool {
     #[default]
@@ -32,6 +33,13 @@ impl Tool {
         Self::Eraser,
         Self::Laser,
     ];
+
+    pub fn is_shape(self) -> bool {
+        matches!(
+            self,
+            Self::Line | Self::Arrow | Self::Rectangle | Self::Ellipse
+        )
+    }
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct Point {
@@ -163,12 +171,32 @@ impl Default for Document {
         }
     }
 }
+
+struct HistoryStep {
+    strokes: Vec<Arc<Stroke>>,
+    bytes: usize,
+}
+
+impl HistoryStep {
+    fn new(strokes: Vec<Arc<Stroke>>) -> Self {
+        let entries = strokes.capacity() * size_of::<Arc<Stroke>>();
+        let bytes = strokes.iter().fold(entries, |total, stroke| {
+            total.saturating_add(
+                size_of::<Stroke>()
+                    + 2 * size_of::<usize>()
+                    + stroke.points.capacity() * size_of::<Point>(),
+            )
+        });
+        Self { strokes, bytes }
+    }
+}
+
 #[derive(Default)]
 pub struct History {
     pub doc: Document,
     pub active: Option<Stroke>,
-    undo: VecDeque<Vec<Arc<Stroke>>>,
-    redo: Vec<Vec<Arc<Stroke>>>,
+    undo: VecDeque<HistoryStep>,
+    redo: VecDeque<HistoryStep>,
     // Appends can be painted over the committed layer. Any replacement or
     // removal invalidates the pixels already in that layer.
     ink_revision: u64,
@@ -188,20 +216,30 @@ impl History {
 
     pub fn snapshot(&mut self) {
         // Committed strokes are immutable, so snapshots share their samples.
-        self.undo.push_back(self.doc.strokes.clone());
-        while self.undo.len() > 64
+        self.redo.clear();
+        self.undo
+            .push_back(HistoryStep::new(self.doc.strokes.clone()));
+        self.trim_steps();
+        self.changed = true;
+    }
+
+    fn trim_steps(&mut self) {
+        // Charge shared samples to each step to keep a conservative bound.
+        while self.undo.len() + self.redo.len() > 64
             || self
                 .undo
                 .iter()
-                .flat_map(|v| v.iter())
-                .map(|s| s.points.len() * std::mem::size_of::<Point>())
-                .sum::<usize>()
-                > 64 * 1024 * 1024
+                .chain(&self.redo)
+                .fold(0usize, |bytes, step| bytes.saturating_add(step.bytes))
+                > MAX_HISTORY_BYTES
         {
-            self.undo.pop_front();
+            let older = if self.undo.len() >= self.redo.len() {
+                &mut self.undo
+            } else {
+                &mut self.redo
+            };
+            older.pop_front();
         }
-        self.redo.clear();
-        self.changed = true;
     }
 
     fn snapshot_replacement(&mut self) {
@@ -220,16 +258,19 @@ impl History {
     pub fn undo(&mut self) {
         self.active = None;
         if let Some(s) = self.undo.pop_back() {
-            self.redo.push(std::mem::replace(&mut self.doc.strokes, s));
+            let replaced = std::mem::replace(&mut self.doc.strokes, s.strokes);
+            self.redo.push_back(HistoryStep::new(replaced));
+            self.trim_steps();
             self.changed = true;
             self.ink_revision = self.ink_revision.wrapping_add(1);
         }
     }
     pub fn redo(&mut self) {
         self.active = None;
-        if let Some(s) = self.redo.pop() {
-            self.undo
-                .push_back(std::mem::replace(&mut self.doc.strokes, s));
+        if let Some(s) = self.redo.pop_back() {
+            let replaced = std::mem::replace(&mut self.doc.strokes, s.strokes);
+            self.undo.push_back(HistoryStep::new(replaced));
+            self.trim_steps();
             self.changed = true;
             self.ink_revision = self.ink_revision.wrapping_add(1);
         }
@@ -326,6 +367,26 @@ mod tests {
                 Point::new(100., 0., 1., [0.; 2]),
             ],
         }
+    }
+
+    #[test]
+    fn history_budget_counts_fragment_capacity_and_both_stacks() {
+        let mut fragment = stroke();
+        fragment.points.reserve(4096);
+        let step = HistoryStep::new(vec![Arc::new(fragment)]);
+        assert!(step.bytes > 4096 * size_of::<Point>());
+        let mut history = History::default();
+        for stack in [&mut history.undo, &mut history.redo] {
+            stack.push_back(HistoryStep {
+                strokes: Vec::new(),
+                bytes: MAX_HISTORY_BYTES / 2,
+            });
+        }
+        history.undo.push_back(step);
+        history.trim_steps();
+        assert_eq!(history.undo.len(), 1);
+        assert_eq!(history.redo.len(), 1);
+        assert_eq!(history.undo[0].strokes.len(), 1);
     }
     #[test]
     fn all_8192_pressure_steps_remain_distinct() {
