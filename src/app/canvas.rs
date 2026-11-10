@@ -41,9 +41,15 @@ impl Canvas {
             && let Err(error) = window.place_on_display(display.id, true)
             && driver() != "wayland"
         {
-            return Err(error);
+            return Err(format!("Positioning the drawing canvas failed ({error})"));
         }
-        let render = Renderer::new(&window, options.sdr || cfg!(target_os = "macos"))?;
+        let render =
+            Renderer::new(&window, options.sdr || cfg!(target_os = "macos")).map_err(|error| {
+                format!(
+                    "Creating the canvas renderer on {} failed ({error})",
+                    driver()
+                )
+            })?;
         let native = Passthrough::new(&window);
         let mut color = ColorManager::default();
         color.refresh(&window, render.extended);
@@ -96,7 +102,12 @@ impl Canvas {
 
     pub fn show(&mut self, toolbar: &Window, visible: bool) -> Result<(), String> {
         if self.visible != visible {
-            native::show_canvas(&self.window, toolbar, visible)?;
+            native::show_canvas(&self.window, toolbar, visible).map_err(|error| {
+                format!(
+                    "Updating canvas visibility on {} failed ({error})",
+                    driver()
+                )
+            })?;
             self.visible = visible;
             self.guard_dirty = true;
             self.dirty = true;
@@ -114,7 +125,9 @@ impl Canvas {
                         || [actual_x, actual_y] != [x, y]
                         || self.window.size() != [w as f32, h as f32]
                     {
-                        self.window.place_on_display(id, true)?;
+                        self.window.place_on_display(id, true).map_err(|error| {
+                            format!("Positioning the drawing canvas failed ({error})")
+                        })?;
                     }
                 }
                 unsafe { SDL_SetWindowAlwaysOnTop(self.window.raw, true) };

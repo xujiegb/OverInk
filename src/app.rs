@@ -1151,12 +1151,7 @@ pub fn run(options: Options) -> Result<(), String> {
     let _teardown_pool = crate::native::macos::AutoreleasePool::new();
     #[cfg(target_os = "macos")]
     let startup_pool = crate::native::macos::AutoreleasePool::new();
-    if options.smoke {
-        unsafe {
-            SDL_SetHintWithPriority(SDL_HINT_VIDEO_DRIVER, c"dummy".as_ptr(), SDL_HINT_OVERRIDE);
-        }
-    }
-    let _runtime = Runtime::new(options.x11 && !options.smoke)?;
+    let _runtime = Runtime::new(options.x11, options.smoke)?;
     let video = crate::sdl::driver();
     let wayland = video == "wayland";
     let window = Window::new("OverInk - canvas", 1100, 720, !options.smoke)?;
@@ -1186,7 +1181,8 @@ pub fn run(options: Options) -> Result<(), String> {
         let _ = toolbar.arrange_toolbar(false, app.pages.active);
         canvas::reconcile(&mut canvases, &mut app, &toolbar, &options)?;
     }
-    let toolbar_render = Renderer::new(&toolbar, true)?;
+    let toolbar_render = Renderer::new(&toolbar, true)
+        .map_err(|error| format!("Creating the toolbar renderer on {video} failed ({error})"))?;
     let mut gui = gui::Gui::new();
     let mark = crate::toolbar::brand(&gui.ctx);
     let mut toolbar_color = ColorManager::default();
@@ -1194,7 +1190,9 @@ pub fn run(options: Options) -> Result<(), String> {
     for canvas in &mut canvases {
         canvas.show(&toolbar, options.smoke || !app.suspended)?;
     }
-    toolbar.show(true)?;
+    toolbar
+        .show(true)
+        .map_err(|error| format!("Showing the toolbar on {video} failed ({error})"))?;
     if !options.smoke && !wayland {
         let _ = toolbar.arrange_toolbar(false, app.pages.active);
     }

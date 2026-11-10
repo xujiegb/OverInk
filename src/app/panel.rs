@@ -587,9 +587,9 @@ impl App {
         commands.preferences |= per_display.changed();
         if video == "wayland" {
             ui.small(tr.text(
-                "Native Wayland leaves window order and placement to the compositor. XWayland supports separate canvases and always-on-top ink.",
-                "原生 Wayland 由合成器决定窗口层级和位置。XWayland 支持逐屏画布与笔迹置顶。",
-                "原生 Wayland 由合成器決定視窗層級與位置。XWayland 支援逐螢幕畫布與筆跡置頂。",
+                "Native Wayland uses a single canvas.",
+                "原生 Wayland 使用单窗口。",
+                "原生 Wayland 使用單視窗。",
             ));
         }
         egui::ComboBox::from_id_salt("display")
