@@ -206,14 +206,9 @@ impl Window {
             let mut r = SDL_Rect::default();
             check(SDL_GetDisplayBounds(display, &mut r))?;
             if overlay && driver() == "wayland" {
-                // A fullscreen-desktop surface can request an output on Wayland;
-                // ordinary toplevel positioning is controlled by the compositor.
-                check(SDL_SetWindowFullscreenMode(self.raw, ptr::null()))?;
-                let center = SDL_WINDOWPOS_CENTERED_DISPLAY(display);
-                // SDL retains the pending output even when the compositor
-                // rejects positioning the still-windowed surface.
-                SDL_SetWindowPosition(self.raw, center, center);
-                check(SDL_SetWindowFullscreen(self.raw, true))?;
+                // XDG fullscreen hides unrelated content behind transparent
+                // surfaces. Maximizing keeps the desktop in the compositor.
+                check(SDL_MaximizeWindow(self.raw))?;
             } else if overlay {
                 check(SDL_SetWindowSize(self.raw, r.w, r.h))?;
                 check(SDL_SetWindowPosition(self.raw, r.x, r.y))?;

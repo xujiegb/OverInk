@@ -1,5 +1,5 @@
 use super::{History, MAX_POINTS, Point, Stroke, Tool, segment_distance};
-use std::{borrow::Cow, collections::BTreeMap, mem, slice};
+use std::{borrow::Cow, collections::BTreeMap, mem, slice, sync::Arc};
 
 #[derive(Default)]
 pub struct Erasure {
@@ -9,11 +9,11 @@ pub struct Erasure {
 
 struct Edit {
     sweeps: Vec<Sweep>,
-    fragments: Vec<Stroke>,
+    fragments: Vec<Arc<Stroke>>,
 }
 
 impl Erasure {
-    pub fn sample(&mut self, strokes: &[Stroke], point: Point, radius: f32) {
+    pub fn sample(&mut self, strokes: &[Arc<Stroke>], point: Point, radius: f32) {
         if self.last.is_some_and(|last| last.dist(point) <= 0.05) {
             return;
         }
@@ -40,10 +40,10 @@ impl Erasure {
     }
 
     pub fn preview<'a>(
-        stroke: &'a Stroke,
+        stroke: &'a Arc<Stroke>,
         index: usize,
         drafts: impl Iterator<Item = &'a Self>,
-    ) -> Cow<'a, [Stroke]> {
+    ) -> Cow<'a, [Arc<Stroke>]> {
         let mut edits = drafts.filter_map(|draft| draft.edits.get(&index));
         let Some(first) = edits.next() else {
             return Cow::Borrowed(slice::from_ref(stroke));
@@ -135,13 +135,13 @@ struct Sweep {
 }
 
 impl Sweep {
-    fn cut_strokes(self, strokes: &[Stroke]) -> Option<Vec<Stroke>> {
-        let mut remaining: Option<Vec<Stroke>> = None;
+    fn cut_strokes(self, strokes: &[Arc<Stroke>]) -> Option<Vec<Arc<Stroke>>> {
+        let mut remaining: Option<Vec<Arc<Stroke>>> = None;
         for (index, stroke) in strokes.iter().enumerate() {
             if let Some(fragments) = self.cut_stroke(stroke) {
                 remaining
                     .get_or_insert_with(|| strokes[..index].to_vec())
-                    .extend(fragments);
+                    .extend(fragments.into_iter().map(Arc::new));
             } else if let Some(remaining) = &mut remaining {
                 remaining.push(stroke.clone());
             }

@@ -70,6 +70,7 @@ struct Commands {
     frame_rate: bool,
     background: bool,
     preferences: bool,
+    redraw_canvas: bool,
 }
 struct App {
     history: History,
@@ -463,7 +464,7 @@ impl App {
             && !stroke.points.is_empty()
         {
             self.history.snapshot();
-            self.history.doc.strokes.push(stroke);
+            self.history.doc.strokes.push(stroke.into());
         }
     }
     fn commit_touches(&mut self) {
@@ -810,23 +811,33 @@ impl App {
         };
         // Clear the protected area to transparent even on software renderers,
         // which cannot implement SDL's custom alpha-mask texture blend mode.
-        let scale = r.begin(w, [0.; 4])?;
+        let has_hole = self.protected.is_some();
+        let scale = r.begin(w, if has_hole { [0.; 4] } else { bg })?;
         let clips = crate::controller::outside(w.size().map(|v| v.ceil() as i32), self.protected);
-        for area in &clips {
+        let fill = has_hole && bg[3] > 0.;
+        let draw_background = background.frozen && !self.pass;
+        if fill {
             unsafe {
-                check(SDL_SetRenderClipRect(r.raw, &area.sdl()))?;
                 check(SDL_SetRenderDrawColorFloat(
                     r.raw, bg[0], bg[1], bg[2], bg[3],
                 ))?;
-                check(SDL_RenderFillRect(r.raw, ptr::null()))?;
             }
-            if !self.pass
-                && let Err(error) = background.draw(r, w, color)
-            {
-                background.live();
-                self.frozen = false;
-                self.status = text("Frozen desktop unavailable", "无法冻结桌面", "無法凍結桌面")
-                    .detail(error);
+        }
+        if fill || draw_background {
+            for area in &clips {
+                unsafe {
+                    check(SDL_SetRenderClipRect(r.raw, &area.sdl()))?;
+                    if fill {
+                        check(SDL_RenderFillRect(r.raw, ptr::null()))?;
+                    }
+                }
+                if draw_background && let Err(error) = background.draw(r, w, color) {
+                    background.live();
+                    self.frozen = false;
+                    self.status =
+                        text("Frozen desktop unavailable", "无法冻结桌面", "無法凍結桌面")
+                            .detail(error);
+                }
             }
         }
         unsafe {
@@ -1020,6 +1031,16 @@ fn mouse_released() -> bool {
     }
 }
 
+fn wait_for_events(timeout: Duration) {
+    if !timeout.is_zero() {
+        // Wait without removing the event from SDL's queue.
+        let milliseconds = timeout.as_nanos().div_ceil(1_000_000).min(i32::MAX as u128);
+        unsafe {
+            SDL_WaitEventTimeout(ptr::null_mut(), milliseconds as i32);
+        }
+    }
+}
+
 pub struct Options {
     pub board: bool,
     pub x11: bool,
@@ -1035,6 +1056,7 @@ pub fn run(options: Options) -> Result<(), String> {
     }
     let _runtime = Runtime::new(options.x11)?;
     let video = crate::sdl::driver();
+    let wayland = video == "wayland";
     let canvas = Window::new("OverInk - canvas", 1100, 720, !options.smoke)?;
     let topology = crate::display::Topology::new(&video);
     let displays = topology.connected(&canvas).unwrap_or_default();
@@ -1060,7 +1082,7 @@ pub fn run(options: Options) -> Result<(), String> {
     if !options.smoke {
         let _ = toolbar.arrange_toolbar(false, app.pages.active);
     }
-    let toolbar_render = Renderer::new(&toolbar, options.sdr)?;
+    let toolbar_render = Renderer::new(&toolbar, true)?;
     let mut gui = gui::Gui::new();
     let mark = crate::toolbar::brand(&gui.ctx);
     let mut toolbar_expanded = false;
@@ -1109,6 +1131,11 @@ pub fn run(options: Options) -> Result<(), String> {
     let mut topology_dirty = !options.smoke;
     let mut pacer = FramePacer::new(app.frame_rate, app.refresh_hz(), Instant::now());
     let mut appearance = ThemeMonitor::default();
+    let mut canvas_dirty = true;
+    let mut toolbar_dirty = true;
+    let mut guard_dirty = true;
+    let mut last_mouse = false;
+    let mut toolbar_repaint_at: Option<Instant> = None;
     while running {
         let mut disconnected = BTreeSet::new();
         let mut controller_scale_changed = false;
@@ -1123,6 +1150,7 @@ pub fn run(options: Options) -> Result<(), String> {
             }
             if ty == SDL_EVENT_LOCALE_CHANGED && app.preferences.language.is_none() {
                 app.language = Language::system();
+                toolbar_dirty = true;
             }
             if ty >= SDL_EVENT_DISPLAY_FIRST && ty <= SDL_EVENT_DISPLAY_LAST {
                 topology_dirty = !options.smoke;
@@ -1130,29 +1158,58 @@ pub fn run(options: Options) -> Result<(), String> {
                     disconnected.insert(unsafe { event.display.displayID.0 });
                 }
             }
-            if matches!(
-                ty,
-                SDL_EVENT_WINDOW_MOVED
-                    | SDL_EVENT_WINDOW_DISPLAY_CHANGED
-                    | SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED
-            ) && unsafe { event.window.windowID } == toolbar.id
-            {
-                topology_dirty = !options.smoke;
-                controller_scale_changed |= ty == SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED;
-                controller_moved |= ty != SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED;
+            if (SDL_EVENT_WINDOW_FIRST..=SDL_EVENT_WINDOW_LAST).contains(&ty) {
+                let id = unsafe { event.window.windowID };
+                let bounds_changed = matches!(
+                    ty,
+                    SDL_EVENT_WINDOW_MOVED
+                        | SDL_EVENT_WINDOW_DISPLAY_CHANGED
+                        | SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED
+                        | SDL_EVENT_WINDOW_RESIZED
+                        | SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED
+                        | SDL_EVENT_WINDOW_SHOWN
+                        | SDL_EVENT_WINDOW_HIDDEN
+                );
+                let surface_changed = matches!(
+                    ty,
+                    SDL_EVENT_WINDOW_DISPLAY_CHANGED
+                        | SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED
+                        | SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED
+                        | SDL_EVENT_WINDOW_HDR_STATE_CHANGED
+                        | SDL_EVENT_WINDOW_ICCPROF_CHANGED
+                );
+                let redraw = bounds_changed
+                    || surface_changed
+                    || matches!(ty, SDL_EVENT_WINDOW_EXPOSED | SDL_EVENT_WINDOW_RESTORED);
+                if id == toolbar.id {
+                    let moved = matches!(
+                        ty,
+                        SDL_EVENT_WINDOW_MOVED | SDL_EVENT_WINDOW_DISPLAY_CHANGED
+                    );
+                    controller_moved |= moved;
+                    controller_scale_changed |= ty == SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED;
+                    topology_dirty |= !options.smoke && (moved || controller_scale_changed);
+                    guard_dirty |= bounds_changed;
+                    toolbar_dirty |= redraw;
+                } else if id == canvas.id {
+                    // A Wayland output is assigned by the compositor after mapping.
+                    topology_dirty |= wayland && ty == SDL_EVENT_WINDOW_DISPLAY_CHANGED;
+                    canvas_surface_changed |= surface_changed;
+                    guard_dirty |= bounds_changed;
+                    canvas_dirty |= redraw;
+                    if ty == SDL_EVENT_WINDOW_SHOWN {
+                        native.invalidate();
+                        crate::native::keep_controller_above(&canvas, &toolbar, &native);
+                    }
+                }
             }
             if matches!(
                 ty,
-                SDL_EVENT_WINDOW_DISPLAY_CHANGED
-                    | SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED
-                    | SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED
-                    | SDL_EVENT_WINDOW_HDR_STATE_CHANGED
-            ) && unsafe { event.window.windowID } == canvas.id
-            {
-                canvas_surface_changed = true;
-            }
-            if ty == SDL_EVENT_WINDOW_SHOWN && unsafe { event.window.windowID } == canvas.id {
-                native.invalidate();
+                SDL_EVENT_RENDER_TARGETS_RESET | SDL_EVENT_RENDER_DEVICE_RESET
+            ) {
+                canvas_dirty = true;
+                toolbar_dirty = true;
+                background.invalidate_texture();
             }
             if ty == SDL_EVENT_WINDOW_CLOSE_REQUESTED {
                 let id = unsafe { event.window.windowID };
@@ -1162,11 +1219,13 @@ pub fn run(options: Options) -> Result<(), String> {
                 } else if id == canvas.id {
                     app.hidden = true;
                     crate::native::show_canvas(&canvas, &toolbar, false)?;
+                    toolbar_dirty = true;
                 }
             }
             let was_picking = picker.active();
             picker.event(&event, &canvas);
             gui.event(&event, toolbar.id, toolbar.size());
+            let had_contacts = app.contact.is_some() || !app.touches.is_empty();
             if !was_picking
                 && !background.pending()
                 && !app.suspended
@@ -1176,6 +1235,11 @@ pub fn run(options: Options) -> Result<(), String> {
             } else {
                 app.track_pen(&event);
             }
+            let has_contacts = app.contact.is_some() || !app.touches.is_empty();
+            canvas_dirty |= had_contacts || has_contacts;
+            toolbar_dirty |= app.panel.is_some() && (had_contacts || has_contacts);
+            toolbar_dirty |= app.panel == Some(crate::toolbar::Panel::Brush)
+                && matches!(ty, SDL_EVENT_PEN_AXIS | SDL_EVENT_PEN_PROXIMITY_OUT);
             let canvas_activated = unsafe {
                 (ty == SDL_EVENT_WINDOW_FOCUS_GAINED && event.window.windowID == canvas.id)
                     || (ty == SDL_EVENT_MOUSE_BUTTON_DOWN && event.button.windowID == canvas.id)
@@ -1188,6 +1252,8 @@ pub fn run(options: Options) -> Result<(), String> {
             if ty == SDL_EVENT_KEY_DOWN && !was_picking && !background.pending() {
                 let id = unsafe { event.key.windowID };
                 if id == canvas.id || id == toolbar.id {
+                    canvas_dirty = true;
+                    toolbar_dirty = true;
                     let c = app.keyboard(
                         &event,
                         id == toolbar.id
@@ -1195,6 +1261,7 @@ pub fn run(options: Options) -> Result<(), String> {
                                 || egui::Popup::is_any_open(&gui.ctx)),
                     );
                     if c.mode {
+                        guard_dirty = true;
                         apply_mode(&mut app, &canvas, &toolbar, &mut native)?
                     }
                     if c.quit {
@@ -1224,6 +1291,7 @@ pub fn run(options: Options) -> Result<(), String> {
                 .unwrap_or_else(|error| {
                     app.status = text("Display query failed", "查询显示器失败", "查詢顯示器失敗")
                         .detail(error);
+                    toolbar_dirty = true;
                     app.displays.clone()
                 })
                 .into_iter()
@@ -1234,7 +1302,23 @@ pub fn run(options: Options) -> Result<(), String> {
                 .iter()
                 .any(|old| !displays.iter().any(|d| d.id == old.id));
             let was_suspended = app.suspended;
-            let (layout, removed) = app.refresh_displays(displays, requested.or(moved_to));
+            let desired = requested.or(moved_to);
+            let actual = canvas.display_id();
+            let reported = actual.filter(|id| displays.iter().any(|display| display.id == *id));
+            // A maximized Wayland toplevel can only draw on the output the
+            // compositor gave it. Associate ink with the actual output.
+            let target = if wayland {
+                reported.or(desired)
+            } else {
+                desired
+            };
+            let (layout, removed) =
+                if displays != app.displays || target != app.pages.active && target.is_some() {
+                    toolbar_dirty = true;
+                    app.refresh_displays(displays, target)
+                } else {
+                    (false, false)
+                };
             if requested.is_some()
                 && video != "wayland"
                 && let Err(error) = toolbar.arrange_toolbar(toolbar_expanded, app.pages.active)
@@ -1242,7 +1326,15 @@ pub fn run(options: Options) -> Result<(), String> {
                 app.status =
                     text("Toolbar layout failed", "工具栏布局失败", "工具列配置失敗").detail(error);
             }
-            if layout || removed || canvas.display_id() != app.pages.active {
+            let remap = if wayland {
+                app.suspended || was_suspended || desired.is_some_and(|id| Some(id) != reported)
+            } else {
+                layout || removed || actual != app.pages.active
+            };
+            if remap {
+                canvas_dirty = true;
+                toolbar_dirty = true;
+                guard_dirty = true;
                 if picker.active() {
                     picker.cancel();
                 }
@@ -1266,6 +1358,19 @@ pub fn run(options: Options) -> Result<(), String> {
                     apply_mode(&mut app, &canvas, &toolbar, &mut native)?;
                 }
             }
+            if layout || removed {
+                canvas_dirty = true;
+                toolbar_dirty = true;
+            }
+            if wayland && requested.is_some_and(|id| Some(id) != reported) {
+                app.status = text(
+                    "The Wayland compositor controls window order and placement.",
+                    "Wayland 窗口层级和位置由合成器控制。",
+                    "Wayland 視窗層級與位置由合成器控制。",
+                )
+                .into();
+                toolbar_dirty = true;
+            }
             if disconnected
                 && app.pages.needs_save(&app.history)
                 && let Err(error) = app.save_session()
@@ -1276,6 +1381,7 @@ pub fn run(options: Options) -> Result<(), String> {
                     "中斷顯示器連線後儲存失敗",
                 )
                 .detail(error);
+                toolbar_dirty = true;
             }
             topology_dirty = false;
             last_displays = Instant::now();
@@ -1283,6 +1389,7 @@ pub fn run(options: Options) -> Result<(), String> {
         if canvas_surface_changed {
             canvas_color.refresh(&canvas, canvas_render.extended);
             background.invalidate_texture();
+            toolbar_dirty = true;
         }
         app.canvas_units =
             canvas.scale() / unsafe { SDL_GetWindowPixelDensity(canvas.raw) }.max(0.1);
@@ -1297,6 +1404,8 @@ pub fn run(options: Options) -> Result<(), String> {
         ) {
             app.frozen = false;
             app.status = reason.into();
+            canvas_dirty = true;
+            toolbar_dirty = true;
         }
         if (picker.hides_windows() || background.pending()) && !picker_windows_hidden {
             crate::native::show_canvas(&canvas, &toolbar, false)?;
@@ -1304,6 +1413,9 @@ pub fn run(options: Options) -> Result<(), String> {
             picker_windows_hidden = true;
         }
         if let Some(result) = picker.poll(&canvas) {
+            canvas_dirty = true;
+            toolbar_dirty = true;
+            guard_dirty = true;
             app.picking = false;
             match result {
                 Ok(Some(color)) => {
@@ -1322,6 +1434,8 @@ pub fn run(options: Options) -> Result<(), String> {
             }
         }
         if let Some(result) = background.poll(&canvas) {
+            canvas_dirty = true;
+            toolbar_dirty = true;
             app.frozen = background.frozen;
             app.status = match result {
                 Ok(()) => text(
@@ -1342,26 +1456,33 @@ pub fn run(options: Options) -> Result<(), String> {
             toolbar.show(true)?;
             apply_mode(&mut app, &canvas, &toolbar, &mut native)?;
             picker_windows_hidden = false;
+            canvas_dirty = true;
+            toolbar_dirty = true;
+            guard_dirty = true;
         }
         if picker.hides_windows() || background.pending() {
-            unsafe {
-                SDL_Delay(8);
-            }
+            wait_for_events(Duration::from_millis(8));
             continue;
         }
         // The OS/SDL updates HDR white point dynamically. ICC changes are polled to
         // also catch profile replacement without a display move notification.
         if last_color.elapsed() > Duration::from_secs(3) {
             let previous = canvas_color.revision;
+            let previous_toolbar = toolbar_color.revision;
             canvas_color.refresh(&canvas, canvas_render.extended);
             toolbar_color.refresh(&toolbar, toolbar_render.extended);
             if previous != canvas_color.revision {
                 background.invalidate_texture();
+                canvas_dirty = true;
             }
+            toolbar_dirty |=
+                previous != canvas_color.revision || previous_toolbar != toolbar_color.revision;
             last_color = Instant::now();
         }
         let expanded = app.panel.is_some() && !app.picking;
         if expanded != toolbar_expanded || controller_scale_changed {
+            toolbar_dirty = true;
+            guard_dirty = true;
             toolbar_expanded = expanded;
             if let Err(error) = toolbar.arrange_toolbar(expanded, None) {
                 app.status =
@@ -1371,27 +1492,43 @@ pub fn run(options: Options) -> Result<(), String> {
         let theme = appearance.theme(app.preferences.theme);
         if gui.ctx.theme() != theme {
             gui.ctx.set_theme(theme);
+            toolbar_dirty = true;
         }
-        gui.set_language(app.language);
-        let mut input = gui.input(&toolbar);
-        input.predicted_dt = pacer.period.as_secs_f32();
-        let ctx = gui.ctx.clone();
         let mut cmd = Commands::default();
-        let mut output = ctx.run_ui(input, |ui| {
-            cmd = app.ui(
-                ui,
-                &canvas_render,
-                &canvas_color,
-                &video,
-                snapshot_mode.unavailable(),
-                mark.id(),
-            )
-        });
+        let mut output = None;
+        if toolbar_dirty
+            || !gui.raw.events.is_empty()
+            || toolbar_repaint_at.is_some_and(|at| Instant::now() >= at)
+        {
+            toolbar_dirty = false;
+            gui.set_language(app.language);
+            let mut input = gui.input(&toolbar);
+            input.predicted_dt = pacer.period.as_secs_f32();
+            let frame = gui.ctx.run_ui(input, |ui| {
+                cmd = app.ui(
+                    ui,
+                    &canvas_render,
+                    &canvas_color,
+                    &video,
+                    snapshot_mode.unavailable(),
+                    mark.id(),
+                )
+            });
+            toolbar_repaint_at = frame
+                .viewport_output
+                .get(&egui::ViewportId::ROOT)
+                .and_then(|viewport| Instant::now().checked_add(viewport.repaint_delay));
+            output = Some(frame);
+        }
         if cmd.quit {
-            output.textures_delta.clear();
+            if let Some(output) = &mut output {
+                output.textures_delta.clear();
+            }
             break;
         }
+        canvas_dirty |= cmd.redraw_canvas || cmd.mode || cmd.background || cmd.pick;
         if cmd.preferences {
+            toolbar_dirty = true;
             app.language = app.preferences.language.unwrap_or_else(Language::system);
             if let Err(error) = app.preferences.save(&state_dir().join("ui.json")) {
                 app.status = text(
@@ -1418,6 +1555,7 @@ pub fn run(options: Options) -> Result<(), String> {
             }
         }
         if cmd.pick && !background.pending() {
+            guard_dirty = true;
             if picker.active() {
                 picker.cancel();
             } else {
@@ -1431,6 +1569,7 @@ pub fn run(options: Options) -> Result<(), String> {
                         SDL_RaiseWindow(canvas.raw);
                         SDL_RaiseWindow(toolbar.raw);
                     }
+                    crate::native::keep_controller_above(&canvas, &toolbar, &native);
                 }
                 if picker.hides_windows() {
                     crate::native::show_canvas(&canvas, &toolbar, false)?;
@@ -1455,6 +1594,7 @@ pub fn run(options: Options) -> Result<(), String> {
             pacer.configure(app.frame_rate, app.refresh_hz(), Instant::now());
         }
         if cmd.mode {
+            guard_dirty = true;
             apply_mode(&mut app, &canvas, &toolbar, &mut native)?;
         }
         if picker.hides_windows() || background.pending() {
@@ -1465,16 +1605,19 @@ pub fn run(options: Options) -> Result<(), String> {
             }
             // Consume texture deltas from the frame that launched the sampler,
             // without presenting an application window over the desktop sample.
-            gui.paint(&toolbar_render, &toolbar, &toolbar_color, output)?;
-            unsafe {
-                SDL_Delay(8);
+            if let Some(output) = output {
+                gui.paint(&toolbar_render, &toolbar, &toolbar_color, output)?;
             }
+            wait_for_events(Duration::from_millis(8));
             continue;
         }
-        let rail = crate::toolbar::colors(theme == egui::Theme::Dark).rail;
-        toolbar_render.begin(&toolbar, rail.to_array().map(|c| f32::from(c) / 255.))?;
-        gui.paint(&toolbar_render, &toolbar, &toolbar_color, output)?;
-        toolbar_render.present()?;
+        let mut presented = output.is_some();
+        if let Some(output) = output {
+            let rail = crate::toolbar::colors(theme == egui::Theme::Dark).rail;
+            toolbar_render.begin(&toolbar, rail.to_array().map(|c| f32::from(c) / 255.))?;
+            gui.paint(&toolbar_render, &toolbar, &toolbar_color, output)?;
+            toolbar_render.present()?;
+        }
         if !follow_controller {
             // Establish the baseline after the first map/configure, without
             // letting the compositor's initial placement override --display.
@@ -1486,33 +1629,56 @@ pub fn run(options: Options) -> Result<(), String> {
             follow_controller = true;
         }
         let mouse = !picker.choosing() && app.mouse_ready();
-        match controller_guard.update(&canvas, &toolbar, mouse, canvas_render.name != "software") {
-            Ok((rect, shape_changed)) => {
-                app.protected = rect;
-                if shape_changed {
-                    native.invalidate();
+        if guard_dirty || mouse != last_mouse {
+            guard_dirty = false;
+            last_mouse = mouse;
+            match controller_guard.update(
+                &canvas,
+                &toolbar,
+                mouse,
+                canvas_render.name != "software",
+            ) {
+                Ok((rect, shape_changed)) => {
+                    canvas_dirty |= rect != app.protected || shape_changed;
+                    app.protected = rect;
+                    if shape_changed {
+                        native.invalidate();
+                    }
+                }
+                Err(error) => {
+                    app.hidden = true;
+                    toolbar_dirty = true;
+                    crate::native::show_canvas(&canvas, &toolbar, false)?;
+                    app.status = text(
+                        "Drawing layer hidden to keep the toolbar accessible",
+                        "已隐藏书写图层，工具栏仍可使用",
+                        "已隱藏書寫圖層，工具列仍可使用",
+                    )
+                    .detail(error);
                 }
             }
-            Err(error) => {
-                app.hidden = true;
-                crate::native::show_canvas(&canvas, &toolbar, false)?;
-                app.status = text(
-                    "Drawing layer hidden to keep the toolbar accessible",
-                    "已隐藏书写图层，工具栏仍可使用",
-                    "已隱藏書寫圖層，工具列仍可使用",
-                )
-                .detail(error);
-            }
         }
-        if picker.choosing() {
-            canvas_render.begin(&canvas, [0., 0., 0., 1. / 255.])?;
-            canvas_render.present()?;
-        } else if !app.hidden
-            && !app.suspended
-            && (options.smoke || canvas.display_id() == app.pages.active)
+        let on_output = options.smoke || canvas.display_id() == app.pages.active;
+        if canvas_dirty
+            && (picker.choosing() || wayland && !on_output && !app.hidden && !app.suspended)
         {
+            let alpha = if picker.choosing() { 1. / 255. } else { 0. };
+            canvas_render.begin(&canvas, [0., 0., 0., alpha])?;
+            canvas_render.present()?;
+            canvas_dirty = false;
+            presented = true;
+        } else if !picker.choosing()
+            && !app.hidden
+            && !app.suspended
+            && on_output
+            && (options.smoke || canvas_dirty || !app.laser.is_empty())
+        {
+            let was_frozen = app.frozen;
             app.history.doc.size = canvas.size();
             app.paint(&canvas_render, &canvas, &canvas_color, &mut background)?;
+            toolbar_dirty |= was_frozen != app.frozen;
+            canvas_dirty = false;
+            presented = true;
         }
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         if !options.smoke
@@ -1521,6 +1687,7 @@ pub fn run(options: Options) -> Result<(), String> {
             && let Err(error) = native.set_guarded(&canvas, mouse, app.protected)
         {
             app.pass = false;
+            toolbar_dirty = true;
             app.status = text(
                 "Input region update failed",
                 "更新输入区域失败",
@@ -1538,6 +1705,7 @@ pub fn run(options: Options) -> Result<(), String> {
             && !app.suspended
             && let Err(error) = native.set(&canvas, true)
         {
+            toolbar_dirty = true;
             app.status =
                 text("Mouse mode failed", "鼠标模式切换失败", "滑鼠模式切換失敗").detail(error);
         }
@@ -1550,6 +1718,7 @@ pub fn run(options: Options) -> Result<(), String> {
                 && let Err(e) = app.save_session()
             {
                 app.status = text("Autosave failed", "自动保存失败", "自動儲存失敗").detail(e);
+                toolbar_dirty = true;
             }
             app.last_save = Instant::now();
         }
@@ -1585,7 +1754,21 @@ pub fn run(options: Options) -> Result<(), String> {
             );
             running = false;
         }
-        pacer.wait();
+        if presented {
+            pacer.wait();
+        } else if !toolbar_dirty && !topology_dirty {
+            // The longer idle wait still polls autosave, display and theme
+            // state. Input and compositor events can wake it immediately.
+            let mut timeout = if app.wait_for_mouse_up || picker.active() {
+                Duration::from_millis(8)
+            } else {
+                Duration::from_millis(500)
+            };
+            if let Some(at) = toolbar_repaint_at {
+                timeout = timeout.min(at.saturating_duration_since(Instant::now()));
+            }
+            wait_for_events(timeout);
+        }
     }
     if !options.smoke {
         app.stop();

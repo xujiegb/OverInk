@@ -105,11 +105,11 @@ impl Gui {
             egui::vec2(logical[0] / self.units, logical[1] / self.units),
         ));
         self.raw.time = Some(self.started.elapsed().as_secs_f64());
-        self.raw
-            .events
-            .push(Event::ModifiersChanged(modifiers(unsafe {
-                SDL_GetModState()
-            })));
+        let current = modifiers(unsafe { SDL_GetModState() });
+        // A synthetic input event would ask egui for another frame.
+        if current != self.ctx.input(|input| input.modifiers) {
+            self.raw.events.push(Event::ModifiersChanged(current));
+        }
         self.raw
             .viewports
             .entry(egui::ViewportId::ROOT)

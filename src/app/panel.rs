@@ -244,6 +244,7 @@ impl App {
                     {
                         self.reset_contacts();
                         self.history.undo();
+                        commands.redraw_canvas = true;
                     }
                     if toolbar::button(
                         ui,
@@ -259,6 +260,7 @@ impl App {
                     {
                         self.reset_contacts();
                         self.history.redo();
+                        commands.redraw_canvas = true;
                     }
                     if toolbar::button(
                         ui,
@@ -270,6 +272,7 @@ impl App {
                     {
                         self.reset_contacts();
                         self.history.clear();
+                        commands.redraw_canvas = true;
                     }
                     self.panel_button(
                         ui,
@@ -624,6 +627,7 @@ impl App {
             .changed()
         {
             self.discard_touches();
+            commands.redraw_canvas = true;
         }
         ui.separator();
         ui.label(RichText::new(tr.text("Session", "会话", "工作階段")).strong());
@@ -631,15 +635,18 @@ impl App {
         ui.horizontal(|ui| {
             if ui.button(tr.text("Save", "保存", "儲存")).clicked() {
                 self.save();
+                commands.redraw_canvas = true;
             }
             if ui.button(tr.text("Open", "打开", "開啟")).clicked() {
                 self.load();
+                commands.redraw_canvas = true;
             }
             if ui
                 .button(tr.text("Export SVG", "导出 SVG", "匯出 SVG"))
                 .clicked()
             {
                 self.export();
+                commands.redraw_canvas = true;
             }
         });
         let count = self.history.doc.strokes.len();

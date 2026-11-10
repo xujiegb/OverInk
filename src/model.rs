@@ -1,6 +1,6 @@
 use crate::color::InkColor;
 use serde::{Deserialize, Serialize};
-use std::{borrow::Cow, collections::VecDeque};
+use std::{borrow::Cow, collections::VecDeque, sync::Arc};
 
 mod eraser;
 pub use eraser::Erasure;
@@ -152,7 +152,7 @@ impl Stroke {
 pub struct Document {
     pub version: u32,
     pub size: [f32; 2],
-    pub strokes: Vec<Stroke>,
+    pub strokes: Vec<Arc<Stroke>>,
 }
 impl Default for Document {
     fn default() -> Self {
@@ -167,12 +167,13 @@ impl Default for Document {
 pub struct History {
     pub doc: Document,
     pub active: Option<Stroke>,
-    undo: VecDeque<Vec<Stroke>>,
-    redo: Vec<Vec<Stroke>>,
+    undo: VecDeque<Vec<Arc<Stroke>>>,
+    redo: Vec<Vec<Arc<Stroke>>>,
     pub changed: bool,
 }
 impl History {
     pub fn snapshot(&mut self) {
+        // Committed strokes are immutable, so snapshots share their samples.
         self.undo.push_back(self.doc.strokes.clone());
         while self.undo.len() > 64
             || self
@@ -193,7 +194,7 @@ impl History {
             && !s.points.is_empty()
         {
             self.snapshot();
-            self.doc.strokes.push(s)
+            self.doc.strokes.push(Arc::new(s))
         }
     }
     pub fn undo(&mut self) {
@@ -314,10 +315,28 @@ mod tests {
         }
     }
     #[test]
+    fn undo_keeps_the_same_committed_stroke_allocation() {
+        let mut history = History {
+            active: Some(stroke()),
+            ..History::default()
+        };
+        history.commit();
+        let original = Arc::clone(&history.doc.strokes[0]);
+        history.active = Some(stroke());
+        history.commit();
+        history.undo();
+        assert!(Arc::ptr_eq(&original, &history.doc.strokes[0]));
+        history.redo();
+        assert!(Arc::ptr_eq(&original, &history.doc.strokes[0]));
+    }
+
+    #[test]
     fn rejects_nonfinite_and_unknown_version() {
         let mut d = Document::default();
-        d.strokes.push(stroke());
-        d.strokes[0].width = f32::NAN;
+        d.strokes.push(Arc::new(Stroke {
+            width: f32::NAN,
+            ..stroke()
+        }));
         assert!(d.validate().is_err());
         d.strokes.clear();
         d.version = 2;
