@@ -379,9 +379,6 @@ impl Passthrough {
             backend: backend.unwrap_or_else(Backend::Unavailable),
         }
     }
-    pub fn set(&mut self, w: &Window, pass: bool) -> Result<(), String> {
-        self.set_guarded(w, pass, None)
-    }
     pub fn set_guarded(
         &mut self,
         w: &Window,

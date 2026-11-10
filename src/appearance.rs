@@ -168,11 +168,24 @@ impl ThemeMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Preferences {
     pub language: Option<Language>,
     pub theme: ThemeMode,
+    pub restore_session: bool,
+    pub per_display_windows: bool,
+}
+
+impl Default for Preferences {
+    fn default() -> Self {
+        Self {
+            language: None,
+            theme: ThemeMode::System,
+            restore_session: true,
+            per_display_windows: false,
+        }
+    }
 }
 
 impl Preferences {
@@ -262,9 +275,13 @@ mod tests {
         assert_eq!(default, Preferences::default());
         assert_eq!(default.language, None);
         assert_eq!(default.theme, ThemeMode::System);
+        assert!(default.restore_session);
+        assert!(!default.per_display_windows);
         let manual = Preferences {
             language: Some(Language::Traditional),
             theme: ThemeMode::Dark,
+            restore_session: false,
+            per_display_windows: true,
         };
         assert_eq!(
             serde_json::from_str::<Preferences>(&serde_json::to_string(&manual).unwrap()).unwrap(),

@@ -169,9 +169,16 @@ pub struct History {
     pub active: Option<Stroke>,
     undo: VecDeque<Vec<Arc<Stroke>>>,
     redo: Vec<Vec<Arc<Stroke>>>,
+    // Appends can be painted over the committed layer. Any replacement or
+    // removal invalidates the pixels already in that layer.
+    ink_revision: u64,
     pub changed: bool,
 }
 impl History {
+    pub fn ink_revision(&self) -> u64 {
+        self.ink_revision
+    }
+
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
     }
@@ -196,6 +203,12 @@ impl History {
         self.redo.clear();
         self.changed = true;
     }
+
+    fn snapshot_replacement(&mut self) {
+        self.snapshot();
+        self.ink_revision = self.ink_revision.wrapping_add(1);
+    }
+
     pub fn commit(&mut self) {
         if let Some(s) = self.active.take()
             && !s.points.is_empty()
@@ -208,7 +221,8 @@ impl History {
         self.active = None;
         if let Some(s) = self.undo.pop_back() {
             self.redo.push(std::mem::replace(&mut self.doc.strokes, s));
-            self.changed = true
+            self.changed = true;
+            self.ink_revision = self.ink_revision.wrapping_add(1);
         }
     }
     pub fn redo(&mut self) {
@@ -216,13 +230,14 @@ impl History {
         if let Some(s) = self.redo.pop() {
             self.undo
                 .push_back(std::mem::replace(&mut self.doc.strokes, s));
-            self.changed = true
+            self.changed = true;
+            self.ink_revision = self.ink_revision.wrapping_add(1);
         }
     }
     pub fn clear(&mut self) {
         self.active = None;
         if !self.doc.strokes.is_empty() {
-            self.snapshot();
+            self.snapshot_replacement();
             self.doc.strokes.clear()
         }
     }
@@ -230,10 +245,11 @@ impl History {
         if restore {
             *self = Self {
                 doc,
+                ink_revision: self.ink_revision.wrapping_add(1),
                 ..Self::default()
             };
         } else {
-            self.snapshot();
+            self.snapshot_replacement();
             self.doc = doc;
             self.active = None;
         }

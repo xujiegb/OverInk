@@ -1,4 +1,5 @@
 use crate::sdl::*;
+#[cfg(not(target_os = "windows"))]
 use std::ptr;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,6 +65,7 @@ impl Rect {
             h: ((self.y + self.h) as f32 * scale[1]).ceil() as i32 - y,
         }
     }
+    #[cfg(not(target_os = "windows"))]
     pub fn sdl(self) -> SDL_Rect {
         SDL_Rect {
             x: self.x,
@@ -75,6 +77,7 @@ impl Rect {
 }
 
 // Four disjoint rectangles cover the canvas except the protected controller.
+#[cfg(any(not(target_os = "windows"), test))]
 pub fn outside(size: [i32; 2], hole: Option<Rect>) -> Vec<Rect> {
     let full = Rect {
         x: 0,
@@ -159,9 +162,8 @@ impl Guard {
             return Ok((None, false));
         }
         let size = canvas.pixel_size();
-        // Remove the drawing mask in Mouse mode. Cocoa passthrough is
-        // applied separately after SDL updates the window shape.
-        let pixels = if mouse || !shape_rendering {
+        // Mouse mode uses a separate native pass-through setting.
+        let pixels = if mouse || (!shape_rendering && !cfg!(target_os = "windows")) {
             None
         } else {
             hole.map(|r| r.pixels(canvas))
@@ -169,6 +171,9 @@ impl Guard {
         if self.last == Some((size, pixels)) {
             return Ok((hole, false));
         }
+        #[cfg(target_os = "windows")]
+        crate::native::set_controller_region(canvas, size, pixels)?;
+        #[cfg(not(target_os = "windows"))]
         unsafe {
             if let Some(hole) = pixels {
                 let surface = SDL_CreateSurface(size[0], size[1], SDL_PIXELFORMAT_RGBA32);

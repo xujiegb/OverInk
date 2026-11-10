@@ -25,6 +25,55 @@ impl Passthrough {
 }
 
 #[cfg(target_os = "windows")]
+pub fn set_controller_region(
+    window: &Window,
+    size: [i32; 2],
+    hole: Option<crate::controller::Rect>,
+) -> Result<(), String> {
+    use windows::Win32::{
+        Foundation::HWND,
+        Graphics::Gdi::{CombineRgn, CreateRectRgn, DeleteObject, HGDIOBJ, RGN_DIFF, SetWindowRgn},
+    };
+    unsafe {
+        let hwnd = HWND(SDL_GetPointerProperty(
+            SDL_GetWindowProperties(window.raw),
+            SDL_PROP_WINDOW_WIN32_HWND_POINTER,
+            std::ptr::null_mut(),
+        ));
+        if hwnd.is_invalid() {
+            return Err("No Win32 window handle".into());
+        }
+        let region = if let Some(hole) = hole {
+            let full = CreateRectRgn(0, 0, size[0], size[1]);
+            let cut = CreateRectRgn(hole.x, hole.y, hole.x + hole.w, hole.y + hole.h);
+            let valid = !full.is_invalid()
+                && !cut.is_invalid()
+                && CombineRgn(Some(full), Some(full), Some(cut), RGN_DIFF).0 != 0;
+            if !cut.is_invalid() {
+                let _ = DeleteObject(HGDIOBJ(cut.0));
+            }
+            if !valid {
+                if !full.is_invalid() {
+                    let _ = DeleteObject(HGDIOBJ(full.0));
+                }
+                return Err("Could not create the Win32 drawing region".into());
+            }
+            Some(full)
+        } else {
+            None
+        };
+        if SetWindowRgn(hwnd, region, true) == 0 {
+            if let Some(region) = region {
+                let _ = DeleteObject(HGDIOBJ(region.0));
+            }
+            return Err("SetWindowRgn failed".into());
+        }
+        // Windows owns the region after SetWindowRgn succeeds.
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "windows")]
 impl Passthrough {
     pub fn set(&mut self, window: &Window, pass: bool) -> Result<(), String> {
         unsafe {

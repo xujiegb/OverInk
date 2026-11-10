@@ -29,21 +29,22 @@ pub struct Runtime;
 impl Runtime {
     pub fn new(x11: bool) -> Result<Self, String> {
         unsafe {
+            let hint = SDL_GetHint(SDL_HINT_VIDEO_DRIVER);
             if x11 {
-                SDL_SetHint(SDL_HINT_VIDEO_DRIVER, c"x11".as_ptr());
+                SDL_SetHintWithPriority(SDL_HINT_VIDEO_DRIVER, c"x11".as_ptr(), SDL_HINT_OVERRIDE);
             } else if cfg!(any(target_os = "linux", target_os = "freebsd"))
-                && SDL_GetHint(SDL_HINT_VIDEO_DRIVER).is_null()
                 && std::env::var_os("DISPLAY").is_some_and(|display| !display.is_empty())
                 && (std::env::var_os("WAYLAND_DISPLAY").is_some()
                     || std::env::var_os("WAYLAND_SOCKET").is_some()
                     || std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland"))
+                && (hint.is_null() || CStr::from_ptr(hint) == c"wayland")
             {
-                // XWayland can request stacking and positioning for these
-                // desktop overlays. Fall back to native Wayland if unavailable.
+                // A desktop annotation needs XWayland's stacking requests
+                // even if the session exports a default Wayland SDL driver.
                 SDL_SetHintWithPriority(
                     SDL_HINT_VIDEO_DRIVER,
                     c"x11,wayland".as_ptr(),
-                    SDL_HINT_DEFAULT,
+                    SDL_HINT_OVERRIDE,
                 );
             }
             // Avoid a second mouse/touch stroke synthesized from the same pen packet.
@@ -403,11 +404,26 @@ impl Renderer {
             let scale = [pixel[0] as f32 / logical[0], pixel[1] as f32 / logical[1]];
             check(SDL_SetRenderScale(self.raw, scale[0], scale[1]))?;
             SDL_SetRenderClipRect(self.raw, ptr::null());
-            check(SDL_SetRenderDrawColorFloat(
-                self.raw, color[0], color[1], color[2], color[3],
-            ))?;
-            check(SDL_RenderClear(self.raw))?;
+            self.clear(color)?;
             Ok(scale)
+        }
+    }
+    pub fn clear(&self, [r, g, b, a]: [f32; 4]) -> Result<(), String> {
+        unsafe {
+            check(SDL_SetRenderDrawColorFloat(self.raw, r, g, b, a))?;
+            check(SDL_RenderClear(self.raw))
+        }
+    }
+    pub fn with_target(
+        &self,
+        target: *mut SDL_Texture,
+        draw: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        unsafe {
+            let previous = SDL_GetRenderTarget(self.raw);
+            let result = check(SDL_SetRenderTarget(self.raw, target)).and_then(|()| draw());
+            let restore = check(SDL_SetRenderTarget(self.raw, previous));
+            result.and(restore)
         }
     }
     pub fn geometry(

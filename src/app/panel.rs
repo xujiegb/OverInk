@@ -168,7 +168,7 @@ impl App {
                         )
                     };
                     if toolbar::button(ui, eye, label, self.hidden).clicked() {
-                        self.stop();
+                        self.finish_all_contacts();
                         self.hidden = !self.hidden;
                         commands.mode = true;
                     }
@@ -385,10 +385,11 @@ impl App {
         )));
         ui.separator();
         let pen = self
+            .input
             .pens
             .values()
             .find(|p| p.down)
-            .or_else(|| self.pens.values().next())
+            .or_else(|| self.input.pens.values().next())
             .copied()
             .unwrap_or_default();
         ui.add(egui::ProgressBar::new(pen.pressure).text(format!("{:.1}%", pen.pressure * 100.)));
@@ -571,6 +572,26 @@ impl App {
         });
         ui.separator();
         ui.label(RichText::new(tr.text("Display", "显示器", "顯示器")).strong());
+        let per_display = ui
+            .add_enabled_ui(video != "wayland", |ui| {
+                ui.checkbox(
+                    &mut self.preferences.per_display_windows,
+                    tr.text(
+                        "One canvas per display",
+                        "每块屏幕独立画布",
+                        "每個螢幕獨立畫布",
+                    ),
+                )
+            })
+            .inner;
+        commands.preferences |= per_display.changed();
+        if video == "wayland" {
+            ui.small(tr.text(
+                "Native Wayland leaves window order and placement to the compositor. XWayland supports separate canvases and always-on-top ink.",
+                "原生 Wayland 由合成器决定窗口层级和位置。XWayland 支持逐屏画布与笔迹置顶。",
+                "原生 Wayland 由合成器決定視窗層級與位置。XWayland 支援逐螢幕畫布與筆跡置頂。",
+            ));
+        }
         egui::ComboBox::from_id_salt("display")
             .selected_text(
                 self.displays
@@ -589,11 +610,19 @@ impl App {
                     }
                 }
             });
-        ui.small(tr.text(
-            "Drag the OverInk icon to move between screens.",
-            "拖动 OverInk 图标可切换显示器。",
-            "拖曳 OverInk 圖示可切換顯示器。",
-        ));
+        if self.multi {
+            ui.small(tr.text(
+                "Draw directly on each screen. Undo follows the selected canvas.",
+                "在各屏幕直接书写。撤销作用于当前画布。",
+                "在各螢幕直接書寫。復原作用於目前畫布。",
+            ));
+        } else if video != "wayland" {
+            ui.small(tr.text(
+                "Drag the OverInk icon to move the canvas between screens.",
+                "拖动 OverInk 图标可把画布移到另一块屏幕。",
+                "拖曳 OverInk 圖示可將畫布移到另一個螢幕。",
+            ));
+        }
         ui.horizontal(|ui| {
             ui.label(tr.text("Frame rate", "帧率", "影格率"));
             let auto = tr.text("Auto", "自动", "自動");
@@ -626,11 +655,21 @@ impl App {
             )
             .changed()
         {
-            self.discard_touches();
+            self.for_each_page(|app| app.discard_touches());
             commands.redraw_canvas = true;
         }
         ui.separator();
         ui.label(RichText::new(tr.text("Session", "会话", "工作階段")).strong());
+        commands.preferences |= ui
+            .checkbox(
+                &mut self.preferences.restore_session,
+                tr.text(
+                    "Keep ink for the next launch",
+                    "退出后保留笔迹",
+                    "結束後保留筆跡",
+                ),
+            )
+            .changed();
         ui.add(egui::TextEdit::singleline(&mut self.path).desired_width(f32::INFINITY));
         ui.horizontal(|ui| {
             if ui.button(tr.text("Save", "保存", "儲存")).clicked() {
