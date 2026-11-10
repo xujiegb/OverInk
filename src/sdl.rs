@@ -27,8 +27,9 @@ pub fn cstring(v: &str) -> CString {
 }
 pub struct Runtime;
 impl Runtime {
-    pub fn new(x11: bool, smoke: bool) -> Result<Self, String> {
-        let wayland = cfg!(any(target_os = "linux", target_os = "freebsd"))
+    pub fn new(x11: bool, wayland: bool, smoke: bool) -> Result<Self, String> {
+        let wayland = wayland
+            && cfg!(any(target_os = "linux", target_os = "freebsd"))
             && (std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland")
                 || ["WAYLAND_DISPLAY", "WAYLAND_SOCKET"]
                     .iter()
@@ -76,9 +77,11 @@ impl Runtime {
 fn startup_driver(x11: bool, smoke: bool, wayland: bool) -> Option<&'static CStr> {
     if smoke {
         Some(c"dummy")
+    } else if x11 {
+        Some(c"x11")
     } else if wayland {
         Some(c"wayland")
-    } else if x11 {
+    } else if cfg!(any(target_os = "linux", target_os = "freebsd")) {
         Some(c"x11")
     } else {
         None
@@ -497,11 +500,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn native_wayland_takes_priority_in_a_wayland_session() {
+    fn x11_is_default_and_wayland_is_opt_in() {
         assert_eq!(startup_driver(false, false, true), Some(c"wayland"));
-        assert_eq!(startup_driver(true, false, true), Some(c"wayland"));
+        assert_eq!(startup_driver(true, false, true), Some(c"x11"));
         assert_eq!(startup_driver(true, true, true), Some(c"dummy"));
         assert_eq!(startup_driver(true, false, false), Some(c"x11"));
-        assert_eq!(startup_driver(false, false, false), None);
+        assert_eq!(
+            startup_driver(false, false, false),
+            if cfg!(any(target_os = "linux", target_os = "freebsd")) {
+                Some(c"x11")
+            } else {
+                None
+            }
+        );
     }
 }

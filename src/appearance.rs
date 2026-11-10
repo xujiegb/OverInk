@@ -175,6 +175,7 @@ pub struct Preferences {
     pub theme: ThemeMode,
     pub restore_session: bool,
     pub per_display_windows: bool,
+    pub wayland: bool,
 }
 
 impl Default for Preferences {
@@ -184,6 +185,7 @@ impl Default for Preferences {
             theme: ThemeMode::System,
             restore_session: true,
             per_display_windows: false,
+            wayland: false,
         }
     }
 }
@@ -277,11 +279,13 @@ mod tests {
         assert_eq!(default.theme, ThemeMode::System);
         assert!(default.restore_session);
         assert!(!default.per_display_windows);
+        assert!(!default.wayland);
         let manual = Preferences {
             language: Some(Language::Traditional),
             theme: ThemeMode::Dark,
             restore_session: false,
             per_display_windows: true,
+            wayland: true,
         };
         assert_eq!(
             serde_json::from_str::<Preferences>(&serde_json::to_string(&manual).unwrap()).unwrap(),

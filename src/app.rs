@@ -1169,6 +1169,14 @@ fn update_preferences(app: &mut App, previous: Preferences, multi_supported: boo
             .detail(error);
         }
     }
+    if previous.wayland != app.preferences.wayland {
+        app.status = text(
+            "Restart OverInk to switch the display backend.",
+            "重启 OverInk 后切换显示后端。",
+            "重新啟動 OverInk 後切換顯示後端。",
+        )
+        .into();
+    }
     let multi = multi_supported && app.preferences.per_display_windows;
     if multi != app.multi {
         app.finish_all_contacts();
@@ -1185,7 +1193,9 @@ pub fn run(options: Options) -> Result<(), String> {
     let _teardown_pool = crate::native::macos::AutoreleasePool::new();
     #[cfg(target_os = "macos")]
     let startup_pool = crate::native::macos::AutoreleasePool::new();
-    let _runtime = Runtime::new(options.x11, options.smoke)?;
+    let base = state_dir();
+    let preferences = Preferences::load(&base.join("ui.json"));
+    let _runtime = Runtime::new(options.x11, preferences.wayland, options.smoke)?;
     let video = crate::sdl::driver();
     let wayland = video == "wayland";
     let window = Window::new("OverInk - canvas", 1100, 720, !options.smoke)?;
@@ -1196,7 +1206,7 @@ pub fn run(options: Options) -> Result<(), String> {
         options.board || options.smoke,
         options.display,
         displays,
-        &state_dir(),
+        &base,
     );
     app.multi = app.preferences.per_display_windows && !wayland && !options.smoke;
     let mut canvases = vec![canvas::Canvas::new(

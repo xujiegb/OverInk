@@ -567,6 +567,19 @@ impl App {
         });
         ui.separator();
         ui.label(RichText::new(tr.text("Display", "显示器", "顯示器")).strong());
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        {
+            commands.preferences |= ui
+                .checkbox(
+                    &mut self.preferences.wayland,
+                    tr.text(
+                        "Native Wayland (restart to apply)",
+                        "原生 Wayland（重启后生效）",
+                        "原生 Wayland（重新啟動後生效）",
+                    ),
+                )
+                .changed();
+        }
         let per_display = ui
             .add_enabled_ui(video != "wayland", |ui| {
                 ui.checkbox(
