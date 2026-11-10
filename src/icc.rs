@@ -6,8 +6,11 @@ use crate::{
     sdl::*,
 };
 use lcms2_sys as cms;
-use std::hash::{Hash, Hasher};
 use std::ptr;
+use std::{
+    ffi::c_void,
+    hash::{Hash, Hasher},
+};
 pub struct ColorManager {
     transform: cms::HTRANSFORM,
     pub status: Text,
@@ -18,6 +21,19 @@ const SYSTEM_SRGB: Text = text(
     "sRGB 表面 / 系统合成",
     "sRGB 表面 / 系統合成",
 );
+
+fn query_profile(window: &Window, size: &mut usize) -> *mut c_void {
+    unsafe {
+        let profile = SDL_GetWindowICCProfile(window.raw, size);
+        if profile.is_null() {
+            // An ICC profile is optional. Do not leave this error behind for
+            // a later SDL operation that may fail without setting its own.
+            SDL_ClearError();
+        }
+        profile
+    }
+}
+
 impl Default for ColorManager {
     fn default() -> Self {
         Self {
@@ -48,7 +64,7 @@ impl ColorManager {
         }
         unsafe {
             let mut size = 0;
-            let data = SDL_GetWindowICCProfile(window.raw, &mut size);
+            let data = query_profile(window, &mut size);
             if data.is_null() || size == 0 || size > 16 * 1024 * 1024 {
                 if !data.is_null() {
                     SDL_free(data)
@@ -160,7 +176,7 @@ pub fn display_sample_to_srgb(window: &Window, rgb: [f32; 3]) -> crate::color::I
     };
     unsafe {
         let mut size = 0;
-        let data = SDL_GetWindowICCProfile(window.raw, &mut size);
+        let data = query_profile(window, &mut size);
         if data.is_null() {
             return result;
         }

@@ -12,8 +12,8 @@ use std::{
 pub fn error() -> String {
     unsafe {
         let p = SDL_GetError();
-        if p.is_null() {
-            "SDL error".into()
+        if p.is_null() || CStr::from_ptr(p).to_bytes().is_empty() {
+            "SDL did not report an error message".into()
         } else {
             CStr::from_ptr(p).to_string_lossy().into_owned()
         }
@@ -27,25 +27,27 @@ pub fn cstring(v: &str) -> CString {
 }
 pub struct Runtime;
 impl Runtime {
-    pub fn new(x11: bool) -> Result<Self, String> {
+    pub fn new(x11: bool, smoke: bool) -> Result<Self, String> {
+        let wayland = cfg!(any(target_os = "linux", target_os = "freebsd"))
+            && (std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland")
+                || ["WAYLAND_DISPLAY", "WAYLAND_SOCKET"]
+                    .iter()
+                    .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty())));
+        let backend = startup_driver(x11, smoke, wayland);
         unsafe {
-            let hint = SDL_GetHint(SDL_HINT_VIDEO_DRIVER);
-            if x11 {
-                SDL_SetHintWithPriority(SDL_HINT_VIDEO_DRIVER, c"x11".as_ptr(), SDL_HINT_OVERRIDE);
-            } else if cfg!(any(target_os = "linux", target_os = "freebsd"))
-                && std::env::var_os("DISPLAY").is_some_and(|display| !display.is_empty())
-                && (std::env::var_os("WAYLAND_DISPLAY").is_some()
-                    || std::env::var_os("WAYLAND_SOCKET").is_some()
-                    || std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland"))
-                && (hint.is_null() || CStr::from_ptr(hint) == c"wayland")
-            {
-                // A desktop annotation needs XWayland's stacking requests
-                // even if the session exports a default Wayland SDL driver.
-                SDL_SetHintWithPriority(
+            if let Some(name) = backend {
+                SDL_ClearError();
+                check(SDL_SetHintWithPriority(
                     SDL_HINT_VIDEO_DRIVER,
-                    c"x11,wayland".as_ptr(),
+                    name.as_ptr(),
                     SDL_HINT_OVERRIDE,
-                );
+                ))
+                .map_err(|error| {
+                    format!(
+                        "Selecting {} video failed ({error})",
+                        name.to_string_lossy()
+                    )
+                })?;
             }
             // Avoid a second mouse/touch stroke synthesized from the same pen packet.
             SDL_SetHint(SDL_HINT_PEN_MOUSE_EVENTS, c"0".as_ptr());
@@ -61,9 +63,25 @@ impl Runtime {
                 c"0.1.0".as_ptr(),
                 c"org.overink.OverInk".as_ptr(),
             );
-            check(SDL_Init(SDL_INIT_VIDEO))?;
+            SDL_ClearError();
+            check(SDL_Init(SDL_INIT_VIDEO)).map_err(|error| {
+                let name = backend.map_or_else(|| "SDL".into(), CStr::to_string_lossy);
+                format!("Initializing {name} video failed ({error})")
+            })?;
             Ok(Self)
         }
+    }
+}
+
+fn startup_driver(x11: bool, smoke: bool, wayland: bool) -> Option<&'static CStr> {
+    if smoke {
+        Some(c"dummy")
+    } else if wayland {
+        Some(c"wayland")
+    } else if x11 {
+        Some(c"x11")
+    } else {
+        None
     }
 }
 impl Drop for Runtime {
@@ -117,9 +135,15 @@ impl Window {
             if overlay {
                 flags |= SDL_WINDOW_BORDERLESS | SDL_WINDOW_TRANSPARENT;
             }
+            SDL_ClearError();
             let raw = SDL_CreateWindow(title.as_ptr(), w, h, flags);
             if raw.is_null() {
-                return Err(error());
+                let detail = error();
+                return Err(format!(
+                    "Creating {} on {} failed ({detail})",
+                    title.to_string_lossy(),
+                    driver()
+                ));
             }
             Ok(Self {
                 raw,
@@ -227,6 +251,7 @@ impl Window {
     }
     pub fn show(&self, show: bool) -> Result<(), String> {
         unsafe {
+            SDL_ClearError();
             check(if show {
                 SDL_ShowWindow(self.raw)
             } else {
@@ -255,19 +280,25 @@ impl Window {
     }
     pub fn place_on_display(&self, id: u32, overlay: bool) -> Result<(), String> {
         unsafe {
+            let video = driver();
             let display = SDL_DisplayID(id);
             let mut r = SDL_Rect::default();
             check(SDL_GetDisplayBounds(display, &mut r))?;
-            if overlay && driver() == "wayland" {
+            if overlay && video == "wayland" {
                 // XDG fullscreen hides unrelated content behind transparent
                 // surfaces. Maximizing keeps the desktop in the compositor.
                 check(SDL_MaximizeWindow(self.raw))?;
             } else if overlay {
                 check(SDL_SetWindowSize(self.raw, r.w, r.h))?;
                 check(SDL_SetWindowPosition(self.raw, r.x, r.y))?;
-                // Finish the pending native resize before a software renderer
-                // allocates its window surface at the old hidden-window size.
-                check(SDL_SyncWindow(self.raw))?;
+                // Give the resize time to settle before allocating a software
+                // framebuffer. X11 can time out before the window manager's
+                // configure event. SDL will still report the later resize.
+                SDL_ClearError();
+                let synced = SDL_SyncWindow(self.raw);
+                if video != "x11" {
+                    check(synced)?;
+                }
             } else {
                 let center = SDL_WINDOWPOS_CENTERED_DISPLAY(display);
                 check(SDL_SetWindowPosition(self.raw, center, center))?;
@@ -337,6 +368,7 @@ impl Renderer {
                     SDL_PROP_RENDERER_CREATE_OUTPUT_COLORSPACE_NUMBER,
                     SDL_COLORSPACE_SRGB_LINEAR.0 as i64,
                 );
+                SDL_ClearError();
                 raw = SDL_CreateRendererWithProperties(props);
                 #[cfg(target_os = "macos")]
                 if raw.is_null() {
@@ -349,11 +381,13 @@ impl Renderer {
                     SDL_PROP_RENDERER_CREATE_OUTPUT_COLORSPACE_NUMBER,
                     SDL_COLORSPACE_SRGB.0 as i64,
                 );
+                SDL_ClearError();
                 raw = SDL_CreateRendererWithProperties(props);
             }
+            let failure = raw.is_null().then(error);
             SDL_DestroyProperties(props);
-            if raw.is_null() {
-                return Err(error());
+            if let Some(error) = failure {
+                return Err(error);
             }
             let p = SDL_GetRendererProperties(raw);
             let extended = SDL_GetNumberProperty(p, SDL_PROP_RENDERER_OUTPUT_COLORSPACE_NUMBER, 0)
@@ -455,5 +489,19 @@ impl Drop for Renderer {
         if !self.raw.is_null() {
             unsafe { SDL_DestroyRenderer(self.raw) }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_wayland_takes_priority_in_a_wayland_session() {
+        assert_eq!(startup_driver(false, false, true), Some(c"wayland"));
+        assert_eq!(startup_driver(true, false, true), Some(c"wayland"));
+        assert_eq!(startup_driver(true, true, true), Some(c"dummy"));
+        assert_eq!(startup_driver(true, false, false), Some(c"x11"));
+        assert_eq!(startup_driver(false, false, false), None);
     }
 }
