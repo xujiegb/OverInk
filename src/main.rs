@@ -13,6 +13,8 @@ mod display;
 mod export;
 mod frame_rate;
 mod geometry;
+#[cfg(target_os = "linux")]
+mod gnome;
 mod gui;
 mod icc;
 mod model;
@@ -42,8 +44,14 @@ fn start() -> Result<(), String> {
                 println!(
                     "OverInk 0.1.0 — Rust 2024 / egui / SDL3\n\n  --whiteboard   Start with an opaque white background\n  --x11         Select SDL's X11 backend in an X11 session\n  --sdr         Disable extended-linear-sRGB output\n  --display N   Start on display N (1-based)\n  --smoke-test  Render synthetic pen and touch events with SDL dummy video\n\nKeys (when an OverInk window has focus):\n  Space: click through / draw   H: hide / show\n  Esc: cancel stroke / click through   B: pencil   P/M/L/A/R/O/E/K: other tools\n  1–4: preset colors   Ctrl/Cmd+Z: undo   Ctrl/Cmd+Shift+Z: redo\n  Ctrl/Cmd+S: save   Ctrl/Cmd+O: open   Ctrl/Cmd+Shift+S: SVG\n\nDrag the control window to move a single canvas. Settings can assign a canvas to each display.\nDisconnected displays lose their page and undo history.\nFrame-rate choices: Auto, 120, 90, 60, 30 FPS. Auto follows the display.\nBackground choices: live desktop or frozen snapshot.\nThe separate control window remains usable in click-through mode.\nWhen session recovery is enabled, ink autosaves every 10 seconds and on normal exit.\nTouchscreens: draw with multiple fingers. Native pens take priority over finger drawing."
                 );
+                #[cfg(target_os = "linux")]
+                println!(
+                    "\n  --install-gnome-extension   Install native Wayland overlay support for GNOME"
+                );
                 return Ok(());
             }
+            #[cfg(target_os = "linux")]
+            "--install-gnome-extension" => return gnome::install_overlay(),
             "--whiteboard" => options.board = true,
             "--x11" => options.x11 = true,
             "--sdr" => options.sdr = true,

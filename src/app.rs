@@ -3,7 +3,7 @@ mod ink;
 mod panel;
 
 use crate::{
-    appearance::{Language, Preferences, Status, ThemeMonitor, text},
+    appearance::{Language, Preferences, Status, Text, ThemeMonitor, text},
     color::{InkColor, PRESETS},
     display::{Display, Pages},
     export,
@@ -53,6 +53,7 @@ enum Gesture {
 struct Contact {
     source: Source,
     gesture: Gesture,
+    last: Point,
 }
 struct FingerStroke {
     gesture: Gesture,
@@ -267,11 +268,31 @@ impl App {
             return;
         };
         let points = self.draft_point_count();
-        if let Err(error) =
-            erase.commit(&mut self.history, &mut self.input.pending_erasures, points)
+        if erase
+            .commit(&mut self.history, &mut self.input.pending_erasures, points)
+            .is_err()
         {
-            self.status = text("Erase failed", "擦除失败", "擦除失敗").detail(error);
+            self.show_sample_limit(text(
+                "This erase would exceed the one million sample limit.",
+                "此次擦除会超出一百万采样点上限。",
+                "此次擦除會超過一百萬取樣點上限。",
+            ));
         }
+    }
+    fn show_sample_limit(&mut self, message: Text) {
+        self.status = message.into();
+        self.panel.get_or_insert(crate::toolbar::Panel::Settings);
+    }
+    fn can_start_ink(&mut self) -> bool {
+        if self.draft_point_count() < MAX_POINTS {
+            return true;
+        }
+        self.show_sample_limit(text(
+            "One million sample limit reached. Export and clear the canvas.",
+            "已达到一百万采样点上限，请导出后清屏。",
+            "已達一百萬取樣點上限，請匯出後清除頁面。",
+        ));
+        false
     }
     fn cancel_gesture(&mut self, gesture: Gesture) {
         match gesture {
@@ -318,13 +339,7 @@ impl App {
             Gesture::Erase(id) => self.erase_sample(id, p),
             Gesture::Laser(id) => self.laser_sample(id, p, true),
             Gesture::Ink => {
-                if self.draft_point_count() >= MAX_POINTS {
-                    self.status = text(
-                        "One million sample limit reached. Export and clear the canvas.",
-                        "已达到一百万采样点上限，请导出后清屏。",
-                        "已達一百萬取樣點上限，請匯出後清除頁面。",
-                    )
-                    .into();
+                if !self.can_start_ink() {
                     return;
                 }
                 let mut stroke = self.stroke(tool);
@@ -332,7 +347,11 @@ impl App {
                 self.history.active = Some(stroke);
             }
         }
-        self.input.contact = Some(Contact { source, gesture });
+        self.input.contact = Some(Contact {
+            source,
+            gesture,
+            last: p,
+        });
     }
     fn motion(&mut self, source: Source, p: Point) {
         let Some(contact) = self
@@ -342,13 +361,18 @@ impl App {
         else {
             return;
         };
-        if self.input.protected.is_some_and(|r| r.contains(p.x, p.y)) {
+        if self
+            .input
+            .protected
+            .is_some_and(|r| r.contains(p.x, p.y) || r.crosses(contact.last, p))
+        {
             self.finish_contact();
             return;
         }
         if self.pass || self.hidden || self.suspended {
             return;
         }
+        self.input.contact = Some(Contact { last: p, ..contact });
         match contact.gesture {
             Gesture::Erase(id) => self.erase_sample(id, p),
             Gesture::Laser(id) => self.laser_sample(id, p, false),
@@ -361,10 +385,7 @@ impl App {
         }
     }
     fn append(stroke: &mut Stroke, p: Point, can_append: bool) {
-        if matches!(
-            stroke.tool,
-            Tool::Line | Tool::Arrow | Tool::Rectangle | Tool::Ellipse
-        ) {
+        if stroke.tool.is_shape() {
             if stroke.points.len() == 1 && can_append {
                 stroke.points.push(p);
             } else if let Some(end) = stroke.points.get_mut(1) {
@@ -412,7 +433,6 @@ impl App {
         }
     }
     fn use_mouse(&mut self) {
-        self.finish_all_contacts();
         self.pass = true;
         self.wait_for_mouse_up = true;
         self.panel = None;
@@ -422,6 +442,7 @@ impl App {
             "滑鼠模式。可點按桌面，選擇任一繪圖工具即可繼續書寫。",
         )
         .into();
+        self.finish_all_contacts();
     }
     fn use_tool(&mut self, tool: Tool) {
         self.finish_all_contacts();
@@ -642,6 +663,16 @@ impl App {
             .input
             .protected
             .is_some_and(|r| r.contains(point.x, point.y));
+        if let Some(stroke) = &mut finger.stroke
+            && stroke.tool.is_shape()
+        {
+            // A shape keeps its original anchor while the finger crosses the
+            // toolbar. Rendering clips the part under the toolbar separately.
+            if !inside {
+                Self::append(stroke, point, can_append);
+            }
+            return;
+        }
         let crosses = self
             .input
             .protected
@@ -649,8 +680,9 @@ impl App {
         if inside || crosses {
             if let Gesture::Erase(id) = finger.gesture
                 && let Some(erase) = self.input.pending_erasures.get_mut(&id)
+                && erase.break_path(&self.history.doc.strokes)
             {
-                erase.last = None;
+                self.input.eraser_revision = self.input.eraser_revision.wrapping_add(1);
             }
             if let Some(stroke) = &mut finger.stroke
                 && !stroke.points.is_empty()
@@ -722,12 +754,14 @@ impl App {
                 || touch::is_indirect(event.touchID)
                 || !(0.0..=1.0).contains(&event.x)
                 || !(0.0..=1.0).contains(&event.y)
-                || self.draft_point_count() >= MAX_POINTS
             {
                 return;
             }
             let gesture = self.gesture(self.tool);
             let stroke = if gesture == Gesture::Ink {
+                if !self.can_start_ink() {
+                    return;
+                }
                 let mut stroke = self.stroke(self.tool);
                 // Capacitive contact pressure is often absent or contact area, not pen force.
                 stroke.pressure_enabled = false;
@@ -1369,6 +1403,7 @@ pub fn run(options: Options) -> Result<(), String> {
                     canvas.keep_toolbar_above(&toolbar);
                 }
                 let before = app.history_buttons();
+                let panel_before = app.panel;
                 let edited = app.on_page(canvas.output, |app| {
                     let had_contacts = app.input.has_contacts();
                     if drawing && canvas.visible && canvas.on_output(options.smoke) {
@@ -1381,6 +1416,7 @@ pub fn run(options: Options) -> Result<(), String> {
                 });
                 canvas.dirty |= edited;
                 toolbar_dirty |= before != app.history_buttons();
+                toolbar_dirty |= panel_before != app.panel;
                 toolbar_dirty |= app.panel.is_some() && (edited || activates);
             } else if matches!(
                 ty,
@@ -2375,6 +2411,104 @@ mod touch_tests {
         );
         assert_eq!(a.history.doc.strokes.len(), count);
     }
+
+    #[test]
+    fn fast_pointer_crossing_stops_ink_and_eraser_at_the_toolbar() {
+        for source in [Source::Mouse(LEFT_BUTTON), Source::Pen(1)] {
+            let mut a = app();
+            a.input.protected = Some(crate::controller::Rect {
+                x: 100,
+                y: 100,
+                w: 56,
+                h: 100,
+            });
+            let p = |x| Point::new(x, 150., 1., [0.; 2]);
+            a.begin(source, p(45.), false);
+            a.motion(source, p(65.));
+            a.motion(source, p(230.));
+            assert!(a.input.contact.is_none());
+            assert_eq!(a.history.doc.strokes[0].points.last().unwrap().x, 65.);
+
+            let far_side = std::sync::Arc::new(Stroke {
+                points: vec![p(175.), p(215.)],
+                ..a.stroke(Tool::Pen)
+            });
+            a.history.doc.strokes.push(far_side.clone());
+            a.begin(source, p(75.), true);
+            a.motion(source, p(230.));
+            assert!(a.input.contact.is_none());
+            assert_eq!(a.history.doc.strokes.len(), 2);
+            assert!(std::sync::Arc::ptr_eq(&a.history.doc.strokes[1], &far_side));
+        }
+    }
+
+    #[test]
+    fn touch_shapes_keep_one_anchor_across_the_toolbar() {
+        for tool in Tool::ALL.into_iter().filter(|tool| tool.is_shape()) {
+            let mut a = app();
+            a.use_tool(tool);
+            a.input.protected = Some(crate::controller::Rect {
+                x: 100,
+                y: 100,
+                w: 56,
+                h: 100,
+            });
+            finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 1, 0.05, 0.25);
+            finger(&mut a, SDL_EVENT_FINGER_MOTION, 1, 1, 0.1, 0.25);
+            finger(&mut a, SDL_EVENT_FINGER_MOTION, 1, 1, 0.15, 0.25);
+            finger(&mut a, SDL_EVENT_FINGER_MOTION, 1, 1, 0.45, 0.25);
+            finger(&mut a, SDL_EVENT_FINGER_UP, 1, 1, 0.5, 0.3);
+            let [shape] = a.history.doc.strokes.as_slice() else {
+                panic!("expected one unbroken shape");
+            };
+            assert_eq!(shape.tool, tool);
+            assert_eq!(shape.points.len(), 2);
+            assert_eq!((shape.points[0].x, shape.points[1].x), (40., 400.));
+        }
+    }
+
+    #[test]
+    fn sample_limit_opens_a_panel_for_pointer_touch_and_rejected_erase() {
+        let mut a = app();
+        let p = |x, y| Point::new(x, y, 1., [0.; 2]);
+        a.history.doc.strokes = vec![
+            Stroke {
+                points: vec![p(1000., 1000.); MAX_POINTS - 2],
+                ..a.stroke(Tool::Pen)
+            }
+            .into(),
+            Stroke {
+                points: vec![p(20., 50.), p(120., 50.)],
+                ..a.stroke(Tool::Pen)
+            }
+            .into(),
+        ];
+        let panel = Some(crate::toolbar::Panel::Settings);
+        let mouse = Source::Mouse(LEFT_BUTTON);
+        a.begin(mouse, p(70., 50.), false);
+        assert!(a.input.contact.is_none());
+        assert_eq!(a.panel, panel);
+        assert!(a.status.get(Language::English).contains("limit reached"));
+
+        a.panel = None;
+        finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 1, 0.1, 0.1);
+        assert!(a.input.touches.is_empty());
+        assert_eq!(a.panel, panel);
+        assert!(a.status.get(Language::English).contains("limit reached"));
+
+        a.panel = None;
+        a.begin(mouse, p(70., 50.), true);
+        a.end(mouse);
+        assert_eq!(a.history.doc.strokes.len(), 2);
+        assert!(!a.history.can_undo());
+        assert_eq!(a.panel, panel);
+        assert!(
+            a.status
+                .get(Language::English)
+                .contains("erase would exceed")
+        );
+    }
+
     #[test]
     fn touch_ink_crossing_the_controller_creates_two_fragments_and_one_undo() {
         let mut a = app();

@@ -2,7 +2,7 @@ use crate::sdl::*;
 use egui::Theme;
 use futures_lite::{StreamExt, future};
 use std::{
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     thread,
     time::Duration,
 };
@@ -14,6 +14,7 @@ use zbus::{
 
 const APPEARANCE: &str = "org.freedesktop.appearance";
 const COLOR_SCHEME: &str = "color-scheme";
+static WAKE_EVENT: OnceLock<u32> = OnceLock::new();
 
 pub struct Monitor {
     scheme: Arc<Mutex<Option<u32>>>,
@@ -25,7 +26,7 @@ impl Monitor {
         let (stop, stopped) = async_channel::bounded::<()>(1);
         let scheme = Arc::new(Mutex::new(Some(0)));
         let update = scheme.clone();
-        let wake = unsafe { SDL_RegisterEvents(1) };
+        let wake = *WAKE_EVENT.get_or_init(|| unsafe { SDL_RegisterEvents(1) });
         let _ = thread::Builder::new()
             .name("overink-system-theme".into())
             .spawn(move || {
