@@ -1,3 +1,4 @@
+mod canvas;
 mod panel;
 
 use crate::{
@@ -9,13 +10,12 @@ use crate::{
     geometry, gui,
     icc::ColorManager,
     model::{Erasure, History, MAX_POINTS, Point, Stroke, Tool},
-    native::Passthrough,
     sdl::*,
     touch::{self, TouchKey},
 };
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
-    path::PathBuf,
+    path::{Path, PathBuf},
     ptr,
     time::{Duration, Instant},
 };
@@ -79,7 +79,44 @@ struct Commands {
     preferences: bool,
     redraw_canvas: bool,
 }
+struct CanvasInput {
+    protected: Option<crate::controller::Rect>,
+    pens: HashMap<u32, Pen>,
+    pen_proximity: BTreeSet<u32>,
+    touches: BTreeMap<TouchKey, FingerStroke>,
+    contact: Option<Contact>,
+    laser: BTreeMap<u64, VecDeque<LaserSample>>,
+    next_gesture: u64,
+    pending_erasures: BTreeMap<u64, Erasure>,
+    canvas_units: f32,
+}
+
+impl Default for CanvasInput {
+    fn default() -> Self {
+        Self {
+            protected: None,
+            pens: HashMap::new(),
+            pen_proximity: BTreeSet::new(),
+            touches: BTreeMap::new(),
+            contact: None,
+            laser: BTreeMap::new(),
+            next_gesture: 0,
+            pending_erasures: BTreeMap::new(),
+            canvas_units: 1.,
+        }
+    }
+}
+
+impl CanvasInput {
+    fn has_contacts(&self) -> bool {
+        self.contact.is_some() || !self.touches.is_empty()
+    }
+}
+
 struct App {
+    input: CanvasInput,
+    parked_input: BTreeMap<u32, CanvasInput>,
+    multi: bool,
     history: History,
     tool: Tool,
     color: InkColor,
@@ -101,25 +138,15 @@ struct App {
     language: Language,
     suspended: bool,
     frozen: bool,
-    protected: Option<crate::controller::Rect>,
     panel: Option<crate::toolbar::Panel>,
-    pens: HashMap<u32, Pen>,
-    pen_proximity: BTreeSet<u32>,
-    touches: BTreeMap<TouchKey, FingerStroke>,
     touch_enabled: bool,
-    contact: Option<Contact>,
-    laser: BTreeMap<u64, VecDeque<LaserSample>>,
-    next_gesture: u64,
-    pending_erasures: BTreeMap<u64, Erasure>,
     status: Status,
     path: String,
     save_path: PathBuf,
-    canvas_units: f32,
     last_save: Instant,
 }
 impl App {
-    fn new(board: bool, display: usize, displays: Vec<Display>) -> Self {
-        let base = state_dir();
+    fn new(board: bool, display: usize, displays: Vec<Display>, base: &Path) -> Self {
         let save_path = base.join("session.overink.json");
         let preferences = Preferences::load(&base.join("ui.json"));
         let mut history = History::default();
@@ -133,7 +160,7 @@ impl App {
             "就緒。可在螢幕上書寫，按空白鍵切換至滑鼠模式。",
         )
         .into();
-        if save_path.exists() {
+        if preferences.restore_session && save_path.exists() {
             match pages.load(&mut history, &save_path, true) {
                 Ok(0) => {}
                 Ok(pending) => status = pending_pages(pending),
@@ -144,6 +171,9 @@ impl App {
             }
         }
         Self {
+            input: CanvasInput::default(),
+            parked_input: BTreeMap::new(),
+            multi: false,
             history,
             tool: Tool::Pen,
             color: InkColor::default(),
@@ -165,20 +195,14 @@ impl App {
             language: preferences.language.unwrap_or_else(Language::system),
             suspended,
             frozen: false,
-            protected: None,
             panel: None,
-            pens: HashMap::new(),
-            pen_proximity: BTreeSet::new(),
-            touches: BTreeMap::new(),
             touch_enabled: true,
-            contact: None,
-            laser: BTreeMap::new(),
-            next_gesture: 0,
-            pending_erasures: BTreeMap::new(),
             status,
-            path: save_path.to_string_lossy().into_owned(),
+            path: base
+                .join("drawing.overink.json")
+                .to_string_lossy()
+                .into_owned(),
             save_path,
-            canvas_units: 1.,
             last_save: Instant::now(),
         }
     }
@@ -187,9 +211,9 @@ impl App {
             tool,
             color: self.color,
             width: if tool == Tool::Marker {
-                self.width * 3. * self.canvas_units
+                self.width * 3. * self.input.canvas_units
             } else {
-                self.width * self.canvas_units
+                self.width * self.input.canvas_units
             },
             opacity: if tool == Tool::Marker {
                 self.opacity * 0.32
@@ -207,46 +231,48 @@ impl App {
     fn gesture(&mut self, tool: Tool) -> Gesture {
         match tool {
             Tool::Eraser | Tool::Laser => {
-                self.next_gesture += 1;
+                self.input.next_gesture += 1;
                 if tool == Tool::Eraser {
-                    Gesture::Erase(self.next_gesture)
+                    Gesture::Erase(self.input.next_gesture)
                 } else {
-                    Gesture::Laser(self.next_gesture)
+                    Gesture::Laser(self.input.next_gesture)
                 }
             }
             _ => Gesture::Ink,
         }
     }
     fn erase_sample(&mut self, id: u64, point: Point) {
-        let radius = self.width.max(12.) * self.canvas_units;
-        self.pending_erasures.entry(id).or_default().sample(
+        let radius = self.width.max(12.) * self.input.canvas_units;
+        self.input.pending_erasures.entry(id).or_default().sample(
             &self.history.doc.strokes,
             point,
             radius,
         );
     }
     fn commit_erase(&mut self, id: u64) {
-        let Some(erase) = self.pending_erasures.remove(&id) else {
+        let Some(erase) = self.input.pending_erasures.remove(&id) else {
             return;
         };
         let points = self.draft_point_count();
-        if let Err(error) = erase.commit(&mut self.history, &mut self.pending_erasures, points) {
+        if let Err(error) =
+            erase.commit(&mut self.history, &mut self.input.pending_erasures, points)
+        {
             self.status = text("Erase failed", "擦除失败", "擦除失敗").detail(error);
         }
     }
     fn cancel_gesture(&mut self, gesture: Gesture) {
         match gesture {
             Gesture::Erase(id) => {
-                self.pending_erasures.remove(&id);
+                self.input.pending_erasures.remove(&id);
             }
             Gesture::Laser(id) => {
-                self.laser.remove(&id);
+                self.input.laser.remove(&id);
             }
             Gesture::Ink => {}
         }
     }
     fn laser_sample(&mut self, id: u64, point: Point, starts_segment: bool) {
-        let trail = self.laser.entry(id).or_default();
+        let trail = self.input.laser.entry(id).or_default();
         let now = Instant::now();
         if !starts_segment
             && let Some(last) = trail.back_mut()
@@ -268,7 +294,7 @@ impl App {
         if self.pass
             || self.hidden
             || self.suspended
-            || self.protected.is_some_and(|r| r.contains(p.x, p.y))
+            || self.input.protected.is_some_and(|r| r.contains(p.x, p.y))
         {
             return;
         }
@@ -293,13 +319,17 @@ impl App {
                 self.history.active = Some(stroke);
             }
         }
-        self.contact = Some(Contact { source, gesture });
+        self.input.contact = Some(Contact { source, gesture });
     }
     fn motion(&mut self, source: Source, p: Point) {
-        let Some(contact) = self.contact.filter(|contact| contact.source == source) else {
+        let Some(contact) = self
+            .input
+            .contact
+            .filter(|contact| contact.source == source)
+        else {
             return;
         };
-        if self.protected.is_some_and(|r| r.contains(p.x, p.y)) {
+        if self.input.protected.is_some_and(|r| r.contains(p.x, p.y)) {
             self.finish_contact();
             return;
         }
@@ -338,7 +368,11 @@ impl App {
         }
     }
     fn end(&mut self, source: Source) {
-        if self.contact.is_some_and(|contact| contact.source == source) {
+        if self
+            .input
+            .contact
+            .is_some_and(|contact| contact.source == source)
+        {
             self.finish_contact();
         }
     }
@@ -346,27 +380,26 @@ impl App {
         if let Some(Contact {
             gesture: Gesture::Erase(id),
             ..
-        }) = self.contact.take()
+        }) = self.input.contact.take()
         {
             self.commit_erase(id);
         }
         self.history.commit();
     }
     fn discard_touches(&mut self) {
-        for finger in std::mem::take(&mut self.touches).into_values() {
+        for finger in std::mem::take(&mut self.input.touches).into_values() {
             self.cancel_gesture(finger.gesture);
         }
     }
     fn stop(&mut self) {
         self.finish_contact();
         self.commit_touches();
-        for pen in self.pens.values_mut() {
+        for pen in self.input.pens.values_mut() {
             pen.down = false;
         }
     }
     fn use_mouse(&mut self) {
-        self.stop();
-        self.reset_contacts();
+        self.finish_all_contacts();
         self.pass = true;
         self.wait_for_mouse_up = true;
         self.panel = None;
@@ -378,8 +411,7 @@ impl App {
         .into();
     }
     fn use_tool(&mut self, tool: Tool) {
-        self.stop();
-        self.reset_contacts();
+        self.finish_all_contacts();
         self.tool = tool;
         self.pass = false;
         self.wait_for_mouse_up = false;
@@ -400,13 +432,74 @@ impl App {
     }
     fn reset_contacts(&mut self) {
         self.history.active = None;
-        self.contact = None;
-        self.touches.clear();
-        self.pending_erasures.clear();
-        for pen in self.pens.values_mut() {
+        self.input.contact = None;
+        self.input.touches.clear();
+        self.input.pending_erasures.clear();
+        for pen in self.input.pens.values_mut() {
             pen.down = false;
         }
-        self.laser.clear();
+        self.input.laser.clear();
+    }
+    fn swap_page(&mut self, id: u32) {
+        let previous = self.pages.active;
+        if !self.pages.switch(&mut self.history, id) {
+            return;
+        }
+        let next = self.parked_input.remove(&id).unwrap_or_default();
+        let previous_input = std::mem::replace(&mut self.input, next);
+        if let Some(previous) = previous {
+            self.parked_input.insert(previous, previous_input);
+        }
+        self.display = self.displays.iter().position(|d| d.id == id).unwrap_or(0);
+    }
+    fn select_page(&mut self, id: u32) {
+        if self.pages.active != Some(id) {
+            if self.multi {
+                self.swap_page(id);
+            } else {
+                self.stop();
+                self.reset_contacts();
+                self.pages.switch(&mut self.history, id);
+                self.display = self.displays.iter().position(|d| d.id == id).unwrap_or(0);
+            }
+        }
+    }
+    fn on_page<T>(&mut self, id: Option<u32>, f: impl FnOnce(&mut Self) -> T) -> T {
+        let previous = self.pages.active;
+        if let (Some(previous), Some(id)) = (previous, id)
+            && previous != id
+        {
+            self.swap_page(id);
+            let result = f(self);
+            self.swap_page(previous);
+            result
+        } else {
+            f(self)
+        }
+    }
+    fn for_each_page(&mut self, mut f: impl FnMut(&mut Self)) {
+        f(self);
+        for id in self.parked_input.keys().copied().collect::<Vec<_>>() {
+            self.on_page(Some(id), &mut f);
+        }
+    }
+    fn finish_all_contacts(&mut self) {
+        self.for_each_page(|app| {
+            app.stop();
+            app.reset_contacts();
+        });
+    }
+    fn has_contacts(&self) -> bool {
+        self.input.has_contacts() || self.parked_input.values().any(CanvasInput::has_contacts)
+    }
+    fn touch_page(&self, key: TouchKey) -> Option<u32> {
+        if self.input.touches.contains_key(&key) {
+            self.pages.active
+        } else {
+            self.parked_input
+                .iter()
+                .find_map(|(id, input)| input.touches.contains_key(&key).then_some(*id))
+        }
     }
     fn refresh_displays(&mut self, displays: Vec<Display>, preferred: Option<u32>) -> (bool, bool) {
         let old = self
@@ -414,32 +507,34 @@ impl App {
             .iter()
             .find(|d| Some(d.id) == self.pages.active)
             .cloned();
-        let removed = self.pages.sync(&mut self.history, &displays);
-        if removed {
-            self.reset_contacts();
+        let removed = self
+            .displays
+            .iter()
+            .any(|old| !displays.iter().any(|d| d.id == old.id));
+        if self.pages.sync(&mut self.history, &displays) {
+            self.input = CanvasInput::default();
         }
+        self.parked_input
+            .retain(|id, _| displays.iter().any(|d| d.id == *id));
         let target = preferred
             .filter(|id| displays.iter().any(|d| d.id == *id))
             .or(self.pages.active)
             .or_else(|| displays.first().map(|d| d.id));
+        self.displays = displays;
         if let Some(id) = target {
-            if self.pages.active != Some(id) {
-                self.stop();
-                self.reset_contacts();
-                self.pages.switch(&mut self.history, id);
-            }
+            self.select_page(id);
         } else {
             self.reset_contacts();
         }
         self.suspended = target.is_none();
-        self.display = displays
+        self.display = self
+            .displays
             .iter()
             .position(|d| Some(d.id) == target)
             .unwrap_or(0);
-        let new = displays.get(self.display);
+        let new = self.displays.get(self.display);
         let layout = old.as_ref().map(|d| (d.id, d.bounds, d.scale))
             != new.map(|d| (d.id, d.bounds, d.scale));
-        self.displays = displays;
         if removed {
             self.status = text(
                 "Display disconnected. Its ink and undo history were cleared.",
@@ -462,6 +557,7 @@ impl App {
             .sum::<usize>()
             + self.history.active.as_ref().map_or(0, |s| s.points.len())
             + self
+                .input
                 .touches
                 .values()
                 .flat_map(|f| f.fragments.iter().chain(f.stroke.iter()))
@@ -474,7 +570,11 @@ impl App {
             self.history.can_redo(),
             !self.history.doc.strokes.is_empty()
                 || self.history.active.is_some()
-                || self.touches.values().any(|finger| finger.stroke.is_some()),
+                || self
+                    .input
+                    .touches
+                    .values()
+                    .any(|finger| finger.stroke.is_some()),
         ]
     }
     #[cfg(any(target_os = "macos", test))]
@@ -486,7 +586,8 @@ impl App {
             .map(|stroke| stroke.as_ref())
             .chain(self.history.active.iter())
             .chain(
-                self.touches
+                self.input
+                    .touches
                     .values()
                     .flat_map(|finger| finger.fragments.iter().chain(finger.stroke.iter())),
             )
@@ -512,22 +613,26 @@ impl App {
         }
     }
     fn commit_touches(&mut self) {
-        while let Some((_, finger)) = self.touches.pop_first() {
+        while let Some((_, finger)) = self.input.touches.pop_first() {
             self.commit_touch(finger);
         }
     }
     fn touch_motion(&mut self, key: TouchKey, point: Point) {
         let can_append = self.draft_point_count() < MAX_POINTS;
-        let Some(finger) = self.touches.get_mut(&key) else {
+        let Some(finger) = self.input.touches.get_mut(&key) else {
             return;
         };
-        let inside = self.protected.is_some_and(|r| r.contains(point.x, point.y));
+        let inside = self
+            .input
+            .protected
+            .is_some_and(|r| r.contains(point.x, point.y));
         let crosses = self
+            .input
             .protected
             .is_some_and(|r| finger.last.is_some_and(|last| r.crosses(last, point)));
         if inside || crosses {
             if let Gesture::Erase(id) = finger.gesture
-                && let Some(erase) = self.pending_erasures.get_mut(&id)
+                && let Some(erase) = self.input.pending_erasures.get_mut(&id)
             {
                 erase.last = None;
             }
@@ -563,7 +668,7 @@ impl App {
     fn touch_event(&mut self, event: SDL_TouchFingerEvent, size: [f32; 2]) {
         let key = TouchKey::from(event);
         if event.r#type == SDL_EVENT_FINGER_CANCELED {
-            if let Some(finger) = self.touches.remove(&key) {
+            if let Some(finger) = self.input.touches.remove(&key) {
                 self.cancel_gesture(finger.gesture);
             }
             return;
@@ -572,7 +677,7 @@ impl App {
             if let Some(point) = touch::point(event, size) {
                 self.touch_motion(key, point);
             }
-            if let Some(finger) = self.touches.remove(&key) {
+            if let Some(finger) = self.input.touches.remove(&key) {
                 self.commit_touch(finger);
             }
             return;
@@ -581,7 +686,7 @@ impl App {
             || self.pass
             || self.hidden
             || self.suspended
-            || !self.pen_proximity.is_empty()
+            || !self.input.pen_proximity.is_empty()
         {
             return;
         }
@@ -589,11 +694,15 @@ impl App {
             return;
         };
         if event.r#type == SDL_EVENT_FINGER_DOWN {
-            if self.protected.is_some_and(|r| r.contains(point.x, point.y)) {
+            if self
+                .input
+                .protected
+                .is_some_and(|r| r.contains(point.x, point.y))
+            {
                 return;
             }
-            if self.touches.contains_key(&key)
-                || self.touches.len() >= 16
+            if self.input.touches.contains_key(&key)
+                || self.input.touches.len() >= 16
                 || touch::is_indirect(event.touchID)
                 || !(0.0..=1.0).contains(&event.x)
                 || !(0.0..=1.0).contains(&event.y)
@@ -611,7 +720,7 @@ impl App {
             } else {
                 None
             };
-            self.touches.insert(
+            self.input.touches.insert(
                 key,
                 FingerStroke {
                     gesture,
@@ -631,8 +740,8 @@ impl App {
                 SDL_EVENT_PEN_PROXIMITY_OUT => {
                     let id = event.pproximity.which.0;
                     self.end(Source::Pen(id));
-                    self.pens.remove(&id);
-                    self.pen_proximity.remove(&id);
+                    self.input.pens.remove(&id);
+                    self.input.pen_proximity.remove(&id);
                     return;
                 }
                 SDL_EVENT_PEN_AXIS => event.paxis.which.0,
@@ -641,7 +750,7 @@ impl App {
                 _ => return,
             }
         };
-        if self.pen_proximity.insert(id) {
+        if self.input.pen_proximity.insert(id) {
             self.discard_touches();
         }
     }
@@ -658,6 +767,7 @@ impl App {
                     if b.button == RIGHT_BUTTON
                         || (b.button == LEFT_BUTTON
                             && self
+                                .input
                                 .contact
                                 .is_none_or(|c| c.source != Source::Mouse(RIGHT_BUTTON)))
                     {
@@ -672,7 +782,7 @@ impl App {
                     if e.button.which != SDL_PEN_MOUSEID && e.button.which != SDL_TOUCH_MOUSEID {
                         let b = e.button;
                         let source = Source::Mouse(b.button);
-                        if self.contact.is_some_and(|contact| {
+                        if self.input.contact.is_some_and(|contact| {
                             contact.source == source && matches!(contact.gesture, Gesture::Erase(_))
                         }) {
                             self.motion(source, Point::new(b.x, b.y, 1., [0.; 2]));
@@ -684,7 +794,7 @@ impl App {
                     let m = e.motion;
                     if m.which != SDL_PEN_MOUSEID
                         && m.which != SDL_TOUCH_MOUSEID
-                        && let Some(contact) = self.contact
+                        && let Some(contact) = self.input.contact
                         && matches!(contact.source, Source::Mouse(_))
                     {
                         self.motion(contact.source, Point::new(m.x, m.y, 1., [0.; 2]));
@@ -698,7 +808,7 @@ impl App {
                 }
                 SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP if e.ptouch.windowID == overlay => {
                     let t = e.ptouch;
-                    let pen = self.pens.entry(t.which.0).or_default();
+                    let pen = self.input.pens.entry(t.which.0).or_default();
                     pen.down = t.down;
                     let p = pen.point(t.x, t.y);
                     if t.down {
@@ -706,7 +816,7 @@ impl App {
                     } else {
                         self.motion(Source::Pen(t.which.0), p);
                         self.end(Source::Pen(t.which.0));
-                        if let Some(pen) = self.pens.get_mut(&t.which.0) {
+                        if let Some(pen) = self.input.pens.get_mut(&t.which.0) {
                             pen.pressure = 0.;
                             pen.has_pressure = false;
                         }
@@ -714,7 +824,7 @@ impl App {
                 }
                 SDL_EVENT_PEN_AXIS if e.paxis.windowID == overlay => {
                     let a = e.paxis;
-                    let pen = self.pens.entry(a.which.0).or_default();
+                    let pen = self.input.pens.entry(a.which.0).or_default();
                     match a.axis {
                         SDL_PEN_AXIS_PRESSURE if a.value.is_finite() => {
                             pen.pressure = a.value.clamp(0., 1.);
@@ -729,16 +839,26 @@ impl App {
                 }
                 SDL_EVENT_PEN_MOTION if e.pmotion.windowID == overlay => {
                     let m = e.pmotion;
-                    let point = self.pens.entry(m.which.0).or_default().point(m.x, m.y);
+                    let point = self
+                        .input
+                        .pens
+                        .entry(m.which.0)
+                        .or_default()
+                        .point(m.x, m.y);
                     self.motion(Source::Pen(m.which.0), point);
                 }
                 SDL_EVENT_WINDOW_FOCUS_LOST if e.window.windowID == overlay => {
-                    self.discard_touches();
-                    self.stop();
+                    if self.multi {
+                        self.finish_contact();
+                    } else {
+                        self.discard_touches();
+                        self.stop();
+                    }
                 }
                 SDL_EVENT_WINDOW_MOUSE_LEAVE
                     if e.window.windowID == overlay
                         && self
+                            .input
                             .contact
                             .is_some_and(|contact| matches!(contact.source, Source::Mouse(_))) =>
                 {
@@ -763,7 +883,7 @@ impl App {
                 return c;
             }
             if k.key == SDLK_ESCAPE {
-                if self.contact.is_some() || !self.touches.is_empty() {
+                if self.input.contact.is_some() || !self.input.touches.is_empty() {
                     self.reset_contacts();
                 } else {
                     self.use_mouse();
@@ -799,7 +919,7 @@ impl App {
                     c.mode = true
                 }
                 SDLK_H => {
-                    self.stop();
+                    self.finish_all_contacts();
                     self.hidden = !self.hidden;
                     c.mode = true
                 }
@@ -828,10 +948,16 @@ impl App {
         c
     }
     fn save(&mut self) {
-        self.stop();
+        self.finish_all_contacts();
         let p = PathBuf::from(&self.path);
         let result = if p == self.save_path {
-            self.save_session()
+            Err(text(
+                "Choose a different file for manual saves.",
+                "请为手动保存选择其他文件名。",
+                "請為手動儲存選擇其他檔名。",
+            )
+            .get(self.language)
+            .into())
         } else {
             self.pages.save(&self.history, &p)
         };
@@ -845,8 +971,27 @@ impl App {
         self.pages.mark_saved(&mut self.history);
         Ok(())
     }
+    fn remove_resume_file(&self) -> Result<(), String> {
+        match std::fs::remove_file(&self.save_path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+    fn finish_session(&mut self) -> Result<(), String> {
+        self.finish_all_contacts();
+        if !self.preferences.restore_session {
+            self.remove_resume_file()
+                .map_err(|e| format!("Clearing the last session on exit: {e}"))
+        } else if self.pages.needs_save(&self.history) {
+            self.save_session()
+                .map_err(|e| format!("Autosave on exit: {e}"))
+        } else {
+            Ok(())
+        }
+    }
     fn load(&mut self) {
-        self.stop();
+        self.finish_all_contacts();
         let p = PathBuf::from(&self.path);
         match self.pages.load(&mut self.history, &p, false) {
             Ok(0) => self.status = text("Session loaded", "已打开会话", "已開啟工作階段").into(),
@@ -884,9 +1029,10 @@ impl App {
         };
         // Clear the protected area to transparent even on software renderers,
         // which cannot implement SDL's custom alpha-mask texture blend mode.
-        let has_hole = self.protected.is_some();
+        let has_hole = self.input.protected.is_some();
         let scale = r.begin(w, if has_hole { [0.; 4] } else { bg })?;
-        let clips = crate::controller::outside(w.size().map(|v| v.ceil() as i32), self.protected);
+        let clips =
+            crate::controller::outside(w.size().map(|v| v.ceil() as i32), self.input.protected);
         let fill = has_hole && bg[3] > 0.;
         let draw_background = background.frozen && !self.pass;
         if fill {
@@ -906,7 +1052,6 @@ impl App {
                 }
                 if draw_background && let Err(error) = background.draw(r, w, color) {
                     background.live();
-                    self.frozen = false;
                     self.status =
                         text("Frozen desktop unavailable", "无法冻结桌面", "無法凍結桌面")
                             .detail(error);
@@ -918,7 +1063,7 @@ impl App {
         }
         let aa = 0.8 / scale[0].max(scale[1]);
         for (index, stroke) in self.history.doc.strokes.iter().enumerate() {
-            let preview = Erasure::preview(stroke, index, self.pending_erasures.values());
+            let preview = Erasure::preview(stroke, index, self.input.pending_erasures.values());
             for fragment in preview.iter() {
                 paint_stroke(r, fragment, color, aa, &clips)?;
             }
@@ -926,13 +1071,13 @@ impl App {
         if let Some(ref s) = self.history.active {
             paint_stroke(r, s, color, aa, &clips)?
         }
-        for finger in self.touches.values() {
+        for finger in self.input.touches.values() {
             for stroke in finger.fragments.iter().chain(finger.stroke.iter()) {
                 paint_stroke(r, stroke, color, aa, &clips)?;
             }
         }
         let now = Instant::now();
-        self.laser.retain(|_, trail| {
+        self.input.laser.retain(|_, trail| {
             while trail
                 .front()
                 .is_some_and(|sample| now.duration_since(sample.at) >= LASER_LIFETIME)
@@ -944,13 +1089,13 @@ impl App {
         let mut laser = Stroke {
             tool: Tool::Laser,
             color: InkColor::from_rgb8([246, 72, 99]),
-            width: 4. * self.canvas_units,
+            width: 4. * self.input.canvas_units,
             opacity: 1.,
             pressure_curve: 1.,
             pressure_enabled: false,
             points: Vec::new(),
         };
-        for trail in self.laser.values() {
+        for trail in self.input.laser.values() {
             laser.points.clear();
             for sample in trail {
                 if sample.starts_segment && !laser.points.is_empty() {
@@ -1062,42 +1207,6 @@ fn state_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".local/state/overink")
 }
-fn apply_mode(
-    a: &mut App,
-    w: &Window,
-    toolbar: &Window,
-    pass: &mut Passthrough,
-) -> Result<(), String> {
-    if a.hidden || a.suspended {
-        return crate::native::show_canvas(w, toolbar, false);
-    }
-    crate::native::show_canvas(w, toolbar, true)?;
-    let mouse = a.mouse_ready();
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    let result = pass.set_guarded(w, mouse, a.protected);
-    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-    let result = pass.set(w, mouse);
-    if let Err(e) = result {
-        a.pass = false;
-        a.status = text(
-            "Mouse mode unavailable. Hide the drawing layer to click the desktop.",
-            "鼠标穿透不可用，可隐藏书写图层后点击桌面。",
-            "滑鼠穿透無法使用，可隱藏書寫圖層後點按桌面。",
-        )
-        .detail(e);
-    }
-    unsafe {
-        SDL_SetWindowAlwaysOnTop(w.raw, true);
-        if !a.pass {
-            SDL_RaiseWindow(w.raw);
-        }
-        // Keep the controller above the drawing input region after resuming.
-        SDL_RaiseWindow(toolbar.raw);
-    }
-    crate::native::keep_controller_above(w, toolbar, pass);
-    Ok(())
-}
-
 fn mouse_released() -> bool {
     // Cocoa can route the release to a different application during a focus
     // change. Its global state reflects the physical buttons in that case.
@@ -1129,6 +1238,60 @@ pub struct Options {
     pub display: usize,
     pub smoke: bool,
 }
+fn capture_visibility(
+    canvases: &mut [canvas::Canvas],
+    toolbar: &Window,
+    tooltips: &mut crate::toolbar::Tooltips,
+    toolbar_hidden: &mut bool,
+    hide: bool,
+) -> Result<bool, String> {
+    if hide == *toolbar_hidden {
+        return Ok(false);
+    }
+    if hide {
+        tooltips.clear();
+        for canvas in canvases {
+            canvas.show(toolbar, false)?;
+        }
+    }
+    toolbar.show(!hide)?;
+    *toolbar_hidden = hide;
+    Ok(true)
+}
+
+fn update_preferences(app: &mut App, previous: Preferences, multi_supported: bool) -> bool {
+    if let Err(error) = app.preferences.save(&state_dir().join("ui.json")) {
+        app.preferences = previous;
+        app.status = text("Settings save failed", "保存设置失败", "儲存設定失敗").detail(error);
+        return false;
+    }
+    app.language = app.preferences.language.unwrap_or_else(Language::system);
+    if previous.restore_session != app.preferences.restore_session {
+        let result = if app.preferences.restore_session {
+            app.save_session()
+        } else {
+            app.remove_resume_file()
+        };
+        if let Err(error) = result {
+            app.status = text(
+                "Last session update failed",
+                "更新自动恢复会话失败",
+                "更新自動復原工作階段失敗",
+            )
+            .detail(error);
+        }
+    }
+    let multi = multi_supported && app.preferences.per_display_windows;
+    if multi != app.multi {
+        app.finish_all_contacts();
+        app.parked_input.clear();
+        app.multi = multi;
+        true
+    } else {
+        false
+    }
+}
+
 pub fn run(options: Options) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let _teardown_pool = crate::native::macos::AutoreleasePool::new();
@@ -1136,33 +1299,28 @@ pub fn run(options: Options) -> Result<(), String> {
     let startup_pool = crate::native::macos::AutoreleasePool::new();
     if options.smoke {
         unsafe {
-            SDL_SetHint(SDL_HINT_VIDEO_DRIVER, c"dummy".as_ptr());
+            SDL_SetHintWithPriority(SDL_HINT_VIDEO_DRIVER, c"dummy".as_ptr(), SDL_HINT_OVERRIDE);
         }
     }
-    let _runtime = Runtime::new(options.x11)?;
+    let _runtime = Runtime::new(options.x11 && !options.smoke)?;
     let video = crate::sdl::driver();
     let wayland = video == "wayland";
-    let canvas = Window::new("OverInk - canvas", 1100, 720, !options.smoke)?;
+    let window = Window::new("OverInk - canvas", 1100, 720, !options.smoke)?;
     let topology = crate::display::Topology::new(&video);
-    let displays = topology.connected(&canvas).unwrap_or_default();
-    let mut app = App::new(options.board || options.smoke, options.display, displays);
-    if !options.smoke
-        && let Some(id) = app.pages.active
-        && let Err(e) = canvas.place_on_display(id, true)
-        && video != "wayland"
-    {
-        return Err(e);
-    }
-    app.canvas_units = canvas.scale() / unsafe { SDL_GetWindowPixelDensity(canvas.raw) }.max(0.1);
-    let canvas_render = Renderer::new(&canvas, options.sdr || cfg!(target_os = "macos"))?;
-    #[cfg(target_os = "macos")]
-    let mut canvas_render = canvas_render;
-    #[cfg(target_os = "macos")]
-    let mut extended_unavailable = false;
-    #[cfg(target_os = "macos")]
-    let (mut wide_ink, mut recheck_ink) = (false, true);
-    let xwayland = crate::background::is_xwayland(&canvas, &video);
-    // Declare renderers before GUI texture owners, so textures are destroyed first.
+    let displays = topology.connected(&window).unwrap_or_default();
+    let xwayland = crate::background::is_xwayland(&window, &video);
+    let mut app = App::new(
+        options.board || options.smoke,
+        options.display,
+        displays,
+        &state_dir(),
+    );
+    app.multi = app.preferences.per_display_windows && !wayland && !options.smoke;
+    let mut canvases = vec![canvas::Canvas::new(
+        window,
+        app.displays.get(app.display),
+        &options,
+    )?];
     let toolbar = Window::new(
         "OverInk",
         crate::toolbar::WIDTH as i32,
@@ -1172,47 +1330,32 @@ pub fn run(options: Options) -> Result<(), String> {
     toolbar.setup_toolbar();
     if !options.smoke {
         let _ = toolbar.arrange_toolbar(false, app.pages.active);
+        canvas::reconcile(&mut canvases, &mut app, &toolbar, &options)?;
     }
     let toolbar_render = Renderer::new(&toolbar, true)?;
     let mut gui = gui::Gui::new();
     let mark = crate::toolbar::brand(&gui.ctx);
-    let mut toolbar_expanded = false;
-    let mut native = Passthrough::new(&canvas);
-    let mut canvas_color = ColorManager::default();
-    canvas_color.refresh(&canvas, canvas_render.extended);
     let mut toolbar_color = ColorManager::default();
     toolbar_color.refresh(&toolbar, toolbar_render.extended);
-    crate::native::show_canvas(&canvas, &toolbar, true)?;
-    if !options.smoke
-        && let Some(id) = app.pages.active
-    {
-        let _ = canvas.place_on_display(id, true);
+    for canvas in &mut canvases {
+        canvas.show(&toolbar, options.smoke || !app.suspended)?;
     }
     toolbar.show(true)?;
-    if !options.smoke && video != "wayland" {
-        // The window system may place a newly shown toolbar using its
-        // original size. Position it once the compact size is visible.
+    if !options.smoke && !wayland {
         let _ = toolbar.arrange_toolbar(false, app.pages.active);
     }
     unsafe {
         SDL_StartTextInput(toolbar.raw);
         SDL_RaiseWindow(toolbar.raw);
     }
-    if !options.smoke {
-        apply_mode(&mut app, &canvas, &toolbar, &mut native)?;
-        unsafe {
-            SDL_RaiseWindow(toolbar.raw);
-        }
-    }
     if options.smoke {
         app.history = History::default();
-        smoke_events(&mut app, canvas.id)?;
+        smoke_events(&mut app, canvases[0].window.id)?;
     }
     let mut picker = crate::picker::Picker::default();
-    let mut background = crate::background::Background::default();
     let mut tooltips = crate::toolbar::Tooltips::default();
-    let mut controller_guard = crate::controller::Guard::default();
-    let mut picker_windows_hidden = false;
+    let mut toolbar_hidden = false;
+    let mut toolbar_expanded = false;
     let mut running = true;
     let mut frame = 0;
     let mut last_color = Instant::now();
@@ -1223,10 +1366,7 @@ pub fn run(options: Options) -> Result<(), String> {
     let mut topology_dirty = !options.smoke;
     let mut pacer = FramePacer::new(app.frame_rate, app.refresh_hz(), Instant::now());
     let mut appearance = ThemeMonitor::default();
-    let mut canvas_dirty = true;
     let mut toolbar_dirty = true;
-    let mut guard_dirty = true;
-    let mut last_mouse = false;
     let mut toolbar_repaint_at: Option<Instant> = None;
     #[cfg(target_os = "macos")]
     drop(startup_pool);
@@ -1236,7 +1376,8 @@ pub fn run(options: Options) -> Result<(), String> {
         let mut disconnected = BTreeSet::new();
         let mut controller_scale_changed = false;
         let mut controller_moved = false;
-        let mut canvas_surface_changed = false;
+        let mut controller_bounds_changed = false;
+        let mut mode_changed = false;
         let mut event = SDL_Event::default();
         while unsafe { SDL_PollEvent(&mut event) } {
             let ty = unsafe { SDL_EventType(event.r#type) };
@@ -1248,7 +1389,7 @@ pub fn run(options: Options) -> Result<(), String> {
                 app.language = Language::system();
                 toolbar_dirty = true;
             }
-            if ty >= SDL_EVENT_DISPLAY_FIRST && ty <= SDL_EVENT_DISPLAY_LAST {
+            if (SDL_EVENT_DISPLAY_FIRST..=SDL_EVENT_DISPLAY_LAST).contains(&ty) {
                 topology_dirty = !options.smoke;
                 if ty == SDL_EVENT_DISPLAY_REMOVED {
                     disconnected.insert(unsafe { event.display.displayID.0 });
@@ -1278,8 +1419,13 @@ pub fn run(options: Options) -> Result<(), String> {
                     || surface_changed
                     || matches!(ty, SDL_EVENT_WINDOW_EXPOSED | SDL_EVENT_WINDOW_RESTORED);
                 if id == toolbar.id {
+                    if ty == SDL_EVENT_WINDOW_CLOSE_REQUESTED {
+                        running = false;
+                        break;
+                    }
                     if bounds_changed {
                         tooltips.clear();
+                        controller_bounds_changed = true;
                     }
                     let moved = matches!(
                         ty,
@@ -1288,17 +1434,25 @@ pub fn run(options: Options) -> Result<(), String> {
                     controller_moved |= moved;
                     controller_scale_changed |= ty == SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED;
                     topology_dirty |= !options.smoke && (moved || controller_scale_changed);
-                    guard_dirty |= bounds_changed;
                     toolbar_dirty |= redraw;
-                } else if id == canvas.id {
-                    // A Wayland output is assigned by the compositor after mapping.
-                    topology_dirty |= wayland && ty == SDL_EVENT_WINDOW_DISPLAY_CHANGED;
-                    canvas_surface_changed |= surface_changed;
-                    guard_dirty |= bounds_changed;
-                    canvas_dirty |= redraw;
-                    if ty == SDL_EVENT_WINDOW_SHOWN {
-                        native.invalidate();
-                        crate::native::keep_controller_above(&canvas, &toolbar, &native);
+                } else if let Some(canvas) =
+                    canvases.iter_mut().find(|canvas| canvas.window.id == id)
+                {
+                    topology_dirty |= ty == SDL_EVENT_WINDOW_DISPLAY_CHANGED && !options.smoke;
+                    canvas.guard_dirty |= bounds_changed;
+                    canvas.dirty |= redraw;
+                    if surface_changed {
+                        canvas.surface_changed();
+                        toolbar_dirty = true;
+                    }
+                    if matches!(ty, SDL_EVENT_WINDOW_SHOWN | SDL_EVENT_WINDOW_FOCUS_GAINED) {
+                        canvas.keep_toolbar_above(&toolbar);
+                    }
+                    if ty == SDL_EVENT_WINDOW_CLOSE_REQUESTED {
+                        app.finish_all_contacts();
+                        app.hidden = true;
+                        mode_changed = true;
+                        toolbar_dirty = true;
                     }
                 } else if matches!(
                     ty,
@@ -1311,78 +1465,124 @@ pub fn run(options: Options) -> Result<(), String> {
                 ty,
                 SDL_EVENT_RENDER_TARGETS_RESET | SDL_EVENT_RENDER_DEVICE_RESET
             ) {
-                canvas_dirty = true;
-                toolbar_dirty = true;
-                background.invalidate_texture();
-            }
-            if ty == SDL_EVENT_WINDOW_CLOSE_REQUESTED {
-                let id = unsafe { event.window.windowID };
-                if id == toolbar.id {
-                    running = false;
-                    break;
-                } else if id == canvas.id {
-                    app.hidden = true;
-                    crate::native::show_canvas(&canvas, &toolbar, false)?;
-                    toolbar_dirty = true;
+                for canvas in &mut canvases {
+                    canvas.background.invalidate_texture();
+                    canvas.dirty = true;
                 }
+                toolbar_dirty = true;
             }
+
+            let active = canvas::active_index(&canvases, app.pages.active);
             let was_picking = picker.active();
-            picker.event(&event, &canvas);
+            picker.event(&event, &canvases[active].window);
             gui.event(&event, toolbar.id, toolbar.size());
-            let had_contacts = app.contact.is_some() || !app.touches.is_empty();
-            let history_buttons = app.history_buttons();
-            if !was_picking
-                && !background.pending()
-                && !app.suspended
-                && (options.smoke || canvas.display_id() == app.pages.active)
-            {
-                app.event(&event, canvas.id, canvas.size());
+            let id = canvas::event_window(&event, ty);
+            let target = if ty == SDL_EVENT_FINGER_CANCELED {
+                app.touch_page(unsafe { TouchKey::from(event.tfinger) })
+                    .and_then(|output| canvases.iter().position(|c| c.output == Some(output)))
             } else {
-                app.track_pen(&event);
+                id.and_then(|id| canvases.iter().position(|c| c.window.id == id))
+            };
+            let drawing = !was_picking && !toolbar_hidden && !app.suspended;
+            if ty == SDL_EVENT_PEN_PROXIMITY_OUT {
+                // A pen can leave proximity over a different window from the
+                // one that received its earlier packets.
+                app.for_each_page(|page| page.track_pen(&event));
+                for canvas in &mut canvases {
+                    canvas.dirty = true;
+                }
+                toolbar_dirty = true;
+            } else if let Some(index) =
+                target.or((ty == SDL_EVENT_FINGER_CANCELED && !app.multi).then_some(active))
+            {
+                let canvas = &mut canvases[index];
+                let activates = drawing
+                    && canvas.visible
+                    && canvas.on_output(options.smoke)
+                    && unsafe {
+                        (ty == SDL_EVENT_MOUSE_BUTTON_DOWN
+                            && event.button.which != SDL_TOUCH_MOUSEID
+                            && event.button.which != SDL_PEN_MOUSEID)
+                            || matches!(
+                                ty,
+                                SDL_EVENT_PEN_DOWN | SDL_EVENT_FINGER_DOWN | SDL_EVENT_KEY_DOWN
+                            )
+                    };
+                if activates {
+                    if app.multi
+                        && let Some(output) = canvas.output
+                    {
+                        toolbar_dirty |= app.pages.active != Some(output);
+                        app.select_page(output);
+                    }
+                    canvas.keep_toolbar_above(&toolbar);
+                }
+                let before = app.history_buttons();
+                let edited = app.on_page(canvas.output, |app| {
+                    let had_contacts = app.input.has_contacts();
+                    if drawing && canvas.visible && canvas.on_output(options.smoke) {
+                        canvas.set_page_geometry(app);
+                        app.event(&event, canvas.window.id, canvas.window.size());
+                    } else {
+                        app.track_pen(&event);
+                    }
+                    had_contacts || app.input.has_contacts()
+                });
+                canvas.dirty |= edited;
+                toolbar_dirty |= before != app.history_buttons();
+                toolbar_dirty |= app.panel.is_some() && (edited || activates);
+            } else if matches!(
+                ty,
+                SDL_EVENT_PEN_PROXIMITY_IN
+                    | SDL_EVENT_PEN_DOWN
+                    | SDL_EVENT_PEN_UP
+                    | SDL_EVENT_PEN_AXIS
+                    | SDL_EVENT_PEN_MOTION
+            ) {
+                // Pen events on the controller still drive palm rejection.
+                let index = if id == Some(toolbar.id) && app.multi {
+                    canvas::active_index(&canvases, toolbar.display_id())
+                } else {
+                    active
+                };
+                let canvas = &mut canvases[index];
+                canvas.dirty |= app.on_page(canvas.output, |page| {
+                    let had_touches = !page.input.touches.is_empty();
+                    page.track_pen(&event);
+                    had_touches && page.input.touches.is_empty()
+                });
             }
-            let has_contacts = app.contact.is_some() || !app.touches.is_empty();
-            canvas_dirty |= had_contacts || has_contacts;
-            toolbar_dirty |= history_buttons != app.history_buttons();
-            toolbar_dirty |= app.panel.is_some() && (had_contacts || has_contacts);
             toolbar_dirty |= app.panel == Some(crate::toolbar::Panel::Brush)
                 && matches!(ty, SDL_EVENT_PEN_AXIS | SDL_EVENT_PEN_PROXIMITY_OUT);
-            let canvas_activated = unsafe {
-                (ty == SDL_EVENT_WINDOW_FOCUS_GAINED && event.window.windowID == canvas.id)
-                    || (ty == SDL_EVENT_MOUSE_BUTTON_DOWN && event.button.windowID == canvas.id)
-                    || (ty == SDL_EVENT_PEN_DOWN && event.ptouch.windowID == canvas.id)
-                    || (ty == SDL_EVENT_FINGER_DOWN && event.tfinger.windowID == canvas.id)
-            };
-            toolbar_dirty |= app.panel.is_some() && canvas_activated;
-            if canvas_activated {
-                crate::native::keep_controller_above(&canvas, &toolbar, &native);
-            }
-            if ty == SDL_EVENT_KEY_DOWN && !was_picking && !background.pending() {
-                let id = unsafe { event.key.windowID };
-                if id == canvas.id || id == toolbar.id {
-                    canvas_dirty = true;
-                    toolbar_dirty = true;
-                    let c = app.keyboard(
-                        &event,
-                        id == toolbar.id
-                            && (gui.ctx.egui_wants_keyboard_input()
-                                || egui::Popup::is_any_open(&gui.ctx)),
-                    );
-                    if c.mode {
-                        guard_dirty = true;
-                        apply_mode(&mut app, &canvas, &toolbar, &mut native)?
-                    }
-                    if c.quit {
-                        running = false
-                    }
+            if ty == SDL_EVENT_KEY_DOWN
+                && drawing
+                && (id == Some(toolbar.id)
+                    || target.is_some_and(|index| canvases[index].on_output(options.smoke)))
+            {
+                toolbar_dirty = true;
+                for canvas in &mut canvases {
+                    canvas.dirty = true;
+                }
+                let command = app.keyboard(
+                    &event,
+                    id == Some(toolbar.id)
+                        && (gui.ctx.egui_wants_keyboard_input()
+                            || egui::Popup::is_any_open(&gui.ctx)),
+                );
+                mode_changed |= command.mode;
+                if command.quit {
+                    running = false;
+                    break;
                 }
             }
         }
         if !running {
             break;
         }
+
         if !options.smoke
             && (topology_dirty
-                || (video == "x11" && last_displays.elapsed() > Duration::from_millis(500)))
+                || video == "x11" && last_displays.elapsed() > Duration::from_millis(500))
         {
             let moved_to = if follow_controller && controller_moved {
                 let reported = toolbar.display_id();
@@ -1394,7 +1594,7 @@ pub fn run(options: Options) -> Result<(), String> {
             };
             let requested = requested_display.take();
             let displays = topology
-                .connected(&canvas)
+                .connected(&canvases[0].window)
                 .unwrap_or_else(|error| {
                     app.status = text("Display query failed", "查询显示器失败", "查詢顯示器失敗")
                         .detail(error);
@@ -1404,70 +1604,45 @@ pub fn run(options: Options) -> Result<(), String> {
                 .into_iter()
                 .filter(|d| !disconnected.contains(&d.id))
                 .collect::<Vec<_>>();
-            let disconnected = app
-                .displays
-                .iter()
-                .any(|old| !displays.iter().any(|d| d.id == old.id));
             let was_suspended = app.suspended;
+            let reported = canvases[0]
+                .window
+                .display_id()
+                .filter(|id| displays.iter().any(|display| display.id == *id));
             let desired = requested.or(moved_to);
-            let actual = canvas.display_id();
-            let reported = actual.filter(|id| displays.iter().any(|display| display.id == *id));
-            // A maximized Wayland toplevel can only draw on the output the
-            // compositor gave it. Associate ink with the actual output.
             let target = if wayland {
                 reported.or(desired)
             } else {
                 desired
             };
+            let topology_changed = displays != app.displays;
             let (layout, removed) =
-                if displays != app.displays || target != app.pages.active && target.is_some() {
+                if topology_changed || target.is_some_and(|id| Some(id) != app.pages.active) {
                     toolbar_dirty = true;
                     app.refresh_displays(displays, target)
                 } else {
                     (false, false)
                 };
             if requested.is_some()
-                && video != "wayland"
+                && !wayland
                 && let Err(error) = toolbar.arrange_toolbar(toolbar_expanded, app.pages.active)
             {
                 app.status =
                     text("Toolbar layout failed", "工具栏布局失败", "工具列配置失敗").detail(error);
             }
-            let remap = if wayland {
-                app.suspended || was_suspended || desired.is_some_and(|id| Some(id) != reported)
-            } else {
-                layout || removed || actual != app.pages.active
-            };
-            if remap {
-                canvas_dirty = true;
-                toolbar_dirty = true;
-                guard_dirty = true;
-                if picker.active() {
+            if (was_suspended || removed)
+                && let Some(id) = app.pages.active
+            {
+                let _ = toolbar.recover_on_display(id);
+            }
+            if topology_changed || layout || topology_dirty {
+                if (layout || removed) && picker.active() {
                     picker.cancel();
                 }
-                crate::native::show_canvas(&canvas, &toolbar, false)?;
-                if let Some(id) = app.pages.active {
-                    if let Err(error) = canvas.place_on_display(id, true) {
-                        app.status = text(
-                            "Cannot move the drawing layer",
-                            "无法移动书写图层",
-                            "無法移動書寫圖層",
-                        )
-                        .detail(error);
-                        app.suspended = true;
-                    }
-                    if removed || was_suspended {
-                        let _ = toolbar.recover_on_display(id);
-                    }
-                    canvas_color.refresh(&canvas, canvas_render.extended);
-                    toolbar_color.refresh(&toolbar, toolbar_render.extended);
-                    background.invalidate_texture();
-                    apply_mode(&mut app, &canvas, &toolbar, &mut native)?;
+                if let Err(error) = canvas::reconcile(&mut canvases, &mut app, &toolbar, &options) {
+                    app.status = canvas::failure(error);
+                    toolbar_dirty = true;
                 }
-            }
-            if layout || removed {
-                canvas_dirty = true;
-                toolbar_dirty = true;
             }
             if wayland && requested.is_some_and(|id| Some(id) != reported) {
                 app.status = text(
@@ -1478,7 +1653,8 @@ pub fn run(options: Options) -> Result<(), String> {
                 .into();
                 toolbar_dirty = true;
             }
-            if disconnected
+            if removed
+                && app.preferences.restore_session
                 && app.pages.needs_save(&app.history)
                 && let Err(error) = app.save_session()
             {
@@ -1493,123 +1669,96 @@ pub fn run(options: Options) -> Result<(), String> {
             topology_dirty = false;
             last_displays = Instant::now();
         }
-        if canvas_surface_changed {
-            canvas_color.refresh(&canvas, canvas_render.extended);
-            background.invalidate_texture();
-            toolbar_dirty = true;
-        }
-        app.canvas_units =
-            canvas.scale() / unsafe { SDL_GetWindowPixelDensity(canvas.raw) }.max(0.1);
+
+        let active = canvas::active_index(&canvases, app.pages.active);
+        let connected = app.displays.iter().map(|d| d.id).collect();
         pacer.configure(app.frame_rate, app.refresh_hz(), Instant::now());
-        let hdr = canvas.hdr_enabled();
-        #[cfg(target_os = "macos")]
-        if !options.sdr && !extended_unavailable {
-            if canvas_dirty || recheck_ink {
-                wide_ink = app.has_wide_ink();
-                recheck_ink = false;
-            }
-            let extended = (app.frozen && hdr) || wide_ink;
-            if extended != canvas_render.extended {
-                background.invalidate_texture();
-                canvas_render.change_color_output(&canvas, extended)?;
-                extended_unavailable = extended && !canvas_render.extended;
-                canvas_color.refresh(&canvas, canvas_render.extended);
+        for canvas in &mut canvases {
+            let mode = canvas.snapshot_mode(&video, xwayland, options.sdr);
+            if let Err(reason) = canvas.update_background(
+                &app.displays,
+                &connected,
+                mode,
+                !app.pass && !app.hidden && !picker.active(),
+            ) {
+                app.status = reason.into();
+                canvas.dirty = true;
                 toolbar_dirty = true;
             }
         }
-        let extended_available = canvas_render.extended;
-        #[cfg(target_os = "macos")]
-        let extended_available = extended_available || (!options.sdr && !extended_unavailable);
-        let snapshot_mode =
-            crate::background::snapshot_mode(hdr, extended_available, &video, xwayland);
-        if let Err(reason) = background.display(
-            app.displays.get(app.display).filter(|_| !app.suspended),
-            &app.displays.iter().map(|d| d.id).collect(),
-            snapshot_mode,
-            !app.pass,
-        ) {
-            app.frozen = false;
-            app.status = reason.into();
-            canvas_dirty = true;
-            toolbar_dirty = true;
-        }
-        if (picker.hides_windows() || background.pending()) && !picker_windows_hidden {
-            tooltips.clear();
-            crate::native::show_canvas(&canvas, &toolbar, false)?;
-            toolbar.show(false)?;
-            picker_windows_hidden = true;
-        }
-        if let Some(result) = picker.poll(&canvas) {
-            canvas_dirty = true;
-            toolbar_dirty = true;
-            guard_dirty = true;
+        let hide = picker.hides_windows() || canvases.iter().any(|c| c.background.pending());
+        capture_visibility(
+            &mut canvases,
+            &toolbar,
+            &mut tooltips,
+            &mut toolbar_hidden,
+            hide,
+        )?;
+        if let Some(result) = picker.poll(&canvases[active].window) {
             app.picking = false;
-            match result {
+            toolbar_dirty = true;
+            for canvas in &mut canvases {
+                canvas.dirty = true;
+                canvas.guard_dirty = true;
+            }
+            app.status = match result {
                 Ok(Some(color)) => {
                     let color = color.converted(app.color.space);
                     app.select_color(color);
-                    app.status = text("Picked", "已取色", "已取色").detail(color.hex());
+                    text("Picked", "已取色", "已取色").detail(color.hex())
                 }
-                Ok(None) => {
-                    app.status =
-                        text("Color selection cancelled", "已取消取色", "已取消取色").into()
-                }
+                Ok(None) => text("Color selection cancelled", "已取消取色", "已取消取色").into(),
                 Err(error) => {
-                    app.status = text("Screen color picker failed", "屏幕取色失败", "螢幕取色失敗")
-                        .detail(error)
+                    text("Screen color picker failed", "屏幕取色失败", "螢幕取色失敗").detail(error)
                 }
-            }
-        }
-        if let Some(result) = background.poll(&canvas) {
-            canvas_dirty = true;
-            toolbar_dirty = true;
-            app.frozen = background.frozen;
-            app.status = match result {
-                Ok(()) => text(
-                    "Desktop frozen. Select Live desktop to resume the background.",
-                    "桌面已冻结，选择实时桌面即可恢复。",
-                    "桌面已凍結，選擇即時桌面即可恢復。",
-                )
-                .into(),
-                Err(error) => text(
-                    "Showing the live desktop",
-                    "已切回实时桌面",
-                    "已切回即時桌面",
-                )
-                .detail(error),
             };
         }
-        if picker_windows_hidden && !picker.hides_windows() && !background.pending() {
-            toolbar.show(true)?;
-            apply_mode(&mut app, &canvas, &toolbar, &mut native)?;
-            picker_windows_hidden = false;
-            canvas_dirty = true;
-            toolbar_dirty = true;
-            guard_dirty = true;
+        for canvas in &mut canvases {
+            if let Some(result) = canvas.background.poll(&canvas.window) {
+                canvas.dirty = true;
+                toolbar_dirty = true;
+                app.status = match result {
+                    Ok(()) => text(
+                        "Desktop frozen. Select Live desktop to resume the background.",
+                        "桌面已冻结，选择实时桌面即可恢复。",
+                        "桌面已凍結，選擇即時桌面即可恢復。",
+                    )
+                    .into(),
+                    Err(error) => text(
+                        "Showing the live desktop",
+                        "已切回实时桌面",
+                        "已切回即時桌面",
+                    )
+                    .detail(error),
+                };
+            }
         }
-        if picker.hides_windows() || background.pending() {
+        let hide = picker.hides_windows() || canvases.iter().any(|c| c.background.pending());
+        toolbar_dirty |= capture_visibility(
+            &mut canvases,
+            &toolbar,
+            &mut tooltips,
+            &mut toolbar_hidden,
+            hide,
+        )?;
+        if hide {
             wait_for_events(Duration::from_millis(8));
             continue;
         }
-        // The OS/SDL updates HDR white point dynamically. ICC changes are polled to
-        // also catch profile replacement without a display move notification.
+
         if last_color.elapsed() > Duration::from_secs(3) {
-            let previous = canvas_color.revision;
             let previous_toolbar = toolbar_color.revision;
-            canvas_color.refresh(&canvas, canvas_render.extended);
             toolbar_color.refresh(&toolbar, toolbar_render.extended);
-            if previous != canvas_color.revision {
-                background.invalidate_texture();
-                canvas_dirty = true;
+            toolbar_dirty |= previous_toolbar != toolbar_color.revision;
+            for canvas in &mut canvases {
+                toolbar_dirty |= canvas.refresh_color();
             }
-            toolbar_dirty |=
-                previous != canvas_color.revision || previous_toolbar != toolbar_color.revision;
             last_color = Instant::now();
         }
         let expanded = app.panel.is_some() && !app.picking;
         if expanded != toolbar_expanded || controller_scale_changed {
             toolbar_dirty = true;
-            guard_dirty = true;
+            controller_bounds_changed = true;
             toolbar_expanded = expanded;
             if let Err(error) = toolbar.arrange_toolbar(expanded, None) {
                 app.status =
@@ -1621,6 +1770,9 @@ pub fn run(options: Options) -> Result<(), String> {
             gui.ctx.set_theme(theme);
             toolbar_dirty = true;
         }
+        let previous_preferences = app.preferences;
+        let was_board = app.board;
+        app.frozen = canvases[active].background.frozen;
         let mut cmd = Commands::default();
         let mut output = None;
         if toolbar_dirty
@@ -1631,13 +1783,16 @@ pub fn run(options: Options) -> Result<(), String> {
             gui.set_language(app.language);
             let mut input = gui.input(&toolbar);
             input.predicted_dt = pacer.period.as_secs_f32();
+            let canvas = &canvases[active];
             let frame = gui.ctx.run_ui(input, |ui| {
                 cmd = app.ui(
                     ui,
-                    &canvas_render,
-                    &canvas_color,
+                    &canvas.render,
+                    &canvas.color,
                     &video,
-                    snapshot_mode.unavailable(),
+                    canvas
+                        .snapshot_mode(&video, xwayland, options.sdr)
+                        .unavailable(),
                     mark.id(),
                 )
             });
@@ -1648,66 +1803,42 @@ pub fn run(options: Options) -> Result<(), String> {
             output = Some(frame);
         }
         if cmd.quit {
-            if let Some(output) = &mut output {
-                output.textures_delta.clear();
-            }
             break;
         }
-        canvas_dirty |= cmd.redraw_canvas || cmd.mode || cmd.background || cmd.pick;
-        #[cfg(target_os = "macos")]
-        {
-            recheck_ink |= cmd.redraw_canvas || cmd.mode;
-        }
+        mode_changed |= cmd.mode;
         if cmd.preferences {
             toolbar_dirty = true;
-            app.language = app.preferences.language.unwrap_or_else(Language::system);
-            if let Err(error) = app.preferences.save(&state_dir().join("ui.json")) {
-                app.status = text(
-                    "UI settings save failed",
-                    "保存界面设置失败",
-                    "儲存介面設定失敗",
-                )
-                .detail(error);
-            }
+            topology_dirty |=
+                update_preferences(&mut app, previous_preferences, !wayland && !options.smoke);
         }
         if cmd.background {
             if picker.active() {
                 picker.cancel();
             }
-            app.stop();
-            app.reset_contacts();
-            if app.frozen {
-                background.freeze();
-                if app.pass {
-                    background.pause_capture();
+            app.finish_all_contacts();
+            if app.board {
+                for canvas in &mut canvases {
+                    canvas.background.live();
                 }
             } else {
-                background.live();
+                let background = &mut canvases[active].background;
+                if app.frozen {
+                    background.freeze();
+                    if app.pass || app.hidden {
+                        background.pause_capture();
+                    }
+                } else {
+                    background.live();
+                }
             }
         }
-        if cmd.pick && !background.pending() {
-            guard_dirty = true;
+        if cmd.pick {
             if picker.active() {
                 picker.cancel();
             } else {
-                app.stop();
+                app.finish_all_contacts();
                 app.picking = true;
                 picker.start(wayland || xwayland);
-                if picker.choosing() {
-                    crate::native::show_canvas(&canvas, &toolbar, true)?;
-                    native.set(&canvas, false)?;
-                    unsafe {
-                        SDL_RaiseWindow(canvas.raw);
-                        SDL_RaiseWindow(toolbar.raw);
-                    }
-                    crate::native::keep_controller_above(&canvas, &toolbar, &native);
-                }
-                if picker.hides_windows() {
-                    tooltips.clear();
-                    crate::native::show_canvas(&canvas, &toolbar, false)?;
-                    toolbar.show(false)?;
-                    picker_windows_hidden = true;
-                }
             }
         }
         if let Some(id) = cmd.display {
@@ -1725,19 +1856,25 @@ pub fn run(options: Options) -> Result<(), String> {
             }
             pacer.configure(app.frame_rate, app.refresh_hz(), Instant::now());
         }
-        if cmd.mode {
-            guard_dirty = true;
-            apply_mode(&mut app, &canvas, &toolbar, &mut native)?;
+        let redraw = cmd.redraw_canvas
+            || mode_changed
+            || cmd.background
+            || cmd.pick
+            || was_board != app.board;
+        for canvas in &mut canvases {
+            canvas.dirty |= redraw;
+            canvas.guard_dirty |= controller_bounds_changed || mode_changed || cmd.pick;
         }
-        if picker.hides_windows() || background.pending() {
-            if !picker_windows_hidden {
-                tooltips.clear();
-                crate::native::show_canvas(&canvas, &toolbar, false)?;
-                toolbar.show(false)?;
-                picker_windows_hidden = true;
-            }
-            // Consume texture deltas from the frame that launched the sampler,
-            // without presenting an application window over the desktop sample.
+
+        let hide = picker.hides_windows() || canvases.iter().any(|c| c.background.pending());
+        capture_visibility(
+            &mut canvases,
+            &toolbar,
+            &mut tooltips,
+            &mut toolbar_hidden,
+            hide,
+        )?;
+        if hide {
             if let Some(output) = output {
                 gui.paint(&toolbar_render, &toolbar, &toolbar_color, output)?;
             }
@@ -1753,8 +1890,6 @@ pub fn run(options: Options) -> Result<(), String> {
             tooltips.update(&toolbar, &gui, app.language, &toolbar_color);
         }
         if !follow_controller {
-            // Establish the baseline after the first map/configure, without
-            // letting the compositor's initial placement override --display.
             unsafe {
                 SDL_SyncWindow(toolbar.raw);
                 SDL_PumpEvents();
@@ -1763,95 +1898,51 @@ pub fn run(options: Options) -> Result<(), String> {
             follow_controller = true;
         }
         let mouse = !picker.choosing() && app.mouse_ready();
-        if guard_dirty || mouse != last_mouse {
-            guard_dirty = false;
-            last_mouse = mouse;
-            match controller_guard.update(
-                &canvas,
-                &toolbar,
-                mouse,
-                canvas_render.name != "software",
-            ) {
-                Ok((rect, shape_changed)) => {
-                    canvas_dirty |= rect != app.protected || shape_changed;
-                    app.protected = rect;
-                    if shape_changed {
-                        native.invalidate();
-                    }
+        let mut unsafe_layer = false;
+        for (index, canvas) in canvases.iter_mut().enumerate() {
+            let visible = (options.smoke
+                || !app.hidden
+                    && !app.suspended
+                    && canvas.output.is_some_and(|id| connected.contains(&id)))
+                && (app.multi || index == active)
+                && (!picker.choosing() || index == active);
+            canvas.show(&toolbar, visible)?;
+            if visible {
+                if let Err(error) = canvas.update_guard(&toolbar, mouse) {
+                    app.status = canvas::failure(error);
+                    unsafe_layer = true;
+                    break;
                 }
-                Err(error) => {
-                    app.hidden = true;
-                    toolbar_dirty = true;
-                    crate::native::show_canvas(&canvas, &toolbar, false)?;
-                    app.status = text(
-                        "Drawing layer hidden to keep the toolbar accessible",
-                        "已隐藏书写图层，工具栏仍可使用",
-                        "已隱藏書寫圖層，工具列仍可使用",
-                    )
-                    .detail(error);
+                let frozen = canvas.background.frozen;
+                presented |= canvas.paint(&mut app, &options, picker.choosing(), wayland)?;
+                toolbar_dirty |= frozen != canvas.background.frozen;
+                if !options.smoke
+                    && let Err(error) = canvas.apply_input(mouse)
+                {
+                    app.status = canvas::failure(error);
+                    unsafe_layer = true;
+                    break;
                 }
             }
         }
-        let on_output = options.smoke || canvas.display_id() == app.pages.active;
-        if canvas_dirty
-            && (picker.choosing() || wayland && !on_output && !app.hidden && !app.suspended)
-        {
-            let alpha = if picker.choosing() { 1. / 255. } else { 0. };
-            canvas_render.begin(&canvas, [0., 0., 0., alpha])?;
-            canvas_render.present()?;
-            canvas_dirty = false;
-            presented = true;
-        } else if !picker.choosing()
-            && !app.hidden
-            && !app.suspended
-            && on_output
-            && (options.smoke || canvas_dirty || !app.laser.is_empty())
-        {
-            let was_frozen = app.frozen;
-            app.history.doc.size = canvas.size();
-            app.paint(&canvas_render, &canvas, &canvas_color, &mut background)?;
-            toolbar_dirty |= was_frozen != app.frozen;
-            canvas_dirty = false;
-            presented = true;
-        }
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        if !options.smoke
-            && !app.hidden
-            && !app.suspended
-            && let Err(error) = native.set_guarded(&canvas, mouse, app.protected)
-        {
-            app.pass = false;
+        if unsafe_layer {
+            app.hidden = true;
             toolbar_dirty = true;
-            app.status = text(
-                "Input region update failed",
-                "更新输入区域失败",
-                "更新輸入區域失敗",
-            )
-            .detail(error);
-            if video == "x11" && app.protected.is_some() {
-                app.hidden = true;
-                crate::native::show_canvas(&canvas, &toolbar, false)?;
+            for canvas in &mut canvases {
+                canvas.show(&toolbar, false)?;
             }
-        }
-        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-        if mouse
-            && !app.hidden
-            && !app.suspended
-            && let Err(error) = native.set(&canvas, true)
-        {
-            toolbar_dirty = true;
-            app.status =
-                text("Mouse mode failed", "鼠标模式切换失败", "滑鼠模式切換失敗").detail(error);
+        } else if mode_changed || controller_bounds_changed {
+            canvases[active].keep_toolbar_above(&toolbar);
         }
         if !options.smoke
+            && app.preferences.restore_session
             && app.last_save.elapsed() > Duration::from_secs(10)
-            && app.history.active.is_none()
-            && app.touches.is_empty()
+            && !app.has_contacts()
         {
             if app.pages.needs_save(&app.history)
-                && let Err(e) = app.save_session()
+                && let Err(error) = app.save_session()
             {
-                app.status = text("Autosave failed", "自动保存失败", "自動儲存失敗").detail(e);
+                app.status = text("Autosave failed", "自动保存失败", "自動儲存失敗").detail(error);
                 toolbar_dirty = true;
             }
             app.last_save = Instant::now();
@@ -1862,25 +1953,20 @@ pub fn run(options: Options) -> Result<(), String> {
             std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
             std::fs::write(path.join("smoke.svg"), export::svg(&app.history.doc))
                 .map_err(|e| e.to_string())?;
-            unsafe {
-                let surface = SDL_RenderReadPixels(canvas_render.raw, ptr::null());
-                if surface.is_null() {
-                    return Err(crate::sdl::error());
+            for (name, render) in [
+                ("smoke.bmp", &canvases[active].render),
+                ("toolbar.bmp", &toolbar_render),
+            ] {
+                unsafe {
+                    let surface = SDL_RenderReadPixels(render.raw, ptr::null());
+                    if surface.is_null() {
+                        return Err(crate::sdl::error());
+                    }
+                    let path = crate::sdl::cstring(&path.join(name).to_string_lossy());
+                    let ok = SDL_SaveBMP(surface, path.as_ptr());
+                    SDL_DestroySurface(surface);
+                    check(ok)?;
                 }
-                let p = crate::sdl::cstring(&path.join("smoke.bmp").to_string_lossy());
-                let ok = SDL_SaveBMP(surface, p.as_ptr());
-                SDL_DestroySurface(surface);
-                check(ok)?;
-            }
-            unsafe {
-                let surface = SDL_RenderReadPixels(toolbar_render.raw, ptr::null());
-                if surface.is_null() {
-                    return Err(crate::sdl::error());
-                }
-                let p = crate::sdl::cstring(&path.join("toolbar.bmp").to_string_lossy());
-                let ok = SDL_SaveBMP(surface, p.as_ptr());
-                SDL_DestroySurface(surface);
-                check(ok)?;
             }
             println!(
                 "OverInk smoke OK: {} strokes, native pressure and multi-touch events, egui textures, SDL geometry, SVG, BMP",
@@ -1891,8 +1977,6 @@ pub fn run(options: Options) -> Result<(), String> {
         if presented {
             pacer.wait();
         } else if !toolbar_dirty && !topology_dirty {
-            // The longer idle wait still polls autosave, display and theme
-            // state. Input and compositor events can wake it immediately.
             let mut timeout = if app.wait_for_mouse_up || picker.active() {
                 Duration::from_millis(8)
             } else {
@@ -1905,12 +1989,7 @@ pub fn run(options: Options) -> Result<(), String> {
         }
     }
     if !options.smoke {
-        app.stop();
-        if app.pages.needs_save(&app.history)
-            && let Err(e) = app.save_session()
-        {
-            return Err(format!("Autosave on exit: {e}"));
-        }
+        app.finish_session()?;
     }
     Ok(())
 }
@@ -1992,7 +2071,7 @@ fn smoke_events(app: &mut App, id: SDL_WindowID) -> Result<(), String> {
         };
         app.event(&event, id, [1100., 720.]);
     }
-    if app.touches.len() != 2 {
+    if app.input.touches.len() != 2 {
         return Err("Multi-touch down smoke failed".into());
     }
     for (finger, x) in [(1, 0.35), (2, 0.65)] {
@@ -2009,7 +2088,7 @@ fn smoke_events(app: &mut App, id: SDL_WindowID) -> Result<(), String> {
         };
         app.event(&event, id, [1100., 720.]);
     }
-    if app.history.doc.strokes.len() != 7 || !app.touches.is_empty() {
+    if app.history.doc.strokes.len() != 7 || !app.input.touches.is_empty() {
         return Err("Multi-touch commit smoke failed".into());
     }
     Ok(())
@@ -2020,6 +2099,9 @@ mod touch_tests {
     use super::*;
     fn app() -> App {
         App {
+            input: CanvasInput::default(),
+            parked_input: BTreeMap::new(),
+            multi: false,
             history: History::default(),
             tool: Tool::Pen,
             color: InkColor::default(),
@@ -2041,20 +2123,11 @@ mod touch_tests {
             language: Language::English,
             suspended: false,
             frozen: false,
-            protected: None,
             panel: None,
-            pens: HashMap::new(),
-            pen_proximity: BTreeSet::new(),
-            touches: BTreeMap::new(),
             touch_enabled: true,
-            contact: None,
-            laser: BTreeMap::new(),
-            next_gesture: 0,
-            pending_erasures: BTreeMap::new(),
             status: Status::default(),
             path: String::new(),
             save_path: PathBuf::new(),
-            canvas_units: 1.,
             last_save: Instant::now(),
         }
     }
@@ -2139,7 +2212,12 @@ mod touch_tests {
             false,
         );
         assert!(
-            Erasure::preview(&a.history.doc.strokes[0], 0, a.pending_erasures.values()).is_empty()
+            Erasure::preview(
+                &a.history.doc.strokes[0],
+                0,
+                a.input.pending_erasures.values()
+            )
+            .is_empty()
         );
         assert_eq!(a.history.doc.strokes.len(), 1);
         a.keyboard(
@@ -2152,8 +2230,8 @@ mod touch_tests {
             },
             false,
         );
-        assert!(a.pending_erasures.is_empty());
-        assert!(a.contact.is_none() && !a.history.changed);
+        assert!(a.input.pending_erasures.is_empty());
+        assert!(a.input.contact.is_none() && !a.history.changed);
         a.history.redo();
         assert_eq!(a.history.doc.strokes.len(), 2);
     }
@@ -2164,7 +2242,7 @@ mod touch_tests {
         a.use_tool(Tool::Eraser);
         for (key, expected) in [(SDLK_Z, 1), (SDLK_Y, 2)] {
             finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 1, 0.1, 0.1);
-            assert_eq!(a.pending_erasures.len(), 1);
+            assert_eq!(a.input.pending_erasures.len(), 1);
             a.keyboard(
                 &SDL_Event {
                     key: SDL_KeyboardEvent {
@@ -2180,7 +2258,7 @@ mod touch_tests {
                 },
                 false,
             );
-            assert!(a.pending_erasures.is_empty());
+            assert!(a.input.pending_erasures.is_empty());
             finger(&mut a, SDL_EVENT_FINGER_UP, 1, 1, 0.1, 0.1);
             assert_eq!(a.history.doc.strokes.len(), expected);
             assert_eq!(a.history.doc.strokes[0].points[0].x, 80.);
@@ -2217,9 +2295,9 @@ mod touch_tests {
         );
         finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 1, 0.1, 0.1);
         finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 2, 0.6, 0.1);
-        assert_eq!(a.pending_erasures.len(), 3);
+        assert_eq!(a.input.pending_erasures.len(), 3);
         finger(&mut a, SDL_EVENT_FINGER_CANCELED, 1, 1, 0.1, 0.1);
-        assert_eq!(a.pending_erasures.len(), 2);
+        assert_eq!(a.input.pending_erasures.len(), 2);
         assert_eq!(a.history.doc.strokes.len(), 3);
         a.event(
             &SDL_Event {
@@ -2233,8 +2311,8 @@ mod touch_tests {
             SDL_WindowID(1),
             [800., 600.],
         );
-        assert!(a.touches.is_empty());
-        assert_eq!(a.pending_erasures.len(), 1);
+        assert!(a.input.touches.is_empty());
+        assert_eq!(a.input.pending_erasures.len(), 1);
         a.end(Source::Mouse(RIGHT_BUTTON));
         assert_eq!(
             a.history
@@ -2275,7 +2353,12 @@ mod touch_tests {
         finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 1, 0.1, 0.1);
         finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 2, 0.6, 0.1);
         assert_eq!(
-            Erasure::preview(&a.history.doc.strokes[0], 0, a.pending_erasures.values()).len(),
+            Erasure::preview(
+                &a.history.doc.strokes[0],
+                0,
+                a.input.pending_erasures.values()
+            )
+            .len(),
             3
         );
         finger(&mut a, SDL_EVENT_FINGER_UP, 1, 1, 0.1, 0.1);
@@ -2342,7 +2425,7 @@ mod touch_tests {
         a.reset_contacts();
         a.history.clear();
         finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 5, 0.4, 0.4);
-        assert!(a.touches.is_empty() && a.pen_proximity.contains(&4));
+        assert!(a.input.touches.is_empty() && a.input.pen_proximity.contains(&4));
     }
     #[test]
     fn laser_trails_are_separate_across_releases_and_fingers() {
@@ -2360,8 +2443,8 @@ mod touch_tests {
         finger(&mut a, SDL_EVENT_FINGER_MOTION, 1, 2, 0.8, 0.3);
         finger(&mut a, SDL_EVENT_FINGER_UP, 1, 1, 0.3, 0.5);
         finger(&mut a, SDL_EVENT_FINGER_UP, 1, 2, 0.8, 0.5);
-        assert_eq!(a.laser.len(), 4);
-        assert!(a.laser.values().all(|trail| {
+        assert_eq!(a.input.laser.len(), 4);
+        assert!(a.input.laser.values().all(|trail| {
             trail.len() >= 2
                 && trail
                     .iter()
@@ -2384,7 +2467,7 @@ mod touch_tests {
         a.use_mouse();
         assert!(a.pass);
         assert!(a.history.active.is_none());
-        assert!(a.contact.is_none());
+        assert!(a.input.contact.is_none());
         assert_eq!(a.history.doc.strokes.len(), 1);
         assert_eq!(a.history.doc.strokes[0].points.len(), 2);
         a.motion(
@@ -2410,7 +2493,7 @@ mod touch_tests {
     #[test]
     fn controller_area_rejects_pen_touch_and_eraser_edits() {
         let mut a = app();
-        a.protected = Some(crate::controller::Rect {
+        a.input.protected = Some(crate::controller::Rect {
             x: 100,
             y: 100,
             w: 300,
@@ -2419,7 +2502,7 @@ mod touch_tests {
         a.begin(Source::Pen(1), Point::new(150., 150., 1., [0.; 2]), false);
         assert!(a.history.active.is_none());
         finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 1, 0.2, 0.3);
-        assert!(a.touches.is_empty());
+        assert!(a.input.touches.is_empty());
         a.begin(
             Source::Mouse(LEFT_BUTTON),
             Point::new(50., 150., 1., [0.; 2]),
@@ -2444,7 +2527,7 @@ mod touch_tests {
     #[test]
     fn touch_ink_crossing_the_controller_creates_two_fragments_and_one_undo() {
         let mut a = app();
-        a.protected = Some(crate::controller::Rect {
+        a.input.protected = Some(crate::controller::Rect {
             x: 100,
             y: 100,
             w: 200,
@@ -2470,7 +2553,7 @@ mod touch_tests {
     #[test]
     fn touch_laser_breaks_at_the_controller_without_losing_the_fading_trail() {
         let mut a = app();
-        a.protected = Some(crate::controller::Rect {
+        a.input.protected = Some(crate::controller::Rect {
             x: 100,
             y: 100,
             w: 200,
@@ -2482,7 +2565,7 @@ mod touch_tests {
         finger(&mut a, SDL_EVENT_FINGER_MOTION, 1, 1, 0.2, 0.25);
         finger(&mut a, SDL_EVENT_FINGER_MOTION, 1, 1, 0.45, 0.25);
         finger(&mut a, SDL_EVENT_FINGER_UP, 1, 1, 0.5, 0.25);
-        let trail = a.laser.values().next().unwrap();
+        let trail = a.input.laser.values().next().unwrap();
         assert_eq!(trail.len(), 4);
         assert!(trail[0].starts_segment && !trail[1].starts_segment);
         assert!(trail[2].starts_segment && !trail[3].starts_segment);
@@ -2569,15 +2652,81 @@ mod touch_tests {
         finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 1, 0.1, 0.1);
         let (layout, removed) = a.refresh_displays(vec![], None);
         assert!(layout && removed && a.suspended);
-        assert!(a.touches.is_empty());
+        assert!(a.input.touches.is_empty());
         finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 1, 0.2, 0.2);
         a.history.undo();
         a.history.redo();
         assert!(a.history.doc.strokes.is_empty());
-        assert!(a.touches.is_empty());
+        assert!(a.input.touches.is_empty());
         a.refresh_displays(vec![screen(30, 0, 60.0)], Some(30));
         assert!(!a.suspended);
         assert!(a.history.doc.strokes.is_empty());
+    }
+    #[test]
+    fn multi_window_touches_and_unplug_are_local_to_their_output() {
+        let left = screen(10, 0, 60.0);
+        let right = screen(20, 1920, 120.0);
+        let mut a = app();
+        a.multi = true;
+        a.refresh_displays(vec![left.clone(), right.clone()], Some(10));
+        finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 1, 0.1, 0.1);
+        a.select_page(20);
+        finger(&mut a, SDL_EVENT_FINGER_DOWN, 2, 2, 0.25, 0.1);
+        a.on_page(Some(10), |left_page| {
+            assert!(left_page.input.has_contacts());
+            finger(left_page, SDL_EVENT_FINGER_UP, 1, 1, 0.1, 0.2);
+            assert_eq!(left_page.history.doc.strokes[0].points[0].x, 80.);
+        });
+        assert_eq!(a.pages.active, Some(20));
+        assert!(a.input.has_contacts());
+        finger(&mut a, SDL_EVENT_FINGER_UP, 2, 2, 0.25, 0.2);
+        assert_eq!(a.history.doc.strokes[0].points[0].x, 200.);
+        a.refresh_displays(vec![right.clone()], None);
+        a.refresh_displays(vec![left, right], None);
+        a.select_page(10);
+        a.history.undo();
+        assert!(a.history.doc.strokes.is_empty());
+        a.select_page(20);
+        assert_eq!(a.history.doc.strokes[0].points[0].x, 200.);
+    }
+
+    #[test]
+    fn disabling_session_recovery_discards_the_cache_and_keeps_manual_saves() {
+        let state = std::env::temp_dir().join(format!(
+            "overink-session-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        let displays = vec![screen(10, 0, 60.0), screen(20, 1920, 120.0)];
+        let mut a = App::new(true, 0, displays.clone(), &state);
+        add_ink(&mut a, &[120.]);
+        a.select_page(20);
+        add_ink(&mut a, &[440.]);
+        a.save();
+        a.finish_session().unwrap();
+        assert!(a.save_path.is_file());
+        assert!(Path::new(&a.path).is_file());
+
+        let resumed = App::new(true, 1, displays.clone(), &state);
+        assert_eq!(resumed.history.doc.strokes[0].points[0].x, 440.);
+        Preferences {
+            restore_session: false,
+            ..Preferences::default()
+        }
+        .save(&state.join("ui.json"))
+        .unwrap();
+        let mut private = App::new(true, 1, displays, &state);
+        assert!(private.history.doc.strokes.is_empty());
+        add_ink(&mut private, &[640.]);
+        private.finish_session().unwrap();
+        assert!(!private.save_path.exists());
+        assert!(Path::new(&private.path).is_file());
+        private.load();
+        assert_eq!(private.history.doc.strokes[0].points[0].x, 440.);
+        std::fs::remove_dir_all(state).unwrap();
     }
     #[test]
     fn finger_stroke_is_saved_in_logical_units_without_fake_pen_pressure() {
@@ -2585,7 +2734,7 @@ mod touch_tests {
         finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 3, 0.1, 0.2);
         finger(&mut a, SDL_EVENT_FINGER_MOTION, 1, 3, 0.5, 0.5);
         finger(&mut a, SDL_EVENT_FINGER_UP, 1, 3, 0.5, 0.5);
-        assert!(a.touches.is_empty());
+        assert!(a.input.touches.is_empty());
         let s = &a.history.doc.strokes[0];
         assert_eq!(s.points.len(), 2);
         assert_eq!([s.points[1].x, s.points[1].y], [400., 300.]);
@@ -2601,7 +2750,7 @@ mod touch_tests {
         for (d, f, x) in [(1, 1, 0.1), (1, 2, 0.4), (2, 1, 0.7)] {
             finger(&mut a, SDL_EVENT_FINGER_DOWN, d, f, x, 0.1);
         }
-        assert_eq!(a.touches.len(), 3);
+        assert_eq!(a.input.touches.len(), 3);
         for (d, f, x) in [(1, 1, 0.1), (1, 2, 0.4), (2, 1, 0.7)] {
             finger(&mut a, SDL_EVENT_FINGER_UP, d, f, x, 0.7);
         }
@@ -2615,7 +2764,7 @@ mod touch_tests {
         let mut a = app();
         finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 1, 0.2, 0.2);
         finger(&mut a, SDL_EVENT_FINGER_CANCELED, 1, 1, 0.2, 0.2);
-        assert!(a.touches.is_empty() && a.history.doc.strokes.is_empty());
+        assert!(a.input.touches.is_empty() && a.history.doc.strokes.is_empty());
         finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 2, 0.2, 0.2);
         a.event(
             &SDL_Event {
@@ -2629,7 +2778,7 @@ mod touch_tests {
             [800., 600.],
         );
         finger(&mut a, SDL_EVENT_FINGER_UP, 1, 2, 0.5, 0.5);
-        assert!(a.touches.is_empty() && a.history.doc.strokes.is_empty());
+        assert!(a.input.touches.is_empty() && a.history.doc.strokes.is_empty());
     }
     #[test]
     fn pen_proximity_rejects_palms_and_requires_a_new_finger_down() {
@@ -2649,7 +2798,7 @@ mod touch_tests {
             [800., 600.],
         );
         finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 2, 0.3, 0.3);
-        assert!(a.touches.is_empty());
+        assert!(a.input.touches.is_empty());
         a.event(
             &pen(SDL_EVENT_PEN_PROXIMITY_OUT),
             SDL_WindowID(1),
@@ -2690,6 +2839,6 @@ mod touch_tests {
         a.touch_enabled = true;
         a.pass = true;
         finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 2, 0.2, 0.2);
-        assert!(a.touches.is_empty() && a.history.doc.strokes.is_empty());
+        assert!(a.input.touches.is_empty() && a.history.doc.strokes.is_empty());
     }
 }
