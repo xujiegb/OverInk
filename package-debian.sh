@@ -375,15 +375,19 @@ if short == "loong64" and "loongarch" not in subprocess.check_output(["clang", "
         l_pkgs.update(parse_packages(fetch_index(l_repo, "llvm-toolchain-noble-20", h_arch)))
         llvm_root = work / "llvm"
         llvm_root.mkdir(exist_ok=True)
-        for pkg in ("clang-20", "lld-20", "libclang-common-20-dev", "libclang-cpp20", "libllvm20"):
-            if pkg in l_pkgs:
-                fname, _, checksum = l_pkgs[pkg]
-                deb_path = debs_dir / os.path.basename(fname)
-                if not deb_path.exists():
-                    try: urllib.request.urlretrieve(f"{l_repo}/{fname}", deb_path)
-                    except Exception: urllib.request.urlretrieve(f"{u_repo}/{fname}", deb_path)
-                if hashlib.sha256(deb_path.read_bytes()).hexdigest() != checksum: raise RuntimeError(f"Bad SHA256: {fname}")
-                extract_deb(deb_path, llvm_root)
+        for pkg in (
+            "clang-20", "lld-20", "libclang-common-20-dev", "libclang-cpp20", "libllvm20",
+            "libedit2", "libbsd0", "libmd0", "libtinfo6",
+        ):
+            if pkg not in l_pkgs:
+                raise RuntimeError(f"Missing LLVM host dependency: {pkg}")
+            fname, _, checksum = l_pkgs[pkg]
+            deb_path = debs_dir / os.path.basename(fname)
+            if not deb_path.exists():
+                try: urllib.request.urlretrieve(f"{l_repo}/{fname}", deb_path)
+                except Exception: urllib.request.urlretrieve(f"{u_repo}/{fname}", deb_path)
+            if hashlib.sha256(deb_path.read_bytes()).hexdigest() != checksum: raise RuntimeError(f"Bad SHA256: {fname}")
+            extract_deb(deb_path, llvm_root)
 
 for name in ("lib", "lib64", "lib32", "libx32"):
     old, new = sysroot / name, sysroot / "usr" / name
@@ -449,7 +453,9 @@ publish_binary() {
     if [[ -x "$SDK_WORK_DIR/llvm/usr/lib/llvm-20/bin/$compiler" ]]; then
       driver="$SDK_WORK_DIR/llvm/usr/lib/llvm-20/bin/$compiler"
       linker="$SDK_WORK_DIR/llvm/usr/lib/llvm-20/bin/ld.lld"
-      compiler_env="LD_LIBRARY_PATH=$SDK_WORK_DIR/llvm/usr/lib/llvm-20/lib:$SDK_WORK_DIR/llvm/usr/lib/${HOST_ARCH}-linux-gnu"
+      compiler_env="LD_LIBRARY_PATH=$SDK_WORK_DIR/llvm/usr/lib/llvm-20/lib:$SDK_WORK_DIR/llvm/usr/lib/${HOST_ARCH}-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+      env "$compiler_env" "$driver" --version >/dev/null || die "Unable to start LLVM 20 $compiler"
+      env "$compiler_env" "$linker" --version >/dev/null || die "Unable to start LLVM 20 linker"
     fi
     cat > "$SDK_WORK_DIR/cc/$compiler" <<WRAPPER
 #!/bin/sh
