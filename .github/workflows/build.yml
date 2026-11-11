@@ -512,6 +512,9 @@ jobs:
 
           dnf -y makecache --refresh
           dnf repolist --enabled | awk '$1 == "epel" {found=1; print} END {exit !found}'
+          if rpm -q rpm-plugin-syslog >/dev/null 2>&1; then
+            dnf -y remove rpm-plugin-syslog
+          fi
           dnf -y distro-sync rpm rpm-libs
           dnf -y install --setopt=install_weak_deps=False \
             sudo git rpm-build rpmdevtools dnf-plugins-core rsync findutils \
