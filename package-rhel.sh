@@ -608,7 +608,7 @@ License:        BSD-3-Clause AND OFL-1.1
 URL:            https://github.com/xujiegb/OverInk
 Source0:        __PKGROOT__.tar.gz
 
-Requires:       libX11, libXext, libXi, libXrandr, libXcursor, libXfixes, libXrender, libXScrnSaver, libXtst
+Requires:       libX11, libXext, libXi, libXrandr, libXcursor, libXfixes, libXrender, libXtst
 Requires:       libwayland-client, libxkbcommon, mesa-libEGL, mesa-libGL
 Requires:       desktop-file-utils, hicolor-icon-theme
 
