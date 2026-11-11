@@ -271,24 +271,36 @@ prepare_target_sdk() {
     [[ -d "$share_dir" ]] && cp -a "$share_dir" "$SDK_WORK_DIR/sysroot/usr/share/" || true
   done
 
-  if [[ "$suite" == "noble" ]]; then
-    [[ "$deb_arch" == "arm64" ]] && repo="https://ports.ubuntu.com/ubuntu-ports" || repo="https://archive.ubuntu.com/ubuntu"
+  if [[ "$deb_arch" == "loong64" ]]; then
+    repo="https://loong13.debian.net/debian-loong64"
   fi
 
   python3 - "$repo" "$suite" "$deb_arch" "$gcc_ver" "$SDK_WORK_DIR" "$short" "$HOST_ARCH" <<'PY'
-import gzip, hashlib, lzma, os, pathlib, shutil, subprocess, sys, urllib.request
+import gzip, hashlib, lzma, os, pathlib, shutil, subprocess, sys, time, urllib.error, urllib.request
 
 repo, suite, arch, gcc_ver, work_str, short, host_arch = sys.argv[1:8]
 work, sysroot, debs_dir = pathlib.Path(work_str), pathlib.Path(work_str) / "sysroot", pathlib.Path(work_str) / "debs"
 
 def fetch_index(base_url, dist, binary_arch):
+    errors = []
     for ext, dec in (("xz", lzma.decompress), ("gz", gzip.decompress)):
-        try:
-            with urllib.request.urlopen(f"{base_url}/dists/{dist}/main/binary-{binary_arch}/Packages.{ext}") as r:
-                return dec(r.read()).decode("utf-8", errors="replace")
-        except Exception:
-            continue
-    raise RuntimeError(f"Cannot fetch index {base_url}/{dist}/{binary_arch}")
+        url = f"{base_url}/dists/{dist}/main/binary-{binary_arch}/Packages.{ext}"
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(url, timeout=30) as response:
+                    return dec(response.read()).decode("utf-8", errors="replace")
+            except urllib.error.HTTPError as exc:
+                if exc.code == 404:
+                    errors.append(f"{url}: {exc}")
+                    break
+                if attempt == 2:
+                    errors.append(f"{url}: {exc}")
+            except Exception as exc:
+                if attempt == 2:
+                    errors.append(f"{url}: {type(exc).__name__}: {exc}")
+            if attempt < 2:
+                time.sleep(attempt + 1)
+    raise RuntimeError("Cannot fetch package index:\n" + "\n".join(errors))
 
 def parse_packages(raw):
     pkgs = {}
@@ -337,6 +349,9 @@ queue = [
     "libxfixes-dev", "libxrender-dev", "libxss-dev", "libxtst-dev",
     "libwayland-dev", "wayland-protocols", "libxkbcommon-dev", "libegl-dev", "libgl-dev",
 ]
+missing = [pkg for pkg in queue if pkg not in pkgs]
+if missing:
+    raise RuntimeError(f"Missing required {suite}/{arch} packages: {', '.join(missing)}")
 seen, files = set(), []
 while queue:
     pkg = queue.pop(0)
@@ -355,13 +370,13 @@ for fname, checksum in files:
 if not shutil.which("wayland-scanner"):
     host_arch_map = {
         "x86_64": "amd64", "aarch64": "arm64", "i686": "i386", "i386": "i386",
-        "ppc64le": "ppc64el", "riscv64": "riscv64", "s390x": "s390x",
+        "ppc64le": "ppc64el", "riscv64": "riscv64", "s390x": "s390x", "loongarch64": "loong64",
     }
     h_arch = host_arch_map.get(host_arch)
     if not h_arch:
         raise RuntimeError(f"A host wayland-scanner is required on {host_arch}")
-    h_repo = "https://archive.ubuntu.com/ubuntu" if h_arch in ("amd64", "i386") else "https://ports.ubuntu.com/ubuntu-ports"
-    host_packages = parse_packages(fetch_index(h_repo, "noble", h_arch))
+    h_repo = "https://loong13.debian.net/debian-loong64" if h_arch == "loong64" else "https://deb.debian.org/debian"
+    host_packages = parse_packages(fetch_index(h_repo, "trixie", h_arch))
     fname, _, checksum = host_packages["libwayland-bin"]
     deb_path = debs_dir / os.path.basename(fname)
     if not deb_path.exists(): urllib.request.urlretrieve(f"{h_repo}/{fname}", deb_path)
@@ -370,27 +385,7 @@ if not shutil.which("wayland-scanner"):
     extract_deb(deb_path, work / "host")
 
 if short == "loong64" and "loongarch" not in subprocess.check_output(["clang", "--print-targets"], text=True).lower():
-    if host_arch in ("x86_64", "aarch64"):
-        h_arch = "amd64" if host_arch == "x86_64" else "arm64"
-        u_repo = "https://archive.ubuntu.com/ubuntu" if h_arch == "amd64" else "https://ports.ubuntu.com/ubuntu-ports"
-        l_repo = "https://apt.llvm.org/noble"
-        l_pkgs = parse_packages(fetch_index(u_repo, "noble", h_arch))
-        l_pkgs.update(parse_packages(fetch_index(l_repo, "llvm-toolchain-noble-20", h_arch)))
-        llvm_root = work / "llvm"
-        llvm_root.mkdir(exist_ok=True)
-        for pkg in (
-            "clang-20", "lld-20", "libclang-common-20-dev", "libclang-cpp20", "libllvm20",
-            "libedit2", "libbsd0", "libmd0", "libtinfo6",
-        ):
-            if pkg not in l_pkgs:
-                raise RuntimeError(f"Missing LLVM host dependency: {pkg}")
-            fname, _, checksum = l_pkgs[pkg]
-            deb_path = debs_dir / os.path.basename(fname)
-            if not deb_path.exists():
-                try: urllib.request.urlretrieve(f"{l_repo}/{fname}", deb_path)
-                except Exception: urllib.request.urlretrieve(f"{u_repo}/{fname}", deb_path)
-            if hashlib.sha256(deb_path.read_bytes()).hexdigest() != checksum: raise RuntimeError(f"Bad SHA256: {fname}")
-            extract_deb(deb_path, llvm_root)
+    raise RuntimeError("Host Clang lacks the LoongArch backend; install a Clang/LLVM build with LoongArch support")
 
 for name in ("lib", "lib64", "lib32", "libx32"):
     old, new = sysroot / name, sysroot / "usr" / name
@@ -414,12 +409,12 @@ describe_target() {
   local short="$1"
 
   case "$short" in
-    x64)     printf '%s\n%s\n%s\n%s\n%s\n%s\n' "x86_64-unknown-linux-gnu" "x86_64-linux-gnu" "amd64" "noble" "13" "x86_64" ;;
-    arm64)   printf '%s\n%s\n%s\n%s\n%s\n%s\n' "aarch64-unknown-linux-gnu" "aarch64-linux-gnu" "arm64" "noble" "13" "aarch64" ;;
+    x64)     printf '%s\n%s\n%s\n%s\n%s\n%s\n' "x86_64-unknown-linux-gnu" "x86_64-linux-gnu" "amd64" "trixie" "14" "x86_64" ;;
+    arm64)   printf '%s\n%s\n%s\n%s\n%s\n%s\n' "aarch64-unknown-linux-gnu" "aarch64-linux-gnu" "arm64" "trixie" "14" "aarch64" ;;
     i386)    printf '%s\n%s\n%s\n%s\n%s\n%s\n' "i686-unknown-linux-gnu" "i686-linux-gnu" "i386" "trixie" "14" "i686" ;;
     ppc64le) printf '%s\n%s\n%s\n%s\n%s\n%s\n' "powerpc64le-unknown-linux-gnu" "powerpc64le-linux-gnu" "ppc64el" "trixie" "14" "ppc64le" ;;
     riscv64) printf '%s\n%s\n%s\n%s\n%s\n%s\n' "riscv64gc-unknown-linux-gnu" "riscv64-linux-gnu" "riscv64" "trixie" "14" "riscv64" ;;
-    loong64) printf '%s\n%s\n%s\n%s\n%s\n%s\n' "loongarch64-unknown-linux-gnu" "loongarch64-linux-gnu" "loong64" "forky" "15" "loongarch64" ;;
+    loong64) printf '%s\n%s\n%s\n%s\n%s\n%s\n' "loongarch64-unknown-linux-gnu" "loongarch64-linux-gnu" "loong64" "trixie" "14" "loongarch64" ;;
     s390x)   printf '%s\n%s\n%s\n%s\n%s\n%s\n' "s390x-unknown-linux-gnu" "s390x-linux-gnu" "s390x" "trixie" "14" "s390x" ;;
     *)       echo "Unknown arch '$short' (use ppc64le|i386|x64|arm64|loong64|riscv64|s390x)" >&2; return 1 ;;
   esac
@@ -452,17 +447,9 @@ publish_binary() {
   for compiler in clang clang++; do
     local driver="/usr/bin/$compiler"
     local linker="lld"
-    local compiler_env=""
-    if [[ -x "$SDK_WORK_DIR/llvm/usr/lib/llvm-20/bin/$compiler" ]]; then
-      driver="$SDK_WORK_DIR/llvm/usr/lib/llvm-20/bin/$compiler"
-      linker="$SDK_WORK_DIR/llvm/usr/lib/llvm-20/bin/ld.lld"
-      compiler_env="LD_LIBRARY_PATH=$SDK_WORK_DIR/llvm/usr/lib/llvm-20/lib:$SDK_WORK_DIR/llvm/usr/lib/${HOST_ARCH}-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-      env "$compiler_env" "$driver" --version >/dev/null || die "Unable to start LLVM 20 $compiler"
-      env "$compiler_env" "$linker" --version >/dev/null || die "Unable to start LLVM 20 linker"
-    fi
     cat > "$SDK_WORK_DIR/cc/$compiler" <<WRAPPER
 #!/bin/sh
-exec env $compiler_env "$driver" --target=$triple --sysroot=$sysroot --gcc-install-dir=$gcc_dir -fuse-ld=$linker -Qunused-arguments "\$@"
+exec "$driver" --target=$triple --sysroot=$sysroot --gcc-install-dir=$gcc_dir -fuse-ld=$linker -Qunused-arguments "\$@"
 WRAPPER
     chmod +x "$SDK_WORK_DIR/cc/$compiler"
   done
