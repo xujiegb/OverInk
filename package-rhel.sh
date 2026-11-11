@@ -92,11 +92,7 @@ install_dependencies() {
     rpm-build curl unzip tar jq rsync ca-certificates git file \
     desktop-file-utils wget gcc gcc-c++ clang lld llvm cmake make \
     pkgconf-pkg-config findutils diffutils binutils gzip xz zstd \
-    expat libxml2 dbus-daemon python3 wayland-devel wayland-protocols-devel \
-    libX11-devel libXext-devel libXi-devel libXrandr-devel \
-    libXcursor-devel libXfixes-devel libXrender-devel \
-    libXScrnSaver-devel libXtst-devel libxkbcommon-devel \
-    mesa-libEGL-devel mesa-libGL-devel
+    expat libxml2 dbus-daemon python3
 
   if ! command -v rustup >/dev/null 2>&1; then
     curl --proto '=https' --tlsv1.2 -fsSL --retry 3 https://sh.rustup.rs -o /tmp/overink-rustup.sh
@@ -268,11 +264,6 @@ prepare_target_sdk() {
 
   rustup target add "$rust_target"
 
-  if is_native_target "$short"; then
-    SDK_WORK_DIR=""
-    return 0
-  fi
-
   SDK_WORK_DIR="$(mktemp -d)"
   mkdir -p "$SDK_WORK_DIR/sysroot/usr/share" "$SDK_WORK_DIR/debs" "$SDK_WORK_DIR/cc"
 
@@ -344,7 +335,7 @@ queue = [
     "libc6-dev", f"libgcc-{gcc_ver}-dev", f"libstdc++-{gcc_ver}-dev",
     "libx11-dev", "libxext-dev", "libxi-dev", "libxrandr-dev", "libxcursor-dev",
     "libxfixes-dev", "libxrender-dev", "libxss-dev", "libxtst-dev",
-    "libwayland-dev", "libxkbcommon-dev", "libegl-dev", "libgl-dev",
+    "libwayland-dev", "wayland-protocols", "libxkbcommon-dev", "libegl-dev", "libgl-dev",
 ]
 seen, files = set(), []
 while queue:
@@ -360,6 +351,23 @@ for fname, checksum in files:
     if not deb_path.exists(): urllib.request.urlretrieve(f"{repo}/{fname}", deb_path)
     if hashlib.sha256(deb_path.read_bytes()).hexdigest() != checksum: raise RuntimeError(f"Bad SHA256: {fname}")
     extract_deb(deb_path, sysroot)
+
+if not shutil.which("wayland-scanner"):
+    host_arch_map = {
+        "x86_64": "amd64", "aarch64": "arm64", "i686": "i386", "i386": "i386",
+        "ppc64le": "ppc64el", "riscv64": "riscv64", "s390x": "s390x",
+    }
+    h_arch = host_arch_map.get(host_arch)
+    if not h_arch:
+        raise RuntimeError(f"A host wayland-scanner is required on {host_arch}")
+    h_repo = "https://archive.ubuntu.com/ubuntu" if h_arch in ("amd64", "i386") else "https://ports.ubuntu.com/ubuntu-ports"
+    host_packages = parse_packages(fetch_index(h_repo, "noble", h_arch))
+    fname, _, checksum = host_packages["libwayland-bin"]
+    deb_path = debs_dir / os.path.basename(fname)
+    if not deb_path.exists(): urllib.request.urlretrieve(f"{h_repo}/{fname}", deb_path)
+    if hashlib.sha256(deb_path.read_bytes()).hexdigest() != checksum: raise RuntimeError(f"Bad SHA256: {fname}")
+    (work / "host").mkdir(exist_ok=True)
+    extract_deb(deb_path, work / "host")
 
 if short == "loong64" and "loongarch" not in subprocess.check_output(["clang", "--print-targets"], text=True).lower():
     if host_arch in ("x86_64", "aarch64"):
@@ -420,7 +428,7 @@ publish_binary() {
 
   CARGO_TARGET_DIR="$(mktemp -d)"
 
-  if is_native_target "$short"; then
+  if [[ -z "$SDK_WORK_DIR" ]]; then
     CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS" \
     CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
       cargo build --manifest-path "$PROJECT" --locked --release --target "$rust_target"
@@ -474,6 +482,7 @@ CMAKE
   local upper="${key^^}"
 
   env \
+    PATH="$SDK_WORK_DIR/host/usr/bin:$PATH" \
     CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS" \
     CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
     PKG_CONFIG_ALLOW_CROSS=1 \
