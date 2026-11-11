@@ -560,8 +560,8 @@ jobs:
       max-parallel: 3
       matrix:
         include:
-          - {runner: ubuntu-24.04, platform: linux/amd64, mode: native, arch: x64, deb: amd64}
-          - {runner: ubuntu-24.04-arm, platform: linux/arm64, mode: native, arch: arm64, deb: arm64}
+          - {runner: ubuntu-24.04, platform: linux/amd64, mode: native, arch: x64, deb: amd64, suite: noble, gcc: 13}
+          - {runner: ubuntu-24.04-arm, platform: linux/arm64, mode: native, arch: arm64, deb: arm64, suite: noble, gcc: 13}
           - {runner: ubuntu-24.04, platform: linux/amd64, mode: cross, arch: i386, deb: i386, suite: trixie, gcc: 14}
           - {runner: ubuntu-24.04, platform: linux/amd64, mode: cross, arch: ppc64le, deb: ppc64el, suite: trixie, gcc: 14}
           - {runner: ubuntu-24.04, platform: linux/amd64, mode: cross, arch: loong64, deb: loong64, suite: forky, gcc: 15}
@@ -571,8 +571,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
-      - name: Prepare cross-compilation sysroot
-        if: matrix.mode == 'cross'
+      - name: Prepare compilation sysroot
         shell: bash
         env:
           TARGET_ARCH: ${{ matrix.deb }}
@@ -604,10 +603,17 @@ jobs:
               done
           fi
           : > "$work/status"
-          keyring="$work/debian.asc"
-          curl -fsSL --retry 3 https://ftp-master.debian.org/keys/archive-key-13.asc -o "$keyring"
-          printf 'deb [arch=%s signed-by=%s] https://deb.debian.org/debian %s main\n' \
-            "$TARGET_ARCH" "$keyring" "$TARGET_SUITE" > "$work/sources.list"
+          if [[ $TARGET_SUITE == noble ]]; then
+            keyring=/usr/share/keyrings/ubuntu-archive-keyring.gpg
+            repo=https://archive.ubuntu.com/ubuntu
+            if [[ $TARGET_ARCH == arm64 ]]; then repo=https://ports.ubuntu.com/ubuntu-ports; fi
+          else
+            keyring="$work/debian.asc"
+            curl -fsSL --retry 3 https://ftp-master.debian.org/keys/archive-key-13.asc -o "$keyring"
+            repo=https://deb.debian.org/debian
+          fi
+          printf 'deb [arch=%s signed-by=%s] %s %s main\n' \
+            "$TARGET_ARCH" "$keyring" "$repo" "$TARGET_SUITE" > "$work/sources.list"
           apt_options=(
             -o "APT::Architecture=$TARGET_ARCH"
             -o "APT::Architectures::=$TARGET_ARCH"
@@ -663,20 +669,16 @@ jobs:
           set -euo pipefail
           dnf -y install --setopt=install_weak_deps=False \
             ca-certificates curl git tar gzip findutils coreutils binutils \
-            clang lld llvm cmake make ninja-build pkgconf-pkg-config \
-            wayland-devel wayland-protocols-devel rpm-build rpm \
-            libX11-devel libXext-devel libXi-devel libXrandr-devel libXcursor-devel \
-            libXfixes-devel libXrender-devel libXScrnSaver-devel libXtst-devel \
-            libxkbcommon-devel mesa-libEGL-devel mesa-libGL-devel
+            gcc gcc-c++ clang lld llvm cmake make pkgconf-pkg-config \
+            expat libxml2 rpm-build rpm
+          export PATH="/sdk/tools:$PATH"
+          wayland-scanner --version
           curl --proto '=https' --tlsv1.2 -fsSL --retry 3 https://sh.rustup.rs -o /tmp/rustup.sh
           sh /tmp/rustup.sh -y --profile minimal --default-toolchain "$RUST_VERSION"
           . "$HOME/.cargo/env"
           args=(--arch "$TARGET_ARCH" --jobs 2 --output dist/packages)
           if [[ -n "$RELEASE_VERSION" ]]; then args+=(--version "$RELEASE_VERSION"); fi
-          if [[ "$TARGET_MODE" == cross ]]; then
-            args+=(--sysroot /sdk/sysroot)
-            export PATH="/sdk/tools:$PATH"
-          fi
+          args+=(--sysroot /sdk/sysroot)
           if [[ "$TARGET_ARCH" == loong64 ]]; then
             export OVERINK_CLANG=/sdk/llvm/bin/clang
             export OVERINK_CLANGXX=/sdk/llvm/bin/clang++
