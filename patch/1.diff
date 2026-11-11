@@ -8,10 +8,10 @@ index c47b719..fecf700 100644
    "description": "Keep OverInk's native Wayland canvas above windows and place its toolbar at the left edge.",
 -  "shell-version": ["47", "48", "49"],
 +  "shell-version": ["45", "46", "47", "48", "49", "50"],
-   "url": "https://github.com/xujiegb/OverInk"
+   "url": "https://www.google.com/search?q=https://github.com/xujiegb/OverInk"
  }
 diff --git a/src/app.rs b/src/app.rs
-index aeb87ce..872f1de 100644
+index 6cb344c..b25fe62 100644
 --- a/src/app.rs
 +++ b/src/app.rs
 @@ -156,6 +156,12 @@ struct App {
@@ -44,27 +44,42 @@ index aeb87ce..872f1de 100644
          }
      }
      fn stroke(&self, tool: Tool) -> Stroke {
-@@ -1185,7 +1201,73 @@ pub fn run(options: Options) -> Result<(), String> {
-     let _teardown_pool = crate::native::macos::AutoreleasePool::new();
+@@ -1169,14 +1185,6 @@ fn update_preferences(app: &mut App, previous: Preferences, multi_supported: boo
+             .detail(error);
+         }
+     }
+-    if previous.wayland != app.preferences.wayland {
+-        app.status = text(
+-            "Restart OverInk to switch the display backend.",
+-            "重启 OverInk 后切换显示后端。",
+-            "重新啟動 OverInk 後切換顯示後端。",
+-        )
+-        .into();
+-    }
+     let multi = multi_supported && app.preferences.per_display_windows;
+     if multi != app.multi {
+         app.finish_all_contacts();
+@@ -1194,8 +1202,72 @@ pub fn run(options: Options) -> Result<(), String> {
      #[cfg(target_os = "macos")]
      let startup_pool = crate::native::macos::AutoreleasePool::new();
--    let _runtime = Runtime::new(options.x11, options.smoke)?;
-+    let base = state_dir();
-+    let mut startup_preferences = Preferences::load(&base.join("ui.json"));
+     let base = state_dir();
+-    let preferences = Preferences::load(&base.join("ui.json"));
+-    let _runtime = Runtime::new(options.x11, preferences.wayland, options.smoke)?;
++    let mut preferences = Preferences::load(&base.join("ui.json"));
 +    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 +    let mut wayland_fallback: Option<(Status, bool, crate::gnome::ExtensionState)> = None;
 +    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 +    if !options.smoke
 +        && !options.x11
-+        && startup_preferences.wayland
++        && preferences.wayland
 +        && crate::gnome::has_wayland_session()
 +    {
 +        match crate::gnome::desktop() {
 +            crate::gnome::Desktop::Gnome => {
 +                let state = crate::gnome::extension_state();
 +                if state != crate::gnome::ExtensionState::Enabled {
-+                    startup_preferences.wayland = false;
-+                    let _ = startup_preferences.save(&base.join("ui.json"));
++                    preferences.wayland = false;
++                    let _ = preferences.save(&base.join("ui.json"));
 +                    let message = if state == crate::gnome::ExtensionState::NotInstalled {
 +                        text(
 +                            "GNOME detected without overlay extension. Switched to XWayland; install it below.",
@@ -83,8 +98,8 @@ index aeb87ce..872f1de 100644
 +            }
 +            crate::gnome::Desktop::Pantheon => {
 +                if !crate::native::has_layer_shell() {
-+                    startup_preferences.wayland = false;
-+                    let _ = startup_preferences.save(&base.join("ui.json"));
++                    preferences.wayland = false;
++                    let _ = preferences.save(&base.join("ui.json"));
 +                    wayland_fallback = Some((
 +                        text(
 +                            "Pantheon does not support wlr-layer-shell. Switched to XWayland.",
@@ -99,8 +114,8 @@ index aeb87ce..872f1de 100644
 +            }
 +            crate::gnome::Desktop::Other => {
 +                if !crate::native::has_layer_shell() {
-+                    startup_preferences.wayland = false;
-+                    let _ = startup_preferences.save(&base.join("ui.json"));
++                    preferences.wayland = false;
++                    let _ = preferences.save(&base.join("ui.json"));
 +                    wayland_fallback = Some((
 +                        text(
 +                            "Current desktop does not support wlr-layer-shell. Switched to XWayland.",
@@ -115,20 +130,17 @@ index aeb87ce..872f1de 100644
 +            }
 +        }
 +    }
-+    let _runtime = Runtime::new(options.x11, options.smoke, startup_preferences.wayland)?;
++    let _runtime = Runtime::new(options.x11, options.smoke, preferences.wayland)?;
      let video = crate::sdl::driver();
      let wayland = video == "wayland";
      let window = Window::new("OverInk - canvas", 1100, 720, !options.smoke)?;
-@@ -1196,8 +1278,17 @@ pub fn run(options: Options) -> Result<(), String> {
-         options.board || options.smoke,
-         options.display,
+@@ -1208,6 +1280,15 @@ pub fn run(options: Options) -> Result<(), String> {
          displays,
--        &state_dir(),
-+        &base,
+         &base,
      );
 +    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 +    if let Some((fallback_status, open_gnome_guide, state)) = wayland_fallback {
-+        app.preferences = startup_preferences;
++        app.preferences = preferences;
 +        app.status = fallback_status;
 +        app.panel = Some(crate::toolbar::Panel::Settings);
 +        app.gnome_guide = open_gnome_guide;
@@ -138,7 +150,7 @@ index aeb87ce..872f1de 100644
      app.multi = app.preferences.per_display_windows && !wayland && !options.smoke;
      let mut canvases = vec![canvas::Canvas::new(
          window,
-@@ -1211,8 +1302,9 @@ pub fn run(options: Options) -> Result<(), String> {
+@@ -1221,8 +1302,9 @@ pub fn run(options: Options) -> Result<(), String> {
          false,
      )?;
      toolbar.setup_toolbar();
@@ -149,7 +161,7 @@ index aeb87ce..872f1de 100644
          canvas::reconcile(&mut canvases, &mut app, &toolbar, &options)?;
      }
      let toolbar_render = Renderer::new(&toolbar, true)
-@@ -1228,7 +1320,7 @@ pub fn run(options: Options) -> Result<(), String> {
+@@ -1238,7 +1320,7 @@ pub fn run(options: Options) -> Result<(), String> {
          .show(true)
          .map_err(|error| format!("Showing the toolbar on {video} failed ({error})"))?;
      if !options.smoke && !wayland {
@@ -158,7 +170,7 @@ index aeb87ce..872f1de 100644
      }
      unsafe {
          SDL_StartTextInput(toolbar.raw);
-@@ -1241,7 +1333,7 @@ pub fn run(options: Options) -> Result<(), String> {
+@@ -1251,7 +1333,7 @@ pub fn run(options: Options) -> Result<(), String> {
      let mut picker = crate::picker::Picker::default();
      let mut tooltips = crate::toolbar::Tooltips::default();
      let mut toolbar_hidden = false;
@@ -167,7 +179,7 @@ index aeb87ce..872f1de 100644
      let mut running = true;
      let mut frame = 0;
      let mut last_color = Instant::now();
-@@ -2016,6 +2108,12 @@ mod touch_tests {
+@@ -2026,6 +2108,12 @@ mod touch_tests {
              path: String::new(),
              save_path: PathBuf::new(),
              last_save: Instant::now(),
@@ -218,19 +230,30 @@ index f64606a..f253852 100644
          let result = self.native.set(&self.window, mouse);
          result
 diff --git a/src/app/panel.rs b/src/app/panel.rs
-index c2761c6..a6c6503 100644
+index 4aeede8..a6c6503 100644
 --- a/src/app/panel.rs
 +++ b/src/app/panel.rs
-@@ -567,6 +567,8 @@ impl App {
-         });
+@@ -568,18 +568,7 @@ impl App {
          ui.separator();
          ui.label(RichText::new(tr.text("Display", "显示器", "顯示器")).strong());
-+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+-        {
+-            commands.preferences |= ui
+-                .checkbox(
+-                    &mut self.preferences.wayland,
+-                    tr.text(
+-                        "Native Wayland (restart to apply)",
+-                        "原生 Wayland（重启后生效）",
+-                        "原生 Wayland（重新啟動後生效）",
+-                    ),
+-                )
+-                .changed();
+-        }
 +        self.wayland_settings(ui, video, commands);
          let per_display = ui
              .add_enabled_ui(video != "wayland", |ui| {
                  ui.checkbox(
-@@ -722,6 +724,305 @@ impl App {
+@@ -735,6 +724,305 @@ impl App {
              commands.quit = true;
          }
      }
@@ -536,40 +559,6 @@ index c2761c6..a6c6503 100644
  }
  
  fn tool_label(tool: Tool, tr: Language) -> &'static str {
-diff --git a/src/appearance.rs b/src/appearance.rs
-index 554dc21..7aee387 100644
---- a/src/appearance.rs
-+++ b/src/appearance.rs
-@@ -175,6 +175,7 @@ pub struct Preferences {
-     pub theme: ThemeMode,
-     pub restore_session: bool,
-     pub per_display_windows: bool,
-+    pub wayland: bool,
- }
- 
- impl Default for Preferences {
-@@ -184,6 +185,7 @@ impl Default for Preferences {
-             theme: ThemeMode::System,
-             restore_session: true,
-             per_display_windows: false,
-+            wayland: false,
-         }
-     }
- }
-@@ -277,11 +279,13 @@ mod tests {
-         assert_eq!(default.theme, ThemeMode::System);
-         assert!(default.restore_session);
-         assert!(!default.per_display_windows);
-+        assert!(!default.wayland);
-         let manual = Preferences {
-             language: Some(Language::Traditional),
-             theme: ThemeMode::Dark,
-             restore_session: false,
-             per_display_windows: true,
-+            wayland: true,
-         };
-         assert_eq!(
-             serde_json::from_str::<Preferences>(&serde_json::to_string(&manual).unwrap()).unwrap(),
 diff --git a/src/controller.rs b/src/controller.rs
 index fece044..71251b9 100644
 --- a/src/controller.rs
@@ -1498,34 +1487,10 @@ index 8b42a52..39e5ca6 100644
          hole: Option<Rect>,
      ) -> Result<(), String> {
 diff --git a/src/sdl.rs b/src/sdl.rs
-index 7de37b4..c082257 100644
+index 9107e87..88d1f5e 100644
 --- a/src/sdl.rs
 +++ b/src/sdl.rs
-@@ -27,8 +27,9 @@ pub fn cstring(v: &str) -> CString {
- }
- pub struct Runtime;
- impl Runtime {
--    pub fn new(x11: bool, smoke: bool) -> Result<Self, String> {
-+    pub fn new(x11: bool, smoke: bool, wayland: bool) -> Result<Self, String> {
-         let wayland = cfg!(any(target_os = "linux", target_os = "freebsd"))
-+            && wayland
-             && (std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland")
-                 || ["WAYLAND_DISPLAY", "WAYLAND_SOCKET"]
-                     .iter()
-@@ -76,9 +77,11 @@ impl Runtime {
- fn startup_driver(x11: bool, smoke: bool, wayland: bool) -> Option<&'static CStr> {
-     if smoke {
-         Some(c"dummy")
-+    } else if x11 {
-+        Some(c"x11")
-     } else if wayland {
-         Some(c"wayland")
--    } else if x11 {
-+    } else if cfg!(any(target_os = "linux", target_os = "freebsd")) {
-         Some(c"x11")
-     } else {
-         None
-@@ -102,6 +105,8 @@ pub fn driver() -> String {
+@@ -105,6 +105,8 @@ pub fn driver() -> String {
  pub struct Window {
      pub raw: *mut SDL_Window,
      pub id: SDL_WindowID,
@@ -1534,7 +1499,7 @@ index 7de37b4..c082257 100644
  }
  unsafe extern "C" fn toolbar_hit_test(
      window: *mut SDL_Window,
-@@ -135,8 +140,49 @@ impl Window {
+@@ -138,8 +140,49 @@ impl Window {
              if overlay {
                  flags |= SDL_WINDOW_BORDERLESS | SDL_WINDOW_TRANSPARENT;
              }
@@ -1586,7 +1551,7 @@ index 7de37b4..c082257 100644
              if raw.is_null() {
                  let detail = error();
                  return Err(format!(
-@@ -148,10 +194,25 @@ impl Window {
+@@ -151,10 +194,25 @@ impl Window {
              Ok(Self {
                  raw,
                  id: SDL_GetWindowID(raw),
@@ -1612,7 +1577,7 @@ index 7de37b4..c082257 100644
          unsafe {
              let raw = SDL_CreatePopupWindow(
                  parent.raw,
-@@ -170,6 +231,8 @@ impl Window {
+@@ -173,6 +231,8 @@ impl Window {
              Ok(Self {
                  raw,
                  id: SDL_GetWindowID(raw),
@@ -1621,7 +1586,7 @@ index 7de37b4..c082257 100644
              })
          }
      }
-@@ -224,6 +287,10 @@ impl Window {
+@@ -227,6 +287,10 @@ impl Window {
                  h = h.min((bounds.h - 16).max(1));
              }
              check(SDL_SetWindowSize(self.raw, w, h))?;
@@ -1632,7 +1597,7 @@ index 7de37b4..c082257 100644
              let driver = driver();
              if bounded && driver != "wayland" {
                  let (mut x, mut y) = (0, 0);
-@@ -279,6 +346,9 @@ impl Window {
+@@ -282,6 +346,9 @@ impl Window {
          }
      }
      pub fn place_on_display(&self, id: u32, overlay: bool) -> Result<(), String> {
@@ -1642,7 +1607,7 @@ index 7de37b4..c082257 100644
          unsafe {
              let video = driver();
              let display = SDL_DisplayID(id);
-@@ -330,6 +400,10 @@ impl Window {
+@@ -333,6 +400,10 @@ impl Window {
  }
  impl Drop for Window {
      fn drop(&mut self) {
@@ -1651,25 +1616,5 @@ index 7de37b4..c082257 100644
 +            self.layer = None;
 +        }
          unsafe { SDL_DestroyWindow(self.raw) }
-     }
- }
-@@ -497,11 +571,16 @@ mod tests {
-     use super::*;
- 
-     #[test]
--    fn native_wayland_takes_priority_in_a_wayland_session() {
-+    fn defaults_to_x11_unless_wayland_is_enabled() {
-+        let default = if cfg!(any(target_os = "linux", target_os = "freebsd")) {
-+            Some(c"x11")
-+        } else {
-+            None
-+        };
-         assert_eq!(startup_driver(false, false, true), Some(c"wayland"));
--        assert_eq!(startup_driver(true, false, true), Some(c"wayland"));
-+        assert_eq!(startup_driver(true, false, true), Some(c"x11"));
-         assert_eq!(startup_driver(true, true, true), Some(c"dummy"));
-         assert_eq!(startup_driver(true, false, false), Some(c"x11"));
--        assert_eq!(startup_driver(false, false, false), None);
-+        assert_eq!(startup_driver(false, false, false), default);
      }
  }
