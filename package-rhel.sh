@@ -78,6 +78,11 @@ This script only supports: RHEL / Rocky / AlmaLinux / Fedora / CentOS."
 }
 
 install_dependencies() {
+  if [[ -n "${OVERINK_ARCHIVE_DIR:-}" ]]; then
+    as_root dnf -y install --setopt=install_weak_deps=False \
+      rpm-build tar gzip findutils binutils
+    return
+  fi
   local repo_options=()
 
   if dnf repolist --all 2>/dev/null | grep -q 'codeready-builder-for-ubi-10'; then
@@ -313,10 +318,26 @@ def parse_packages(raw):
     return pkgs
 
 def extract_deb(deb_path, dest):
+    if shutil.which("dpkg-deb"):
+        subprocess.run(["dpkg-deb", "-x", str(deb_path), str(dest)], check=True)
+        return
     members = subprocess.check_output(["ar", "t", str(deb_path)], text=True).splitlines()
-    data_member = next(m for m in members if m.startswith("data.tar"))
-    with subprocess.Popen(["ar", "p", str(deb_path), data_member], stdout=subprocess.PIPE) as p1:
-        subprocess.run(["tar", "-x", "-C", str(dest), "-f", "-"], stdin=p1.stdout, check=True)
+    member = next(m for m in members if m.startswith("data.tar"))
+    if member.endswith(".xz"):
+        flags = ["-xJf"]
+    elif member.endswith(".gz"):
+        flags = ["-xzf"]
+    elif member.endswith(".zst"):
+        flags = ["--zstd", "-xf"]
+    elif member == "data.tar":
+        flags = ["-xf"]
+    else:
+        raise RuntimeError(f"Unsupported DEB compression: {member}")
+    with subprocess.Popen(["ar", "p", str(deb_path), member], stdout=subprocess.PIPE) as archive:
+        subprocess.run(["tar", *flags, "-", "-C", str(dest)], stdin=archive.stdout, check=True)
+        archive.stdout.close()
+        if archive.wait():
+            raise RuntimeError(f"Cannot extract {deb_path}")
 
 pkgs = parse_packages(fetch_index(repo, suite, arch))
 queue = [
@@ -491,6 +512,7 @@ verify_binary() {
   else
     grep -q 'Class:.*ELF64' <<< "$header" || die "Expected ELF64 for $short"
   fi
+  [[ "${3:-0}" == 0 ]] || return 0
   config="$(find "$CARGO_TARGET_DIR/$rust_target/release/build" -name SDL_build_config.h -print -quit)"
   [[ -n "$config" ]] || die "Missing SDL build configuration"
   grep -q '^#define SDL_VIDEO_DRIVER_X11 1' "$config" || die "X11 backend is disabled"
@@ -686,9 +708,18 @@ build_one_target() {
   pkg_arch="${meta[5]}"
 
   echo "[*] Building for target: $short  (target=$rust_target, arch=$pkg_arch)"
-  prepare_target_sdk "$short" "$rust_target" "$deb_arch" "$suite" "$gcc_ver"
-  publish_binary "$short" "$rust_target" "$triple"
-  verify_binary "$short" "$rust_target"
+  if [[ -n "${OVERINK_ARCHIVE_DIR:-}" ]]; then
+    local archive="$OVERINK_ARCHIVE_DIR/OverInk-$rust_target.tar.gz"
+    [[ -s "$archive" ]] || die "Missing compiled archive: $archive"
+    CARGO_TARGET_DIR="$(mktemp -d)"
+    mkdir -p "$CARGO_TARGET_DIR/$rust_target/release"
+    tar -xzf "$archive" -C "$CARGO_TARGET_DIR/$rust_target/release" overink
+    verify_binary "$short" "$rust_target" 1
+  else
+    prepare_target_sdk "$short" "$rust_target" "$deb_arch" "$suite" "$gcc_ver"
+    publish_binary "$short" "$rust_target" "$triple"
+    verify_binary "$short" "$rust_target"
+  fi
   package_binary "$short" "$rust_target" "$pkg_arch"
 
   [[ -z "$CARGO_TARGET_DIR" ]] || rm -rf -- "$CARGO_TARGET_DIR"
@@ -715,7 +746,6 @@ main() {
 
   mapfile -t targets < <(select_targets)
   (( ${#targets[@]} > 0 )) || die "No architectures selected"
-  [[ "${ARCH_OVERRIDE:-}" == "all" ]] && BUILT_ALL=1 || 
   for arch in "${targets[@]}"; do
     build_one_target "$arch"
   done
