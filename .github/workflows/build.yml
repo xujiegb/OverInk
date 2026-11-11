@@ -550,10 +550,298 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  rpm:
+    needs: prepare
+    name: Red Hat UBI 10 · ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        include:
+          - {runner: ubuntu-24.04, platform: linux/amd64, mode: native, arch: x64, deb: amd64}
+          - {runner: ubuntu-24.04-arm, platform: linux/arm64, mode: native, arch: arm64, deb: arm64}
+          - {runner: ubuntu-24.04, platform: linux/amd64, mode: cross, arch: i386, deb: i386, suite: trixie, gcc: 14}
+          - {runner: ubuntu-24.04, platform: linux/amd64, mode: cross, arch: ppc64le, deb: ppc64el, suite: trixie, gcc: 14}
+          - {runner: ubuntu-24.04, platform: linux/amd64, mode: cross, arch: loong64, deb: loong64, suite: forky, gcc: 15}
+          - {runner: ubuntu-24.04, platform: linux/amd64, mode: cross, arch: riscv64, deb: riscv64, suite: trixie, gcc: 14}
+          - {runner: ubuntu-24.04, platform: linux/amd64, mode: cross, arch: s390x, deb: s390x, suite: trixie, gcc: 14}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Prepare cross-compilation sysroot
+        if: matrix.mode == 'cross'
+        shell: bash
+        env:
+          TARGET_ARCH: ${{ matrix.deb }}
+          TARGET_SUITE: ${{ matrix.suite }}
+          TARGET_GCC: ${{ matrix.gcc }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwayland-bin ca-certificates curl
+          work="$RUNNER_TEMP/overink-package-sdk"
+          mkdir -p "$work"/{sysroot,lists/partial,archives/partial,tools}
+          cp "$(command -v wayland-scanner)" "$work/tools/"
+          if [[ $TARGET_ARCH == loong64 ]]; then
+            curl -fsSL --retry 3 https://apt.llvm.org/llvm-snapshot.gpg.key -o "$work/llvm.asc"
+            sudo install -m 0644 "$work/llvm.asc" /usr/share/keyrings/overink-llvm.asc
+            echo 'deb [signed-by=/usr/share/keyrings/overink-llvm.asc] https://apt.llvm.org/noble/ llvm-toolchain-noble-20 main' |
+              sudo tee /etc/apt/sources.list.d/overink-llvm.list >/dev/null
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends clang-20 lld-20
+            clang-20 --print-targets | grep -i loongarch
+            mkdir -p "$work/llvm/bin" "$work/llvm/lib/clang"
+            for tool in clang clang++ ld.lld; do cp -L "/usr/lib/llvm-20/bin/$tool" "$work/llvm/bin/"; done
+            cp -R "$(clang-20 -print-resource-dir)" "$work/llvm/lib/clang/"
+            ldd "$work/llvm/bin/clang" "$work/llvm/bin/ld.lld" |
+              awk '/ => \/.* / {print $1, $3}' | sort -u |
+              while read -r soname path; do
+                case "$soname" in libc.so.*|libm.so.*|libdl.so.*|libpthread.so.*|librt.so.*) continue;; esac
+                cp -L "$path" "$work/llvm/lib/$soname"
+              done
+          fi
+          : > "$work/status"
+          keyring="$work/debian.asc"
+          curl -fsSL --retry 3 https://ftp-master.debian.org/keys/archive-key-13.asc -o "$keyring"
+          printf 'deb [arch=%s signed-by=%s] https://deb.debian.org/debian %s main\n' \
+            "$TARGET_ARCH" "$keyring" "$TARGET_SUITE" > "$work/sources.list"
+          apt_options=(
+            -o "APT::Architecture=$TARGET_ARCH"
+            -o "APT::Architectures::=$TARGET_ARCH"
+            -o "Dir::Etc::sourcelist=$work/sources.list"
+            -o Dir::Etc::sourceparts=-
+            -o "Dir::State::lists=$work/lists"
+            -o "Dir::State::status=$work/status"
+            -o "Dir::Cache::archives=$work/archives"
+            -o Acquire::Retries=3
+          )
+          apt-get "${apt_options[@]}" update
+          apt-get "${apt_options[@]}" -y --download-only --no-install-recommends install \
+            libc6-dev "libgcc-$TARGET_GCC-dev" "libstdc++-$TARGET_GCC-dev" \
+            libx11-dev libxext-dev libxi-dev libxrandr-dev libxcursor-dev \
+            libxfixes-dev libxrender-dev libxss-dev libxtst-dev \
+            libwayland-dev libxkbcommon-dev libegl-dev libgl-dev
+          for package in "$work/archives/"*.deb; do dpkg-deb -x "$package" "$work/sysroot"; done
+          python3 - "$work/sysroot" <<'PYTHON'
+          import os, pathlib, shutil, sys
+          root = pathlib.Path(sys.argv[1])
+          for name in ('lib', 'lib64', 'lib32', 'libx32'):
+              old = root / name
+              new = root / 'usr' / name
+              if old.is_dir() and not old.is_symlink():
+                  shutil.copytree(old, new, dirs_exist_ok=True, symlinks=True)
+                  shutil.rmtree(old)
+              if not old.is_symlink() and not old.exists() and new.is_dir():
+                  old.symlink_to('usr/' + name)
+          for directory, dirs, files in os.walk(root, followlinks=False):
+              for name in dirs + files:
+                  path = pathlib.Path(directory) / name
+                  if path.is_symlink():
+                      target = os.readlink(path)
+                      if target.startswith('/'):
+                          path.unlink()
+                          path.symlink_to(os.path.relpath(root / target.lstrip('/'), path.parent))
+          PYTHON
+      - name: Build and package in Red Hat UBI 10
+        shell: bash
+        env:
+          TARGET_ARCH: ${{ matrix.arch }}
+          TARGET_MODE: ${{ matrix.mode }}
+          TARGET_PLATFORM: ${{ matrix.platform }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/overink-package-sdk"
+          mkdir -p "$work" dist/packages
+          docker run --rm -i --platform "$TARGET_PLATFORM" \
+            -e TARGET_ARCH -e TARGET_MODE -e RELEASE_VERSION -e RUST_VERSION \
+            -v "$GITHUB_WORKSPACE:/src" -v "$work:/sdk:ro" -w /src \
+            registry.access.redhat.com/ubi10/ubi:latest bash -s <<'CONTAINER'
+          set -euo pipefail
+          dnf -y install --setopt=install_weak_deps=False \
+            ca-certificates curl git tar gzip findutils coreutils binutils \
+            clang lld llvm cmake make ninja-build pkgconf-pkg-config \
+            wayland-devel wayland-protocols-devel rpm-build rpm \
+            libX11-devel libXext-devel libXi-devel libXrandr-devel libXcursor-devel \
+            libXfixes-devel libXrender-devel libXScrnSaver-devel libXtst-devel \
+            libxkbcommon-devel mesa-libEGL-devel mesa-libGL-devel
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 3 https://sh.rustup.rs -o /tmp/rustup.sh
+          sh /tmp/rustup.sh -y --profile minimal --default-toolchain "$RUST_VERSION"
+          . "$HOME/.cargo/env"
+          args=(--arch "$TARGET_ARCH" --jobs 2 --output dist/packages)
+          if [[ -n "$RELEASE_VERSION" ]]; then args+=(--version "$RELEASE_VERSION"); fi
+          if [[ "$TARGET_MODE" == cross ]]; then
+            args+=(--sysroot /sdk/sysroot)
+            export PATH="/sdk/tools:$PATH"
+          fi
+          if [[ "$TARGET_ARCH" == loong64 ]]; then
+            export OVERINK_CLANG=/sdk/llvm/bin/clang
+            export OVERINK_CLANGXX=/sdk/llvm/bin/clang++
+            export LD_LIBRARY_PATH=/sdk/llvm/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+          fi
+          bash package-rhel.sh "${args[@]}" 
+          CONTAINER
+          shopt -s nullglob
+          files=(dist/packages/*.rpm)
+          (( ${#files[@]} == 1 )) || { echo 'Expected exactly one rpm package'; exit 1; }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OverInk-rpm-${{ matrix.arch }}
+          path: dist/packages/*.rpm
+          if-no-files-found: error
+          compression-level: 0
+
+  deb:
+    needs: prepare
+    name: Debian 13 · ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        include:
+          - {runner: ubuntu-24.04, platform: linux/amd64, mode: native, arch: x64, deb: amd64}
+          - {runner: ubuntu-24.04-arm, platform: linux/arm64, mode: native, arch: arm64, deb: arm64}
+          - {runner: ubuntu-24.04, platform: linux/amd64, mode: cross, arch: i386, deb: i386, suite: trixie, gcc: 14}
+          - {runner: ubuntu-24.04, platform: linux/amd64, mode: cross, arch: ppc64le, deb: ppc64el, suite: trixie, gcc: 14}
+          - {runner: ubuntu-24.04, platform: linux/amd64, mode: cross, arch: loong64, deb: loong64, suite: forky, gcc: 15}
+          - {runner: ubuntu-24.04, platform: linux/amd64, mode: cross, arch: riscv64, deb: riscv64, suite: trixie, gcc: 14}
+          - {runner: ubuntu-24.04, platform: linux/amd64, mode: cross, arch: s390x, deb: s390x, suite: trixie, gcc: 14}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Prepare cross-compilation sysroot
+        if: matrix.mode == 'cross'
+        shell: bash
+        env:
+          TARGET_ARCH: ${{ matrix.deb }}
+          TARGET_SUITE: ${{ matrix.suite }}
+          TARGET_GCC: ${{ matrix.gcc }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwayland-bin ca-certificates curl
+          work="$RUNNER_TEMP/overink-package-sdk"
+          mkdir -p "$work"/{sysroot,lists/partial,archives/partial,tools}
+          cp "$(command -v wayland-scanner)" "$work/tools/"
+          if [[ $TARGET_ARCH == loong64 ]]; then
+            curl -fsSL --retry 3 https://apt.llvm.org/llvm-snapshot.gpg.key -o "$work/llvm.asc"
+            sudo install -m 0644 "$work/llvm.asc" /usr/share/keyrings/overink-llvm.asc
+            echo 'deb [signed-by=/usr/share/keyrings/overink-llvm.asc] https://apt.llvm.org/noble/ llvm-toolchain-noble-20 main' |
+              sudo tee /etc/apt/sources.list.d/overink-llvm.list >/dev/null
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends clang-20 lld-20
+            clang-20 --print-targets | grep -i loongarch
+            mkdir -p "$work/llvm/bin" "$work/llvm/lib/clang"
+            for tool in clang clang++ ld.lld; do cp -L "/usr/lib/llvm-20/bin/$tool" "$work/llvm/bin/"; done
+            cp -R "$(clang-20 -print-resource-dir)" "$work/llvm/lib/clang/"
+            ldd "$work/llvm/bin/clang" "$work/llvm/bin/ld.lld" |
+              awk '/ => \/.* / {print $1, $3}' | sort -u |
+              while read -r soname path; do
+                case "$soname" in libc.so.*|libm.so.*|libdl.so.*|libpthread.so.*|librt.so.*) continue;; esac
+                cp -L "$path" "$work/llvm/lib/$soname"
+              done
+          fi
+          : > "$work/status"
+          keyring="$work/debian.asc"
+          curl -fsSL --retry 3 https://ftp-master.debian.org/keys/archive-key-13.asc -o "$keyring"
+          printf 'deb [arch=%s signed-by=%s] https://deb.debian.org/debian %s main\n' \
+            "$TARGET_ARCH" "$keyring" "$TARGET_SUITE" > "$work/sources.list"
+          apt_options=(
+            -o "APT::Architecture=$TARGET_ARCH"
+            -o "APT::Architectures::=$TARGET_ARCH"
+            -o "Dir::Etc::sourcelist=$work/sources.list"
+            -o Dir::Etc::sourceparts=-
+            -o "Dir::State::lists=$work/lists"
+            -o "Dir::State::status=$work/status"
+            -o "Dir::Cache::archives=$work/archives"
+            -o Acquire::Retries=3
+          )
+          apt-get "${apt_options[@]}" update
+          apt-get "${apt_options[@]}" -y --download-only --no-install-recommends install \
+            libc6-dev "libgcc-$TARGET_GCC-dev" "libstdc++-$TARGET_GCC-dev" \
+            libx11-dev libxext-dev libxi-dev libxrandr-dev libxcursor-dev \
+            libxfixes-dev libxrender-dev libxss-dev libxtst-dev \
+            libwayland-dev libxkbcommon-dev libegl-dev libgl-dev
+          for package in "$work/archives/"*.deb; do dpkg-deb -x "$package" "$work/sysroot"; done
+          python3 - "$work/sysroot" <<'PYTHON'
+          import os, pathlib, shutil, sys
+          root = pathlib.Path(sys.argv[1])
+          for name in ('lib', 'lib64', 'lib32', 'libx32'):
+              old = root / name
+              new = root / 'usr' / name
+              if old.is_dir() and not old.is_symlink():
+                  shutil.copytree(old, new, dirs_exist_ok=True, symlinks=True)
+                  shutil.rmtree(old)
+              if not old.is_symlink() and not old.exists() and new.is_dir():
+                  old.symlink_to('usr/' + name)
+          for directory, dirs, files in os.walk(root, followlinks=False):
+              for name in dirs + files:
+                  path = pathlib.Path(directory) / name
+                  if path.is_symlink():
+                      target = os.readlink(path)
+                      if target.startswith('/'):
+                          path.unlink()
+                          path.symlink_to(os.path.relpath(root / target.lstrip('/'), path.parent))
+          PYTHON
+      - name: Build and package in Debian 13
+        shell: bash
+        env:
+          TARGET_ARCH: ${{ matrix.arch }}
+          TARGET_MODE: ${{ matrix.mode }}
+          TARGET_PLATFORM: ${{ matrix.platform }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/overink-package-sdk"
+          mkdir -p "$work" dist/packages
+          docker run --rm -i --platform "$TARGET_PLATFORM" \
+            -e TARGET_ARCH -e TARGET_MODE -e RELEASE_VERSION -e RUST_VERSION \
+            -v "$GITHUB_WORKSPACE:/src" -v "$work:/sdk:ro" -w /src \
+            debian:13 bash -s <<'CONTAINER'
+          set -euo pipefail
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates curl git tar gzip findutils coreutils binutils \
+            clang lld llvm cmake make ninja-build pkgconf libwayland-bin wayland-protocols \
+            libx11-dev libxext-dev libxi-dev libxrandr-dev libxcursor-dev \
+            libxfixes-dev libxrender-dev libxss-dev libxtst-dev \
+            libwayland-dev libxkbcommon-dev libegl-dev libgl-dev dpkg-dev
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 3 https://sh.rustup.rs -o /tmp/rustup.sh
+          sh /tmp/rustup.sh -y --profile minimal --default-toolchain "$RUST_VERSION"
+          . "$HOME/.cargo/env"
+          args=(--arch "$TARGET_ARCH" --jobs 2 --output dist/packages)
+          if [[ -n "$RELEASE_VERSION" ]]; then args+=(--version "$RELEASE_VERSION"); fi
+          if [[ "$TARGET_MODE" == cross ]]; then
+            args+=(--sysroot /sdk/sysroot)
+            export PATH="/sdk/tools:$PATH"
+          fi
+          if [[ "$TARGET_ARCH" == loong64 ]]; then
+            export OVERINK_CLANG=/sdk/llvm/bin/clang
+            export OVERINK_CLANGXX=/sdk/llvm/bin/clang++
+            export LD_LIBRARY_PATH=/sdk/llvm/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+          fi
+          bash package-debian.sh "${args[@]}" 
+          CONTAINER
+          shopt -s nullglob
+          files=(dist/packages/*.deb)
+          (( ${#files[@]} == 1 )) || { echo 'Expected exactly one deb package'; exit 1; }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OverInk-deb-${{ matrix.arch }}
+          path: dist/packages/*.deb
+          if-no-files-found: error
+          compression-level: 0
+
   publish:
     name: Publish ${{ needs.prepare.outputs.tag }}
     if: github.event_name == 'workflow_dispatch'
-    needs: [prepare, desktop, linux, freebsd]
+    needs: [prepare, desktop, linux, freebsd, rpm, deb]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -578,26 +866,32 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
           artifact_dirs=(release-input/OverInk-*)
-          if (( ${#artifact_dirs[@]} != 17 )); then
-            echo "::error::Expected 17 build artifacts. Found ${#artifact_dirs[@]}."
+          if (( ${#artifact_dirs[@]} != 31 )); then
+            echo "::error::Expected 31 build artifacts. Found ${#artifact_dirs[@]}."
             exit 1
           fi
           mkdir release-assets
           for dir in "${artifact_dirs[@]}"; do
             name=${dir##*/}
-            archives=("$dir/$name".*)
+            case "$name" in
+              OverInk-rpm-*) archives=("$dir"/*.rpm) ;;
+              OverInk-deb-*) archives=("$dir"/*.deb) ;;
+              *) archives=("$dir/$name".*) ;;
+            esac
             if (( ${#archives[@]} != 1 )); then
               echo "::error::Expected one package in $dir."
               exit 1
             fi
             archive=${archives[0]}
-            case "$archive" in
-              "$dir/$name.zip"|"$dir/$name.tar.gz") ;;
-              *) echo "::error::Unexpected package $archive."; exit 1 ;;
-            esac
             test -s "$archive"
             file=${archive##*/}
-            cp -- "$archive" "release-assets/OverInk-$RELEASE_VERSION-${file#OverInk-}"
+            case "$name:$archive" in
+              OverInk-rpm-*:*/*.rpm|OverInk-deb-*:*/*.deb)
+                cp -- "$archive" "release-assets/$file" ;;
+              *:"$dir/$name.zip"|*:"$dir/$name.tar.gz")
+                cp -- "$archive" "release-assets/OverInk-$RELEASE_VERSION-${file#OverInk-}" ;;
+              *) echo "::error::Unexpected package $archive."; exit 1 ;;
+            esac
           done
 
           # A failed upload can be retried using this workflow's draft.
