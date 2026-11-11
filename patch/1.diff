@@ -1,66 +1,541 @@
+diff --git a/assets/gnome-shell/metadata.json b/assets/gnome-shell/metadata.json
+index c47b719..fecf700 100644
+--- a/assets/gnome-shell/metadata.json
++++ b/assets/gnome-shell/metadata.json
+@@ -2,6 +2,6 @@
+   "uuid": "overink-overlay@overink",
+   "name": "OverInk Overlay",
+   "description": "Keep OverInk's native Wayland canvas above windows and place its toolbar at the left edge.",
+-  "shell-version": ["47", "48", "49"],
++  "shell-version": ["45", "46", "47", "48", "49", "50"],
+   "url": "https://github.com/xujiegb/OverInk"
+ }
 diff --git a/src/app.rs b/src/app.rs
-index aeb87ce..6cb344c 100644
+index aeb87ce..872f1de 100644
 --- a/src/app.rs
 +++ b/src/app.rs
-@@ -1169,6 +1169,14 @@ fn update_preferences(app: &mut App, previous: Preferences, multi_supported: boo
-             .detail(error);
+@@ -156,6 +156,12 @@ struct App {
+     path: String,
+     save_path: PathBuf,
+     last_save: Instant,
++    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
++    gnome_guide: bool,
++    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
++    gnome_prompt: bool,
++    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
++    gnome_state: crate::gnome::ExtensionState,
+ }
+ impl App {
+     fn new(board: bool, display: usize, displays: Vec&lt;Display&gt;, base: &Path) -> Self {
+@@ -216,6 +222,16 @@ impl App {
+                 .into_owned(),
+             save_path,
+             last_save: Instant::now(),
++            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
++            gnome_guide: false,
++            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
++            gnome_prompt: false,
++            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
++            gnome_state: if crate::gnome::desktop() == crate::gnome::Desktop::Gnome {
++                crate::gnome::extension_state()
++            } else {
++                crate::gnome::ExtensionState::NotInstalled
++            },
          }
      }
-+    if previous.wayland != app.preferences.wayland {
-+        app.status = text(
-+            "Restart OverInk to switch the display backend.",
-+            "重启 OverInk 后切换显示后端。",
-+            "重新啟動 OverInk 後切換顯示後端。",
-+        )
-+        .into();
-+    }
-     let multi = multi_supported && app.preferences.per_display_windows;
-     if multi != app.multi {
-         app.finish_all_contacts();
-@@ -1185,7 +1193,9 @@ pub fn run(options: Options) -> Result<(), String> {
+     fn stroke(&self, tool: Tool) -> Stroke {
+@@ -1185,7 +1201,73 @@ pub fn run(options: Options) -> Result<(), String> {
      let _teardown_pool = crate::native::macos::AutoreleasePool::new();
      #[cfg(target_os = "macos")]
      let startup_pool = crate::native::macos::AutoreleasePool::new();
 -    let _runtime = Runtime::new(options.x11, options.smoke)?;
 +    let base = state_dir();
-+    let preferences = Preferences::load(&base.join("ui.json"));
-+    let _runtime = Runtime::new(options.x11, preferences.wayland, options.smoke)?;
++    let mut startup_preferences = Preferences::load(&base.join("ui.json"));
++    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
++    let mut wayland_fallback: Option<(Status, bool, crate::gnome::ExtensionState)> = None;
++    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
++    if !options.smoke
++        && !options.x11
++        && startup_preferences.wayland
++        && crate::gnome::has_wayland_session()
++    {
++        match crate::gnome::desktop() {
++            crate::gnome::Desktop::Gnome => {
++                let state = crate::gnome::extension_state();
++                if state != crate::gnome::ExtensionState::Enabled {
++                    startup_preferences.wayland = false;
++                    let _ = startup_preferences.save(&base.join("ui.json"));
++                    let message = if state == crate::gnome::ExtensionState::NotInstalled {
++                        text(
++                            "GNOME detected without overlay extension. Switched to XWayland; install it below.",
++                            "检测到切换至 GNOME 桌面且未安装插件，已关闭 Wayland 退回 XWayland，请在下方安装插件。",
++                            "偵測到切換至 GNOME 桌面且未安裝外掛，已關閉 Wayland 退回 XWayland，請在下方安裝外掛。",
++                        )
++                    } else {
++                        text(
++                            "GNOME extension requires a re-login to load. Switched to XWayland for now.",
++                            "GNOME 插件需注销并重新登录后生效，已自动退回 XWayland。",
++                            "GNOME 外掛需登出並重新登入後生效，已自動退回 XWayland。",
++                        )
++                    };
++                    wayland_fallback = Some((message.into(), true, state));
++                }
++            }
++            crate::gnome::Desktop::Pantheon => {
++                if !crate::native::has_layer_shell() {
++                    startup_preferences.wayland = false;
++                    let _ = startup_preferences.save(&base.join("ui.json"));
++                    wayland_fallback = Some((
++                        text(
++                            "Pantheon does not support wlr-layer-shell. Switched to XWayland.",
++                            "Pantheon 桌面不支持 wlr-layer-shell，已自动关闭 Wayland 退回 XWayland。",
++                            "Pantheon 桌面不支援 wlr-layer-shell，已自動關閉 Wayland 退回 XWayland。",
++                        )
++                        .into(),
++                        false,
++                        crate::gnome::ExtensionState::NotInstalled,
++                    ));
++                }
++            }
++            crate::gnome::Desktop::Other => {
++                if !crate::native::has_layer_shell() {
++                    startup_preferences.wayland = false;
++                    let _ = startup_preferences.save(&base.join("ui.json"));
++                    wayland_fallback = Some((
++                        text(
++                            "Current desktop does not support wlr-layer-shell. Switched to XWayland.",
++                            "当前桌面合成器不支持 wlr-layer-shell，已自动关闭 Wayland 退回 XWayland。",
++                            "目前桌面合成器不支援 wlr-layer-shell，已自動關閉 Wayland 退回 XWayland。",
++                        )
++                        .into(),
++                        false,
++                        crate::gnome::ExtensionState::NotInstalled,
++                    ));
++                }
++            }
++        }
++    }
++    let _runtime = Runtime::new(options.x11, options.smoke, startup_preferences.wayland)?;
      let video = crate::sdl::driver();
      let wayland = video == "wayland";
      let window = Window::new("OverInk - canvas", 1100, 720, !options.smoke)?;
-@@ -1196,7 +1206,7 @@ pub fn run(options: Options) -> Result<(), String> {
+@@ -1196,8 +1278,17 @@ pub fn run(options: Options) -> Result<(), String> {
          options.board || options.smoke,
          options.display,
          displays,
 -        &state_dir(),
 +        &base,
      );
++    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
++    if let Some((fallback_status, open_gnome_guide, state)) = wayland_fallback {
++        app.preferences = startup_preferences;
++        app.status = fallback_status;
++        app.panel = Some(crate::toolbar::Panel::Settings);
++        app.gnome_guide = open_gnome_guide;
++        app.gnome_prompt = open_gnome_guide;
++        app.gnome_state = state;
++    }
      app.multi = app.preferences.per_display_windows && !wayland && !options.smoke;
      let mut canvases = vec![canvas::Canvas::new(
+         window,
+@@ -1211,8 +1302,9 @@ pub fn run(options: Options) -> Result<(), String> {
+         false,
+     )?;
+     toolbar.setup_toolbar();
++    let initial_expanded = app.panel.is_some();
+     if !options.smoke {
+-        let _ = toolbar.arrange_toolbar(false, app.pages.active);
++        let _ = toolbar.arrange_toolbar(initial_expanded, app.pages.active);
+         canvas::reconcile(&mut canvases, &mut app, &toolbar, &options)?;
+     }
+     let toolbar_render = Renderer::new(&toolbar, true)
+@@ -1228,7 +1320,7 @@ pub fn run(options: Options) -> Result<(), String> {
+         .show(true)
+         .map_err(|error| format!("Showing the toolbar on {video} failed ({error})"))?;
+     if !options.smoke && !wayland {
+-        let _ = toolbar.arrange_toolbar(false, app.pages.active);
++        let _ = toolbar.arrange_toolbar(initial_expanded, app.pages.active);
+     }
+     unsafe {
+         SDL_StartTextInput(toolbar.raw);
+@@ -1241,7 +1333,7 @@ pub fn run(options: Options) -> Result<(), String> {
+     let mut picker = crate::picker::Picker::default();
+     let mut tooltips = crate::toolbar::Tooltips::default();
+     let mut toolbar_hidden = false;
+-    let mut toolbar_expanded = false;
++    let mut toolbar_expanded = initial_expanded;
+     let mut running = true;
+     let mut frame = 0;
+     let mut last_color = Instant::now();
+@@ -2016,6 +2108,12 @@ mod touch_tests {
+             path: String::new(),
+             save_path: PathBuf::new(),
+             last_save: Instant::now(),
++            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
++            gnome_guide: false,
++            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
++            gnome_prompt: false,
++            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
++            gnome_state: crate::gnome::ExtensionState::NotInstalled,
+         }
+     }
+     fn finger(app: &mut App, ty: SDL_EventType, device: u64, id: u64, x: f32, y: f32) {
+diff --git a/src/app/canvas.rs b/src/app/canvas.rs
+index f64606a..f253852 100644
+--- a/src/app/canvas.rs
++++ b/src/app/canvas.rs
+@@ -102,6 +102,12 @@ impl Canvas {
+ 
+     pub fn show(&mut self, toolbar: &Window, visible: bool) -> Result<(), String> {
+         if self.visible != visible {
++            if !visible && self.window.has_layer_shell() {
++                let _ = self.render.begin(&self.window, [0., 0., 0., 0.]);
++                let _ = self.render.present();
++                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
++                let _ = self.native.set_guarded(&mut self.window, true, None);
++            }
+             native::show_canvas(&self.window, toolbar, visible).map_err(|error| {
+                 format!(
+                     "Updating canvas visibility on {} failed ({error})",
+@@ -138,7 +144,9 @@ impl Canvas {
+     }
+ 
+     pub fn on_output(&self, smoke: bool) -> bool {
+-        smoke || self.output.is_some() && self.window.display_id() == self.output
++        smoke
++            || self.window.has_layer_shell() && self.output.is_some()
++            || self.output.is_some() && self.window.display_id() == self.output
+     }
+ 
+     pub fn set_page_geometry(&self, app: &mut App) {
+@@ -194,7 +202,7 @@ impl Canvas {
+ 
+     pub fn apply_input(&mut self, mouse: bool) -> Result<(), String> {
+         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+-        let result = self.native.set_guarded(&self.window, mouse, self.protected);
++        let result = self.native.set_guarded(&mut self.window, mouse, self.protected);
+         #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+         let result = self.native.set(&self.window, mouse);
+         result
 diff --git a/src/app/panel.rs b/src/app/panel.rs
-index c2761c6..4aeede8 100644
+index c2761c6..a6c6503 100644
 --- a/src/app/panel.rs
 +++ b/src/app/panel.rs
-@@ -567,6 +567,19 @@ impl App {
+@@ -567,6 +567,8 @@ impl App {
          });
          ui.separator();
          ui.label(RichText::new(tr.text("Display", "显示器", "顯示器")).strong());
 +        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-+        {
-+            commands.preferences |= ui
-+                .checkbox(
-+                    &mut self.preferences.wayland,
-+                    tr.text(
-+                        "Native Wayland (restart to apply)",
-+                        "原生 Wayland（重启后生效）",
-+                        "原生 Wayland（重新啟動後生效）",
-+                    ),
-+                )
-+                .changed();
-+        }
++        self.wayland_settings(ui, video, commands);
          let per_display = ui
              .add_enabled_ui(video != "wayland", |ui| {
                  ui.checkbox(
+@@ -722,6 +724,305 @@ impl App {
+             commands.quit = true;
+         }
+     }
++
++    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
++    fn wayland_settings(&mut self, ui: &mut Ui, video: &str, commands: &mut Commands) {
++        let tr = self.language;
++        let desktop = crate::gnome::desktop();
++        ui.horizontal_wrapped(|ui| {
++            let response = ui.checkbox(
++                &mut self.preferences.wayland,
++                tr.text(
++                    "Wayland (restart required)",
++                    "Wayland（重启后生效）",
++                    "Wayland（重啟後生效）",
++                ),
++            );
++            if response.changed() {
++                if self.preferences.wayland {
++                    match desktop {
++                        crate::gnome::Desktop::Gnome => {
++                            self.gnome_guide = true;
++                            self.gnome_prompt = false;
++                            match crate::gnome::install_overlay() {
++                                Ok(state) => {
++                                    self.gnome_state = state;
++                                    commands.preferences = true;
++                                    self.status = if state == crate::gnome::ExtensionState::Enabled
++                                    {
++                                        super::text(
++                                            "GNOME extension enabled. Restart OverInk to use Wayland.",
++                                            "已安装并启用 GNOME 插件，重启 OverInk 后生效。",
++                                            "已安裝並啟用 GNOME 外掛，重啟 OverInk 後生效。",
++                                        )
++                                        .into()
++                                    } else {
++                                        super::text(
++                                            "GNOME extension installed. Log out and back in to GNOME, then restart OverInk.",
++                                            "已安装 GNOME 插件。请先注销并重新登录 GNOME 桌面，再重启 OverInk。",
++                                            "已安裝 GNOME 外掛。請先登出並重新登入 GNOME 桌面，再重啟 OverInk。",
++                                        )
++                                        .into()
++                                    };
++                                }
++                                Err(error) => {
++                                    self.preferences.wayland = false;
++                                    self.status = super::text(
++                                        "GNOME extension install failed",
++                                        "安装 GNOME 插件失败",
++                                        "安裝 GNOME 外掛失敗",
++                                    )
++                                    .detail(error);
++                                }
++                            }
++                        }
++                        crate::gnome::Desktop::Pantheon => {
++                            if crate::native::has_layer_shell() {
++                                commands.preferences = true;
++                                self.status = super::text(
++                                    "Wayland (wlr-layer-shell) enabled. Restart OverInk to apply.",
++                                    "已启用 Wayland (wlr-layer-shell)，重启 OverInk 后生效。",
++                                    "已啟用 Wayland (wlr-layer-shell)，重啟 OverInk 後生效。",
++                                )
++                                .into();
++                            } else {
++                                self.preferences.wayland = false;
++                                self.status = super::text(
++                                    "Pantheon does not support wlr-layer-shell; staying on XWayland.",
++                                    "Pantheon 桌面不支持 wlr-layer-shell，已保持 XWayland 模式。",
++                                    "Pantheon 桌面不支援 wlr-layer-shell，已保持 XWayland 模式。",
++                                )
++                                .into();
++                            }
++                        }
++                        crate::gnome::Desktop::Other => {
++                            if crate::native::has_layer_shell() {
++                                commands.preferences = true;
++                                self.status = super::text(
++                                    "Wayland (wlr-layer-shell) enabled. Restart OverInk to apply.",
++                                    "已启用 Wayland (wlr-layer-shell)，重启 OverInk 后生效。",
++                                    "已啟用 Wayland (wlr-layer-shell)，重啟 OverInk 後生效。",
++                                )
++                                .into();
++                            } else {
++                                self.preferences.wayland = false;
++                                self.status = super::text(
++                                    "Compositor does not support wlr-layer-shell; staying on XWayland.",
++                                    "当前合成器不支持 wlr-layer-shell，已保持 XWayland 模式。",
++                                    "目前合成器不支援 wlr-layer-shell，已保持 XWayland 模式。",
++                                )
++                                .into();
++                            }
++                        }
++                    }
++                } else {
++                    commands.preferences = true;
++                    self.status = super::text(
++                        "Switched to X11/XWayland. Restart OverInk to apply.",
++                        "已切回 X11/XWayland，重启 OverInk 后生效。",
++                        "已切回 X11/XWayland，重啟 OverInk 後生效。",
++                    )
++                    .into();
++                }
++            }
++            if desktop == crate::gnome::Desktop::Gnome {
++                let toggle = if self.gnome_guide {
++                    tr.text("Hide guide", "收起引导", "收起引導")
++                } else {
++                    tr.text("Setup guide", "安装引导", "安裝引導")
++                };
++                if ui.small_button(toggle).clicked() {
++                    self.gnome_guide = !self.gnome_guide;
++                    if self.gnome_guide {
++                        self.gnome_state = crate::gnome::extension_state();
++                    }
++                }
++            }
++        });
++        if desktop == crate::gnome::Desktop::Gnome {
++            ui.horizontal_wrapped(|ui| {
++                if ui
++                    .button(tr.text(
++                        "Reinstall GNOME extension",
++                        "重新安装 GNOME 插件",
++                        "重新安裝 GNOME 外掛",
++                    ))
++                    .clicked()
++                {
++                    self.gnome_guide = true;
++                    match crate::gnome::install_overlay() {
++                        Ok(state) => {
++                            self.gnome_state = state;
++                            self.gnome_prompt = false;
++                            self.status = if state == crate::gnome::ExtensionState::Enabled {
++                                super::text(
++                                    "Reinstalled and enabled GNOME extension.",
++                                    "已重新安装并启用 GNOME 插件。",
++                                    "已重新安裝並啟用 GNOME 外掛。",
++                                )
++                                .into()
++                            } else {
++                                super::text(
++                                    "Reinstalled GNOME extension. Log out and back in to GNOME to load it.",
++                                    "已重新安装 GNOME 插件，注销并重新登录 GNOME 桌面后生效。",
++                                    "已重新安裝 GNOME 外掛，登出並重新登入 GNOME 桌面後生效。",
++                                )
++                                .into()
++                            };
++                        }
++                        Err(error) => {
++                            self.status = super::text(
++                                "Reinstalling GNOME extension failed",
++                                "重新安装 GNOME 插件失败",
++                                "重新安裝 GNOME 外掛失敗",
++                            )
++                            .detail(error);
++                        }
++                    }
++                }
++            });
++            if self.gnome_guide {
++                self.gnome_setup_guide(ui, commands);
++            }
++        } else if desktop == crate::gnome::Desktop::Pantheon {
++            ui.small(tr.text(
++                "Pantheon (Gala) does not support wlr-layer-shell; OverInk uses XWayland.",
++                "Pantheon (Gala) 不支持 wlr-layer-shell，自动使用 XWayland 保持置顶。",
++                "Pantheon (Gala) 不支援 wlr-layer-shell，自動使用 XWayland 保持置頂。",
++            ));
++        } else if video == "wayland" {
++            ui.small(tr.text(
++                "Active backend: native Wayland (wlr-layer-shell).",
++                "当前使用原生 Wayland (wlr-layer-shell) 置顶图层。",
++                "目前使用原生 Wayland (wlr-layer-shell) 置頂圖層。",
++            ));
++        }
++    }
++
++    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
++    fn gnome_setup_guide(&mut self, ui: &mut Ui, commands: &mut Commands) {
++        let tr = self.language;
++        egui::Frame::new()
++            .fill(ui.visuals().faint_bg_color)
++            .corner_radius(6.)
++            .inner_margin(egui::Margin::same(8))
++            .show(ui, |ui| {
++                ui.label(
++                    RichText::new(tr.text(
++                        "GNOME Wayland Extension Setup Guide",
++                        "GNOME Wayland 插件安装引导",
++                        "GNOME Wayland 外掛安裝引導",
++                    ))
++                    .strong(),
++                );
++                if self.gnome_prompt {
++                    ui.colored_label(
++                        ui.visuals().warn_fg_color,
++                        tr.text(
++                            "Wayland was previously enabled, but the GNOME extension is not active. OverInk switched back to XWayland.",
++                            "检测到之前已开启 Wayland，但当前 GNOME 桌面尚未启用插件，已自动退回 XWayland。",
++                            "偵測到先前已開啟 Wayland，但目前 GNOME 桌面尚未啟用外掛，已自動退回 XWayland。",
++                        ),
++                    );
++                }
++                let state_text = match self.gnome_state {
++                    crate::gnome::ExtensionState::NotInstalled => tr.text(
++                        "Status: Not installed",
++                        "状态：尚未安装插件",
++                        "狀態：尚未安裝外掛",
++                    ),
++                    crate::gnome::ExtensionState::NeedsRelogin => tr.text(
++                        "Status: Installed (log out & back in to GNOME to load)",
++                        "状态：已安装（需注销并重新登录 GNOME 桌面加载）",
++                        "狀態：已安裝（需登出並重新登入 GNOME 桌面載入）",
++                    ),
++                    crate::gnome::ExtensionState::Enabled => tr.text(
++                        "Status: Installed & enabled",
++                        "状态：已安装并启用",
++                        "狀態：已安裝並啟用",
++                    ),
++                };
++                ui.small(RichText::new(state_text).strong());
++                ui.small(tr.text(
++                    "1. Install overink-overlay@overink to keep the canvas above windows.",
++                    "1. 安装 overink-overlay@overink 插件以支持 GNOME 原生置顶与工具栏停靠。",
++                    "1. 安裝 overink-overlay@overink 外掛以支援 GNOME 原生置頂與工具列停靠。",
++                ));
++                ui.small(tr.text(
++                    "2. Log out of GNOME and log back in (required once after first install).",
++                    "2. 注销并重新登录 GNOME 桌面（首次安装后需重新登录以加载插件）。",
++                    "2. 登出並重新登入 GNOME 桌面（首次安裝後需重新登入以載入外掛）。",
++                ));
++                ui.small(tr.text(
++                    "3. Enable the Wayland switch above and restart OverInk.",
++                    "3. 开启上方 Wayland 开关并重启 OverInk。",
++                    "3. 開啟上方 Wayland 開關並重啟 OverInk。",
++                ));
++                ui.horizontal_wrapped(|ui| {
++                    if (self.gnome_state == crate::gnome::ExtensionState::NotInstalled
++                        || self.gnome_prompt)
++                        && ui
++                            .button(tr.text(
++                                "Install & enable extension",
++                                "安装并启用插件",
++                                "安裝並啟用外掛",
++                            ))
++                            .clicked()
++                    {
++                        match crate::gnome::install_overlay() {
++                            Ok(state) => {
++                                self.gnome_state = state;
++                                self.gnome_prompt = false;
++                                self.preferences.wayland = true;
++                                commands.preferences = true;
++                                self.status = if state == crate::gnome::ExtensionState::Enabled {
++                                    super::text(
++                                        "GNOME extension enabled. Restart OverInk to use Wayland.",
++                                        "已安装并启用 GNOME 插件，重启 OverInk 后生效。",
++                                        "已安裝並啟用 GNOME 外掛，重啟 OverInk 後生效。",
++                                    )
++                                    .into()
++                                } else {
++                                    super::text(
++                                        "GNOME extension installed. Log out and back in to GNOME, then restart OverInk.",
++                                        "已安装 GNOME 插件。请先注销并重新登录 GNOME 桌面，再重启 OverInk。",
++                                        "已安裝 GNOME 外掛。請先登出並重新登入 GNOME 桌面，再重啟 OverInk。",
++                                    )
++                                    .into()
++                                };
++                            }
++                            Err(error) => {
++                                self.status = super::text(
++                                    "GNOME extension install failed",
++                                    "安装 GNOME 插件失败",
++                                    "安裝 GNOME 外掛失敗",
++                                )
++                                .detail(error);
++                            }
++                        }
++                    }
++                    if ui
++                        .button(tr.text(
++                            "Recheck status",
++                            "重新检测状态",
++                            "重新檢測狀態",
++                        ))
++                        .clicked()
++                    {
++                        self.gnome_state = crate::gnome::enable_overlay();
++                        if self.gnome_state == crate::gnome::ExtensionState::Enabled {
++                            self.gnome_prompt = false;
++                            self.status = super::text(
++                                "GNOME extension is active.",
++                                "GNOME 插件已处于启用状态。",
++                                "GNOME 外掛已處於啟用狀態。",
++                            )
++                            .into();
++                        }
++                    }
++                });
++            });
++    }
+ }
+ 
+ fn tool_label(tool: Tool, tr: Language) -> &'static str {
 diff --git a/src/appearance.rs b/src/appearance.rs
 index 554dc21..7aee387 100644
 --- a/src/appearance.rs
@@ -95,8 +570,935 @@ index 554dc21..7aee387 100644
          };
          assert_eq!(
              serde_json::from_str::<Preferences>(&serde_json::to_string(&manual).unwrap()).unwrap(),
+diff --git a/src/controller.rs b/src/controller.rs
+index fece044..71251b9 100644
+--- a/src/controller.rs
++++ b/src/controller.rs
+@@ -153,9 +153,11 @@ impl Guard {
+         shape_rendering: bool,
+     ) -> Result<(Option&lt;Rect&gt;, bool), String> {
+         let hole = rectangle(canvas, toolbar);
+-        // Cocoa uses a higher native toolbar level. X11 uses an input region.
+-        // Both clip ink without a screen-sized SDL surface and texture.
+-        if cfg!(target_os = "macos") || crate::sdl::driver() == "x11" {
++        // Cocoa uses a higher native toolbar level. X11 and Wayland use native
++        // input regions. All three clip without a screen-sized SDL shape mask.
++        if cfg!(target_os = "macos")
++            || matches!(crate::sdl::driver().as_str(), "x11" | "wayland")
++        {
+             return Ok((hole, false));
+         }
+         if unsafe { SDL_GetWindowFlags(canvas.raw) } & SDL_WINDOW_TRANSPARENT == 0 {
+diff --git a/src/gnome.rs b/src/gnome.rs
+index 9b65b86..f461275 100644
+--- a/src/gnome.rs
++++ b/src/gnome.rs
+@@ -1,9 +1,60 @@
+ // SPDX-License-Identifier: BSD-3-Clause
+-use std::{fs, path::PathBuf};
++use std::{
++    fs,
++    path::{Path, PathBuf},
++    process::Command,
++};
+ 
+-const UUID: &str = "overink-overlay@overink";
++pub const UUID: &str = "overink-overlay@overink";
+ 
+-pub fn install_overlay() -> Result<(), String> {
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum Desktop {
++    Gnome,
++    Pantheon,
++    Other,
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum ExtensionState {
++    NotInstalled,
++    NeedsRelogin,
++    Enabled,
++}
++
++pub fn has_wayland_session() -> bool {
++    std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland")
++        || ["WAYLAND_DISPLAY", "WAYLAND_SOCKET"]
++            .iter()
++            .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
++}
++
++pub fn desktop() -> Desktop {
++    let current = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
++    let session = std::env::var("XDG_SESSION_DESKTOP").unwrap_or_default();
++    let desktop = std::env::var("DESKTOP_SESSION").unwrap_or_default();
++    let gnome_mode = std::env::var("GNOME_SHELL_SESSION_MODE").unwrap_or_default();
++    desktop_from_vars(&current, &session, &desktop, &gnome_mode)
++}
++
++fn desktop_from_vars(current: &str, session: &str, desktop: &str, gnome_mode: &str) -> Desktop {
++    let vars = [current, session, desktop];
++    if vars.iter().any(|value| {
++        let lower = value.to_ascii_lowercase();
++        lower.contains("pantheon") || lower.contains("elementary")
++    }) {
++        return Desktop::Pantheon;
++    }
++    if !gnome_mode.trim().is_empty()
++        || vars
++            .iter()
++            .any(|value| value.to_ascii_lowercase().contains("gnome"))
++    {
++        return Desktop::Gnome;
++    }
++    Desktop::Other
++}
++
++pub fn extension_dir() -> Result<PathBuf, String> {
+     let data = std::env::var_os("XDG_DATA_HOME")
+         .map(PathBuf::from)
+         .filter(|path| path.is_absolute())
+@@ -14,7 +65,121 @@ pub fn install_overlay() -> Result<(), String> {
+                 .map(|home| home.join(".local/share"))
+         })
+         .ok_or("No absolute XDG_DATA_HOME or HOME directory")?;
+-    let extension = data.join("gnome-shell/extensions").join(UUID);
++    Ok(data.join("gnome-shell/extensions").join(UUID))
++}
++
++fn has_extension_files(dir: &Path) -> bool {
++    dir.join("extension.js").is_file() && dir.join("metadata.json").is_file()
++}
++
++pub fn is_installed() -> bool {
++    extension_dir()
++        .ok()
++        .is_some_and(|dir| has_extension_files(&dir))
++        || [
++            "/usr/share/gnome-shell/extensions/overink-overlay@overink",
++            "/usr/local/share/gnome-shell/extensions/overink-overlay@overink",
++        ]
++        .iter()
++        .any(|path| has_extension_files(Path::new(path)))
++}
++
++fn info_shows_enabled(stdout: &str) -> bool {
++    stdout.lines().any(|line| {
++        let trimmed = line.trim();
++        trimmed == "State: ACTIVE"
++            || trimmed == "State: ENABLED"
++            || trimmed == "Enabled: Yes"
++    })
++}
++
++pub fn extension_state() -> ExtensionState {
++    if !is_installed() {
++        return ExtensionState::NotInstalled;
++    }
++    match Command::new("gnome-extensions").args(["info", UUID]).output() {
++        Ok(output) if output.status.success() => {
++            let stdout = String::from_utf8_lossy(&output.stdout);
++            if info_shows_enabled(&stdout) {
++                return ExtensionState::Enabled;
++            }
++            let _ = Command::new("gnome-extensions")
++                .args(["enable", UUID])
++                .output();
++            if let Ok(recheck) = Command::new("gnome-extensions").args(["info", UUID]).output()
++                && recheck.status.success()
++                && info_shows_enabled(&String::from_utf8_lossy(&recheck.stdout))
++            {
++                ExtensionState::Enabled
++            } else {
++                ExtensionState::NeedsRelogin
++            }
++        }
++        Ok(_) => ExtensionState::NeedsRelogin,
++        Err(_) => {
++            if let Ok(output) = Command::new("gsettings")
++                .args(["get", "org.gnome.shell", "enabled-extensions"])
++                .output()
++                && output.status.success()
++                && String::from_utf8_lossy(&output.stdout).contains(UUID)
++            {
++                ExtensionState::Enabled
++            } else {
++                ExtensionState::NeedsRelogin
++            }
++        }
++    }
++}
++
++fn add_enabled_extension(current: &str, uuid: &str) -> String {
++    let mut items = Vec::new();
++    let mut rest = current;
++    while let Some(start) = rest.find('\'') {
++        rest = &rest[start + 1..];
++        if let Some(end) = rest.find('\'') {
++            let item = &rest[..end];
++            if !item.is_empty() && !items.contains(&item) {
++                items.push(item);
++            }
++            rest = &rest[end + 1..];
++        } else {
++            break;
++        }
++    }
++    if !items.contains(&uuid) {
++        items.push(uuid);
++    }
++    let quoted = items
++        .into_iter()
++        .map(|item| format!("'{item}'"))
++        .collect::<Vec<_>>()
++        .join(", ");
++    format!("[{quoted}]")
++}
++
++pub fn enable_overlay() -> ExtensionState {
++    let _ = Command::new("gsettings")
++        .args(["set", "org.gnome.shell", "disable-user-extensions", "false"])
++        .output();
++    if let Ok(output) = Command::new("gsettings")
++        .args(["get", "org.gnome.shell", "enabled-extensions"])
++        .output()
++        && output.status.success()
++    {
++        let current = String::from_utf8_lossy(&output.stdout);
++        let updated = add_enabled_extension(&current, UUID);
++        let _ = Command::new("gsettings")
++            .args(["set", "org.gnome.shell", "enabled-extensions", &updated])
++            .output();
++    }
++    let _ = Command::new("gnome-extensions")
++        .args(["enable", UUID])
++        .output();
++    extension_state()
++}
++
++pub fn install_overlay() -> Result<ExtensionState, String> {
++    let extension = extension_dir()?;
+     fs::create_dir_all(&extension)
+         .map_err(|error| format!("Creating {} failed ({error})", extension.display()))?;
+     for (name, contents) in [
+@@ -39,7 +204,66 @@ pub fn install_overlay() -> Result<(), String> {
+             ));
+         }
+     }
++    Ok(enable_overlay())
++}
++
++pub fn install_cli() -> Result<(), String> {
++    let extension = extension_dir()?;
++    let state = install_overlay()?;
+     println!("Installed {UUID} in {}", extension.display());
+-    println!("After logging back in to GNOME, run gnome-extensions enable {UUID}");
++    if state == ExtensionState::Enabled {
++        println!("Enabled {UUID} in GNOME Shell.");
++    } else {
++        println!("Log out and back in to GNOME for {UUID} to load.");
++    }
+     Ok(())
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn detects_gnome_pantheon_and_other_desktops() {
++        assert_eq!(
++            desktop_from_vars("ubuntu:GNOME", "ubuntu", "ubuntu", ""),
++            Desktop::Gnome
++        );
++        assert_eq!(
++            desktop_from_vars("", "", "", "user"),
++            Desktop::Gnome
++        );
++        assert_eq!(
++            desktop_from_vars("Pantheon", "pantheon", "pantheon", ""),
++            Desktop::Pantheon
++        );
++        assert_eq!(
++            desktop_from_vars("elementary", "", "", ""),
++            Desktop::Pantheon
++        );
++        assert_eq!(
++            desktop_from_vars("KDE", "plasma", "plasma", ""),
++            Desktop::Other
++        );
++        assert_eq!(
++            desktop_from_vars("sway", "sway", "sway", ""),
++            Desktop::Other
++        );
++    }
++
++    #[test]
++    fn formats_gsettings_enabled_extensions_list() {
++        assert_eq!(
++            add_enabled_extension("@as []\n", UUID),
++            "['overink-overlay@overink']"
++        );
++        assert_eq!(
++            add_enabled_extension("['dock@ubuntu.com']\n", UUID),
++            "['dock@ubuntu.com', 'overink-overlay@overink']"
++        );
++        assert_eq!(
++            add_enabled_extension("['overink-overlay@overink']\n", UUID),
++            "['overink-overlay@overink']"
++        );
++    }
++}
+diff --git a/src/main.rs b/src/main.rs
+index efcb321..35c59bb 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -13,7 +13,7 @@ mod display;
+ mod export;
+ mod frame_rate;
+ mod geometry;
+-#[cfg(target_os = "linux")]
++#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+ mod gnome;
+ mod gui;
+ mod icc;
+@@ -44,14 +44,14 @@ fn start() -> Result<(), String> {
+                 println!(
+                     "OverInk 0.1.0 — Rust 2024 / egui / SDL3\n\n  --whiteboard   Start with an opaque white background\n  --x11         Select SDL's X11 backend in an X11 session\n  --sdr         Disable extended-linear-sRGB output\n  --display N   Start on display N (1-based)\n  --smoke-test  Render synthetic pen and touch events with SDL dummy video\n\nKeys (when an OverInk window has focus):\n  Space: click through / draw   H: hide / show\n  Esc: cancel stroke / click through   B: pencil   P/M/L/A/R/O/E/K: other tools\n  1–4: preset colors   Ctrl/Cmd+Z: undo   Ctrl/Cmd+Shift+Z: redo\n  Ctrl/Cmd+S: save   Ctrl/Cmd+O: open   Ctrl/Cmd+Shift+S: SVG\n\nDrag the control window to move a single canvas. Settings can assign a canvas to each display.\nDisconnected displays lose their page and undo history.\nFrame-rate choices: Auto, 120, 90, 60, 30 FPS. Auto follows the display.\nBackground choices: live desktop or frozen snapshot.\nThe separate control window remains usable in click-through mode.\nWhen session recovery is enabled, ink autosaves every 10 seconds and on normal exit.\nTouchscreens: draw with multiple fingers. Native pens take priority over finger drawing."
+                 );
+-                #[cfg(target_os = "linux")]
++                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                 println!(
+                     "\n  --install-gnome-extension   Install native Wayland overlay support for GNOME"
+                 );
+                 return Ok(());
+             }
+-            #[cfg(target_os = "linux")]
+-            "--install-gnome-extension" => return gnome::install_overlay(),
++            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
++            "--install-gnome-extension" => return gnome::install_cli(),
+             "--whiteboard" => options.board = true,
+             "--x11" => options.x11 = true,
+             "--sdr" => options.sdr = true,
+diff --git a/src/native.rs b/src/native.rs
+index 1061250..493bbcd 100644
+--- a/src/native.rs
++++ b/src/native.rs
+@@ -7,7 +7,7 @@ pub mod macos;
+ #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+ mod unix;
+ #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+-pub use unix::Passthrough;
++pub use unix::{LayerWindow, Passthrough, has_layer_shell};
+ 
+ #[cfg(any(target_os = "windows", target_os = "macos"))]
+ #[derive(Default)]
+@@ -301,7 +301,7 @@ pub fn keep_controller_above(canvas: &Window, controller: &Window, _native: &Pas
+ }
+ 
+ pub fn show_canvas(canvas: &Window, controller: &Window, shown: bool) -> Result<(), String> {
+-    if crate::sdl::driver() == "wayland" {
++    if crate::sdl::driver() == "wayland" && !canvas.has_layer_shell() {
+         unsafe {
+             // Transient toplevels stay above the fullscreen drawing surface.
+             // Detach before hiding it so Hide cannot also hide the controls.
+diff --git a/src/native/unix.rs b/src/native/unix.rs
+index 8b42a52..39e5ca6 100644
+--- a/src/native/unix.rs
++++ b/src/native/unix.rs
+@@ -17,6 +17,536 @@ fn library(names: &[&str]) -> Result<Library, String> {
+ type Marshal = unsafe extern "C" fn(*mut c_void, u32, *const c_void, u32, u32, ...) -> *mut c_void;
+ type Version = unsafe extern "C" fn(*mut c_void) -> u32;
+ type Destroy = unsafe extern "C" fn(*mut c_void);
++
++#[repr(C)]
++struct WlMessage {
++    name: *const c_char,
++    signature: *const c_char,
++    types: *const *const WlInterface,
++}
++unsafe impl Sync for WlMessage {}
++
++#[repr(C)]
++struct WlInterface {
++    name: *const c_char,
++    version: c_int,
++    method_count: c_int,
++    methods: *const WlMessage,
++    event_count: c_int,
++    events: *const WlMessage,
++}
++unsafe impl Sync for WlInterface {}
++
++static NULL_TYPES: [*const WlInterface; 4] = [ptr::null(); 4];
++static LAYER_SURFACE_METHODS: [WlMessage; 9] = [
++    WlMessage {
++        name: c"set_size".as_ptr(),
++        signature: c"uu".as_ptr(),
++        types: NULL_TYPES.as_ptr(),
++    },
++    WlMessage {
++        name: c"set_anchor".as_ptr(),
++        signature: c"u".as_ptr(),
++        types: NULL_TYPES.as_ptr(),
++    },
++    WlMessage {
++        name: c"set_exclusive_zone".as_ptr(),
++        signature: c"i".as_ptr(),
++        types: NULL_TYPES.as_ptr(),
++    },
++    WlMessage {
++        name: c"set_margin".as_ptr(),
++        signature: c"iiii".as_ptr(),
++        types: NULL_TYPES.as_ptr(),
++    },
++    WlMessage {
++        name: c"set_keyboard_interactivity".as_ptr(),
++        signature: c"u".as_ptr(),
++        types: NULL_TYPES.as_ptr(),
++    },
++    WlMessage {
++        name: c"get_popup".as_ptr(),
++        signature: c"o".as_ptr(),
++        types: NULL_TYPES.as_ptr(),
++    },
++    WlMessage {
++        name: c"ack_configure".as_ptr(),
++        signature: c"u".as_ptr(),
++        types: NULL_TYPES.as_ptr(),
++    },
++    WlMessage {
++        name: c"destroy".as_ptr(),
++        signature: c"".as_ptr(),
++        types: NULL_TYPES.as_ptr(),
++    },
++    WlMessage {
++        name: c"set_layer".as_ptr(),
++        signature: c"2u".as_ptr(),
++        types: NULL_TYPES.as_ptr(),
++    },
++];
++static LAYER_SURFACE_EVENTS: [WlMessage; 2] = [
++    WlMessage {
++        name: c"configure".as_ptr(),
++        signature: c"uuu".as_ptr(),
++        types: NULL_TYPES.as_ptr(),
++    },
++    WlMessage {
++        name: c"closed".as_ptr(),
++        signature: c"".as_ptr(),
++        types: NULL_TYPES.as_ptr(),
++    },
++];
++static ZWLR_LAYER_SURFACE_V1_INTERFACE: WlInterface = WlInterface {
++    name: c"zwlr_layer_surface_v1".as_ptr(),
++    version: 4,
++    method_count: 9,
++    methods: LAYER_SURFACE_METHODS.as_ptr(),
++    event_count: 2,
++    events: LAYER_SURFACE_EVENTS.as_ptr(),
++};
++static GET_LAYER_SURFACE_TYPES: [*const WlInterface; 5] = [
++    &ZWLR_LAYER_SURFACE_V1_INTERFACE,
++    ptr::null(),
++    ptr::null(),
++    ptr::null(),
++    ptr::null(),
++];
++static LAYER_SHELL_METHODS: [WlMessage; 2] = [
++    WlMessage {
++        name: c"get_layer_surface".as_ptr(),
++        signature: c"no?ous".as_ptr(),
++        types: GET_LAYER_SURFACE_TYPES.as_ptr(),
++    },
++    WlMessage {
++        name: c"destroy".as_ptr(),
++        signature: c"3".as_ptr(),
++        types: NULL_TYPES.as_ptr(),
++    },
++];
++static ZWLR_LAYER_SHELL_V1_INTERFACE: WlInterface = WlInterface {
++    name: c"zwlr_layer_shell_v1".as_ptr(),
++    version: 4,
++    method_count: 2,
++    methods: LAYER_SHELL_METHODS.as_ptr(),
++    event_count: 0,
++    events: ptr::null(),
++};
++
++struct LayerState {
++    marshal: Marshal,
++    version: Version,
++    width: u32,
++    height: u32,
++}
++
++unsafe extern "C" fn layer_configure(
++    data: *mut c_void,
++    layer_surface: *mut c_void,
++    serial: u32,
++    width: u32,
++    height: u32,
++) {
++    unsafe {
++        let state = &mut *data.cast::<LayerState>();
++        (state.marshal)(
++            layer_surface,
++            6,
++            ptr::null(),
++            (state.version)(layer_surface),
++            0,
++            serial,
++        );
++        if width > 0 {
++            state.width = width;
++        }
++        if height > 0 {
++            state.height = height;
++        }
++    }
++}
++
++unsafe extern "C" fn layer_closed(_data: *mut c_void, _layer_surface: *mut c_void) {}
++
++#[repr(C)]
++struct LayerListener {
++    configure: unsafe extern "C" fn(*mut c_void, *mut c_void, u32, u32, u32),
++    closed: unsafe extern "C" fn(*mut c_void, *mut c_void),
++}
++
++static LAYER_LISTENER: LayerListener = LayerListener {
++    configure: layer_configure,
++    closed: layer_closed,
++};
++
++pub struct LayerWindow {
++    _lib: Library,
++    display: *mut c_void,
++    surface: *mut c_void,
++    queue: *mut c_void,
++    layer_shell: *mut c_void,
++    layer_surface: *mut c_void,
++    state: Box&lt;LayerState&gt;,
++    overlay: bool,
++    keyboard_mode: Option&lt;u32&gt;,
++    marshal: Marshal,
++    version: Version,
++    destroy: Destroy,
++    queue_destroy: Destroy,
++    dispatch_pending: unsafe extern "C" fn(*mut c_void, *mut c_void) -> c_int,
++    roundtrip: unsafe extern "C" fn(*mut c_void, *mut c_void) -> c_int,
++    flush: unsafe extern "C" fn(*mut c_void) -> c_int,
++}
++
++impl LayerWindow {
++    pub fn new(raw: *mut SDL_Window, w: i32, h: i32, overlay: bool) -> Result<Self, String> {
++        unsafe {
++            let lib = library(&["libwayland-client.so.0", "libwayland-client.so"])?;
++            let marshal: Marshal = *lib
++                .get(b"wl_proxy_marshal_flags\0")
++                .map_err(|e| e.to_string())?;
++            let version: Version = *lib
++                .get(b"wl_proxy_get_version\0")
++                .map_err(|e| e.to_string())?;
++            let destroy: Destroy = *lib.get(b"wl_proxy_destroy\0").map_err(|e| e.to_string())?;
++            let queue_destroy: Destroy = *lib
++                .get(b"wl_event_queue_destroy\0")
++                .map_err(|e| e.to_string())?;
++            let create_queue: unsafe extern "C" fn(*mut c_void) -> *mut c_void = *lib
++                .get(b"wl_display_create_queue\0")
++                .map_err(|e| e.to_string())?;
++            let create_wrapper: unsafe extern "C" fn(*mut c_void) -> *mut c_void = *lib
++                .get(b"wl_proxy_create_wrapper\0")
++                .map_err(|e| e.to_string())?;
++            let wrapper_destroy: Destroy = *lib
++                .get(b"wl_proxy_wrapper_destroy\0")
++                .map_err(|e| e.to_string())?;
++            let set_queue: unsafe extern "C" fn(*mut c_void, *mut c_void) = *lib
++                .get(b"wl_proxy_set_queue\0")
++                .map_err(|e| e.to_string())?;
++            let add_listener: unsafe extern "C" fn(
++                *mut c_void,
++                *const c_void,
++                *mut c_void,
++            ) -> c_int = *lib
++                .get(b"wl_proxy_add_listener\0")
++                .map_err(|e| e.to_string())?;
++            let roundtrip: unsafe extern "C" fn(*mut c_void, *mut c_void) -> c_int = *lib
++                .get(b"wl_display_roundtrip_queue\0")
++                .map_err(|e| e.to_string())?;
++            let dispatch_pending: unsafe extern "C" fn(*mut c_void, *mut c_void) -> c_int = *lib
++                .get(b"wl_display_dispatch_queue_pending\0")
++                .map_err(|e| e.to_string())?;
++            let flush: unsafe extern "C" fn(*mut c_void) -> c_int =
++                *lib.get(b"wl_display_flush\0").map_err(|e| e.to_string())?;
++            let registry_interface: *const c_void = *lib
++                .get(b"wl_registry_interface\0")
++                .map_err(|e| e.to_string())?;
++            let props = SDL_GetWindowProperties(raw);
++            let display = SDL_GetPointerProperty(
++                props,
++                SDL_PROP_WINDOW_WAYLAND_DISPLAY_POINTER,
++                ptr::null_mut(),
++            );
++            let surface = SDL_GetPointerProperty(
++                props,
++                SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER,
++                ptr::null_mut(),
++            );
++            if display.is_null() || surface.is_null() {
++                return Err("No Wayland display or surface".into());
++            }
++            let queue = create_queue(display);
++            if queue.is_null() {
++                return Err("Cannot create Wayland layer queue".into());
++            }
++            let wrapper = create_wrapper(display);
++            if wrapper.is_null() {
++                queue_destroy(queue);
++                return Err("Cannot wrap Wayland display".into());
++            }
++            set_queue(wrapper, queue);
++            let registry = marshal(
++                wrapper,
++                1,
++                registry_interface,
++                1,
++                0,
++                ptr::null_mut::<c_void>(),
++            );
++            wrapper_destroy(wrapper);
++            if registry.is_null() {
++                queue_destroy(queue);
++                return Err("No Wayland registry".into());
++            }
++            let mut globals = Box::new(Globals::default());
++            if add_listener(
++                registry,
++                (&LISTENER as *const Listener).cast(),
++                (&mut *globals as *mut Globals).cast(),
++            ) != 0
++                || roundtrip(display, queue) < 0
++                || globals.layer_shell == 0
++            {
++                destroy(registry);
++                queue_destroy(queue);
++                return Err("Compositor does not provide zwlr_layer_shell_v1".into());
++            }
++            let layer_shell = marshal(
++                registry,
++                0,
++                (&ZWLR_LAYER_SHELL_V1_INTERFACE as *const WlInterface).cast(),
++                globals.layer_version,
++                0,
++                globals.layer_shell,
++                c"zwlr_layer_shell_v1".as_ptr(),
++                globals.layer_version,
++                ptr::null_mut::<c_void>(),
++            );
++            destroy(registry);
++            if layer_shell.is_null() {
++                queue_destroy(queue);
++                return Err("Cannot bind zwlr_layer_shell_v1".into());
++            }
++            let layer = if overlay { 2u32 } else { 3u32 };
++            let namespace = if overlay {
++                c"overink-canvas".as_ptr()
++            } else {
++                c"overink-toolbar".as_ptr()
++            };
++            let layer_surface = marshal(
++                layer_shell,
++                0,
++                (&ZWLR_LAYER_SURFACE_V1_INTERFACE as *const WlInterface).cast(),
++                version(layer_shell),
++                0,
++                ptr::null_mut::<c_void>(),
++                surface,
++                ptr::null_mut::<c_void>(),
++                layer,
++                namespace,
++            );
++            if layer_surface.is_null() {
++                if version(layer_shell) >= 3 {
++                    marshal(layer_shell, 1, ptr::null(), version(layer_shell), 1);
++                } else {
++                    destroy(layer_shell);
++                }
++                queue_destroy(queue);
++                return Err("Cannot create zwlr_layer_surface_v1".into());
++            }
++            let ver = version(layer_surface);
++            let kb = if ver >= 4 { 2u32 } else { 1u32 };
++            if overlay {
++                marshal(layer_surface, 1, ptr::null(), ver, 0, 15u32);
++                marshal(layer_surface, 2, ptr::null(), ver, 0, -1i32);
++                marshal(layer_surface, 0, ptr::null(), ver, 0, 0u32, 0u32);
++                marshal(layer_surface, 4, ptr::null(), ver, 0, kb);
++            } else {
++                marshal(layer_surface, 1, ptr::null(), ver, 0, 4u32);
++                marshal(
++                    layer_surface,
++                    3,
++                    ptr::null(),
++                    ver,
++                    0,
++                    0i32,
++                    0i32,
++                    0i32,
++                    8i32,
++                );
++                marshal(layer_surface, 2, ptr::null(), ver, 0, 0i32);
++                marshal(
++                    layer_surface,
++                    0,
++                    ptr::null(),
++                    ver,
++                    0,
++                    w.max(1) as u32,
++                    h.max(1) as u32,
++                );
++                marshal(layer_surface, 4, ptr::null(), ver, 0, kb);
++            }
++            let mut state = Box::new(LayerState {
++                marshal,
++                version,
++                width: w.max(1) as u32,
++                height: h.max(1) as u32,
++            });
++            add_listener(
++                layer_surface,
++                (&LAYER_LISTENER as *const LayerListener).cast(),
++                (&mut *state as *mut LayerState).cast(),
++            );
++            marshal(surface, 6, ptr::null(), version(surface), 0);
++            let _ = roundtrip(display, queue);
++            if state.width > 0 && state.height > 0 {
++                let _ = SDL_SetWindowSize(raw, state.width as i32, state.height as i32);
++            }
++            Ok(Self {
++                _lib: lib,
++                display,
++                surface,
++                queue,
++                layer_shell,
++                layer_surface,
++                state,
++                overlay,
++                keyboard_mode: Some(kb),
++                marshal,
++                version,
++                destroy,
++                queue_destroy,
++                dispatch_pending,
++                roundtrip,
++                flush,
++            })
++        }
++    }
++
++    pub fn set_size(&self, w: i32, h: i32) {
++        if self.overlay {
++            return;
++        }
++        unsafe {
++            let ver = (self.version)(self.layer_surface);
++            (self.marshal)(
++                self.layer_surface,
++                0,
++                ptr::null(),
++                ver,
++                0,
++                w.max(1) as u32,
++                h.max(1) as u32,
++            );
++            (self.marshal)(
++                self.surface,
++                6,
++                ptr::null(),
++                (self.version)(self.surface),
++                0,
++            );
++            let _ = (self.roundtrip)(self.display, self.queue);
++        }
++    }
++
++    pub fn poll(&mut self, raw: *mut SDL_Window, pass: bool) {
++        unsafe {
++            let _ = (self.dispatch_pending)(self.display, self.queue);
++            if self.overlay {
++                let ver = (self.version)(self.layer_surface);
++                let desired = if pass {
++                    0u32
++                } else if ver >= 4 {
++                    2u32
++                } else {
++                    1u32
++                };
++                if self.keyboard_mode != Some(desired) {
++                    (self.marshal)(self.layer_surface, 4, ptr::null(), ver, 0, desired);
++                    self.keyboard_mode = Some(desired);
++                }
++                if self.state.width > 0 && self.state.height > 0 {
++                    let (mut w, mut h) = (0, 0);
++                    SDL_GetWindowSize(raw, &mut w, &mut h);
++                    if w != self.state.width as i32 || h != self.state.height as i32 {
++                        let _ = SDL_SetWindowSize(raw, self.state.width as i32, self.state.height as i32);
++                    }
++                }
++            }
++        }
++    }
++}
++
++impl Drop for LayerWindow {
++    fn drop(&mut self) {
++        unsafe {
++            (self.marshal)(
++                self.layer_surface,
++                7,
++                ptr::null(),
++                (self.version)(self.layer_surface),
++                1,
++            );
++            if (self.version)(self.layer_shell) >= 3 {
++                (self.marshal)(
++                    self.layer_shell,
++                    1,
++                    ptr::null(),
++                    (self.version)(self.layer_shell),
++                    1,
++                );
++            } else {
++                (self.destroy)(self.layer_shell);
++            }
++            let _ = (self.flush)(self.display);
++            (self.queue_destroy)(self.queue);
++        }
++    }
++}
++
++pub fn has_layer_shell() -> bool {
++    static SUPPORTED: OnceLock&lt;bool&gt; = OnceLock::new();
++    *SUPPORTED.get_or_init(|| unsafe {
++        let Ok(lib) = library(&["libwayland-client.so.0", "libwayland-client.so"]) else {
++            return false;
++        };
++        let Ok(connect) =
++            lib.get::<unsafe extern "C" fn(*const c_char) -> *mut c_void>(b"wl_display_connect\0")
++        else {
++            return false;
++        };
++        let Ok(disconnect) = lib.get::<Destroy>(b"wl_display_disconnect\0") else {
++            return false;
++        };
++        let Ok(marshal) = lib.get::<Marshal>(b"wl_proxy_marshal_flags\0") else {
++            return false;
++        };
++        let Ok(destroy) = lib.get::<Destroy>(b"wl_proxy_destroy\0") else {
++            return false;
++        };
++        let Ok(add_listener) = lib.get::<
++            unsafe extern "C" fn(*mut c_void, *const c_void, *mut c_void) -> c_int,
++        >(b"wl_proxy_add_listener\0") else {
++            return false;
++        };
++        let Ok(roundtrip) =
++            lib.get::<unsafe extern "C" fn(*mut c_void) -> c_int>(b"wl_display_roundtrip\0")
++        else {
++            return false;
++        };
++        let Ok(registry_interface) = lib.get::<*const c_void>(b"wl_registry_interface\0") else {
++            return false;
++        };
++        let display = connect(ptr::null());
++        if display.is_null() {
++            return false;
++        }
++        let registry = marshal(
++            display,
++            1,
++            *registry_interface,
++            1,
++            0,
++            ptr::null_mut::<c_void>(),
++        );
++        let mut globals = Box::new(Globals::default());
++        let supported = !registry.is_null()
++            && add_listener(
++                registry,
++                (&LISTENER as *const Listener).cast(),
++                (&mut *globals as *mut Globals).cast(),
++            ) == 0
++            && roundtrip(display) >= 0
++            && globals.layer_shell != 0;
++        if !registry.is_null() {
++            destroy(registry);
++        }
++        disconnect(display);
++        supported
++    })
++}
++
+ struct Wayland {
+     _lib: Library,
+     queue: *mut c_void,
+@@ -32,6 +562,8 @@ struct Wayland {
+ struct Globals {
+     compositor: u32,
+     version: u32,
++    layer_shell: u32,
++    layer_version: u32,
+ }
+ unsafe extern "C" fn global(
+     data: *mut c_void,
+@@ -41,10 +573,20 @@ unsafe extern "C" fn global(
+     version: u32,
+ ) {
+     unsafe {
+-        if !interface.is_null() && CStr::from_ptr(interface).to_bytes() == b"wl_compositor" {
+-            let s = &mut *data.cast::<Globals>();
+-            s.compositor = name;
+-            s.version = version.min(4);
++        if interface.is_null() {
++            return;
++        }
++        let s = &mut *data.cast::<Globals>();
++        match CStr::from_ptr(interface).to_bytes() {
++            b"wl_compositor" => {
++                s.compositor = name;
++                s.version = version.min(4);
++            }
++            b"zwlr_layer_shell_v1" => {
++                s.layer_shell = name;
++                s.layer_version = version.min(4);
++            }
++            _ => {}
+         }
+     }
+ }
+@@ -174,7 +716,10 @@ impl Wayland {
+             })
+         }
+     }
+-    fn set(&mut self, w: &Window, pass: bool) -> Result<(), String> {
++    fn set(&mut self, w: &mut Window, pass: bool) -> Result<(), String> {
++        if let Some(layer) = &mut w.layer {
++            layer.poll(w.raw, pass);
++        }
+         unsafe {
+             let surface = SDL_GetPointerProperty(
+                 SDL_GetWindowProperties(w.raw),
+@@ -381,7 +926,7 @@ impl Passthrough {
+     }
+     pub fn set_guarded(
+         &mut self,
+-        w: &Window,
++        w: &mut Window,
+         pass: bool,
+         hole: Option<Rect>,
+     ) -> Result<(), String> {
 diff --git a/src/sdl.rs b/src/sdl.rs
-index 7de37b4..9107e87 100644
+index 7de37b4..c082257 100644
 --- a/src/sdl.rs
 +++ b/src/sdl.rs
 @@ -27,8 +27,9 @@ pub fn cstring(v: &str) -> CString {
@@ -104,10 +1506,9 @@ index 7de37b4..9107e87 100644
  pub struct Runtime;
  impl Runtime {
 -    pub fn new(x11: bool, smoke: bool) -> Result<Self, String> {
--        let wayland = cfg!(any(target_os = "linux", target_os = "freebsd"))
-+    pub fn new(x11: bool, wayland: bool, smoke: bool) -> Result<Self, String> {
-+        let wayland = wayland
-+            && cfg!(any(target_os = "linux", target_os = "freebsd"))
++    pub fn new(x11: bool, smoke: bool, wayland: bool) -> Result<Self, String> {
+         let wayland = cfg!(any(target_os = "linux", target_os = "freebsd"))
++            && wayland
              && (std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland")
                  || ["WAYLAND_DISPLAY", "WAYLAND_SOCKET"]
                      .iter()
@@ -124,25 +1525,151 @@ index 7de37b4..9107e87 100644
          Some(c"x11")
      } else {
          None
-@@ -497,11 +500,18 @@ mod tests {
+@@ -102,6 +105,8 @@ pub fn driver() -> String {
+ pub struct Window {
+     pub raw: *mut SDL_Window,
+     pub id: SDL_WindowID,
++    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
++    pub layer: Optioncrate::native::LayerWindow,
+ }
+ unsafe extern "C" fn toolbar_hit_test(
+     window: *mut SDL_Window,
+@@ -135,8 +140,49 @@ impl Window {
+             if overlay {
+                 flags |= SDL_WINDOW_BORDERLESS | SDL_WINDOW_TRANSPARENT;
+             }
+-            SDL_ClearError();
+-            let raw = SDL_CreateWindow(title.as_ptr(), w, h, flags);
++            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
++            let mut layer = None;
++            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
++            let mut raw = ptr::null_mut();
++            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
++            if driver() == "wayland"
++                && crate::gnome::desktop() != crate::gnome::Desktop::Gnome
++                && crate::native::has_layer_shell()
++            {
++                let props = SDL_CreateProperties();
++                SDL_SetStringProperty(props, SDL_PROP_WINDOW_CREATE_TITLE_STRING, title.as_ptr());
++                SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, w as i64);
++                SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, h as i64);
++                SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_FLAGS_NUMBER, flags.0 as i64);
++                SDL_SetBooleanProperty(
++                    props,
++                    SDL_PROP_WINDOW_CREATE_WAYLAND_SURFACE_ROLE_CUSTOM_BOOLEAN,
++                    true,
++                );
++                SDL_SetBooleanProperty(
++                    props,
++                    SDL_PROP_WINDOW_CREATE_WAYLAND_CREATE_EGL_WINDOW_BOOLEAN,
++                    true,
++                );
++                SDL_ClearError();
++                raw = SDL_CreateWindowWithProperties(props);
++                SDL_DestroyProperties(props);
++                if !raw.is_null() {
++                    match crate::native::LayerWindow::new(raw, w, h, overlay) {
++                        Ok(surface) => layer = Some(surface),
++                        Err(_) => {
++                            SDL_DestroyWindow(raw);
++                            raw = ptr::null_mut();
++                        }
++                    }
++                }
++            }
++            #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
++            let mut raw = ptr::null_mut();
++            if raw.is_null() {
++                SDL_ClearError();
++                raw = SDL_CreateWindow(title.as_ptr(), w, h, flags);
++            }
+             if raw.is_null() {
+                 let detail = error();
+                 return Err(format!(
+@@ -148,10 +194,25 @@ impl Window {
+             Ok(Self {
+                 raw,
+                 id: SDL_GetWindowID(raw),
++                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
++                layer,
+             })
+         }
+     }
++    pub fn has_layer_shell(&self) -> bool {
++        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
++        {
++            self.layer.is_some()
++        }
++        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
++        {
++            false
++        }
++    }
+     pub fn tooltip(parent: &Self, x: i32, y: i32, w: i32, h: i32) -> Result<Self, String> {
++        if parent.has_layer_shell() {
++            return Err("Layer shell does not use popup windows".into());
++        }
+         unsafe {
+             let raw = SDL_CreatePopupWindow(
+                 parent.raw,
+@@ -170,6 +231,8 @@ impl Window {
+             Ok(Self {
+                 raw,
+                 id: SDL_GetWindowID(raw),
++                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
++                layer: None,
+             })
+         }
+     }
+@@ -224,6 +287,10 @@ impl Window {
+                 h = h.min((bounds.h - 16).max(1));
+             }
+             check(SDL_SetWindowSize(self.raw, w, h))?;
++            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
++            if let Some(layer) = &self.layer {
++                layer.set_size(w, h);
++            }
+             let driver = driver();
+             if bounded && driver != "wayland" {
+                 let (mut x, mut y) = (0, 0);
+@@ -279,6 +346,9 @@ impl Window {
+         }
+     }
+     pub fn place_on_display(&self, id: u32, overlay: bool) -> Result<(), String> {
++        if self.has_layer_shell() {
++            return Ok(());
++        }
+         unsafe {
+             let video = driver();
+             let display = SDL_DisplayID(id);
+@@ -330,6 +400,10 @@ impl Window {
+ }
+ impl Drop for Window {
+     fn drop(&mut self) {
++        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
++        {
++            self.layer = None;
++        }
+         unsafe { SDL_DestroyWindow(self.raw) }
+     }
+ }
+@@ -497,11 +571,16 @@ mod tests {
      use super::*;
  
      #[test]
 -    fn native_wayland_takes_priority_in_a_wayland_session() {
-+    fn x11_is_default_and_wayland_is_opt_in() {
++    fn defaults_to_x11_unless_wayland_is_enabled() {
++        let default = if cfg!(any(target_os = "linux", target_os = "freebsd")) {
++            Some(c"x11")
++        } else {
++            None
++        };
          assert_eq!(startup_driver(false, false, true), Some(c"wayland"));
 -        assert_eq!(startup_driver(true, false, true), Some(c"wayland"));
 +        assert_eq!(startup_driver(true, false, true), Some(c"x11"));
          assert_eq!(startup_driver(true, true, true), Some(c"dummy"));
          assert_eq!(startup_driver(true, false, false), Some(c"x11"));
 -        assert_eq!(startup_driver(false, false, false), None);
-+        assert_eq!(
-+            startup_driver(false, false, false),
-+            if cfg!(any(target_os = "linux", target_os = "freebsd")) {
-+                Some(c"x11")
-+            } else {
-+                None
-+            }
-+        );
++        assert_eq!(startup_driver(false, false, false), default);
      }
  }
