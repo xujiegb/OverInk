@@ -415,8 +415,6 @@ jobs:
           - {runner: ubuntu-24.04, arch: loong64, pkg_arch: loong64}
           - {runner: ubuntu-24.04, arch: s390x, pkg_arch: s390x}
     env:
-      OVERINK_PACKAGE_VERSION: ${{ needs.prepare.outputs.version || github.ref_name }}
-      OVERINK_OUTPUT_DIR: ${{ github.workspace }}/pkg-output
       CARGO_BUILD_JOBS: '2'
     steps:
       - name: Prepare container
@@ -439,11 +437,11 @@ jobs:
           bash package-debian.sh --buildfrom 3 --arch "$TARGET_ARCH"
           mkdir -p dist
           if [[ deb == deb ]]; then
-            mapfile -t files < <(find pkg-output -maxdepth 1 -name '*.deb' -type f)
+            mapfile -t files < <(find "$HOME/debbuild" -maxdepth 1 -name '*.deb' -type f)
             (( ${#files[@]} == 1 )) || exit 1
             test "$(dpkg-deb -f "${files[0]}" Architecture)" = "$PACKAGE_ARCH"
           else
-            mapfile -t files < <(find pkg-output/RPMS -name '*.rpm' -type f)
+            mapfile -t files < <(find "$HOME/rpmbuild/RPMS" -name '*.rpm' -type f)
             (( ${#files[@]} == 1 )) || exit 1
             test "$(rpm -qp --qf '%{ARCH}' "${files[0]}")" = "$PACKAGE_ARCH"
           fi
@@ -473,15 +471,51 @@ jobs:
           - {runner: ubuntu-24.04, arch: loong64, pkg_arch: loongarch64}
           - {runner: ubuntu-24.04, arch: s390x, pkg_arch: s390x}
     env:
-      OVERINK_PACKAGE_VERSION: ${{ needs.prepare.outputs.version || github.ref_name }}
-      OVERINK_OUTPUT_DIR: ${{ github.workspace }}/pkg-output
       CARGO_BUILD_JOBS: '2'
     steps:
-      - name: Prepare container
+      - name: Prepare tools (Red Hat)
         shell: bash
         run: |
           set -euo pipefail
-          dnf -y install git curl ca-certificates python3 findutils
+          . /etc/os-release
+          EL_MAJOR="${VERSION_ID%%.*}"
+          [[ "$EL_MAJOR" == 10 ]] || { echo "Unsupported EL version: $VERSION_ID" >&2; exit 1; }
+          ARCH="$(uname -m)"
+          case "$ARCH" in
+            x86_64|aarch64) ;;
+            *) echo "Unsupported arch: $ARCH" >&2; exit 1 ;;
+          esac
+          dnf -y makecache
+          command -v curl >/dev/null 2>&1 || dnf -y install curl ca-certificates
+
+          install_epel_from_dir() {
+            local base="$1" directory rpm
+            for directory in Packages/e Packages; do
+              rpm="$(curl -fsSL "$base/$directory/" 2>/dev/null |
+                sed -n 's/.*href="\([^"/]*epel-release-[^"/]*\.noarch\.rpm\)".*/\1/p' |
+                sort -V | tail -n1)" || continue
+              [[ -n "$rpm" ]] || continue
+              dnf -y install "$base/$directory/$rpm" && return 0
+            done
+            return 1
+          }
+
+          if ! rpm -q epel-release >/dev/null 2>&1; then
+            FEDORA="https://dl.fedoraproject.org/pub/epel/epel-release-latest-${EL_MAJOR}.noarch.rpm"
+            ROCKY="https://dl.rockylinux.org/pub/rocky/${EL_MAJOR}/extras/${ARCH}/os"
+            ALMA="https://repo.almalinux.org/almalinux/${EL_MAJOR}/extras/${ARCH}/os"
+            dnf -y install "$FEDORA" ||
+              install_epel_from_dir "$ROCKY" ||
+              install_epel_from_dir "$ALMA" ||
+              { echo 'EPEL bootstrap failed (Fedora/Rocky/Alma)' >&2; exit 1; }
+          fi
+
+          dnf -y makecache --refresh
+          dnf repolist --enabled | awk '$1 == "epel" {found=1; print} END {exit !found}'
+          dnf -y distro-sync rpm rpm-libs
+          dnf -y install --setopt=install_weak_deps=False \
+            sudo git rpm-build rpmdevtools dnf-plugins-core rsync findutils \
+            tar gzip unzip which python3 ca-certificates
       - uses: actions/checkout@v5
         with:
           submodules: recursive
@@ -496,11 +530,11 @@ jobs:
           bash package-rhel.sh --buildfrom 3 --arch "$TARGET_ARCH"
           mkdir -p dist
           if [[ rpm == deb ]]; then
-            mapfile -t files < <(find pkg-output -maxdepth 1 -name '*.deb' -type f)
+            mapfile -t files < <(find "$HOME/debbuild" -maxdepth 1 -name '*.deb' -type f)
             (( ${#files[@]} == 1 )) || exit 1
             test "$(dpkg-deb -f "${files[0]}" Architecture)" = "$PACKAGE_ARCH"
           else
-            mapfile -t files < <(find pkg-output/RPMS -name '*.rpm' -type f)
+            mapfile -t files < <(find "$HOME/rpmbuild/RPMS" -name '*.rpm' -type f)
             (( ${#files[@]} == 1 )) || exit 1
             test "$(rpm -qp --qf '%{ARCH}' "${files[0]}")" = "$PACKAGE_ARCH"
           fi
