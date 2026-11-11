@@ -512,13 +512,32 @@ jobs:
 
           dnf -y makecache --refresh
           dnf repolist --enabled | awk '$1 == "epel" {found=1; print} END {exit !found}'
-          if rpm -q rpm-plugin-syslog >/dev/null 2>&1; then
-            dnf -y remove rpm-plugin-syslog
-          fi
-          dnf -y distro-sync rpm rpm-libs
           dnf -y install --setopt=install_weak_deps=False \
-            sudo git rpm-build rpmdevtools dnf-plugins-core rsync findutils \
-            tar gzip unzip which python3 ca-certificates
+            sudo git dnf-plugins-core rsync findutils tar gzip unzip which \
+            python3 ca-certificates binutils bzip2 cpio debugedit diffutils \
+            elfutils file gawk patch pkgconf-pkg-config redhat-rpm-config
+          if ! command -v rpmbuild >/dev/null 2>&1; then
+            rpm_version="$(rpm -q --qf '%{VERSION}-%{RELEASE}' rpm)"
+            arch="$(rpm --eval '%{_arch}')"
+            base='https://mirror.stream.centos.org/10-stream'
+            mkdir -p /tmp/overink-rpm-tools
+            for package in rpm-build-libs:BaseOS rpm-build:AppStream; do
+              name="${package%%:*}"
+              repo="${package#*:}"
+              curl -fsSL --retry 3 \
+                "$base/$repo/$arch/os/Packages/$name-$rpm_version.$arch.rpm" \
+                -o "/tmp/overink-rpm-tools/$name.rpm"
+            done
+            curl -fsSL --retry 3 https://www.centos.org/keys/RPM-GPG-KEY-CentOS-Official \
+              -o /tmp/overink-rpm-tools/CentOS.key
+            rpm --import /tmp/overink-rpm-tools/CentOS.key
+            rpm -K /tmp/overink-rpm-tools/*.rpm
+            dnf -y install --setopt=localpkg_gpgcheck=True --setopt=install_weak_deps=False \
+              /tmp/overink-rpm-tools/rpm-build-libs.rpm \
+              /tmp/overink-rpm-tools/rpm-build.rpm
+          fi
+          dnf -y install --setopt=install_weak_deps=False rpmdevtools
+          rpmbuild --version
       - uses: actions/checkout@v5
         with:
           submodules: recursive
