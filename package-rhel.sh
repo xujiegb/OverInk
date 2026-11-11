@@ -172,7 +172,7 @@ check_sysroots() {
   local arch triple directory
   for arch in "${TARGETS[@]}"; do
     triple="$(target_triple "$arch")"
-    if [[ "$triple" != "$HOST" ]]; then
+    if [[ "$triple" != "$HOST" || -n "$SYSROOT" ]]; then
       directory="$(select_sysroot "$arch" "$triple")"
       [[ -d "$directory/usr/lib/gcc" ]] || die "Missing cross GCC runtime in $directory/usr/lib/gcc"
       find "$directory/usr/lib/gcc" -name crtbeginS.o -print -quit | grep -q . || die "Missing crtbeginS.o for $arch"
@@ -202,7 +202,7 @@ build_target() (
   export "CC_$key=$CLANG" "CXX_$key=$CLANGXX" "AR_$key=llvm-ar"
   export "CARGO_TARGET_${upper}_LINKER=$CLANG"
   export CMAKE_TOOLCHAIN_FILE="$work/toolchain.cmake"
-  if [[ "$triple" != "$HOST" ]]; then
+  if [[ "$triple" != "$HOST" || -n "$SYSROOT" ]]; then
     sysroot="$(select_sysroot "$arch" "$triple")"
     gcc_dir="$(find "$sysroot/usr/lib/gcc" -name crtbeginS.o -print | sort -V | tail -n1)"
     [[ -n "$gcc_dir" ]] || die "Missing cross GCC startup files for $arch"
@@ -221,7 +221,7 @@ build_target() (
     export PKG_CONFIG_LIBDIR="$sysroot/usr/lib/$multi/pkgconfig:$sysroot/usr/lib/pkgconfig:$sysroot/usr/share/pkgconfig:$sysroot/usr/lib64/pkgconfig"
     export PKG_CONFIG_PATH=""
     write_cmake "$CMAKE_TOOLCHAIN_FILE" "$work/clang" "$work/clang++" "$sysroot" "${processor%%-*}"
-    printf 'Cross-compiling %s (%s)\n' "$arch" "$triple"
+    printf 'Compiling %s (%s) with sysroot\n' "$arch" "$triple"
   else
     pkg-config --exists x11 wayland-client xkbcommon egl gl || die 'Native X11/Wayland/EGL development packages are missing; use --install-deps'
     write_cmake "$CMAKE_TOOLCHAIN_FILE" "$(command -v "$CLANG")" "$(command -v "$CLANGXX")" '' ''
