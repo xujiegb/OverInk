@@ -13,6 +13,7 @@ RUST_VERSION="${RUST_VERSION:-1.99.1}"
 CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}"
 CARGO_TARGET_DIR=""
 SDK_WORK_DIR=""
+LLVM_TOOL_BIN=""
 
 OS_ID=""
 OS_NAME=""
@@ -90,7 +91,7 @@ install_dependencies() {
   fi
   as_root dnf -y "${repo_options[@]}" install \
     rpm-build curl unzip tar jq rsync ca-certificates git file \
-    desktop-file-utils wget gcc gcc-c++ clang lld llvm cmake make \
+    desktop-file-utils wget clang lld llvm cmake make \
     pkgconf-pkg-config findutils diffutils binutils gzip xz zstd \
     expat libxml2 dbus-daemon python3
 
@@ -254,6 +255,40 @@ is_native_target() {
   esac
 }
 
+prepare_loongarch_compiler() {
+  LLVM_TOOL_BIN="${OVERINK_LLVM_BIN_DIR:-$(dirname "$(command -v clang)")}"
+  [[ -x "$LLVM_TOOL_BIN/clang" && -x "$LLVM_TOOL_BIN/clang++" ]] || die "Clang/Clang++ not found in $LLVM_TOOL_BIN"
+
+  if [[ "$1" == loong64 ]] && ! "$LLVM_TOOL_BIN/clang" --print-targets 2>/dev/null | grep -qi loongarch; then
+    local archive=""
+    local checksum=""
+    case "$HOST_ARCH" in
+      x86_64|aarch64)
+        case "$HOST_ARCH" in
+          x86_64) checksum="8d5d1e52a06e1c10e457fd36489047053ac451ddad9c88017b0d0fc6b8e5d4c0" ;;
+          aarch64) checksum="0b0131b9a6fb38c2fbe73e576d7812962268db610b8b2f1b6ef217dd5161ef77" ;;
+        esac
+        [[ -z "${OVERINK_LLVM_BIN_DIR:-}" ]] || die "The supplied LLVM toolchain lacks LoongArch support"
+        archive="$SDK_WORK_DIR/llvm.tar.xz"
+        mkdir -p "$SDK_WORK_DIR/llvm"
+        curl -fL --retry 3 \
+          "https://www.kernel.org/pub/tools/llvm/files/llvm-22.1.8-${HOST_ARCH}.tar.xz" \
+          -o "$archive"
+        printf '%s  %s\n' "$checksum" "$archive" | sha256sum -c -
+        tar -xJf "$archive" -C "$SDK_WORK_DIR/llvm" --strip-components=1
+        rm -f "$archive"
+        LLVM_TOOL_BIN="$SDK_WORK_DIR/llvm/bin"
+        ;;
+      *) die "Supply OVERINK_LLVM_BIN_DIR with a LoongArch-capable Clang for $HOST_ARCH" ;;
+    esac
+  fi
+
+  if [[ "$1" == loong64 ]]; then
+    "$LLVM_TOOL_BIN/clang" --print-targets | grep -qi loongarch || die "Clang lacks the LoongArch backend"
+    "$LLVM_TOOL_BIN/ld.lld" --version >/dev/null || die "ld.lld is missing from $LLVM_TOOL_BIN"
+    echo "[OK] Using LLVM Clang with LoongArch support: $LLVM_TOOL_BIN/clang"
+  fi
+}
 prepare_target_sdk() {
   local short="$1"
   local rust_target="$2"
@@ -266,6 +301,7 @@ prepare_target_sdk() {
 
   SDK_WORK_DIR="$(mktemp -d)"
   mkdir -p "$SDK_WORK_DIR/sysroot/usr/share" "$SDK_WORK_DIR/debs" "$SDK_WORK_DIR/cc"
+  prepare_loongarch_compiler "$short"
 
   for share_dir in /usr/share/wayland /usr/share/wayland-protocols; do
     [[ -d "$share_dir" ]] && cp -a "$share_dir" "$SDK_WORK_DIR/sysroot/usr/share/" || true
@@ -384,9 +420,6 @@ if not shutil.which("wayland-scanner"):
     (work / "host").mkdir(exist_ok=True)
     extract_deb(deb_path, work / "host")
 
-if short == "loong64" and "loongarch" not in subprocess.check_output(["clang", "--print-targets"], text=True).lower():
-    raise RuntimeError("Host Clang lacks the LoongArch backend; install a Clang/LLVM build with LoongArch support")
-
 for name in ("lib", "lib64", "lib32", "libx32"):
     old, new = sysroot / name, sysroot / "usr" / name
     if old.is_dir() and not old.is_symlink():
@@ -428,6 +461,7 @@ publish_binary() {
   CARGO_TARGET_DIR="$(mktemp -d)"
 
   if [[ -z "$SDK_WORK_DIR" ]]; then
+    CC="$(command -v clang)" CXX="$(command -v clang++)" \
     CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS" \
     CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
       cargo build --manifest-path "$PROJECT" --locked --release --target "$rust_target"
@@ -445,14 +479,24 @@ publish_binary() {
 
   local compiler=""
   for compiler in clang clang++; do
-    local driver="/usr/bin/$compiler"
-    local linker="lld"
     cat > "$SDK_WORK_DIR/cc/$compiler" <<WRAPPER
 #!/bin/sh
-exec "$driver" --target=$triple --sysroot=$sysroot --gcc-install-dir=$gcc_dir -fuse-ld=$linker -Qunused-arguments "\$@"
+exec "$LLVM_TOOL_BIN/$compiler" --target=$triple --sysroot=$sysroot --gcc-install-dir=$gcc_dir -fuse-ld=lld -Qunused-arguments "\$@"
 WRAPPER
     chmod +x "$SDK_WORK_DIR/cc/$compiler"
   done
+
+  if [[ "$short" == loong64 ]]; then
+    printf 'int main(void) { return 0; }\n' > "$SDK_WORK_DIR/smoke.c"
+    "$SDK_WORK_DIR/cc/clang" "$SDK_WORK_DIR/smoke.c" -o "$SDK_WORK_DIR/smoke-c" || die "LoongArch Clang C link test failed"
+    printf '#include <string>\nint main() { std::string s = "ok"; return s.size() != 2; }\n' > "$SDK_WORK_DIR/smoke.cpp"
+    "$SDK_WORK_DIR/cc/clang++" "$SDK_WORK_DIR/smoke.cpp" -o "$SDK_WORK_DIR/smoke-cxx" || die "LoongArch Clang C++ link test failed"
+    readelf -h "$SDK_WORK_DIR/smoke-c" | grep -q 'Machine:.*LoongArch' || die "LoongArch linker produced the wrong architecture"
+    echo "[OK] LoongArch Clang cross-link tests passed"
+  fi
+
+  local archiver="$LLVM_TOOL_BIN/llvm-ar"
+  local ranlib="$LLVM_TOOL_BIN/llvm-ranlib"
 
   local toolchain="$SDK_WORK_DIR/toolchain.cmake"
   cat > "$toolchain" <<CMAKE
@@ -461,8 +505,8 @@ set(CMAKE_SYSTEM_PROCESSOR ${triple%%-*})
 set(CMAKE_SYSROOT $sysroot)
 set(CMAKE_C_COMPILER $SDK_WORK_DIR/cc/clang)
 set(CMAKE_CXX_COMPILER $SDK_WORK_DIR/cc/clang++)
-set(CMAKE_AR /usr/bin/llvm-ar)
-set(CMAKE_RANLIB /usr/bin/llvm-ranlib)
+set(CMAKE_AR $archiver)
+set(CMAKE_RANLIB $ranlib)
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
 set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
@@ -475,7 +519,8 @@ CMAKE
   local upper="${key^^}"
 
   env \
-    PATH="$SDK_WORK_DIR/host/usr/bin:$PATH" \
+    PATH="$LLVM_TOOL_BIN:$SDK_WORK_DIR/host/usr/bin:$PATH" \
+    CC="$LLVM_TOOL_BIN/clang" CXX="$LLVM_TOOL_BIN/clang++" \
     CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS" \
     CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
     PKG_CONFIG_ALLOW_CROSS=1 \
@@ -484,7 +529,7 @@ CMAKE
     CMAKE_TOOLCHAIN_FILE="$toolchain" \
     "CC_${key}=$SDK_WORK_DIR/cc/clang" \
     "CXX_${key}=$SDK_WORK_DIR/cc/clang++" \
-    "AR_${key}=llvm-ar" \
+    "AR_${key}=$archiver" \
     "CARGO_TARGET_${upper}_LINKER=$SDK_WORK_DIR/cc/clang" \
     cargo build --manifest-path "$PROJECT" --locked --release --target "$rust_target"
 }
