@@ -632,7 +632,7 @@ package_binary() {
   binary="$stage/opt/OverInk/overink"
   min_glibc="$(readelf --version-info "$binary" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sed 's/GLIBC_//' | sort -V | tail -n1)"
   [[ -n "$min_glibc" ]] || die "Unable to determine glibc requirements for $short"
-  depends="libc6 (>= $min_glibc), libx11-6, libxext6, libxi6, libxrandr2, libxcursor1, libxfixes3, libxrender1, libxss1, libxtst6, libwayland-client0, libxkbcommon0, libegl1, libgl1, desktop-file-utils, hicolor-icon-theme"
+  depends="libc6 (>= $min_glibc), libx11-6, libxext6, libxi6, libxrandr2, libxcursor1, libxfixes3, libxrender1, libxtst6, libwayland-client0, libxkbcommon0, libegl1, libgl1, desktop-file-utils, hicolor-icon-theme"
   needed="$(readelf -d "$binary" | sed -n 's/.*Shared library: \[\([^]]*\)\].*/\1/p')"
   if grep -qx 'libgcc_s.so.1' <<< "$needed"; then depends+=', libgcc-s1'; fi
   if grep -qx 'libstdc++.so.6' <<< "$needed"; then depends+=', libstdc++6'; fi
