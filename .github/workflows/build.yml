@@ -528,7 +528,7 @@ jobs:
                 "$base/$repo/$arch/os/Packages/$name-$rpm_version.$arch.rpm" \
                 -o "/tmp/overink-rpm-tools/$name.rpm"
             done
-            curl -fsSL --retry 3 https://www.centos.org/keys/RPM-GPG-KEY-CentOS-Official \
+            curl -fsSL --retry 3 https://www.centos.org/keys/RPM-GPG-KEY-CentOS-Official-SHA256 \
               -o /tmp/overink-rpm-tools/CentOS.key
             rpm --import /tmp/overink-rpm-tools/CentOS.key
             rpm -K /tmp/overink-rpm-tools/*.rpm
