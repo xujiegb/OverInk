@@ -44,19 +44,52 @@ function Assert-PeMachine {
 function Protect-UpgradeInstallDirectory {
     param([string]$MsiPath)
     $installer = New-Object -ComObject WindowsInstaller.Installer
-    $database = $installer.OpenDatabase($MsiPath, 1)
+    $database = $null
     try {
+        $database = $installer.OpenDatabase($MsiPath, 1)
         foreach ($action in @('Hide', 'Disable')) {
-            $sql = "INSERT INTO ``ControlCondition`` (``Dialog_``, ``Control_``, ``Action``, ``Condition``) VALUES ('CustomizeDlg', 'Browse', '$action', 'WIX_UPGRADE_DETECTED')"
+            $sql = "UPDATE ``ControlCondition`` SET ``Condition`` = 'Installed OR WIX_UPGRADE_DETECTED' WHERE ``Dialog_`` = 'CustomizeDlg' AND ``Control_`` = 'Browse' AND ``Action`` = '$action'"
             $view = $database.OpenView($sql)
-            try { $view.Execute() } finally { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($view) }
+            try {
+                $view.Execute()
+                $view.Close()
+            } catch {
+                throw "Failed to update $action condition in MSI: $($_.Exception.Message)"
+            } finally {
+                [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($view)
+            }
+
+            $sql = "SELECT ``Condition`` FROM ``ControlCondition`` WHERE ``Dialog_`` = 'CustomizeDlg' AND ``Control_`` = 'Browse' AND ``Action`` = '$action'"
+            $view = $database.OpenView($sql)
+            try {
+                $view.Execute()
+                $record = $view.Fetch()
+                if ($null -eq $record) { throw "Missing CustomizeDlg/Browse/$action condition in $MsiPath" }
+                try {
+                    if ($record.StringData(1) -ne 'Installed OR WIX_UPGRADE_DETECTED') {
+                        throw "Failed to persist CustomizeDlg/Browse/$action condition in $MsiPath"
+                    }
+                } finally {
+                    [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($record)
+                }
+                $view.Close()
+            } finally {
+                [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($view)
+            }
         }
         $sql = "UPDATE ``ControlEvent`` SET ``Condition`` = 'NOT WIX_UPGRADE_DETECTED' WHERE ``Dialog_`` = 'CustomizeDlg' AND ``Control_`` = 'Browse' AND ``Event`` = 'SelectionBrowse'"
         $view = $database.OpenView($sql)
-        try { $view.Execute() } finally { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($view) }
+        try {
+            $view.Execute()
+            $view.Close()
+        } catch {
+            throw "Failed to protect the MSI Browse event: $($_.Exception.Message)"
+        } finally {
+            [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($view)
+        }
         $database.Commit()
     } finally {
-        [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($database)
+        if ($null -ne $database) { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($database) }
         [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($installer)
     }
 }
