@@ -4,8 +4,7 @@ param(
     [string]$Arch = 'all',
     [string]$Version,
     [string]$RustVersion = '1.99.1',
-    [string]$WixVersion = '7.0.1',
-    [switch]$AcceptWixEula
+    [string]$WixVersion = '7.0.1'
 )
 
 Set-StrictMode -Version Latest
@@ -182,11 +181,7 @@ if (Test-Path -LiteralPath $wix) {
 } else {
     Invoke-Checked 'dotnet' @('tool', 'install', 'wix', '--tool-path', $toolDir, '--version', $WixVersion)
 }
-if ($AcceptWixEula) {
-    Invoke-Checked $wix @('eula', 'accept', 'wix7')
-} elseif (-not (Test-Path -LiteralPath (Join-Path $env:USERPROFILE '.wix/wix7-osmf-eula.txt'))) {
-    throw 'WiX 7 requires explicit OSMF EULA acceptance. Review https://www.firegiant.com/wix/osmf/ and rerun with -AcceptWixEula, or run wix eula accept wix7 first.'
-}
+Invoke-Checked $wix @('eula', 'accept', 'wix7')
 $actualWixVersion = (& $wix --version).Trim()
 if ($LASTEXITCODE -ne 0) { throw "Cannot determine WiX version: $actualWixVersion" }
 $actualWixBaseVersion = ($actualWixVersion -split '\+', 2)[0]
