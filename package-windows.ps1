@@ -472,9 +472,10 @@ try {
 
         $msiXml = @'
 <?xml version="1.0" encoding="UTF-8"?>
-<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
   <Package Name="OverInk ({Arch})" Manufacturer="OverInk Contributors" Version="{Version}" Language="1033" UpgradeCode="{MsiUpgrade}" Scope="perMachine" InstallerVersion="500">
-    <MajorUpgrade DowngradeErrorMessage="A newer version of OverInk is already installed." />
+    <MajorUpgrade Schedule="afterInstallInitialize" DowngradeErrorMessage="A newer version of OverInk is already installed." />
+    <util:CloseApplication Id="CloseOverInk" Target="OverInk.exe" CloseMessage="yes" PromptToContinue="yes" Description="OverInk is running. Save your work and close OverInk before continuing." Timeout="20" RebootPrompt="yes" />
     <Property Id="CREATE_DESKTOP_SHORTCUT" Secure="yes" Value="1" />
     <Property Id="CREATE_STARTMENU_SHORTCUT" Secure="yes" Value="1" />
     <Property Id="PREVIOUS_INSTALLFOLDER" Secure="yes">
@@ -534,7 +535,7 @@ try {
         [System.IO.File]::WriteAllText($msiSource, $msiXml, [System.Text.UTF8Encoding]::new($false))
         $msi = Join-Path $work "OverInk-$Version-$name.msi"
         $script:BuildStage = "Building $name MSI"
-        Invoke-Checked $wix @('build', $msiSource, '-arch', $a.WixArch, '-o', $msi)
+        Invoke-Checked $wix @('build', $msiSource, '-arch', $a.WixArch, '-ext', 'WixToolset.Util.wixext', '-o', $msi)
 
         $themePath = Join-Path $work "$name.theme.xml"
         [System.IO.File]::WriteAllText($themePath, $themeTemplate, [System.Text.UTF8Encoding]::new($false))
@@ -581,14 +582,16 @@ try {
         foreach ($key in $bundleInputs.Keys) { $bundleXml = $bundleXml.Replace('{' + $key + '}', [string]$bundleInputs[$key]) }
         $bundleDocument = [System.Xml.Linq.XDocument]::Parse($bundleXml)
         $installFolderVariableName = [System.Xml.Linq.XName]::Get('Variable', 'http://wixtoolset.org/schemas/v4/wxs')
-        $installFolderVariable = $bundleDocument.Descendants($installFolderVariableName) |
-            Where-Object { [string]$_.Attribute('Name') -eq 'InstallFolder' } |
-            Select-Object -First 1
+        $installFolderVariables = @($bundleDocument.Descendants($installFolderVariableName) |
+            Where-Object { $_.Attribute('Name') -and $_.Attribute('Name').Value -ceq 'InstallFolder' })
+        if ($installFolderVariables.Count -ne 1) {
+            throw ("Expected exactly one Burn InstallFolder variable for {0}, found {1}" -f $name, $installFolderVariables.Count)
+        }
+        $actualFolderType = $installFolderVariables[0].Attribute('Type').Value
+        $actualFolderValue = $installFolderVariables[0].Attribute('Value').Value
         $expectedFolderValue = "[$($a.BurnProgramFiles)]OverInk"
-        if ($null -eq $installFolderVariable -or
-            [string]$installFolderVariable.Attribute('Type') -ne 'formatted' -or
-            [string]$installFolderVariable.Attribute('Value') -ne $expectedFolderValue) {
-            throw ("Invalid Burn install directory for {0}: expected formatted {1}" -f $name, $expectedFolderValue)
+        if ($actualFolderType -cne 'formatted' -or $actualFolderValue -cne $expectedFolderValue) {
+            throw ("Invalid Burn install directory for {0}: expected formatted {1}; got {2} {3}" -f $name, $expectedFolderValue, $actualFolderType, $actualFolderValue)
         }
         $bundleSource = Join-Path $work "$name.bundle.wxs"
         [System.IO.File]::WriteAllText($bundleSource, $bundleXml, [System.Text.UTF8Encoding]::new($false))
