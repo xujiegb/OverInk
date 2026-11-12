@@ -12,7 +12,8 @@ Environment:
   NOTARYTOOL_PROFILE         Optional notarytool keychain profile
 
 Builds native OverInk.app and a branded drag-to-Applications DMG, with a
-bilingual installation background and optional Gatekeeper troubleshooting tip.
+trilingual (Chinese, English, French) installation background and an
+optional, source-trust-gated Gatekeeper troubleshooting tip.
 Requires macOS, Xcode Command Line Tools and Python >= 3.10; Python build
 packages (dmgbuild and Pillow) are installed in an isolated temporary venv.
 The repository needs only this script, not an external DMG theme or icon file.
@@ -36,10 +37,10 @@ case "$arch" in x64|arm64|all) ;; *) echo 'Architecture must be x64, arm64 or al
 
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 cd "$root"
-for item in Cargo.toml Cargo.lock LICENSE assets/overink.png assets/fonts/OFL.txt; do
+for item in Cargo.toml Cargo.lock LICENSE assets/overink.svg assets/overink.png assets/fonts/OFL.txt; do
   [[ -f $item ]] || { printf 'Missing file: %s\n' "$item" >&2; exit 1; }
 done
-for cmd in rustup cargo rustc cmake xcrun sips iconutil plutil codesign lipo ditto hdiutil python3; do
+for cmd in rustup cargo rustc cmake xcrun sips iconutil plutil codesign lipo ditto hdiutil tiffutil python3; do
   command -v "$cmd" >/dev/null 2>&1 || { printf 'Missing tool: %s\n' "$cmd" >&2; exit 1; }
 done
 python3 -c 'import sys; assert sys.version_info >= (3, 10), "Python 3.10 or later is required"'
@@ -81,100 +82,118 @@ python3 -m venv "$work_root/venv"
 
 cat > "$work_root/draw-background.py" <<'PY'
 from pathlib import Path
-from PIL import Image, ImageDraw, ImageFont
+from functools import lru_cache
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
 import sys
+import xml.etree.ElementTree as ET
 
 out = Path(sys.argv[1])
 version = sys.argv[2]
-W, H = 800, 500
+icon_file = Path(sys.argv[3])
+svg_file = Path(sys.argv[4])
+W, H = 900, 640
 
+# Read the artwork palette from the actual assets/overink.svg.
+svg = ET.parse(svg_file).getroot()
+colors = {v.lower() for el in svg.iter() for key, v in el.attrib.items()
+          if key in ('fill', 'stroke') and v.startswith('#')}
+for value in ('#132940', '#58d6ed', '#ffb65e'):
+    if value not in colors:
+        raise SystemExit(f'Unexpected OverInk SVG palette: missing {value}')
+navy, aqua, amber = '#132940', '#58d6ed', '#ffb65e'
 
-def font_paths():
-    candidates = [
-        '/System/Library/Fonts/PingFang.ttc',
-        '/System/Library/Fonts/Supplemental/Arial Unicode.ttf',
-        '/System/Library/Fonts/STHeiti Medium.ttc',
-    ]
-    for folder in ('/System/Library/Fonts', '/Library/Fonts'):
-        root = Path(folder)
-        if root.exists():
-            candidates.extend(str(p) for p in root.rglob('*')
-                              if p.suffix.lower() in ('.ttc', '.otf', '.ttf')
-                              and any(x in p.name.lower() for x in
-                                      ('pingfang', 'heiti', 'arial unicode', 'notosanscjk')))
-    return list(dict.fromkeys(candidates))
-
-
-def load_font(size, bold=False, mono=False):
-    if mono:
+@lru_cache(maxsize=None)
+def font(size, role='normal'):
+    if role == 'mono':
         paths = ['/System/Library/Fonts/Menlo.ttc',
-                 '/System/Library/Fonts/Monaco.ttf']
+                 '/System/Library/Fonts/Monaco.ttf',
+                 '/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf']
     else:
-        paths = font_paths()
-    for path in paths:
-        if Path(path).is_file():
+        paths = ['/System/Library/Fonts/PingFang.ttc',
+                 '/System/Library/Fonts/PingFang SC.ttc',
+                 '/System/Library/Fonts/STHeiti Medium.ttc',
+                 '/System/Library/Fonts/Supplemental/Arial Unicode.ttf',
+                 '/System/Library/Fonts/Supplemental/Arial.ttf',
+                 '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc']
+    for p in paths:
+        if Path(p).is_file():
             try:
-                return ImageFont.truetype(path, size, index=1 if bold and path.endswith('.ttc') else 0)
+                return ImageFont.truetype(p, size, index=1 if role == 'bold' and p.endswith('.ttc') else 0)
             except (OSError, IndexError):
                 try:
-                    return ImageFont.truetype(path, size)
+                    return ImageFont.truetype(p, size)
                 except OSError:
-                    pass
-    raise RuntimeError('A macOS system font is required to render the DMG background')
+                    continue
+    raise RuntimeError('No macOS font available for Chinese, English and French')
 
 
 def render(scale):
     S = scale
-    im = Image.new('RGB', (W*S, H*S), '#f7f8fd')
-    d = ImageDraw.Draw(im)
-    def xy(a):
-        return tuple(round(v*S) for v in a)
-    def rect(bbox, fill, radius=0, outline=None, width=1):
-        d.rounded_rectangle(xy(bbox), radius=round(radius*S), fill=fill,
-                            outline=outline, width=round(width*S))
-    def text(x, y, value, size, color, bold=False, mono=False, anchor=None):
-        d.text((round(x*S), round(y*S)), value, font=load_font(round(size*S), bold, mono),
-               fill=color, anchor=anchor)
+    image = Image.new('RGB', (W*S, H*S), '#f7fafc')
+    d = ImageDraw.Draw(image)
+    def xy(box): return tuple(round(v*S) for v in box)
+    def rounded(box, radius, fill, outline=None, stroke=1):
+        d.rounded_rectangle(xy(box), radius=round(radius*S), fill=fill,
+                            outline=outline, width=round(stroke*S))
+    def label(x, y, value, size, color, weight='normal', anchor=None):
+        f = font(round(size*S), weight)
+        px, py = round(x*S), round(y*S)
+        if anchor == 'center':
+            width = d.textbbox((0,0),value,font=f)[2]
+            px -= width//2
+        d.text((px,py), value, font=f, fill=color, stroke_width=0)
+    def line(points, fill, width):
+        d.line(xy(points), fill=fill, width=round(width*S), joint='curve')
 
-    # A calm, light desktop-friendly surface using OverInk's default ink palette.
-    d.ellipse(xy((650, -140, 1000, 210)), fill='#f0f0ff')
-    d.ellipse(xy((-150, 345, 140, 645)), fill='#eff7f1')
-    rect((0, 0, 800, 12), '#636896')
-    rect((42, 37, 88, 83), '#636896', radius=13)
-    d.line(xy((54, 66, 65, 56, 78, 65)), fill='#ffffff', width=round(5*S), joint='curve')
-    text(102, 33, 'OverInk', 34, '#252842', bold=True)
-    text(103, 73, 'DRAW · PRESENT · EXPRESS', 10, '#69708b', bold=True)
-    rect((670, 46, 750, 78), '#ececf8', radius=16)
-    text(710, 62, f'v{version}', 12, '#636896', bold=True, anchor='mm')
+    # Brand header and negative space
+    d.rectangle(xy((0,0,W,126)), fill=navy)
+    d.ellipse(xy((718,-165,1080,210)),fill='#18394d')
+    d.ellipse(xy((815,-112,1140,172)),fill='#1c4559')
+    d.rectangle(xy((0,126,W,H)), fill='#f7fafc')
+    d.rectangle(xy((0,122,W,126)), fill=aqua)
+    logo = Image.open(icon_file).convert('RGBA').resize((76*S,76*S), Image.Resampling.LANCZOS)
+    image.paste(logo, (49*S,25*S), logo)
+    label(143,25,'OverInk',37,'#ffffff','bold')
+    label(145,82,'DRAW  ·  PRESENT  ·  EXPRESS',11,'#a7c6d1')
+    rounded((751,42,853,80),19,'#25465a', '#466777')
+    label(802,50,'v'+version,15,'#ffffff','bold','center')
 
-    text(400, 114, '将 OverInk 拖入「应用程序」文件夹', 27, '#272b45', bold=True, anchor='mt')
-    text(400, 155, 'Drag OverInk into Applications to install', 15, '#69708b', anchor='mt')
+    # Trilingual title, each language gets its own baseline
+    rounded((42,152,48,240),3,aqua)
+    label(67,145,'将 OverInk 拖入「应用程序」文件夹',27,navy,'bold')
+    label(67,185,'Drag OverInk to the Applications folder',18,'#36576a')
+    label(67,214,'Glissez OverInk dans le dossier Applications',18,'#36576a')
 
-    rect((42, 194, 758, 374), '#edf0fa', 24, '#dfe3f2')
-    rect((100, 218, 286, 357), '#ffffff', 20, '#e1e5f0')
-    rect((516, 218, 702, 357), '#ffffff', 20, '#e1e5f0')
-    # The two white plates are where Finder will place the REAL App and folder icons.
-    # No fake icons: the drag-and-drop works in Finder.
-    rect((116, 207, 147, 234), '#636896', 9)
-    text(131, 220, '1', 14, '#ffffff', bold=True, anchor='mm')
-    rect((532, 207, 563, 234), '#3c775e', 9)
-    text(547, 220, '2', 14, '#ffffff', bold=True, anchor='mm')
-    d.line(xy((345, 287, 446, 287)), fill='#636896', width=round(6*S), joint='curve')
-    d.polygon([xy((444, 274)), xy((465, 287)), xy((444, 300))], fill='#636896')
-    text(402, 315, '拖动安装  ·  DRAG TO INSTALL', 11, '#636896', bold=True, anchor='mt')
+    # Two live Finder icons; all decoration stays outside their hit targets
+    rounded((40,267,860,490),23,'#eaf2f6','#d5e6ed')
+    rounded((82,293,337,468),19,'#ffffff','#d5e6ed')
+    rounded((563,293,818,468),19,'#ffffff','#d5e6ed')
+    rounded((101,283,140,319),13,navy)
+    label(120.5,290,'01',15,'#ffffff','bold','center')
+    rounded((582,283,621,319),13,'#237988')
+    label(601.5,290,'02',15,'#ffffff','bold','center')
+    # Finder positions real OverInk.app / Applications icons at (210,385) and (690,385).
+    # Background deliberately does not draw fake icons or labels.
+    line((392,376,501,376), '#2b98a8', 7)
+    d.polygon([xy((491,361)),xy((516,376)),xy((491,391))],fill='#2b98a8')
+    label(454,418,'拖动   ·   Drag   ·   Glisser',14,'#375967','bold','center')
 
-    rect((42, 394, 758, 478), '#ffffff', 17, '#e0e4f0')
-    rect((55, 407, 60, 465), '#ecad45', 3)
-    text(73, 407, 'macOS 提示应用“已损坏”或无法打开？', 16, '#30344e', bold=True)
-    text(73, 440, '请先确认下载来源可信，再考虑在「终端」执行：', 12, '#727992')
-    rect((419, 431, 743, 464), '#f1f2f9', 9)
-    text(581, 448, 'xattr -cr /Applications/OverInk.app', 12, '#505779', mono=True, anchor='mm')
-    return im
+    # Troubleshooting: non-destructive reminder, no auto-run
+    rounded((40,508,860,628),19,'#ffffff','#d9e6ed')
+    rounded((58,525,64,610),3,amber)
+    label(80,519,'无法打开？  ·  Can’t open it?  ·  Impossible de l’ouvrir ?',16,navy,'bold')
+    label(80,549,'请先确认安装包来源可信，再考虑使用以下命令。',12,'#607584')
+    label(80,571,'Only if you trust the source.',12,'#607584')
+    label(80,593,'Seulement si la source est fiable.',12,'#607584')
+    rounded((485,557,838,599),11,'#e8f3f6','#d2e5e9')
+    label(661.5,569,'xattr -cr /Applications/OverInk.app',12,'#1b485c','mono','center')
+
+    return image
 
 out.parent.mkdir(parents=True, exist_ok=True)
 render(1).save(out, optimize=True)
-render(2).save(out.with_name(out.stem + '@2x' + out.suffix), optimize=True)
-print(f'Rendered branded 1x/2x Finder backgrounds: {out}')
+render(2).save(out.with_name(out.stem+'@2x'+out.suffix), optimize=True)
+print(f'Branded EN/ZH/FR DMG backgrounds: {out}')
 PY
 
 cat > "$work_root/dmg-settings.py" <<'PY'
@@ -186,7 +205,7 @@ background = os.environ['OVERINK_DMG_BACKGROUND']
 icon = os.environ['OVERINK_DMG_ICON']
 format = 'UDZO'
 compression_level = 9
-window_rect = ((160, 110), (800, 500))
+window_rect = ((160, 110), (900, 640))
 show_status_bar = False
 show_tab_view = False
 show_toolbar = False
@@ -199,7 +218,7 @@ icon_size = 110
 text_size = 13
 label_pos = 'bottom'
 show_icon_preview = False
-icon_locations = {'OverInk.app': (194, 278), 'Applications': (608, 278)}
+icon_locations = {'OverInk.app': (210, 374), 'Applications': (690, 374)}
 PY
 
 build_one() {
@@ -289,11 +308,14 @@ PLIST
   fi
   codesign --verify --strict --verbose=2 "$app"
 
-  "$work_root/venv/bin/python" "$work_root/draw-background.py" "$work/background.png" "$version"
+  "$work_root/venv/bin/python" "$work_root/draw-background.py" "$work/background.png" "$version" "$root/assets/overink.png" "$root/assets/overink.svg"
+  sips -s dpiWidth 72 -s dpiHeight 72 "$work/background.png" >/dev/null
+  sips -s dpiWidth 144 -s dpiHeight 144 "$work/background@2x.png" >/dev/null
+  tiffutil -cathidpicheck "$work/background.png" "$work/background@2x.png" -out "$work/background.tiff"
   dmg="$output/OverInk-$version-macos-$name.dmg"
   rm -f -- "$dmg"
   export OVERINK_DMG_APP="$app"
-  export OVERINK_DMG_BACKGROUND="$work/background.png"
+  export OVERINK_DMG_BACKGROUND="$work/background.tiff"
   export OVERINK_DMG_ICON="$contents/Resources/OverInk.icns"
   "$work_root/venv/bin/dmgbuild" -s "$work_root/dmg-settings.py" "OverInk $version" "$dmg"
   unset OVERINK_DMG_APP OVERINK_DMG_BACKGROUND OVERINK_DMG_ICON
