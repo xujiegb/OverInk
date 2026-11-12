@@ -41,59 +41,6 @@ function Assert-PeMachine {
     if ($actual -ne $Machine) { throw ('PE architecture mismatch: {0}; expected 0x{1:X4}, got 0x{2:X4}' -f $Path, $Machine, $actual) }
 }
 
-function Protect-UpgradeInstallDirectory {
-    param([string]$MsiPath)
-    $installer = New-Object -ComObject WindowsInstaller.Installer
-    $database = $null
-    try {
-        $database = $installer.OpenDatabase($MsiPath, 1)
-        foreach ($action in @('Hide', 'Disable')) {
-            $sql = "UPDATE ``ControlCondition`` SET ``Condition`` = 'Installed OR WIX_UPGRADE_DETECTED' WHERE ``Dialog_`` = 'CustomizeDlg' AND ``Control_`` = 'Browse' AND ``Action`` = '$action'"
-            $view = $database.OpenView($sql)
-            try {
-                $view.Execute()
-                $view.Close()
-            } catch {
-                throw "Failed to update $action condition in MSI: $($_.Exception.Message)"
-            } finally {
-                [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($view)
-            }
-
-            $sql = "SELECT ``Condition`` FROM ``ControlCondition`` WHERE ``Dialog_`` = 'CustomizeDlg' AND ``Control_`` = 'Browse' AND ``Action`` = '$action'"
-            $view = $database.OpenView($sql)
-            try {
-                $view.Execute()
-                $record = $view.Fetch()
-                if ($null -eq $record) { throw "Missing CustomizeDlg/Browse/$action condition in $MsiPath" }
-                try {
-                    if ($record.StringData(1) -ne 'Installed OR WIX_UPGRADE_DETECTED') {
-                        throw "Failed to persist CustomizeDlg/Browse/$action condition in $MsiPath"
-                    }
-                } finally {
-                    [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($record)
-                }
-                $view.Close()
-            } finally {
-                [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($view)
-            }
-        }
-        $sql = "UPDATE ``ControlEvent`` SET ``Condition`` = 'NOT WIX_UPGRADE_DETECTED' WHERE ``Dialog_`` = 'CustomizeDlg' AND ``Control_`` = 'Browse' AND ``Event`` = 'SelectionBrowse'"
-        $view = $database.OpenView($sql)
-        try {
-            $view.Execute()
-            $view.Close()
-        } catch {
-            throw "Failed to protect the MSI Browse event: $($_.Exception.Message)"
-        } finally {
-            [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($view)
-        }
-        $database.Commit()
-    } finally {
-        if ($null -ne $database) { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($database) }
-        [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($installer)
-    }
-}
-
 function Set-MsvcEnvironment {
     param([string]$BatchFile, [string]$Target, [hashtable]$OriginalEnvironment)
     foreach ($entry in @(Get-ChildItem Env:)) {
@@ -157,6 +104,24 @@ function New-Icon {
     }
 }
 
+function New-Logo {
+    param([string]$Source, [string]$Destination)
+    Add-Type -AssemblyName System.Drawing
+    $image = [System.Drawing.Image]::FromFile($Source)
+    $bitmap = [System.Drawing.Bitmap]::new(64, 64)
+    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+    try {
+        $graphics.Clear([System.Drawing.Color]::Transparent)
+        $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+        $graphics.DrawImage($image, 0, 0, 64, 64)
+        $bitmap.Save($Destination, [System.Drawing.Imaging.ImageFormat]::Png)
+    } finally {
+        $graphics.Dispose()
+        $bitmap.Dispose()
+        $image.Dispose()
+    }
+}
+
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 foreach ($file in @('Cargo.toml', 'Cargo.lock', 'LICENSE', 'assets/overink.png', 'assets/fonts/OFL.txt')) {
     if (-not (Test-Path -LiteralPath (Join-Path $root $file) -PathType Leaf)) {
@@ -205,23 +170,117 @@ $actualWixVersion = (& $wix --version).Trim()
 if ($LASTEXITCODE -ne 0) { throw "Cannot determine WiX version: $actualWixVersion" }
 $actualWixBaseVersion = ($actualWixVersion -split '\+', 2)[0]
 if ($actualWixBaseVersion -ne $WixVersion) { throw "WiX version mismatch: expected $WixVersion, got $actualWixVersion" }
-foreach ($extension in @('WixToolset.UI.wixext', 'WixToolset.BootstrapperApplications.wixext')) {
+foreach ($extension in @('WixToolset.BootstrapperApplications.wixext', 'WixToolset.Util.wixext')) {
     Invoke-Checked $wix @('extension', 'add', '-g', "$extension/$WixVersion")
 }
 Invoke-Checked 'rustup' @('toolchain', 'install', $RustVersion, '--profile', 'minimal')
 
 $icon = Join-Path $work 'OverInk.ico'
 New-Icon (Join-Path $root 'assets/overink.png') $icon
-$licenseRtf = Join-Path $work 'LICENSE.rtf'
-$licenseText = [System.IO.File]::ReadAllText((Join-Path $root 'LICENSE'))
-$escapedLicense = $licenseText.Replace('\', '\\').Replace('{', '\{').Replace('}', '\}')
-$escapedLicense = [regex]::Replace($escapedLicense, '\r?\n', '\par ')
-[System.IO.File]::WriteAllText($licenseRtf, "{\rtf1\ansi $escapedLicense}", [System.Text.Encoding]::ASCII)
+$logo = Join-Path $work 'OverInk-logo.png'
+New-Logo (Join-Path $root 'assets/overink.png') $logo
+$themeTemplate = @'
+<?xml version="1.0" encoding="utf-8"?>
+<Theme xmlns="http://wixtoolset.org/schemas/v4/thmutil">
+  <Font Id="0" Height="-13" Weight="500" Foreground="292222" Background="ffffff">Segoe UI</Font>
+  <Font Id="1" Height="-25" Weight="650" Foreground="252020">Segoe UI</Font>
+  <Font Id="2" Height="-13" Weight="450" Foreground="777070">Segoe UI</Font>
+  <Font Id="3" Height="-14" Weight="600" Foreground="966863">Segoe UI</Font>
+  <Font Id="4" Height="-15" Weight="450" Foreground="363030">Segoe UI</Font>
+  <Window Width="540" Height="355" HexStyle="100a0000" FontId="0" Caption="OverInk Setup">
+    <ImageControl X="28" Y="23" Width="58" Height="58" ImageFile="logo.png" Visible="yes" />
+    <Label X="98" Y="25" Width="410" Height="34" FontId="1" DisablePrefix="yes">OverInk</Label>
+    <Label X="100" Y="62" Width="410" Height="22" FontId="3" DisablePrefix="yes">Draw over your desktop</Label>
+    <Page Name="Loading">
+      <Label X="28" Y="115" Width="475" Height="32" FontId="4">Preparing setup...</Label>
+      <Label Name="CheckingForUpdatesLabel" X="28" Y="152" Width="475" Height="20" FontId="2" Visible="no"/>
+    </Page>
+    <Page Name="Help">
+      <Label X="28" Y="116" Width="475" Height="35" FontId="4">OverInk setup</Label>
+      <Label X="28" Y="151" Width="475" Height="34" FontId="2">Install, repair, or remove OverInk.</Label>
+      <Button Name="HelpCloseButton" X="-28" Y="-25" Width="96" Height="30" TabStop="yes" FontId="0">
+        <Text>Close</Text><CloseWindowAction />
+      </Button>
+    </Page>
+    <Page Name="Install">
+      <Label X="28" Y="120" Width="470" Height="34" FontId="1">Ready to install</Label>
+      <Label X="28" Y="170" Width="470" Height="45" FontId="4">A lightweight drawing overlay for presentations and teaching.</Label>
+      <Label Name="InstallVersion" X="28" Y="230" Width="310" Height="20" FontId="2" VisibleCondition="WixStdBAShowVersion">Version {Version}</Label>
+      <Label X="28" Y="258" Width="465" Height="20" FontId="2" VisibleCondition="PreviousInstallFolder">Upgrade will keep your existing installation folder.</Label>
+      <Button Name="OptionsButton" X="28" Y="-25" Width="112" Height="30" TabStop="yes" FontId="0" VisibleCondition="NOT PreviousInstallFolder">
+        <Text>Options</Text><ChangePageAction Page="Options" />
+      </Button>
+      <Button Name="InstallButton" X="-136" Y="-25" Width="105" Height="30" TabStop="yes" FontId="0" ElevationShieldCondition='(WixBundleAuthoredScope = 1 AND NOT WixBundleElevated) OR ((WixBundleAuthoredScope = 2 OR WixBundleAuthoredScope = 3) AND WixStdBAScope = "PerMachine")'>Install</Button>
+      <Button Name="InstallCancelButton" X="-28" Y="-25" Width="96" Height="30" TabStop="yes" FontId="0">
+        <Text>Close</Text><CloseWindowAction />
+      </Button>
+    </Page>
+    <Page Name="Options">
+      <Label X="28" Y="105" Width="470" Height="30" FontId="1">Installation options</Label>
+      <Label X="28" Y="150" Width="470" Height="20" FontId="2">Install location</Label>
+      <Editbox Name="InstallFolder" X="28" Y="175" Width="365" Height="26" TabStop="yes" FontId="0" FileSystemAutoComplete="yes" />
+      <Button Name="BrowseButton" X="405" Y="175" Width="100" Height="26" TabStop="yes" FontId="0">
+        <Text>Browse</Text><BrowseDirectoryAction VariableName="InstallFolder" />
+      </Button>
+      <Checkbox Name="CreateDesktopShortcut" X="28" Y="222" Width="470" Height="22" TabStop="yes" FontId="4">Create a desktop shortcut</Checkbox>
+      <Checkbox Name="CreateStartMenuShortcut" X="28" Y="251" Width="470" Height="22" TabStop="yes" FontId="4">Create a Start menu shortcut</Checkbox>
+      <Button Name="OptionsOkButton" X="-136" Y="-25" Width="105" Height="30" TabStop="yes" FontId="0">
+        <Text>Save</Text><ChangePageAction Page="Install" />
+      </Button>
+      <Button Name="OptionsCancelButton" X="-28" Y="-25" Width="96" Height="30" TabStop="yes" FontId="0">
+        <Text>Back</Text><ChangePageAction Page="Install" Cancel="yes" />
+      </Button>
+    </Page>
+    <Page Name="Modify">
+      <Label X="28" Y="124" Width="470" Height="36" FontId="1">OverInk is installed</Label>
+      <Label X="28" Y="171" Width="470" Height="45" FontId="4">You can repair the installation or uninstall OverInk.</Label>
+      <Button Name="RepairButton" X="28" Y="-25" Width="105" Height="30" TabStop="yes" FontId="0" HideWhenDisabled="yes">Repair</Button>
+      <Button Name="UninstallButton" X="145" Y="-25" Width="105" Height="30" TabStop="yes" FontId="0">Uninstall</Button>
+      <Button Name="ModifyCancelButton" X="-28" Y="-25" Width="96" Height="30" TabStop="yes" FontId="0">
+        <Text>Close</Text><CloseWindowAction />
+      </Button>
+    </Page>
+    <Page Name="Progress">
+      <Label X="28" Y="122" Width="470" Height="36" FontId="1">Setting things up</Label>
+      <Label Name="OverallProgressPackageText" X="28" Y="170" Width="470" Height="24" FontId="2">Installing OverInk...</Label>
+      <Progressbar Name="OverallCalculatedProgressbar" X="28" Y="214" Width="477" Height="12" />
+      <Button Name="ProgressCancelButton" X="-28" Y="-25" Width="96" Height="30" TabStop="yes" FontId="0">Cancel</Button>
+    </Page>
+    <Page Name="Success">
+      <Label X="28" Y="122" Width="470" Height="36" FontId="1">
+        <Text>Operation completed</Text>
+        <Text Condition="WixBundleAction = 3">OverInk removed</Text>
+        <Text Condition="WixBundleAction = 5">OverInk is ready</Text>
+        <Text Condition="WixBundleAction = 7">OverInk repaired</Text>
+      </Label>
+      <Label X="28" Y="170" Width="470" Height="44" FontId="4">Everything finished successfully.</Label>
+      <Button Name="LaunchButton" X="28" Y="-25" Width="130" Height="30" TabStop="yes" FontId="0" HideWhenDisabled="yes" VisibleCondition="WixBundleAction = 5">Launch OverInk</Button>
+      <Label X="28" Y="248" Width="470" Height="25" FontId="2" VisibleCondition="WixStdBARestartRequired">Restart Windows to finish setup.</Label>
+      <Button Name="SuccessRestartButton" X="-136" Y="-25" Width="105" Height="30" TabStop="yes" FontId="0" HideWhenDisabled="yes">Restart</Button>
+      <Button Name="SuccessCloseButton" X="-28" Y="-25" Width="96" Height="30" TabStop="yes" FontId="0">
+        <Text>Done</Text><CloseWindowAction />
+      </Button>
+    </Page>
+    <Page Name="Failure">
+      <Label X="28" Y="122" Width="470" Height="36" FontId="1">Setup could not finish</Label>
+      <Label X="28" Y="170" Width="470" Height="26" FontId="4">Windows Installer reported an error.</Label>
+      <Hypertext Name="FailureLogFileLink" X="28" Y="211" Width="470" Height="24" FontId="3" TabStop="yes" HideWhenDisabled="yes">View installation log</Hypertext>
+      <Hypertext Name="FailureMessageText" X="28" Y="239" Width="470" Height="37" FontId="2" TabStop="yes" HideWhenDisabled="yes" />
+      <Button Name="FailureRestartButton" X="-136" Y="-25" Width="105" Height="30" TabStop="yes" FontId="0" HideWhenDisabled="yes">Restart</Button>
+      <Button Name="FailureCloseButton" X="-28" Y="-25" Width="96" Height="30" TabStop="yes" FontId="0">
+        <Text>Close</Text><CloseWindowAction />
+      </Button>
+    </Page>
+  </Window>
+</Theme>
+'@
+# Bootstrapper theme is embedded in this script; no external theme file is required.
+[void][System.Xml.Linq.XDocument]::Parse($themeTemplate)
 
 $architectureMap = [ordered]@{
-    x64 = @{ Triple = 'x86_64-pc-windows-msvc'; Machine = 0x8664; Vcvars = 'x64'; WixArch = 'x64'; ProgramFiles = 'ProgramFiles64Folder'; MsiUpgrade = '60D11D65-227D-4CF2-B0F4-1B2B74D129A1'; BundleUpgrade = '75BE92A5-CDB7-4BA0-B623-C2CE58091521' }
-    i386 = @{ Triple = 'i686-pc-windows-msvc'; Machine = 0x014C; Vcvars = 'x64_x86'; WixArch = 'x86'; ProgramFiles = 'ProgramFilesFolder'; MsiUpgrade = '0E462605-4017-4A9D-A453-E9352E974020'; BundleUpgrade = 'B984C07A-308D-4D41-B45A-97694AA36FB7' }
-    arm64 = @{ Triple = 'aarch64-pc-windows-msvc'; Machine = 0xAA64; Vcvars = 'x64_arm64'; WixArch = 'arm64'; ProgramFiles = 'ProgramFiles64Folder'; MsiUpgrade = '296936D7-8EA0-4396-9EA1-564FDD7BE7D0'; BundleUpgrade = '81759159-0874-4DA4-8AE0-5E043CBEE2B9' }
+    x64 = @{ Triple = 'x86_64-pc-windows-msvc'; Machine = 0x8664; Vcvars = 'x64'; WixArch = 'x64'; ProgramFiles = 'ProgramFiles64Folder'; BurnProgramFiles = 'ProgramFiles64Folder'; Bitness = 'always64'; MsiUpgrade = '60D11D65-227D-4CF2-B0F4-1B2B74D129A1'; BundleUpgrade = '75BE92A5-CDB7-4BA0-B623-C2CE58091521' }
+    i386 = @{ Triple = 'i686-pc-windows-msvc'; Machine = 0x014C; Vcvars = 'x64_x86'; WixArch = 'x86'; ProgramFiles = 'ProgramFilesFolder'; BurnProgramFiles = 'ProgramFilesFolder'; Bitness = 'always32'; MsiUpgrade = '0E462605-4017-4A9D-A453-E9352E974020'; BundleUpgrade = 'B984C07A-308D-4D41-B45A-97694AA36FB7' }
+    arm64 = @{ Triple = 'aarch64-pc-windows-msvc'; Machine = 0xAA64; Vcvars = 'x64_arm64'; WixArch = 'arm64'; ProgramFiles = 'ProgramFiles64Folder'; BurnProgramFiles = 'ProgramFiles64Folder'; Bitness = 'always64'; MsiUpgrade = '296936D7-8EA0-4396-9EA1-564FDD7BE7D0'; BundleUpgrade = '81759159-0874-4DA4-8AE0-5E043CBEE2B9' }
 }
 $selected = if ($Arch -eq 'all') { @('x64', 'i386', 'arm64') } else { @($Arch) }
 $originalEnvironment = @{}
@@ -259,7 +318,6 @@ try {
             Executable = ConvertTo-XmlAttribute $binary
             License = ConvertTo-XmlAttribute (Join-Path $root 'LICENSE')
             FontLicense = ConvertTo-XmlAttribute (Join-Path $root 'assets/fonts/OFL.txt')
-            Rtf = ConvertTo-XmlAttribute $licenseRtf
             Icon = ConvertTo-XmlAttribute $icon
             ProgramFiles = $a.ProgramFiles
             MsiUpgrade = $a.MsiUpgrade
@@ -268,9 +326,11 @@ try {
 
         $msiXml = @'
 <?xml version="1.0" encoding="UTF-8"?>
-<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <Package Name="OverInk ({Arch})" Manufacturer="OverInk Contributors" Version="{Version}" Language="1033" UpgradeCode="{MsiUpgrade}" Scope="perMachine" InstallerVersion="500">
     <MajorUpgrade DowngradeErrorMessage="A newer version of OverInk is already installed." />
+    <Property Id="CREATE_DESKTOP_SHORTCUT" Secure="yes" Value="1" />
+    <Property Id="CREATE_STARTMENU_SHORTCUT" Secure="yes" Value="1" />
     <Property Id="PREVIOUS_INSTALLFOLDER" Secure="yes">
       <RegistrySearch Id="PreviousOverInkInstallDir" Root="HKLM" Key="Software\OverInk\{Arch}" Name="InstallDir" Type="raw" />
     </Property>
@@ -286,6 +346,8 @@ try {
     <Component Id="AppExecutable" Directory="INSTALLFOLDER" Guid="*">
       <File Id="OverInkExe" Source="{Executable}" Name="OverInk.exe" KeyPath="yes" />
       <RegistryValue Root="HKLM" Key="Software\OverInk\{Arch}" Name="InstallDir" Type="string" Value="[INSTALLFOLDER]" />
+      <RegistryValue Root="HKLM" Key="Software\OverInk\{Arch}" Name="DesktopEnabled" Type="string" Value="[CREATE_DESKTOP_SHORTCUT]" />
+      <RegistryValue Root="HKLM" Key="Software\OverInk\{Arch}" Name="StartMenuEnabled" Type="string" Value="[CREATE_STARTMENU_SHORTCUT]" />
     </Component>
     <Component Id="LicenseFile" Directory="INSTALLFOLDER" Guid="*">
       <File Id="License" Source="{License}" Name="LICENSE.txt" KeyPath="yes" />
@@ -306,15 +368,15 @@ try {
       <ComponentRef Id="AppExecutable" />
       <ComponentRef Id="LicenseFile" />
       <ComponentRef Id="FontLicenseFile" />
-      <Feature Id="DesktopOption" Title="Desktop shortcut" Description="Create an OverInk desktop shortcut" Level="1" AllowAdvertise="no">
+      <Feature Id="DesktopOption" Title="Desktop shortcut" Level="1" AllowAdvertise="no">
+        <Level Condition='CREATE_DESKTOP_SHORTCUT = "0"' Value="0" />
         <ComponentRef Id="DesktopShortcutComponent" />
       </Feature>
-      <Feature Id="StartMenuOption" Title="Start menu shortcut" Description="Create an OverInk Start menu shortcut" Level="1" AllowAdvertise="no">
+      <Feature Id="StartMenuOption" Title="Start menu shortcut" Level="1" AllowAdvertise="no">
+        <Level Condition='CREATE_STARTMENU_SHORTCUT = "0"' Value="0" />
         <ComponentRef Id="StartMenuShortcutComponent" />
       </Feature>
     </Feature>
-    <ui:WixUI Id="WixUI_FeatureTree" InstallDirectory="INSTALLFOLDER" />
-    <WixVariable Id="WixUILicenseRtf" Value="{Rtf}" />
     <Icon Id="OverInkIcon" SourceFile="{Icon}" />
     <Property Id="ARPPRODUCTICON" Value="OverInkIcon" />
   </Package>
@@ -324,18 +386,32 @@ try {
         $msiSource = Join-Path $work "$name.msi.wxs"
         [System.IO.File]::WriteAllText($msiSource, $msiXml, [System.Text.UTF8Encoding]::new($false))
         $msi = Join-Path $work "OverInk-$Version-$name.msi"
-        Invoke-Checked $wix @('build', $msiSource, '-arch', $a.WixArch, '-ext', 'WixToolset.UI.wixext', '-o', $msi)
-        Protect-UpgradeInstallDirectory $msi
+        Invoke-Checked $wix @('build', $msiSource, '-arch', $a.WixArch, '-o', $msi)
 
+        $themePath = Join-Path $work "$name.theme.xml"
+        [System.IO.File]::WriteAllText($themePath, $themeTemplate.Replace('{Version}', $Version), [System.Text.UTF8Encoding]::new($false))
         $bundleXml = @'
 <?xml version="1.0" encoding="UTF-8"?>
-<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal">
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal" xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
   <Bundle Name="OverInk ({Arch})" Manufacturer="OverInk Contributors" Version="{Version}" UpgradeCode="{BundleUpgrade}" IconSourceFile="{Icon}">
+    <Variable Name="InstallFolder" Type="string" Value="[{BurnProgramFiles}]OverInk" />
+    <Variable Name="CreateDesktopShortcut" Type="numeric" Value="1" />
+    <Variable Name="CreateStartMenuShortcut" Type="numeric" Value="1" />
+    <util:RegistrySearch Id="PreviousPath" Root="HKLM" Key="Software\OverInk\{Arch}" Value="InstallDir" Variable="PreviousInstallFolder" Result="value" Bitness="{Bitness}" />
+    <util:RegistrySearch Id="PreviousDesktop" Root="HKLM" Key="Software\OverInk\{Arch}" Value="DesktopEnabled" Variable="PreviousDesktopEnabled" Result="value" Bitness="{Bitness}" />
+    <util:RegistrySearch Id="PreviousStartMenu" Root="HKLM" Key="Software\OverInk\{Arch}" Value="StartMenuEnabled" Variable="PreviousStartMenuEnabled" Result="value" Bitness="{Bitness}" />
+    <SetVariable Id="KeepOldFolder" Variable="InstallFolder" Value="[PreviousInstallFolder]" Type="formatted" Condition="PreviousInstallFolder" After="PreviousPath" />
+    <SetVariable Id="KeepDesktopChoice" Variable="CreateDesktopShortcut" Value="[PreviousDesktopEnabled]" Type="numeric" Condition='PreviousDesktopEnabled = "0" OR PreviousDesktopEnabled = "1"' After="PreviousDesktop" />
+    <SetVariable Id="KeepStartMenuChoice" Variable="CreateStartMenuShortcut" Value="[PreviousStartMenuEnabled]" Type="numeric" Condition='PreviousStartMenuEnabled = "0" OR PreviousStartMenuEnabled = "1"' After="PreviousStartMenu" />
     <BootstrapperApplication>
-      <bal:WixInternalUIBootstrapperApplication Theme="standard" />
+      <bal:WixStandardBootstrapperApplication Theme="hyperlinkLargeLicense" ThemeFile="{Theme}" LogoFile="{Logo}" LicenseUrl="" ShowVersion="yes" LaunchTarget="[InstallFolder]\OverInk.exe" SuppressRepair="no" SuppressOptionsUI="no" />
     </BootstrapperApplication>
     <Chain>
-      <MsiPackage Id="OverInkMsi" SourceFile="{Msi}" Compressed="yes" Visible="no" />
+      <MsiPackage Id="OverInkMsi" SourceFile="{Msi}" Compressed="yes" Visible="no" Vital="yes">
+        <MsiProperty Name="INSTALLFOLDER" Value="[InstallFolder]" />
+        <MsiProperty Name="CREATE_DESKTOP_SHORTCUT" Value="[CreateDesktopShortcut]" />
+        <MsiProperty Name="CREATE_STARTMENU_SHORTCUT" Value="[CreateStartMenuShortcut]" />
+      </MsiPackage>
     </Chain>
   </Bundle>
 </Wix>
@@ -346,12 +422,16 @@ try {
             BundleUpgrade = $a.BundleUpgrade
             Icon = $inputs.Icon
             Msi = ConvertTo-XmlAttribute $msi
+            Theme = ConvertTo-XmlAttribute $themePath
+            Logo = ConvertTo-XmlAttribute $logo
+            BurnProgramFiles = $a.BurnProgramFiles
+            Bitness = $a.Bitness
         }
         foreach ($key in $bundleInputs.Keys) { $bundleXml = $bundleXml.Replace('{' + $key + '}', [string]$bundleInputs[$key]) }
         $bundleSource = Join-Path $work "$name.bundle.wxs"
         [System.IO.File]::WriteAllText($bundleSource, $bundleXml, [System.Text.UTF8Encoding]::new($false))
         $setup = Join-Path $dist "OverInk-$Version-windows-$name-setup.exe"
-        Invoke-Checked $wix @('build', $bundleSource, '-arch', $a.WixArch, '-ext', 'WixToolset.BootstrapperApplications.wixext', '-o', $setup)
+        Invoke-Checked $wix @('build', $bundleSource, '-arch', $a.WixArch, '-ext', 'WixToolset.BootstrapperApplications.wixext', '-ext', 'WixToolset.Util.wixext', '-o', $setup)
         Assert-PeMachine $setup $a.Machine
         Write-Host "Created $setup"
     }
