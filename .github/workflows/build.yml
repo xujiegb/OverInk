@@ -183,6 +183,94 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  package-macos:
+    needs: prepare
+    name: macOS DMG · ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {arch: x64, target: x86_64-apple-darwin, runner: macos-15-intel}
+          - {arch: arm64, target: aarch64-apple-darwin, runner: macos-15}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ matrix.target }}
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-dmg-${{ matrix.arch }}
+      - name: Install create-dmg
+        run: |
+          set -euo pipefail
+          if ! command -v create-dmg >/dev/null 2>&1; then
+            HOMEBREW_NO_AUTO_UPDATE=1 brew install create-dmg
+          fi
+      - name: Build and package DMG
+        shell: bash
+        env:
+          OVERINK_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          CODESIGN_IDENTITY: '-'
+        run: |
+          set -euo pipefail
+          bash package-macos.sh --arch '${{ matrix.arch }}' --version "$OVERINK_RELEASE_VERSION"
+          mapfile_check=(dist/OverInk-*-macos-${{ matrix.arch }}.dmg)
+          [[ ${#mapfile_check[@]} -eq 1 && -s ${mapfile_check[0]} ]] || exit 1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OverInk-dmg-macos-${{ matrix.arch }}
+          path: dist/OverInk-*-macos-${{ matrix.arch }}.dmg
+          if-no-files-found: error
+
+  package-windows:
+    needs: prepare
+    name: Windows installer · ${{ matrix.arch }}
+    runs-on: windows-2022
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {arch: x64, target: x86_64-pc-windows-msvc}
+          - {arch: i386, target: i686-pc-windows-msvc}
+          - {arch: arm64, target: aarch64-pc-windows-msvc}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-installer-${{ matrix.arch }}
+      - name: Build and package native installer
+        shell: pwsh
+        env:
+          OVERINK_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          ./package-windows.ps1 -Arch '${{ matrix.arch }}' -Version $env:OVERINK_RELEASE_VERSION -RustVersion $env:RUST_VERSION
+          $packages = @(Get-ChildItem -Path dist -File -Filter 'OverInk-*-windows-${{ matrix.arch }}-setup.exe')
+          if ($packages.Count -ne 1 -or $packages[0].Length -le 0) {
+            throw 'Expected exactly one non-empty Windows installer'
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OverInk-installer-windows-${{ matrix.arch }}
+          path: dist/OverInk-*-windows-${{ matrix.arch }}-setup.exe
+          if-no-files-found: error
+
   linux:
     needs: prepare
     name: Linux ${{ matrix.target }} · Debian 13
@@ -817,7 +905,7 @@ jobs:
   publish:
     name: Publish ${{ needs.prepare.outputs.tag }}
     if: github.event_name == 'workflow_dispatch'
-    needs: [prepare, desktop, linux, freebsd, package-deb, package-rpm]
+    needs: [prepare, desktop, package-macos, package-windows, linux, freebsd, package-deb, package-rpm]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -842,8 +930,8 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
           artifact_dirs=(release-input/OverInk-*)
-          if (( ${#artifact_dirs[@]} != 31 )); then
-            echo "::error::Expected 31 build artifacts. Found ${#artifact_dirs[@]}."
+          if (( ${#artifact_dirs[@]} != 36 )); then
+            echo "::error::Expected 36 build artifacts. Found ${#artifact_dirs[@]}."
             exit 1
           fi
           mkdir release-assets
@@ -856,12 +944,22 @@ jobs:
             fi
             archive=${archives[0]}
             case "$archive" in
-              *.zip|*.tar.gz|*.deb|*.rpm) ;;
+              *.zip|*.tar.gz|*.deb|*.rpm|*.dmg|*.exe) ;;
               *) echo "::error::Unexpected package $archive."; exit 1 ;;
             esac
             test -s "$archive"
             file=${archive##*/}
             case "$name" in
+              OverInk-dmg-macos-*)
+                expected="OverInk-$RELEASE_VERSION-macos-${name#OverInk-dmg-macos-}.dmg"
+                [[ $file == "$expected" ]] || { echo "::error::Unexpected DMG name: $file"; exit 1; }
+                dest="$file"
+                ;;
+              OverInk-installer-windows-*)
+                expected="OverInk-$RELEASE_VERSION-windows-${name#OverInk-installer-windows-}-setup.exe"
+                [[ $file == "$expected" ]] || { echo "::error::Unexpected setup name: $file"; exit 1; }
+                dest="$file"
+                ;;
               OverInk-deb-*) dest="OverInk-$RELEASE_VERSION-linux-debian-${name#OverInk-deb-}.deb" ;;
               OverInk-rpm-*) dest="OverInk-$RELEASE_VERSION-linux-rhel-${name#OverInk-rpm-}.rpm" ;;
               *) dest="OverInk-$RELEASE_VERSION-${file#OverInk-}" ;;
