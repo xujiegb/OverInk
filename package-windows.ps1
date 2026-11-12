@@ -169,7 +169,9 @@ if (-not (Test-Path $wix)) {
     Invoke-Checked 'dotnet' @('tool', 'install', 'wix', '--tool-path', $toolDir, '--version', $WixVersion)
 }
 $actualWixVersion = (& $wix --version).Trim()
-if ($actualWixVersion -ne $WixVersion) { throw "WiX version mismatch: expected $WixVersion, got $actualWixVersion" }
+if ($LASTEXITCODE -ne 0) { throw "Cannot determine WiX version: $actualWixVersion" }
+$actualWixBaseVersion = ($actualWixVersion -split '\+', 2)[0]
+if ($actualWixBaseVersion -ne $WixVersion) { throw "WiX version mismatch: expected $WixVersion, got $actualWixVersion" }
 foreach ($extension in @('WixToolset.UI.wixext', 'WixToolset.BootstrapperApplications.wixext')) {
     Invoke-Checked $wix @('extension', 'add', '-g', "$extension/$WixVersion")
 }
