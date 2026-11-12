@@ -66,7 +66,7 @@ runtime_dir="$(xcrun clang -print-resource-dir)/lib/darwin"
   echo 'Missing libclang_rt.osx.a in the Xcode toolchain.' >&2; exit 1;
 }
 
-rustup toolchain install "$rust_version" --profile minimal --component rustfmt clippy
+rustup toolchain install "$rust_version" --profile minimal --component rustfmt --component clippy
 current_work=
 trap '[[ -z ${current_work:-} ]] || rm -rf -- "$current_work"' EXIT
 mkdir -p "$output"
