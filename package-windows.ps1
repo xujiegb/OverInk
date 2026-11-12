@@ -10,6 +10,18 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+$script:BuildStage = 'Initialization'
+trap {
+    [Console]::Error.WriteLine("OverInk packaging failed during: $script:BuildStage")
+    if ($_.InvocationInfo -and $_.InvocationInfo.PositionMessage) {
+        [Console]::Error.WriteLine($_.InvocationInfo.PositionMessage)
+    }
+    if ($_.ScriptStackTrace) {
+        [Console]::Error.WriteLine($_.ScriptStackTrace)
+    }
+    [Console]::Error.WriteLine($_.Exception.ToString())
+    break
+}
 
 function Invoke-Checked {
     param([string]$Executable, [string[]]$Arguments)
@@ -191,10 +203,13 @@ foreach ($extension in @('WixToolset.BootstrapperApplications.wixext', 'WixTools
 }
 Invoke-Checked 'rustup' @('toolchain', 'install', $RustVersion, '--profile', 'minimal')
 
+$script:BuildStage = 'Generating installer icon'
 $icon = Join-Path $work 'OverInk.ico'
 New-Icon (Join-Path $root 'assets/overink.png') $icon
+$script:BuildStage = 'Generating installer logo'
 $logo = Join-Path $work 'OverInk-logo.png'
 New-Logo (Join-Path $root 'assets/overink.png') $logo
+$script:BuildStage = 'Parsing embedded bootstrapper theme'
 $themeTemplate = @'
 <?xml version="1.0" encoding="utf-8"?>
 <Theme xmlns="http://wixtoolset.org/schemas/v4/thmutil">
@@ -292,6 +307,7 @@ $themeTemplate = @'
 '@
 # Bootstrapper theme is embedded in this script; no external theme file is required.
 [void][System.Xml.Linq.XDocument]::Parse($themeTemplate)
+$script:BuildStage = 'Validating four-language translations'
 
 $themeCultures = @(
     @{ Culture = 'en-US'; Lcid = 1033 },
@@ -355,11 +371,20 @@ foreach ($token in $themeTokens) {
     if (-not $themeTranslations.Contains($token)) { throw "Missing localized string: $token" }
 }
 $themeLocalization = @{}
+$localizationEntries = @($themeTranslations.GetEnumerator())
+foreach ($entry in $localizationEntries) {
+    $values = @($entry.Value)
+    if ($values.Count -ne $themeCultures.Count) {
+        throw ("Translation '{0}' has {1} values; expected {2}" -f $entry.Key, $values.Count, $themeCultures.Count)
+    }
+}
 for ($index = 0; $index -lt $themeCultures.Count; $index++) {
     $culture = $themeCultures[$index]
+    $script:BuildStage = "Generating localization for $($culture.Culture) (index $index)"
     $path = Join-Path $work ("$($culture.Culture).thm.wxl")
-    $strings = foreach ($entry in $themeTranslations.GetEnumerator()) {
-        $value = ConvertTo-XmlAttribute ([string]$entry.Value[$index])
+    $strings = foreach ($entry in $localizationEntries) {
+        $values = @($entry.Value)
+        $value = ConvertTo-XmlAttribute ([string]$values[$index])
         "  <String Id=`"$($entry.Key)`" Value=`"$value`" />"
     }
     $xml = "<?xml version=`"1.0`" encoding=`"utf-8`"?>`n<WixLocalization xmlns=`"http://wixtoolset.org/schemas/v4/wxl`" Culture=`"$($culture.Culture)`" Language=`"$($culture.Lcid)`" Codepage=`"65001`">`n$($strings -join "`n")`n</WixLocalization>"
@@ -367,27 +392,34 @@ for ($index = 0; $index -lt $themeCultures.Count; $index++) {
     [System.IO.File]::WriteAllText($path, $xml, [System.Text.UTF8Encoding]::new($false))
     $themeLocalization[$culture.Culture] = $path
 }
+$script:BuildStage = 'Mapping localization payloads'
 $localizedPayloads = @()
 $localeMappings = [ordered]@{
-    1033 = 'en-US'
-    2052 = 'zh-CN'
-    4100 = 'zh-CN'
-    1028 = 'zh-TW'
-    3076 = 'zh-TW'
-    5124 = 'zh-TW'
-    1036 = 'fr-FR'
-    2060 = 'fr-FR'
-    3084 = 'fr-FR'
-    4108 = 'fr-FR'
-    5132 = 'fr-FR'
+    '1033' = 'en-US'
+    '2052' = 'zh-CN'
+    '4100' = 'zh-CN'
+    '1028' = 'zh-TW'
+    '3076' = 'zh-TW'
+    '5124' = 'zh-TW'
+    '1036' = 'fr-FR'
+    '2060' = 'fr-FR'
+    '3084' = 'fr-FR'
+    '4108' = 'fr-FR'
+    '5132' = 'fr-FR'
 }
-foreach ($lcid in $localeMappings.Keys) {
-    $source = ConvertTo-XmlAttribute $themeLocalization[$localeMappings[$lcid]]
+foreach ($mapping in $localeMappings.GetEnumerator()) {
+    $lcid = [string]$mapping.Key
+    $cultureName = [string]$mapping.Value
+    if (-not $themeLocalization.ContainsKey($cultureName)) {
+        throw "Missing localization file for $cultureName (LCID $lcid)"
+    }
+    $source = ConvertTo-XmlAttribute $themeLocalization[$cultureName]
     $localizedPayloads += "      <Payload Id=`"OverInkLocale$lcid`" Name=`"${lcid}\thm.wxl`" SourceFile=`"$source`" Compressed=`"yes`" />"
 }
 $localizedPayloadXml = $localizedPayloads -join "`n"
 
 
+$script:BuildStage = 'Initializing native architectures'
 $architectureMap = [ordered]@{
     x64 = @{ Triple = 'x86_64-pc-windows-msvc'; Machine = 0x8664; Vcvars = 'x64'; WixArch = 'x64'; ProgramFiles = 'ProgramFiles64Folder'; BurnProgramFiles = 'ProgramFiles64Folder'; Bitness = 'always64'; MsiUpgrade = '60D11D65-227D-4CF2-B0F4-1B2B74D129A1'; BundleUpgrade = '75BE92A5-CDB7-4BA0-B623-C2CE58091521' }
     i386 = @{ Triple = 'i686-pc-windows-msvc'; Machine = 0x014C; Vcvars = 'x64_x86'; WixArch = 'x86'; ProgramFiles = 'ProgramFilesFolder'; BurnProgramFiles = 'ProgramFilesFolder'; Bitness = 'always32'; MsiUpgrade = '0E462605-4017-4A9D-A453-E9352E974020'; BundleUpgrade = 'B984C07A-308D-4D41-B45A-97694AA36FB7' }
@@ -400,7 +432,9 @@ Get-ChildItem Env: | ForEach-Object { $originalEnvironment[$_.Name] = $_.Value }
 Push-Location $root
 try {
     foreach ($name in $selected) {
+        $script:BuildStage = "Preparing $name MSVC toolchain"
         $a = $architectureMap[$name]
+        if ($null -eq $a) { throw "No architecture mapping found for $name" }
         Write-Host "Building OverInk $Version for $name ($($a.Triple))"
         Set-MsvcEnvironment $vcvars $a.Vcvars $originalEnvironment
         $env:CMAKE_GENERATOR = 'Ninja'
@@ -419,6 +453,7 @@ try {
         $resFile = Join-Path $work "$name.res"
         [System.IO.File]::WriteAllText($rcFile, '1 ICON "' + $icon.Replace('\', '/') + '"', [System.Text.Encoding]::ASCII)
         Invoke-Checked 'rc.exe' @('/nologo', "/fo$resFile", $rcFile)
+        $script:BuildStage = "Compiling $name Rust executable"
         Invoke-Checked 'cargo' @($toolchain, 'rustc', '--locked', '--release', '--target', $a.Triple, '--bin', 'overink', '--', '-C', "link-arg=$resFile")
         $binary = Join-Path $root "target/$($a.Triple)/release/overink.exe"
         Assert-PeMachine $binary $a.Machine
@@ -498,6 +533,7 @@ try {
         $msiSource = Join-Path $work "$name.msi.wxs"
         [System.IO.File]::WriteAllText($msiSource, $msiXml, [System.Text.UTF8Encoding]::new($false))
         $msi = Join-Path $work "OverInk-$Version-$name.msi"
+        $script:BuildStage = "Building $name MSI"
         Invoke-Checked $wix @('build', $msiSource, '-arch', $a.WixArch, '-o', $msi)
 
         $themePath = Join-Path $work "$name.theme.xml"
@@ -557,6 +593,7 @@ try {
         $bundleSource = Join-Path $work "$name.bundle.wxs"
         [System.IO.File]::WriteAllText($bundleSource, $bundleXml, [System.Text.UTF8Encoding]::new($false))
         $setup = Join-Path $dist "OverInk-$Version-windows-$name-setup.exe"
+        $script:BuildStage = "Building $name native EXE installer"
         Invoke-Checked $wix @('build', $bundleSource, '-arch', $a.WixArch, '-ext', 'WixToolset.BootstrapperApplications.wixext', '-ext', 'WixToolset.Util.wixext', '-o', $setup)
         Assert-PeMachine $setup $a.Machine
         Write-Host "Created $setup"
