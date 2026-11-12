@@ -557,7 +557,7 @@ try {
         if ($null -eq $installFolderVariable -or
             [string]$installFolderVariable.Attribute('Type') -ne 'formatted' -or
             [string]$installFolderVariable.Attribute('Value') -ne $expectedFolderValue) {
-            throw "Invalid Burn install directory for $name: expected formatted $expectedFolderValue"
+            throw ("Invalid Burn install directory for {0}: expected formatted {1}" -f $name, $expectedFolderValue)
         }
         $bundleSource = Join-Path $work "$name.bundle.wxs"
         [System.IO.File]::WriteAllText($bundleSource, $bundleXml, [System.Text.UTF8Encoding]::new($false))
