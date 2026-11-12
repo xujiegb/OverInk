@@ -511,7 +511,7 @@ try {
 <?xml version="1.0" encoding="UTF-8"?>
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal" xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
   <Bundle Name="OverInk ({Arch})" Manufacturer="OverInk Contributors" Version="{Version}" UpgradeCode="{BundleUpgrade}" IconSourceFile="{Icon}">
-    <Variable Name="InstallFolder" Type="string" Value="[{BurnProgramFiles}]OverInk" />
+    <Variable Name="InstallFolder" Type="formatted" Value="[{BurnProgramFiles}]OverInk" />
     <Variable Name="CreateDesktopShortcut" Type="numeric" Value="1" />
     <Variable Name="CreateStartMenuShortcut" Type="numeric" Value="1" />
     <util:RegistrySearch Id="PreviousPath" Root="HKLM" Key="Software\OverInk\{Arch}" Value="InstallDir" Variable="PreviousInstallFolder" Result="value" Bitness="{Bitness}" />
@@ -548,7 +548,17 @@ try {
             Bitness = $a.Bitness
         }
         foreach ($key in $bundleInputs.Keys) { $bundleXml = $bundleXml.Replace('{' + $key + '}', [string]$bundleInputs[$key]) }
-        [void][System.Xml.Linq.XDocument]::Parse($bundleXml)
+        $bundleDocument = [System.Xml.Linq.XDocument]::Parse($bundleXml)
+        $installFolderVariableName = [System.Xml.Linq.XName]::Get('Variable', 'http://wixtoolset.org/schemas/v4/wxs')
+        $installFolderVariable = $bundleDocument.Descendants($installFolderVariableName) |
+            Where-Object { [string]$_.Attribute('Name') -eq 'InstallFolder' } |
+            Select-Object -First 1
+        $expectedFolderValue = "[$($a.BurnProgramFiles)]OverInk"
+        if ($null -eq $installFolderVariable -or
+            [string]$installFolderVariable.Attribute('Type') -ne 'formatted' -or
+            [string]$installFolderVariable.Attribute('Value') -ne $expectedFolderValue) {
+            throw "Invalid Burn install directory for $name: expected formatted $expectedFolderValue"
+        }
         $bundleSource = Join-Path $work "$name.bundle.wxs"
         [System.IO.File]::WriteAllText($bundleSource, $bundleXml, [System.Text.UTF8Encoding]::new($false))
         $setup = Join-Path $dist "OverInk-$Version-windows-$name-setup.exe"
