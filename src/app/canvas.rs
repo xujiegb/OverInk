@@ -112,6 +112,9 @@ impl Canvas {
             self.guard_dirty = true;
             self.dirty = true;
             self.native.invalidate();
+            if !visible && self.render.extended {
+                self.ink.invalidate_layer();
+            }
             if visible {
                 if let Some(id) = self.output
                     && let Some([x, y, w, h]) = self.bounds
@@ -163,6 +166,10 @@ impl Canvas {
         self.ink.reset_textures();
         self.background.invalidate_texture();
         self.dirty = true;
+    }
+
+    pub fn extended_ink_bytes(&self) -> usize {
+        self.ink.extended_bytes()
     }
 
     pub fn refresh_color(&mut self) -> bool {
@@ -224,6 +231,7 @@ impl Canvas {
         options: &Options,
         picker_choosing: bool,
         wayland: bool,
+        extended_ink_budget: usize,
     ) -> Result<bool, String> {
         if !self.visible || !(options.smoke || self.dirty || self.animation) {
             return Ok(false);
@@ -250,13 +258,14 @@ impl Canvas {
                         self.native.invalidate();
                     }
                 }
-                page.history.doc.size = self.window.size();
+                page.history.set_size(self.window.size());
                 self.ink.paint(
                     page,
                     &self.render,
                     &self.window,
                     &self.color,
                     &mut self.background,
+                    extended_ink_budget,
                 )?;
                 self.animation = !page.input.laser.is_empty();
                 Ok(())

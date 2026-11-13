@@ -696,7 +696,7 @@ impl App {
                 commands.redraw_canvas = true;
             }
         });
-        let count = self.history.doc.strokes.len();
+        let count = self.history.strokes().len();
         ui.small(match tr {
             Language::English => format!("{count} strokes on this screen"),
             Language::Simplified => format!("当前屏幕有 {count} 条笔迹"),

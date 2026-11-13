@@ -7,7 +7,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::CStr,
     fs::{self, File},
-    io::{Read, Write},
+    io::{self, BufWriter, Read, Write},
     path::Path,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -178,11 +178,11 @@ impl Pages {
     fn retain(&mut self, history: &mut History, connected: &BTreeSet<u32>) -> bool {
         self.parked.retain(|id, page| {
             let keep = connected.contains(id);
-            self.changed |= !keep && (page.changed || !page.doc.strokes.is_empty());
+            self.changed |= !keep && (page.changed || !page.strokes().is_empty());
             keep
         });
         if self.active.is_some_and(|id| !connected.contains(&id)) {
-            self.changed |= history.changed || !history.doc.strokes.is_empty();
+            self.changed |= history.changed || !history.strokes().is_empty();
             *history = History::default();
             self.active = None;
             true
@@ -236,7 +236,7 @@ impl Pages {
         }
     }
     pub fn save(&self, history: &History, path: &Path) -> Result<(), String> {
-        if self.active.is_none() && !history.doc.strokes.is_empty() {
+        if self.active.is_none() && !history.strokes().is_empty() {
             return Err("No display for the restored legacy page".into());
         }
         let mut pages = self
@@ -247,9 +247,9 @@ impl Pages {
         let blank = Document::default();
         for (id, key) in &self.keys {
             let doc = if self.active == Some(*id) {
-                &history.doc
+                history.document()
             } else {
-                self.parked.get(id).map_or(&blank, |page| &page.doc)
+                self.parked.get(id).map_or(&blank, |page| page.document())
             };
             doc.validate()?;
             pages.insert(key.clone(), doc);
@@ -258,10 +258,6 @@ impl Pages {
             version: SESSION_VERSION,
             pages: pages.into_iter().collect(),
         };
-        let data = serde_json::to_vec(&session).map_err(|e| e.to_string())?;
-        if data.len() as u64 > MAX_FILE_BYTES {
-            return Err("Session exceeds 64 MiB".into());
-        }
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
@@ -272,7 +268,7 @@ impl Pages {
         let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
         let tmp = path.with_extension(format!("overink-{}-{serial}.tmp", std::process::id()));
         let mut file = File::create_new(&tmp).map_err(|e| e.to_string())?;
-        let written = file.write_all(&data).and_then(|()| file.sync_all());
+        let written = write_session(&mut file, &session).and_then(|()| file.sync_all());
         drop(file);
         let result = written.and_then(|()| fs::rename(&tmp, path));
         if result.is_err() {
@@ -379,6 +375,35 @@ impl Pages {
     }
 }
 
+struct SessionWriter<W> {
+    writer: W,
+    remaining: u64,
+}
+
+impl<W: Write> Write for SessionWriter<W> {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        if data.len() as u64 > self.remaining {
+            return Err(io::Error::other("Session exceeds 64 MiB"));
+        }
+        let written = self.writer.write(data)?;
+        self.remaining -= written as u64;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.writer.flush()
+    }
+}
+
+fn write_session(file: &mut File, session: &impl Serialize) -> io::Result<()> {
+    let mut writer = BufWriter::new(SessionWriter {
+        writer: file,
+        remaining: MAX_FILE_BYTES,
+    });
+    serde_json::to_writer(&mut writer, session)?;
+    writer.flush()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -386,6 +411,25 @@ mod tests {
         color::InkColor,
         model::{Point, Stroke, Tool},
     };
+
+    #[test]
+    fn session_writer_enforces_its_limit_when_flushed() {
+        let mut bytes = Vec::new();
+        let mut writer = BufWriter::new(SessionWriter {
+            writer: &mut bytes,
+            remaining: 6,
+        });
+        serde_json::to_writer(&mut writer, "ink").unwrap();
+        writer.flush().unwrap();
+        writer.write_all(b"  ").unwrap();
+        assert_eq!(
+            writer.flush().unwrap_err().to_string(),
+            "Session exceeds 64 MiB"
+        );
+        drop(writer);
+        assert_eq!(bytes, b"\"ink\"");
+    }
+
     fn draw(history: &mut History, x: f32) {
         history.active = Some(Stroke {
             tool: Tool::Pen,
@@ -418,7 +462,7 @@ mod tests {
         );
         draw(&mut history, 11.);
         pages.switch(&mut history, 20);
-        assert!(history.doc.strokes.is_empty());
+        assert!(history.strokes().is_empty());
         assert!(pages.needs_save(&history));
         pages.save(&history, &path).unwrap();
         pages.mark_saved(&mut history);
@@ -433,11 +477,11 @@ mod tests {
         let mut history = History::default();
         restored.sync(&mut history, &[right.clone(), left.clone()]);
         restored.load(&mut history, &path, true).unwrap();
-        assert_eq!(history.doc.strokes[0].points[0].x, 22.);
+        assert_eq!(history.strokes()[0].points[0].x, 22.);
         restored.switch(&mut history, left.id);
-        assert_eq!(history.doc.strokes[0].points[0].x, 11.);
+        assert_eq!(history.strokes()[0].points[0].x, 11.);
         history.undo();
-        assert_eq!(history.doc.strokes.len(), 1);
+        assert_eq!(history.strokes().len(), 1);
         assert!(!restored.needs_save(&history));
         restored.sync(&mut history, std::slice::from_ref(&left));
         assert!(restored.needs_save(&history));
@@ -445,9 +489,9 @@ mod tests {
         restored.mark_saved(&mut history);
         restored.sync(&mut history, &[left, right.clone()]);
         restored.switch(&mut history, right.id);
-        assert!(history.doc.strokes.is_empty());
+        assert!(history.strokes().is_empty());
         restored.load(&mut history, &path, true).unwrap();
-        assert!(history.doc.strokes.is_empty());
+        assert!(history.strokes().is_empty());
         fs::remove_file(&path).unwrap();
     }
     #[test]
@@ -455,14 +499,14 @@ mod tests {
         let path = std::env::temp_dir().join(format!("overink-legacy-{}.json", std::process::id()));
         let mut legacy = History::default();
         draw(&mut legacy, 15.);
-        fs::write(&path, serde_json::to_vec(&legacy.doc).unwrap()).unwrap();
+        fs::write(&path, serde_json::to_vec(legacy.document()).unwrap()).unwrap();
         let mut restored = Pages::new(Some(20));
         let mut history = History::default();
         restored.sync(&mut history, &[screen(20, "Right", 800)]);
         restored.load(&mut history, &path, true).unwrap();
         assert!(!history.changed);
         history.undo();
-        assert_eq!(history.doc.strokes[0].points[0].x, 15.);
+        assert_eq!(history.strokes()[0].points[0].x, 15.);
         assert!(restored.needs_save(&history));
         restored.save(&history, &path).unwrap();
         let file: Session<Document> = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
@@ -485,7 +529,7 @@ mod tests {
         restored.sync(&mut history, &[screen(20, "BOE Panel", 300)]);
         assert_eq!(restored.load(&mut history, &path, true).unwrap(), 0);
         history.undo();
-        assert_eq!(history.doc.strokes[0].points[0].x, 25.);
+        assert_eq!(history.strokes()[0].points[0].x, 25.);
         assert!(restored.needs_save(&history));
         fs::remove_file(path).unwrap();
     }
@@ -506,9 +550,9 @@ mod tests {
         restored.sync(&mut history, &[screen(30, "Laptop", 0)]);
         draw(&mut history, 33.);
         assert_eq!(restored.load(&mut history, &path, false).unwrap(), 0);
-        assert_eq!(history.doc.strokes[0].points[0].x, 22.);
+        assert_eq!(history.strokes()[0].points[0].x, 22.);
         history.undo();
-        assert_eq!(history.doc.strokes[0].points[0].x, 33.);
+        assert_eq!(history.strokes()[0].points[0].x, 33.);
         fs::remove_file(path).unwrap();
     }
     #[test]
@@ -533,9 +577,9 @@ mod tests {
             &[screen(30, "Display A", 0), screen(40, "Display B", 800)],
         );
         assert_eq!(restored.load(&mut history, &path, true).unwrap(), 0);
-        assert_eq!(history.doc.strokes[0].points[0].x, 22.);
+        assert_eq!(history.strokes()[0].points[0].x, 22.);
         restored.switch(&mut history, 30);
-        assert_eq!(history.doc.strokes[0].points[0].x, 11.);
+        assert_eq!(history.strokes()[0].points[0].x, 11.);
 
         let mut imported = Pages::new(Some(50));
         let mut history = History::default();
@@ -543,11 +587,11 @@ mod tests {
         imported.sync(&mut history, std::slice::from_ref(&laptop));
         draw(&mut history, 55.);
         assert_eq!(imported.load(&mut history, &path, false).unwrap(), 2);
-        assert_eq!(history.doc.strokes[0].points[0].x, 55.);
+        assert_eq!(history.strokes()[0].points[0].x, 55.);
         imported.sync(&mut history, &[laptop, screen(60, "Right", 1200)]);
         assert_eq!(imported.unmatched.len(), 1);
         imported.switch(&mut history, 60);
-        assert_eq!(history.doc.strokes[0].points[0].x, 22.);
+        assert_eq!(history.strokes()[0].points[0].x, 22.);
         fs::remove_file(path).unwrap();
     }
     #[test]
@@ -556,14 +600,14 @@ mod tests {
         let mut history = History::default();
         draw(&mut history, 11.0);
         assert!(pages.switch(&mut history, 20));
-        assert!(history.doc.strokes.is_empty());
+        assert!(history.strokes().is_empty());
         draw(&mut history, 22.0);
         pages.switch(&mut history, 10);
-        assert_eq!(history.doc.strokes[0].points[0].x, 11.0);
+        assert_eq!(history.strokes()[0].points[0].x, 11.0);
         history.undo();
-        assert!(history.doc.strokes.is_empty());
+        assert!(history.strokes().is_empty());
         pages.switch(&mut history, 20);
-        assert_eq!(history.doc.strokes[0].points[0].x, 22.0);
+        assert_eq!(history.strokes()[0].points[0].x, 22.0);
     }
     #[test]
     fn disconnect_drops_active_and_parked_ink_including_undo_redo() {
@@ -573,14 +617,14 @@ mod tests {
         pages.switch(&mut history, 20);
         draw(&mut history, 22.0);
         assert!(pages.retain(&mut history, &BTreeSet::new()));
-        assert!(history.doc.strokes.is_empty());
+        assert!(history.strokes().is_empty());
         history.undo();
         history.redo();
-        assert!(history.doc.strokes.is_empty());
+        assert!(history.strokes().is_empty());
         pages.switch(&mut history, 10);
         history.undo();
         history.redo();
-        assert!(history.doc.strokes.is_empty());
+        assert!(history.strokes().is_empty());
     }
     #[test]
     fn removing_an_inactive_screen_preserves_the_active_page() {
@@ -590,8 +634,8 @@ mod tests {
         pages.switch(&mut history, 20);
         draw(&mut history, 22.0);
         assert!(!pages.retain(&mut history, &BTreeSet::from([20])));
-        assert_eq!(history.doc.strokes[0].points[0].x, 22.0);
+        assert_eq!(history.strokes()[0].points[0].x, 22.0);
         pages.switch(&mut history, 10);
-        assert!(history.doc.strokes.is_empty());
+        assert!(history.strokes().is_empty());
     }
 }
