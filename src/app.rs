@@ -79,6 +79,8 @@ struct Commands {
     frame_rate: bool,
     background: bool,
     preferences: bool,
+    #[cfg(target_os = "linux")]
+    gnome_action: Option<crate::gnome::Action>,
     redraw_canvas: bool,
 }
 struct CanvasInput {
@@ -156,6 +158,8 @@ struct App {
     pages: Pages,
     frame_rate: FrameRate,
     preferences: Preferences,
+    #[cfg(target_os = "linux")]
+    gnome_guide: Option<crate::gnome::Guide>,
     language: Language,
     suspended: bool,
     frozen: bool,
@@ -167,9 +171,14 @@ struct App {
     last_save: Instant,
 }
 impl App {
-    fn new(board: bool, display: usize, displays: Vec<Display>, base: &Path) -> Self {
+    fn new(
+        board: bool,
+        display: usize,
+        displays: Vec<Display>,
+        base: &Path,
+        preferences: Preferences,
+    ) -> Self {
         let save_path = base.join("session.overink.json");
-        let preferences = Preferences::load(&base.join("ui.json"));
         let mut history = History::default();
         let display = display.min(displays.len().saturating_sub(1));
         let suspended = displays.is_empty();
@@ -213,6 +222,8 @@ impl App {
             pages,
             frame_rate: FrameRate::load(&base.join("frame-rate.json")),
             preferences,
+            #[cfg(target_os = "linux")]
+            gnome_guide: None,
             language: preferences.language.unwrap_or_else(Language::system),
             suspended,
             frozen: false,
@@ -1207,13 +1218,58 @@ fn update_preferences(app: &mut App, previous: Preferences, multi_supported: boo
     }
 }
 
+#[cfg(target_os = "linux")]
+impl App {
+    fn update_gnome_guide(
+        &mut self,
+        commands: &mut Commands,
+        previous: Preferences,
+        smoke: bool,
+    ) -> bool {
+        use crate::gnome::{Decision, Guide};
+
+        if let Some(action) = commands.gnome_action.take() {
+            commands.preferences = true;
+            let decision = self.gnome_guide.as_mut().and_then(|guide| {
+                guide
+                    .act(action)
+                    .or_else(|| matches!(guide, Guide::Relogin).then_some(Decision::Relogin))
+            });
+            if let Some(decision) = decision {
+                self.gnome_guide = None;
+                self.preferences.wayland = decision != Decision::XWayland;
+            }
+            return decision == Some(Decision::Relogin);
+        }
+        if commands.preferences
+            && self.preferences.wayland
+            && !previous.wayland
+            && !smoke
+            && crate::gnome::in_wayland_session()
+            && let Some(guide) = Guide::check()
+        {
+            if matches!(guide, Guide::Relogin) {
+                return true;
+            }
+            self.preferences.wayland = false;
+            self.gnome_guide = Some(guide);
+        }
+        false
+    }
+}
+
 pub fn run(options: Options) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let _teardown_pool = crate::native::macos::AutoreleasePool::new();
     #[cfg(target_os = "macos")]
     let startup_pool = crate::native::macos::AutoreleasePool::new();
     let base = state_dir();
-    let preferences = Preferences::load(&base.join("ui.json"));
+    let preferences_path = base.join("ui.json");
+    let preferences = Preferences::load(&preferences_path);
+    #[cfg(target_os = "linux")]
+    let (_runtime, preferences, gnome_status) =
+        crate::gnome::start_video(preferences, &preferences_path, options.x11, options.smoke)?;
+    #[cfg(not(target_os = "linux"))]
     let _runtime = Runtime::new(options.x11, preferences.wayland, options.smoke)?;
     let video = crate::sdl::driver();
     let wayland = video == "wayland";
@@ -1226,7 +1282,12 @@ pub fn run(options: Options) -> Result<(), String> {
         options.display,
         displays,
         &base,
+        preferences,
     );
+    #[cfg(target_os = "linux")]
+    if let Some(status) = gnome_status {
+        app.status = status;
+    }
     app.multi = app.preferences.per_display_windows && !wayland && !options.smoke;
     let mut canvases = vec![canvas::Canvas::new(
         window,
@@ -1722,10 +1783,18 @@ pub fn run(options: Options) -> Result<(), String> {
             break;
         }
         mode_changed |= cmd.mode;
+        #[cfg(target_os = "linux")]
+        let relogin = app.update_gnome_guide(&mut cmd, previous_preferences, options.smoke);
         if cmd.preferences {
             toolbar_dirty = true;
-            topology_dirty |=
-                update_preferences(&mut app, previous_preferences, !wayland && !options.smoke);
+            if app.preferences != previous_preferences {
+                topology_dirty |=
+                    update_preferences(&mut app, previous_preferences, !wayland && !options.smoke);
+            }
+            #[cfg(target_os = "linux")]
+            if relogin && app.preferences.wayland {
+                app.status = crate::gnome::relogin_status();
+            }
         }
         if cmd.background {
             if picker.active() {
@@ -2048,6 +2117,8 @@ mod touch_tests {
             pages: Pages::default(),
             frame_rate: FrameRate::Auto,
             preferences: Preferences::default(),
+            #[cfg(target_os = "linux")]
+            gnome_guide: None,
             language: Language::English,
             suspended: false,
             frozen: false,
@@ -2738,7 +2809,7 @@ mod touch_tests {
                 .as_nanos(),
         ));
         let displays = vec![screen(10, 0, 60.0), screen(20, 1920, 120.0)];
-        let mut a = App::new(true, 0, displays.clone(), &state);
+        let mut a = App::new(true, 0, displays.clone(), &state, Preferences::default());
         add_ink(&mut a, &[120.]);
         a.select_page(20);
         add_ink(&mut a, &[440.]);
@@ -2747,7 +2818,7 @@ mod touch_tests {
         assert!(a.save_path.is_file());
         assert!(Path::new(&a.path).is_file());
 
-        let resumed = App::new(true, 1, displays.clone(), &state);
+        let resumed = App::new(true, 1, displays.clone(), &state, Preferences::default());
         assert_eq!(resumed.history.strokes()[0].points[0].x, 440.);
         Preferences {
             restore_session: false,
@@ -2755,7 +2826,13 @@ mod touch_tests {
         }
         .save(&state.join("ui.json"))
         .unwrap();
-        let mut private = App::new(true, 1, displays, &state);
+        let mut private = App::new(
+            true,
+            1,
+            displays,
+            &state,
+            Preferences::load(&state.join("ui.json")),
+        );
         assert!(private.history.strokes().is_empty());
         add_ink(&mut private, &[640.]);
         private.finish_session().unwrap();

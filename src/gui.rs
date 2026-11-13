@@ -548,8 +548,14 @@ mod tests {
     fn changing_ui_language_loads_chinese_glyphs() {
         let mut gui = Gui::new();
         for (language, sample) in [
-            (Language::Simplified, "简体中文 屏幕取色 退出"),
-            (Language::Traditional, "繁體中文 螢幕取色 結束"),
+            (
+                Language::Simplified,
+                "简体中文 屏幕取色 退出 安装扩展 重新登录",
+            ),
+            (
+                Language::Traditional,
+                "繁體中文 螢幕取色 結束 安裝擴充套件 重新登入",
+            ),
         ] {
             gui.set_language(language);
             let mut output = gui.ctx.run_ui(RawInput::default(), |ui| {

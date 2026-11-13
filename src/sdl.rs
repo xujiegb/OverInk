@@ -25,15 +25,18 @@ pub fn check(value: bool) -> Result<(), String> {
 pub fn cstring(v: &str) -> CString {
     CString::new(v.replace('\0', "")).unwrap()
 }
+pub fn is_wayland_session() -> bool {
+    std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland")
+        || ["WAYLAND_DISPLAY", "WAYLAND_SOCKET"]
+            .iter()
+            .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
+}
 pub struct Runtime;
 impl Runtime {
     pub fn new(x11: bool, wayland: bool, smoke: bool) -> Result<Self, String> {
         let wayland = wayland
             && cfg!(any(target_os = "linux", target_os = "freebsd"))
-            && (std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland")
-                || ["WAYLAND_DISPLAY", "WAYLAND_SOCKET"]
-                    .iter()
-                    .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty())));
+            && is_wayland_session();
         let backend = startup_driver(x11, smoke, wayland);
         unsafe {
             if let Some(name) = backend {
