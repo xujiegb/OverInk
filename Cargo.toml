@@ -1,6 +1,6 @@
 [package]
 name = "overink"
-version = "0.1.0"
+version = "0.1.6"
 edition = "2024"
 rust-version = "1.95"
 description = "Pressure-sensitive desktop annotation with egui and native SDL3 input"
