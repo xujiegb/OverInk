@@ -7,7 +7,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::CStr,
     fs::{self, File},
-    io::{Read, Write},
+    io::{self, BufWriter, Read, Write},
     path::Path,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -258,10 +258,6 @@ impl Pages {
             version: SESSION_VERSION,
             pages: pages.into_iter().collect(),
         };
-        let data = serde_json::to_vec(&session).map_err(|e| e.to_string())?;
-        if data.len() as u64 > MAX_FILE_BYTES {
-            return Err("Session exceeds 64 MiB".into());
-        }
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
@@ -272,7 +268,7 @@ impl Pages {
         let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
         let tmp = path.with_extension(format!("overink-{}-{serial}.tmp", std::process::id()));
         let mut file = File::create_new(&tmp).map_err(|e| e.to_string())?;
-        let written = file.write_all(&data).and_then(|()| file.sync_all());
+        let written = write_session(&mut file, &session).and_then(|()| file.sync_all());
         drop(file);
         let result = written.and_then(|()| fs::rename(&tmp, path));
         if result.is_err() {
@@ -379,6 +375,35 @@ impl Pages {
     }
 }
 
+struct SessionWriter<W> {
+    writer: W,
+    remaining: u64,
+}
+
+impl<W: Write> Write for SessionWriter<W> {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        if data.len() as u64 > self.remaining {
+            return Err(io::Error::other("Session exceeds 64 MiB"));
+        }
+        let written = self.writer.write(data)?;
+        self.remaining -= written as u64;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.writer.flush()
+    }
+}
+
+fn write_session(file: &mut File, session: &impl Serialize) -> io::Result<()> {
+    let mut writer = BufWriter::new(SessionWriter {
+        writer: file,
+        remaining: MAX_FILE_BYTES,
+    });
+    serde_json::to_writer(&mut writer, session)?;
+    writer.flush()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -386,6 +411,25 @@ mod tests {
         color::InkColor,
         model::{Point, Stroke, Tool},
     };
+
+    #[test]
+    fn session_writer_enforces_its_limit_when_flushed() {
+        let mut bytes = Vec::new();
+        let mut writer = BufWriter::new(SessionWriter {
+            writer: &mut bytes,
+            remaining: 6,
+        });
+        serde_json::to_writer(&mut writer, "ink").unwrap();
+        writer.flush().unwrap();
+        writer.write_all(b"  ").unwrap();
+        assert_eq!(
+            writer.flush().unwrap_err().to_string(),
+            "Session exceeds 64 MiB"
+        );
+        drop(writer);
+        assert_eq!(bytes, b"\"ink\"");
+    }
+
     fn draw(history: &mut History, x: f32) {
         history.active = Some(Stroke {
             tool: Tool::Pen,

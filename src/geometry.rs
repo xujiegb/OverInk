@@ -1,5 +1,5 @@
 //! One pressure ribbon per stroke. No series of overlapping translucent stamps.
-use crate::model::{Point, Stroke, Tool};
+use crate::model::{Point, PointSpan, Stroke, Tool};
 use std::ops::RangeInclusive;
 #[derive(Clone, Copy, Debug)]
 pub struct Vertex {
@@ -146,7 +146,12 @@ fn ribbon(m: &mut Mesh, p: &[Point], range: RangeInclusive<usize>, stroke: &Stro
 pub fn mesh(stroke: &Stroke, aa: f32) -> Mesh {
     let mut m = Mesh::default();
     let mut samples = Vec::new();
-    prepare_samples(stroke, true, &mut samples);
+    prepare_samples(
+        stroke,
+        PointSpan::new(&stroke.polyline()),
+        true,
+        &mut samples,
+    );
     m.update(
         stroke,
         &samples,
@@ -169,28 +174,59 @@ fn append_distinct(points: &mut Vec<Point>, p: Point) {
     }
 }
 
-pub fn prepare_samples(stroke: &Stroke, vertex_grain: bool, samples: &mut Vec<Point>) {
+pub fn prepare_samples(
+    stroke: &Stroke,
+    points: PointSpan<'_>,
+    vertex_grain: bool,
+    samples: &mut Vec<Point>,
+) {
     samples.clear();
-    let points = stroke.polyline();
-    if vertex_grain && stroke.tool == Tool::Pencil && points.len() > 1 {
+    let count = points.len();
+    let mut points = points.iter();
+    if vertex_grain && stroke.tool == Tool::Pencil && count > 1 {
         // Preserve grain in SVG and on renderers without a repeating
         // texture. Limit subdivisions while retaining the whole path.
-        let max_steps = (100_000 / points.len()).clamp(1, 32);
-        samples.push(points[0]);
-        for pair in points.windows(2) {
-            let steps = ((pair[0].dist(pair[1]) / 2.0).ceil() as usize).clamp(1, max_steps);
+        let max_steps = (100_000 / count).clamp(1, 32);
+        let mut previous = points.next().unwrap();
+        samples.push(previous);
+        for point in points {
+            let steps = ((previous.dist(point) / 2.0).ceil() as usize).clamp(1, max_steps);
             for i in 1..=steps {
                 append_distinct(
                     samples,
-                    pair[0].interpolate(pair[1], i as f32 / steps as f32),
+                    previous.interpolate(point, i as f32 / steps as f32),
                 );
             }
+            previous = point;
         }
     } else {
-        for &point in points.iter() {
+        for point in points {
             append_distinct(samples, point);
         }
     }
+}
+
+pub fn mesh_ranges(
+    samples: &[Point],
+    chunk: usize,
+    visible: impl Fn(Point, Point) -> bool,
+) -> impl Iterator<Item = RangeInclusive<usize>> {
+    let end = samples.len().saturating_sub(1);
+    let mut first = 0;
+    let mut dot = samples.len() == 1;
+    std::iter::from_fn(move || {
+        if std::mem::take(&mut dot) {
+            return Some(0..=0);
+        }
+        while first < end && !visible(samples[first], samples[first + 1]) {
+            first += 1;
+        }
+        let start = first;
+        while first < end && first - start < chunk && visible(samples[first], samples[first + 1]) {
+            first += 1;
+        }
+        (first > start).then_some(start..=first)
+    })
 }
 
 impl Mesh {

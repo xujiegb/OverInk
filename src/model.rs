@@ -1,9 +1,14 @@
 use crate::color::InkColor;
 use serde::{Deserialize, Serialize};
-use std::{borrow::Cow, collections::VecDeque, sync::Arc};
+use std::{
+    borrow::Cow,
+    cell::{Ref, RefCell},
+    collections::VecDeque,
+    sync::Arc,
+};
 
 mod eraser;
-pub use eraser::Erasure;
+pub use eraser::{EraseError, Erasure};
 
 pub const MAX_POINTS: usize = 1_000_000;
 pub const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
@@ -82,6 +87,96 @@ impl Point {
         )
     }
 }
+
+#[derive(Clone, Copy, Debug)]
+pub struct Bounds {
+    pub min: [f32; 2],
+    pub max: [f32; 2],
+}
+impl Bounds {
+    pub fn between(a: Point, b: Point) -> Self {
+        Self {
+            min: [a.x.min(b.x), a.y.min(b.y)],
+            max: [a.x.max(b.x), a.y.max(b.y)],
+        }
+    }
+
+    pub fn points(points: impl Iterator<Item = Point>) -> Option<Self> {
+        points
+            .map(|point| Self::between(point, point))
+            .reduce(Self::union)
+    }
+
+    pub fn union(self, other: Self) -> Self {
+        Self {
+            min: [self.min[0].min(other.min[0]), self.min[1].min(other.min[1])],
+            max: [self.max[0].max(other.max[0]), self.max[1].max(other.max[1])],
+        }
+    }
+
+    pub fn padded(self, margin: f32) -> Self {
+        Self {
+            min: self.min.map(|value| value - margin),
+            max: self.max.map(|value| value + margin),
+        }
+    }
+
+    pub fn intersects(self, other: Self) -> bool {
+        self.max[0] >= other.min[0]
+            && self.min[0] <= other.max[0]
+            && self.max[1] >= other.min[1]
+            && self.min[1] <= other.max[1]
+    }
+
+    pub fn include(into: &mut Option<Self>, bounds: Self) {
+        *into = Some(into.map_or(bounds, |current| current.union(bounds)));
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct PointSpan<'a> {
+    points: &'a [Point],
+    start: Option<Point>,
+    end: Option<Point>,
+}
+impl<'a> PointSpan<'a> {
+    pub fn new(points: &'a [Point]) -> Self {
+        Self {
+            points,
+            start: None,
+            end: None,
+        }
+    }
+
+    pub fn len(self) -> usize {
+        self.points.len() + usize::from(self.start.is_some()) + usize::from(self.end.is_some())
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn iter(self) -> impl Iterator<Item = Point> + 'a {
+        self.start
+            .into_iter()
+            .chain(self.points.iter().copied())
+            .chain(self.end)
+    }
+
+    fn at(self, index: usize) -> Point {
+        if index == 0
+            && let Some(start) = self.start
+        {
+            return start;
+        }
+        self.points
+            .get(index - usize::from(self.start.is_some()))
+            .copied()
+            .or(self.end)
+            .unwrap()
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Stroke {
     pub tool: Tool,
@@ -93,6 +188,10 @@ pub struct Stroke {
     pub points: Vec<Point>,
 }
 impl Stroke {
+    pub fn max_radius(&self) -> f32 {
+        self.width * if self.tool == Tool::Pencil { 1.25 } else { 0.5 }
+    }
+
     pub fn radius(&self, p: Point) -> f32 {
         let scale = if self.pressure_enabled {
             0.08 + 0.92 * p.pressure.powf(self.pressure_curve)
@@ -156,6 +255,39 @@ impl Stroke {
         Some([tip(0.5), *b, tip(-0.5)])
     }
 }
+
+#[derive(Clone, Copy)]
+pub struct StrokeBounds {
+    pub path: Bounds,
+    well_spaced: bool,
+}
+impl StrokeBounds {
+    fn new(stroke: &Stroke) -> Option<Self> {
+        let points = stroke.polyline();
+        let mut bounds = Self::measure(points.iter().copied())?;
+        if let Some(head) = stroke.arrow_head() {
+            bounds.path = bounds.path.union(Bounds::points(head.into_iter()).unwrap());
+        }
+        Some(bounds)
+    }
+
+    fn measure(mut points: impl Iterator<Item = Point>) -> Option<Self> {
+        let mut previous = points.next()?;
+        let mut path = Bounds::between(previous, previous);
+        let mut well_spaced = true;
+        for point in points {
+            path = path.union(Bounds::between(point, point));
+            // The renderer merges points at 0.05 units. Leave room for
+            // a cut endpoint to change that decision at either neighbor.
+            let x = point.x - previous.x;
+            let y = point.y - previous.y;
+            well_spaced &= x * x + y * y > 0.01;
+            previous = point;
+        }
+        Some(Self { path, well_spaced })
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Document {
     pub version: u32,
@@ -197,14 +329,47 @@ pub struct History {
     pub active: Option<Stroke>,
     undo: VecDeque<HistoryStep>,
     redo: VecDeque<HistoryStep>,
-    // Appends can be painted over the committed layer. Any replacement or
-    // removal invalidates the pixels already in that layer.
+    stroke_bounds: RefCell<Vec<Option<StrokeBounds>>>,
+    // Appends can be painted over the committed layer. Erasure supplies its
+    // own damage, while undo, redo, clear and load invalidate the whole layer.
+    append_revision: u64,
+    erase_revision: u64,
     ink_revision: u64,
     pub changed: bool,
 }
 impl History {
+    pub fn append_revision(&self) -> u64 {
+        self.append_revision
+    }
+
+    pub fn erase_revision(&self) -> u64 {
+        self.erase_revision
+    }
+
     pub fn ink_revision(&self) -> u64 {
         self.ink_revision
+    }
+
+    pub fn point_count(&self) -> usize {
+        self.doc
+            .strokes
+            .iter()
+            .map(|stroke| stroke.points.len())
+            .sum()
+    }
+
+    pub fn stroke_bounds(&self) -> Ref<'_, [Option<StrokeBounds>]> {
+        let end = self.doc.strokes.len();
+        if self.stroke_bounds.borrow().len() < end {
+            let mut bounds = self.stroke_bounds.borrow_mut();
+            let first = bounds.len();
+            bounds.extend(
+                self.doc.strokes[first..end]
+                    .iter()
+                    .map(|stroke| StrokeBounds::new(stroke)),
+            );
+        }
+        Ref::map(self.stroke_bounds.borrow(), Vec::as_slice)
     }
 
     pub fn can_undo(&self) -> bool {
@@ -214,7 +379,7 @@ impl History {
         !self.redo.is_empty()
     }
 
-    pub fn snapshot(&mut self) {
+    fn snapshot(&mut self) {
         // Committed strokes are immutable, so snapshots share their samples.
         self.redo.clear();
         self.undo
@@ -244,21 +409,39 @@ impl History {
 
     fn snapshot_replacement(&mut self) {
         self.snapshot();
+        self.invalidate_stroke_bounds();
         self.ink_revision = self.ink_revision.wrapping_add(1);
     }
 
-    pub fn commit(&mut self) {
-        if let Some(s) = self.active.take()
-            && !s.points.is_empty()
-        {
-            self.snapshot();
-            self.doc.strokes.push(Arc::new(s))
+    fn invalidate_stroke_bounds(&mut self) {
+        let bounds = self.stroke_bounds.get_mut();
+        bounds.clear();
+        if bounds.capacity() > 4096 {
+            *bounds = Vec::new();
         }
+    }
+
+    pub fn append(&mut self, strokes: impl Iterator<Item = Stroke>) {
+        let mut strokes = strokes.peekable();
+        if strokes.peek().is_some() {
+            self.snapshot();
+            self.doc.strokes.extend(strokes.map(Arc::new));
+            self.append_revision = self.append_revision.wrapping_add(1);
+        }
+    }
+
+    pub fn commit(&mut self) {
+        let active = self
+            .active
+            .take()
+            .filter(|stroke| !stroke.points.is_empty());
+        self.append(active.into_iter());
     }
     pub fn undo(&mut self) {
         self.active = None;
         if let Some(s) = self.undo.pop_back() {
             let replaced = std::mem::replace(&mut self.doc.strokes, s.strokes);
+            self.invalidate_stroke_bounds();
             self.redo.push_back(HistoryStep::new(replaced));
             self.trim_steps();
             self.changed = true;
@@ -269,6 +452,7 @@ impl History {
         self.active = None;
         if let Some(s) = self.redo.pop_back() {
             let replaced = std::mem::replace(&mut self.doc.strokes, s.strokes);
+            self.invalidate_stroke_bounds();
             self.undo.push_back(HistoryStep::new(replaced));
             self.trim_steps();
             self.changed = true;
@@ -279,7 +463,7 @@ impl History {
         self.active = None;
         if !self.doc.strokes.is_empty() {
             self.snapshot_replacement();
-            self.doc.strokes.clear()
+            self.doc.strokes = Vec::new();
         }
     }
     pub fn set_document(&mut self, doc: Document, restore: bool) {

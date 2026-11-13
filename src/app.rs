@@ -10,7 +10,7 @@ use crate::{
     frame_rate::{FramePacer, FrameRate},
     gui,
     icc::ColorManager,
-    model::{Erasure, History, MAX_POINTS, Point, Stroke, Tool},
+    model::{Bounds, EraseError, Erasure, History, MAX_POINTS, Point, Stroke, Tool},
     sdl::*,
     touch::{self, TouchKey},
 };
@@ -90,7 +90,7 @@ struct CanvasInput {
     laser: BTreeMap<u64, VecDeque<LaserSample>>,
     next_gesture: u64,
     pending_erasures: BTreeMap<u64, Erasure>,
-    eraser_revision: u64,
+    ink_damage: Option<Bounds>,
     canvas_units: f32,
 }
 
@@ -105,7 +105,7 @@ impl Default for CanvasInput {
             laser: BTreeMap::new(),
             next_gesture: 0,
             pending_erasures: BTreeMap::new(),
-            eraser_revision: 0,
+            ink_damage: None,
             canvas_units: 1.,
         }
     }
@@ -116,12 +116,21 @@ impl CanvasInput {
         self.contact.is_some() || !self.touches.is_empty()
     }
 
-    fn remove_erasure(&mut self, id: u64) -> Option<Erasure> {
-        let draft = self.pending_erasures.remove(&id);
-        if draft.as_ref().is_some_and(Erasure::has_edits) {
-            self.eraser_revision = self.eraser_revision.wrapping_add(1);
+    fn cancel_erasure(&mut self, id: u64) {
+        if let Some(draft) = self.pending_erasures.remove(&id)
+            && let Some(bounds) = draft.affected(!self.pending_erasures.is_empty())
+        {
+            Bounds::include(&mut self.ink_damage, bounds);
         }
-        draft
+    }
+
+    fn eraser_budget(&self, id: u64) -> usize {
+        Erasure::available_budget(
+            self.pending_erasures
+                .iter()
+                .filter(|(other, _)| **other != id)
+                .map(|(_, draft)| draft),
+        )
     }
 }
 
@@ -255,28 +264,37 @@ impl App {
     }
     fn erase_sample(&mut self, id: u64, point: Point) {
         let radius = self.width.max(12.) * self.input.canvas_units;
-        if self.input.pending_erasures.entry(id).or_default().sample(
-            &self.history.doc.strokes,
-            point,
-            radius,
-        ) {
-            self.input.eraser_revision = self.input.eraser_revision.wrapping_add(1);
+        let point_count = self.draft_point_count();
+        let budget = self.input.eraser_budget(id);
+        let draft = self.input.pending_erasures.entry(id).or_default();
+        draft.sample(&self.history, point_count, budget, point, radius);
+        if let Some(bounds) = draft.take_damage() {
+            Bounds::include(&mut self.input.ink_damage, bounds);
         }
     }
     fn commit_erase(&mut self, id: u64) {
-        let Some(erase) = self.input.remove_erasure(id) else {
+        let Some(erase) = self.input.pending_erasures.remove(&id) else {
             return;
         };
         let points = self.draft_point_count();
-        if erase
-            .commit(&mut self.history, &mut self.input.pending_erasures, points)
-            .is_err()
-        {
-            self.show_sample_limit(text(
-                "This erase would exceed the one million sample limit.",
-                "此次擦除会超出一百万采样点上限。",
-                "此次擦除會超過一百萬取樣點上限。",
-            ));
+        if let Err(error) = erase.commit(
+            &mut self.history,
+            &mut self.input.pending_erasures,
+            points,
+            &mut self.input.ink_damage,
+        ) {
+            self.show_sample_limit(match error {
+                EraseError::Samples => text(
+                    "This erase would exceed the one million sample limit.",
+                    "此次擦除会超出一百万采样点上限。",
+                    "此次擦除會超過一百萬取樣點上限。",
+                ),
+                EraseError::Preview => text(
+                    "This erase reached the preview limit. Erase in shorter passes.",
+                    "此次擦除达到预览上限，请分几次擦除。",
+                    "此次擦除達到預覽上限，請分幾次擦除。",
+                ),
+            });
         }
     }
     fn show_sample_limit(&mut self, message: Text) {
@@ -297,7 +315,7 @@ impl App {
     fn cancel_gesture(&mut self, gesture: Gesture) {
         match gesture {
             Gesture::Erase(id) => {
-                self.input.remove_erasure(id);
+                self.input.cancel_erasure(id);
             }
             Gesture::Laser(id) => {
                 self.input.laser.remove(&id);
@@ -468,8 +486,10 @@ impl App {
         self.history.active = None;
         self.input.contact = None;
         self.input.touches.clear();
-        if self.input.pending_erasures.values().any(Erasure::has_edits) {
-            self.input.eraser_revision = self.input.eraser_revision.wrapping_add(1);
+        for draft in self.input.pending_erasures.values() {
+            if let Some(bounds) = draft.affected(self.input.pending_erasures.len() > 1) {
+                Bounds::include(&mut self.input.ink_damage, bounds);
+            }
         }
         self.input.pending_erasures.clear();
         for pen in self.input.pens.values_mut() {
@@ -586,12 +606,7 @@ impl App {
         self.displays.get(self.display).map_or(0.0, |d| d.refresh)
     }
     fn draft_point_count(&self) -> usize {
-        self.history
-            .doc
-            .strokes
-            .iter()
-            .map(|s| s.points.len())
-            .sum::<usize>()
+        self.history.point_count()
             + self.history.active.as_ref().map_or(0, |s| s.points.len())
             + self
                 .input
@@ -634,20 +649,13 @@ impl App {
         if let Gesture::Erase(id) = finger.gesture {
             self.commit_erase(id);
         }
-        let mut strokes = finger
-            .fragments
-            .into_iter()
-            .chain(
-                finger
-                    .stroke
-                    .into_iter()
-                    .filter(|stroke| !stroke.points.is_empty()),
-            )
-            .peekable();
-        if strokes.peek().is_some() {
-            self.history.snapshot();
-            self.history.doc.strokes.extend(strokes.map(Into::into));
-        }
+        let strokes = finger.fragments.into_iter().chain(
+            finger
+                .stroke
+                .into_iter()
+                .filter(|stroke| !stroke.points.is_empty()),
+        );
+        self.history.append(strokes);
     }
     fn commit_touches(&mut self) {
         while let Some((_, finger)) = self.input.touches.pop_first() {
@@ -655,7 +663,8 @@ impl App {
         }
     }
     fn touch_motion(&mut self, key: TouchKey, point: Point) {
-        let can_append = self.draft_point_count() < MAX_POINTS;
+        let point_count = self.draft_point_count();
+        let can_append = point_count < MAX_POINTS;
         let Some(finger) = self.input.touches.get_mut(&key) else {
             return;
         };
@@ -678,11 +687,20 @@ impl App {
             .protected
             .is_some_and(|r| finger.last.is_some_and(|last| r.crosses(last, point)));
         if inside || crosses {
-            if let Gesture::Erase(id) = finger.gesture
-                && let Some(erase) = self.input.pending_erasures.get_mut(&id)
-                && erase.break_path(&self.history.doc.strokes)
-            {
-                self.input.eraser_revision = self.input.eraser_revision.wrapping_add(1);
+            if let Gesture::Erase(id) = finger.gesture {
+                let budget = Erasure::available_budget(
+                    self.input
+                        .pending_erasures
+                        .iter()
+                        .filter(|(other, _)| **other != id)
+                        .map(|(_, draft)| draft),
+                );
+                if let Some(erase) = self.input.pending_erasures.get_mut(&id) {
+                    erase.break_path(&self.history, point_count, budget);
+                    if let Some(bounds) = erase.take_damage() {
+                        Bounds::include(&mut self.input.ink_damage, bounds);
+                    }
+                }
             }
             if let Some(stroke) = &mut finger.stroke
                 && !stroke.points.is_empty()
@@ -828,17 +846,19 @@ impl App {
                         );
                     }
                 }
-                SDL_EVENT_MOUSE_BUTTON_UP if e.button.windowID == overlay => {
-                    if e.button.which != SDL_PEN_MOUSEID && e.button.which != SDL_TOUCH_MOUSEID {
-                        let b = e.button;
-                        let source = Source::Mouse(b.button);
-                        if self.input.contact.is_some_and(|contact| {
-                            contact.source == source && matches!(contact.gesture, Gesture::Erase(_))
-                        }) {
-                            self.motion(source, Point::new(b.x, b.y, 1., [0.; 2]));
-                        }
-                        self.end(source);
+                SDL_EVENT_MOUSE_BUTTON_UP
+                    if e.button.windowID == overlay
+                        && e.button.which != SDL_PEN_MOUSEID
+                        && e.button.which != SDL_TOUCH_MOUSEID =>
+                {
+                    let b = e.button;
+                    let source = Source::Mouse(b.button);
+                    if self.input.contact.is_some_and(|contact| {
+                        contact.source == source && matches!(contact.gesture, Gesture::Erase(_))
+                    }) {
+                        self.motion(source, Point::new(b.x, b.y, 1., [0.; 2]));
                     }
+                    self.end(source);
                 }
                 SDL_EVENT_MOUSE_MOTION if e.motion.windowID == overlay => {
                     let m = e.motion;
@@ -1796,6 +1816,10 @@ pub fn run(options: Options) -> Result<(), String> {
         }
         let mouse = !picker.choosing() && app.mouse_ready();
         let mut unsafe_layer = false;
+        let mut extended_ink_bytes: usize = canvases
+            .iter()
+            .map(canvas::Canvas::extended_ink_bytes)
+            .sum();
         for (index, canvas) in canvases.iter_mut().enumerate() {
             let visible = (options.smoke
                 || !app.hidden
@@ -1811,7 +1835,15 @@ pub fn run(options: Options) -> Result<(), String> {
                     break;
                 }
                 let frozen = canvas.background.frozen;
-                presented |= canvas.paint(&mut app, &options, picker.choosing(), wayland)?;
+                extended_ink_bytes -= canvas.extended_ink_bytes();
+                presented |= canvas.paint(
+                    &mut app,
+                    &options,
+                    picker.choosing(),
+                    wayland,
+                    ink::MAX_EXTENDED_INK_TEXTURE_BYTES.saturating_sub(extended_ink_bytes),
+                )?;
+                extended_ink_bytes += canvas.extended_ink_bytes();
                 toolbar_dirty |= frozen != canvas.background.frozen;
                 if !options.smoke
                     && let Err(error) = canvas.apply_input(mouse)
@@ -2108,14 +2140,14 @@ mod touch_tests {
             Point::new(80., 60., 1., [0.; 2]),
             false,
         );
-        assert!(
-            Erasure::preview(
-                &a.history.doc.strokes[0],
-                0,
-                a.input.pending_erasures.values()
-            )
-            .is_empty()
-        );
+        let mut fragments = 0;
+        assert!(Erasure::preview(
+            &a.history.doc.strokes[0],
+            0,
+            a.input.pending_erasures.values(),
+            |_, _, _| fragments += 1,
+        ));
+        assert_eq!(fragments, 0);
         assert_eq!(a.history.doc.strokes.len(), 1);
         a.keyboard(
             &SDL_Event {
@@ -2249,15 +2281,14 @@ mod touch_tests {
         a.use_tool(Tool::Eraser);
         finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 1, 0.1, 0.1);
         finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 2, 0.6, 0.1);
-        assert_eq!(
-            Erasure::preview(
-                &a.history.doc.strokes[0],
-                0,
-                a.input.pending_erasures.values()
-            )
-            .len(),
-            3
-        );
+        let mut fragments = 0;
+        assert!(Erasure::preview(
+            &a.history.doc.strokes[0],
+            0,
+            a.input.pending_erasures.values(),
+            |_, _, _| fragments += 1,
+        ));
+        assert_eq!(fragments, 3);
         finger(&mut a, SDL_EVENT_FINGER_UP, 1, 1, 0.1, 0.1);
         assert_eq!(a.history.doc.strokes.len(), 2);
         finger(&mut a, SDL_EVENT_FINGER_UP, 1, 2, 0.6, 0.1);
