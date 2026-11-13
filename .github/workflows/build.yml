@@ -613,6 +613,7 @@ jobs:
         env:
           TARGET_ARCH: ${{ matrix.arch }}
           PACKAGE_ARCH: ${{ matrix.pkg_arch }}
+          OVERINK_PACKAGE_VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
           bash package-debian.sh --buildfrom 3 --arch "$TARGET_ARCH"
@@ -709,6 +710,7 @@ jobs:
         env:
           TARGET_ARCH: ${{ matrix.arch }}
           PACKAGE_ARCH: ${{ matrix.pkg_arch }}
+          OVERINK_PACKAGE_VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
           bash package-rhel.sh --buildfrom 3 --arch "$TARGET_ARCH"
