@@ -620,7 +620,7 @@ impl App {
         [
             self.history.can_undo(),
             self.history.can_redo(),
-            !self.history.doc.strokes.is_empty()
+            !self.history.strokes().is_empty()
                 || self.history.active.is_some()
                 || self
                     .input
@@ -632,8 +632,7 @@ impl App {
     #[cfg(any(target_os = "macos", test))]
     fn has_wide_ink(&self) -> bool {
         self.history
-            .doc
-            .strokes
+            .strokes()
             .iter()
             .map(|stroke| stroke.as_ref())
             .chain(self.history.active.iter())
@@ -1072,7 +1071,7 @@ impl App {
     fn export(&mut self) {
         self.stop();
         let p = PathBuf::from(&self.path).with_extension("svg");
-        let data = export::svg(&self.history.doc);
+        let data = export::svg(self.history.document());
         match std::fs::write(&p, data) {
             Ok(()) => self.status = text("Exported", "已导出", "已匯出").detail(p.display()),
             Err(e) => self.status = text("Export failed", "导出失败", "匯出失敗").detail(e),
@@ -1880,7 +1879,7 @@ pub fn run(options: Options) -> Result<(), String> {
         if options.smoke && frame >= 3 {
             let path = state_dir();
             std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
-            std::fs::write(path.join("smoke.svg"), export::svg(&app.history.doc))
+            std::fs::write(path.join("smoke.svg"), export::svg(app.history.document()))
                 .map_err(|e| e.to_string())?;
             for (name, render) in [
                 ("smoke.bmp", &canvases[active].render),
@@ -1899,7 +1898,7 @@ pub fn run(options: Options) -> Result<(), String> {
             }
             println!(
                 "OverInk smoke OK: {} strokes, native pressure and multi-touch events, egui textures, SDL geometry, SVG, BMP",
-                app.history.doc.strokes.len()
+                app.history.strokes().len()
             );
             running = false;
         }
@@ -1958,7 +1957,7 @@ fn smoke_events(app: &mut App, id: SDL_WindowID) -> Result<(), String> {
         ..Default::default()
     };
     app.event(&e, id, [1100., 720.]);
-    if app.history.doc.strokes.len() != 1 || app.history.doc.strokes[0].points.len() < 128 {
+    if app.history.strokes().len() != 1 || app.history.strokes()[0].points.len() < 128 {
         return Err("Pen-event smoke failed".into());
     }
     for (i, tool) in [Tool::Arrow, Tool::Rectangle, Tool::Ellipse, Tool::Marker]
@@ -2017,7 +2016,7 @@ fn smoke_events(app: &mut App, id: SDL_WindowID) -> Result<(), String> {
         };
         app.event(&event, id, [1100., 720.]);
     }
-    if app.history.doc.strokes.len() != 7 || !app.input.touches.is_empty() {
+    if app.history.strokes().len() != 7 || !app.input.touches.is_empty() {
         return Err("Multi-touch commit smoke failed".into());
     }
     Ok(())
@@ -2115,11 +2114,11 @@ mod touch_tests {
             Point::new(250., 80., 1., [0.; 2]),
         );
         a.end(Source::Mouse(RIGHT_BUTTON));
-        assert!(a.history.active.is_none() && a.history.doc.strokes.is_empty());
+        assert!(a.history.active.is_none() && a.history.strokes().is_empty());
         a.history.undo();
-        assert_eq!(a.history.doc.strokes.len(), 2);
+        assert_eq!(a.history.strokes().len(), 2);
         a.history.undo();
-        assert_eq!(a.history.doc.strokes.len(), 1);
+        assert_eq!(a.history.strokes().len(), 1);
     }
     fn add_ink(a: &mut App, xs: &[f32]) {
         for &x in xs {
@@ -2142,13 +2141,13 @@ mod touch_tests {
         );
         let mut fragments = 0;
         assert!(Erasure::preview(
-            &a.history.doc.strokes[0],
+            &a.history.strokes()[0],
             0,
             a.input.pending_erasures.values(),
             |_, _, _| fragments += 1,
         ));
         assert_eq!(fragments, 0);
-        assert_eq!(a.history.doc.strokes.len(), 1);
+        assert_eq!(a.history.strokes().len(), 1);
         a.keyboard(
             &SDL_Event {
                 key: SDL_KeyboardEvent {
@@ -2162,7 +2161,7 @@ mod touch_tests {
         assert!(a.input.pending_erasures.is_empty());
         assert!(a.input.contact.is_none() && !a.history.changed);
         a.history.redo();
-        assert_eq!(a.history.doc.strokes.len(), 2);
+        assert_eq!(a.history.strokes().len(), 2);
     }
     #[test]
     fn history_shortcuts_cancel_a_touch_erase_before_changing_indices() {
@@ -2189,8 +2188,8 @@ mod touch_tests {
             );
             assert!(a.input.pending_erasures.is_empty());
             finger(&mut a, SDL_EVENT_FINGER_UP, 1, 1, 0.1, 0.1);
-            assert_eq!(a.history.doc.strokes.len(), expected);
-            assert_eq!(a.history.doc.strokes[0].points[0].x, 80.);
+            assert_eq!(a.history.strokes().len(), expected);
+            assert_eq!(a.history.strokes()[0].points[0].x, 80.);
         }
     }
 
@@ -2227,7 +2226,7 @@ mod touch_tests {
         assert_eq!(a.input.pending_erasures.len(), 3);
         finger(&mut a, SDL_EVENT_FINGER_CANCELED, 1, 1, 0.1, 0.1);
         assert_eq!(a.input.pending_erasures.len(), 2);
-        assert_eq!(a.history.doc.strokes.len(), 3);
+        assert_eq!(a.history.strokes().len(), 3);
         a.event(
             &SDL_Event {
                 pproximity: SDL_PenProximityEvent {
@@ -2245,15 +2244,14 @@ mod touch_tests {
         a.end(Source::Mouse(RIGHT_BUTTON));
         assert_eq!(
             a.history
-                .doc
-                .strokes
+                .strokes()
                 .iter()
                 .map(|s| s.points[0].x)
                 .collect::<Vec<_>>(),
             [80., 480.]
         );
         a.history.undo();
-        assert_eq!(a.history.doc.strokes.len(), 3);
+        assert_eq!(a.history.strokes().len(), 3);
     }
     #[test]
     fn concurrent_erasers_commit_independently_after_indices_shift() {
@@ -2264,12 +2262,12 @@ mod touch_tests {
         finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 2, 0.6, 0.1);
         finger(&mut a, SDL_EVENT_FINGER_UP, 1, 1, 0.1, 0.1);
         finger(&mut a, SDL_EVENT_FINGER_UP, 1, 2, 0.6, 0.1);
-        assert_eq!(a.history.doc.strokes.len(), 1);
-        assert_eq!(a.history.doc.strokes[0].points[0].x, 240.);
+        assert_eq!(a.history.strokes().len(), 1);
+        assert_eq!(a.history.strokes()[0].points[0].x, 240.);
         a.history.undo();
-        assert_eq!(a.history.doc.strokes.len(), 2);
+        assert_eq!(a.history.strokes().len(), 2);
         a.history.undo();
-        assert_eq!(a.history.doc.strokes.len(), 3);
+        assert_eq!(a.history.strokes().len(), 3);
     }
     #[test]
     fn concurrent_erases_split_one_stroke_and_undo_independently() {
@@ -2283,17 +2281,19 @@ mod touch_tests {
         finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 2, 0.6, 0.1);
         let mut fragments = 0;
         assert!(Erasure::preview(
-            &a.history.doc.strokes[0],
+            &a.history.strokes()[0],
             0,
             a.input.pending_erasures.values(),
             |_, _, _| fragments += 1,
         ));
         assert_eq!(fragments, 3);
         finger(&mut a, SDL_EVENT_FINGER_UP, 1, 1, 0.1, 0.1);
-        assert_eq!(a.history.doc.strokes.len(), 2);
+        assert_eq!(a.history.strokes().len(), 2);
+        assert_eq!(a.history.point_count(), 4);
         finger(&mut a, SDL_EVENT_FINGER_UP, 1, 2, 0.6, 0.1);
-        let strokes = &a.history.doc.strokes;
+        let strokes = a.history.strokes();
         assert_eq!(strokes.len(), 3);
+        assert_eq!(a.history.point_count(), 6);
         assert_eq!(strokes[0].points[0].x, 10.);
         assert_eq!(strokes[2].points.last().unwrap().x, 700.);
         for (left, right, x) in [
@@ -2303,12 +2303,15 @@ mod touch_tests {
             assert!(left.points.last().unwrap().x < x && right.points[0].x > x);
         }
         a.history.undo();
-        assert_eq!(a.history.doc.strokes.len(), 2);
+        assert_eq!(a.history.strokes().len(), 2);
+        assert_eq!(a.history.point_count(), 4);
         a.history.undo();
-        assert_eq!(a.history.doc.strokes.len(), 1);
+        assert_eq!(a.history.strokes().len(), 1);
+        assert_eq!(a.history.point_count(), 2);
         a.history.redo();
         a.history.redo();
-        assert_eq!(a.history.doc.strokes.len(), 3);
+        assert_eq!(a.history.strokes().len(), 3);
+        assert_eq!(a.history.point_count(), 6);
     }
     #[test]
     fn pen_tilt_before_pressure_and_tool_changes_keep_proximity() {
@@ -2378,7 +2381,7 @@ mod touch_tests {
                     .iter()
                     .all(|sample| sample.point.x == trail[0].point.x)
         }));
-        assert!(a.history.doc.strokes.is_empty());
+        assert!(a.history.strokes().is_empty());
     }
     #[test]
     fn mouse_commits_the_unfinished_stroke_and_any_tool_resumes_drawing() {
@@ -2396,8 +2399,8 @@ mod touch_tests {
         assert!(a.pass);
         assert!(a.history.active.is_none());
         assert!(a.input.contact.is_none());
-        assert_eq!(a.history.doc.strokes.len(), 1);
-        assert_eq!(a.history.doc.strokes[0].points.len(), 2);
+        assert_eq!(a.history.strokes().len(), 1);
+        assert_eq!(a.history.strokes()[0].points.len(), 2);
         a.motion(
             Source::Mouse(LEFT_BUTTON),
             Point::new(90., 90., 1., [0.; 2]),
@@ -2415,8 +2418,8 @@ mod touch_tests {
             assert_eq!(a.tool, tool);
             a.use_mouse();
         }
-        assert_eq!(a.history.doc.strokes.len(), 1);
-        assert_eq!(a.history.doc.strokes[0].points.len(), 2);
+        assert_eq!(a.history.strokes().len(), 1);
+        assert_eq!(a.history.strokes()[0].points.len(), 2);
     }
     #[test]
     fn controller_area_rejects_pen_touch_and_eraser_edits() {
@@ -2441,16 +2444,16 @@ mod touch_tests {
             Point::new(150., 150., 1., [0.; 2]),
         );
         assert!(a.history.active.is_none());
-        assert_eq!(a.history.doc.strokes.len(), 1);
-        assert!(a.history.doc.strokes[0].points.iter().all(|p| p.x < 100.));
+        assert_eq!(a.history.strokes().len(), 1);
+        assert!(a.history.strokes()[0].points.iter().all(|p| p.x < 100.));
         a.use_tool(Tool::Eraser);
-        let count = a.history.doc.strokes.len();
+        let count = a.history.strokes().len();
         a.begin(
             Source::Mouse(LEFT_BUTTON),
             Point::new(150., 150., 1., [0.; 2]),
             true,
         );
-        assert_eq!(a.history.doc.strokes.len(), count);
+        assert_eq!(a.history.strokes().len(), count);
     }
 
     #[test]
@@ -2468,18 +2471,19 @@ mod touch_tests {
             a.motion(source, p(65.));
             a.motion(source, p(230.));
             assert!(a.input.contact.is_none());
-            assert_eq!(a.history.doc.strokes[0].points.last().unwrap().x, 65.);
+            assert_eq!(a.history.strokes()[0].points.last().unwrap().x, 65.);
 
-            let far_side = std::sync::Arc::new(Stroke {
+            let far_side = Stroke {
                 points: vec![p(175.), p(215.)],
                 ..a.stroke(Tool::Pen)
-            });
-            a.history.doc.strokes.push(far_side.clone());
+            };
+            a.history.append(std::iter::once(far_side));
+            let far_side = a.history.strokes()[1].clone();
             a.begin(source, p(75.), true);
             a.motion(source, p(230.));
             assert!(a.input.contact.is_none());
-            assert_eq!(a.history.doc.strokes.len(), 2);
-            assert!(std::sync::Arc::ptr_eq(&a.history.doc.strokes[1], &far_side));
+            assert_eq!(a.history.strokes().len(), 2);
+            assert!(std::sync::Arc::ptr_eq(&a.history.strokes()[1], &far_side));
         }
     }
 
@@ -2499,7 +2503,7 @@ mod touch_tests {
             finger(&mut a, SDL_EVENT_FINGER_MOTION, 1, 1, 0.15, 0.25);
             finger(&mut a, SDL_EVENT_FINGER_MOTION, 1, 1, 0.45, 0.25);
             finger(&mut a, SDL_EVENT_FINGER_UP, 1, 1, 0.5, 0.3);
-            let [shape] = a.history.doc.strokes.as_slice() else {
+            let [shape] = a.history.strokes() else {
                 panic!("expected one unbroken shape");
             };
             assert_eq!(shape.tool, tool);
@@ -2512,18 +2516,24 @@ mod touch_tests {
     fn sample_limit_opens_a_panel_for_pointer_touch_and_rejected_erase() {
         let mut a = app();
         let p = |x, y| Point::new(x, y, 1., [0.; 2]);
-        a.history.doc.strokes = vec![
-            Stroke {
-                points: vec![p(1000., 1000.); MAX_POINTS - 2],
-                ..a.stroke(Tool::Pen)
-            }
-            .into(),
-            Stroke {
-                points: vec![p(20., 50.), p(120., 50.)],
-                ..a.stroke(Tool::Pen)
-            }
-            .into(),
-        ];
+        a.history.set_document(
+            crate::model::Document {
+                strokes: vec![
+                    Stroke {
+                        points: vec![p(1000., 1000.); MAX_POINTS - 2],
+                        ..a.stroke(Tool::Pen)
+                    }
+                    .into(),
+                    Stroke {
+                        points: vec![p(20., 50.), p(120., 50.)],
+                        ..a.stroke(Tool::Pen)
+                    }
+                    .into(),
+                ],
+                ..crate::model::Document::default()
+            },
+            true,
+        );
         let panel = Some(crate::toolbar::Panel::Settings);
         let mouse = Source::Mouse(LEFT_BUTTON);
         a.begin(mouse, p(70., 50.), false);
@@ -2540,7 +2550,8 @@ mod touch_tests {
         a.panel = None;
         a.begin(mouse, p(70., 50.), true);
         a.end(mouse);
-        assert_eq!(a.history.doc.strokes.len(), 2);
+        assert_eq!(a.history.strokes().len(), 2);
+        assert_eq!(a.history.point_count(), MAX_POINTS);
         assert!(!a.history.can_undo());
         assert_eq!(a.panel, panel);
         assert!(
@@ -2564,7 +2575,7 @@ mod touch_tests {
         // The touch jumps to the far side without a sample inside the toolbar.
         finger(&mut a, SDL_EVENT_FINGER_MOTION, 1, 1, 0.45, 0.25);
         finger(&mut a, SDL_EVENT_FINGER_UP, 1, 1, 0.5, 0.25);
-        let [left, right] = a.history.doc.strokes.as_slice() else {
+        let [left, right] = a.history.strokes() else {
             panic!("expected two ink fragments");
         };
         assert_eq!(left.points.len(), 2);
@@ -2661,10 +2672,10 @@ mod touch_tests {
             a.refresh_displays(vec![screen(20, 1920, 120.0), screen(10, 0, 60.0)], Some(20));
         assert!(layout);
         assert!(!removed);
-        assert!(a.history.doc.strokes.is_empty());
+        assert!(a.history.strokes().is_empty());
         assert_eq!(a.frame_rate.hz(a.refresh_hz()), 120.0);
         a.refresh_displays(vec![screen(20, 1920, 90.0), screen(10, 0, 60.0)], Some(10));
-        assert_eq!(a.history.doc.strokes.len(), 1);
+        assert_eq!(a.history.strokes().len(), 1);
         assert_eq!(a.pages.active, Some(10));
         assert_eq!(a.display, 1);
         a.refresh_displays(vec![screen(20, 1920, 90.0), screen(10, 0, 60.0)], Some(20));
@@ -2682,11 +2693,11 @@ mod touch_tests {
         finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 1, 0.2, 0.2);
         a.history.undo();
         a.history.redo();
-        assert!(a.history.doc.strokes.is_empty());
+        assert!(a.history.strokes().is_empty());
         assert!(a.input.touches.is_empty());
         a.refresh_displays(vec![screen(30, 0, 60.0)], Some(30));
         assert!(!a.suspended);
-        assert!(a.history.doc.strokes.is_empty());
+        assert!(a.history.strokes().is_empty());
     }
     #[test]
     fn multi_window_touches_and_unplug_are_local_to_their_output() {
@@ -2701,19 +2712,19 @@ mod touch_tests {
         a.on_page(Some(10), |left_page| {
             assert!(left_page.input.has_contacts());
             finger(left_page, SDL_EVENT_FINGER_UP, 1, 1, 0.1, 0.2);
-            assert_eq!(left_page.history.doc.strokes[0].points[0].x, 80.);
+            assert_eq!(left_page.history.strokes()[0].points[0].x, 80.);
         });
         assert_eq!(a.pages.active, Some(20));
         assert!(a.input.has_contacts());
         finger(&mut a, SDL_EVENT_FINGER_UP, 2, 2, 0.25, 0.2);
-        assert_eq!(a.history.doc.strokes[0].points[0].x, 200.);
+        assert_eq!(a.history.strokes()[0].points[0].x, 200.);
         a.refresh_displays(vec![right.clone()], None);
         a.refresh_displays(vec![left, right], None);
         a.select_page(10);
         a.history.undo();
-        assert!(a.history.doc.strokes.is_empty());
+        assert!(a.history.strokes().is_empty());
         a.select_page(20);
-        assert_eq!(a.history.doc.strokes[0].points[0].x, 200.);
+        assert_eq!(a.history.strokes()[0].points[0].x, 200.);
     }
 
     #[test]
@@ -2737,7 +2748,7 @@ mod touch_tests {
         assert!(Path::new(&a.path).is_file());
 
         let resumed = App::new(true, 1, displays.clone(), &state);
-        assert_eq!(resumed.history.doc.strokes[0].points[0].x, 440.);
+        assert_eq!(resumed.history.strokes()[0].points[0].x, 440.);
         Preferences {
             restore_session: false,
             ..Preferences::default()
@@ -2745,13 +2756,13 @@ mod touch_tests {
         .save(&state.join("ui.json"))
         .unwrap();
         let mut private = App::new(true, 1, displays, &state);
-        assert!(private.history.doc.strokes.is_empty());
+        assert!(private.history.strokes().is_empty());
         add_ink(&mut private, &[640.]);
         private.finish_session().unwrap();
         assert!(!private.save_path.exists());
         assert!(Path::new(&private.path).is_file());
         private.load();
-        assert_eq!(private.history.doc.strokes[0].points[0].x, 440.);
+        assert_eq!(private.history.strokes()[0].points[0].x, 440.);
         std::fs::remove_dir_all(state).unwrap();
     }
     #[test]
@@ -2761,14 +2772,14 @@ mod touch_tests {
         finger(&mut a, SDL_EVENT_FINGER_MOTION, 1, 3, 0.5, 0.5);
         finger(&mut a, SDL_EVENT_FINGER_UP, 1, 3, 0.5, 0.5);
         assert!(a.input.touches.is_empty());
-        let s = &a.history.doc.strokes[0];
+        let s = &a.history.strokes()[0];
         assert_eq!(s.points.len(), 2);
         assert_eq!([s.points[1].x, s.points[1].y], [400., 300.]);
         assert!(!s.pressure_enabled);
         a.history.undo();
-        assert!(a.history.doc.strokes.is_empty());
+        assert!(a.history.strokes().is_empty());
         a.history.redo();
-        assert_eq!(a.history.doc.strokes.len(), 1);
+        assert_eq!(a.history.strokes().len(), 1);
     }
     #[test]
     fn multiple_fingers_and_devices_do_not_join_strokes() {
@@ -2780,8 +2791,8 @@ mod touch_tests {
         for (d, f, x) in [(1, 1, 0.1), (1, 2, 0.4), (2, 1, 0.7)] {
             finger(&mut a, SDL_EVENT_FINGER_UP, d, f, x, 0.7);
         }
-        assert_eq!(a.history.doc.strokes.len(), 3);
-        for s in &a.history.doc.strokes {
+        assert_eq!(a.history.strokes().len(), 3);
+        for s in a.history.strokes() {
             assert_eq!(s.points[0].x, s.points[1].x);
         }
     }
@@ -2790,7 +2801,7 @@ mod touch_tests {
         let mut a = app();
         finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 1, 0.2, 0.2);
         finger(&mut a, SDL_EVENT_FINGER_CANCELED, 1, 1, 0.2, 0.2);
-        assert!(a.input.touches.is_empty() && a.history.doc.strokes.is_empty());
+        assert!(a.input.touches.is_empty() && a.history.strokes().is_empty());
         finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 2, 0.2, 0.2);
         a.event(
             &SDL_Event {
@@ -2804,7 +2815,7 @@ mod touch_tests {
             [800., 600.],
         );
         finger(&mut a, SDL_EVENT_FINGER_UP, 1, 2, 0.5, 0.5);
-        assert!(a.input.touches.is_empty() && a.history.doc.strokes.is_empty());
+        assert!(a.input.touches.is_empty() && a.history.strokes().is_empty());
     }
     #[test]
     fn pen_proximity_rejects_palms_and_requires_a_new_finger_down() {
@@ -2831,10 +2842,10 @@ mod touch_tests {
             [800., 600.],
         );
         finger(&mut a, SDL_EVENT_FINGER_UP, 1, 1, 0.4, 0.4);
-        assert!(a.history.doc.strokes.is_empty());
+        assert!(a.history.strokes().is_empty());
         finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 3, 0.2, 0.2);
         finger(&mut a, SDL_EVENT_FINGER_UP, 1, 3, 0.4, 0.4);
-        assert_eq!(a.history.doc.strokes.len(), 1);
+        assert_eq!(a.history.strokes().len(), 1);
     }
     #[test]
     fn emulated_touch_mouse_packets_are_ignored() {
@@ -2855,7 +2866,7 @@ mod touch_tests {
         a.event(&event, SDL_WindowID(1), [800., 600.]);
         assert!(a.history.active.is_none());
         finger(&mut a, SDL_EVENT_FINGER_UP, 1, 1, 0.4, 0.4);
-        assert_eq!(a.history.doc.strokes.len(), 1);
+        assert_eq!(a.history.strokes().len(), 1);
     }
     #[test]
     fn disabled_or_passthrough_touch_cannot_draw() {
@@ -2865,6 +2876,6 @@ mod touch_tests {
         a.touch_enabled = true;
         a.pass = true;
         finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 2, 0.2, 0.2);
-        assert!(a.input.touches.is_empty() && a.history.doc.strokes.is_empty());
+        assert!(a.input.touches.is_empty() && a.history.strokes().is_empty());
     }
 }

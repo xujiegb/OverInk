@@ -258,7 +258,7 @@ impl Canvas {
                         self.native.invalidate();
                     }
                 }
-                page.history.doc.size = self.window.size();
+                page.history.set_size(self.window.size());
                 self.ink.paint(
                     page,
                     &self.render,

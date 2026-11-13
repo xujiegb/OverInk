@@ -205,12 +205,22 @@ impl Ink {
         if !app.has_contacts() && self.painter.samples.capacity() > 128_000 {
             self.painter.samples = Vec::new();
         }
-        renderer.present()
+        renderer.present()?;
+        // A small canvas can use its FP16 layer for the final erase frame.
+        // Release it after SDL has submitted the composition.
+        self.release_unused_extended_layer(app);
+        Ok(())
+    }
+
+    fn release_unused_extended_layer(&mut self, app: &App) {
+        if self.extended_bytes() != 0 && !extended_cache_needed(app) {
+            self.invalidate_layer();
+        }
     }
 
     fn committed(&mut self, frame: &Frame<'_>, app: &mut App) -> Result<(), String> {
         let damage = app.input.ink_damage.take();
-        let count = app.history.doc.strokes.len();
+        let count = app.history.strokes().len();
         if count == 0 {
             self.layer = None;
             return Ok(());
@@ -224,10 +234,7 @@ impl Ink {
         if renderer.extended
             && (renderer.name != "metal"
                 || extended_bytes(frame.pixels) > frame.extended_budget
-                || !(self.layer.is_some()
-                    || count >= EXTENDED_CACHE_STROKES
-                    || app.history.point_count() >= EXTENDED_CACHE_POINTS
-                    || app.input.pending_erasures.values().any(Erasure::has_edits)))
+                || (self.layer.is_none() && !extended_cache_needed(app)))
         {
             self.invalidate_layer();
             return self.painter.history(frame, app, 0, None, 1.);
@@ -334,6 +341,12 @@ fn extended_bytes([width, height]: [i32; 2]) -> usize {
         .saturating_mul(8)
 }
 
+fn extended_cache_needed(app: &App) -> bool {
+    app.history.strokes().len() >= EXTENDED_CACHE_STROKES
+        || app.history.point_count() >= EXTENDED_CACHE_POINTS
+        || app.input.pending_erasures.values().any(Erasure::has_edits)
+}
+
 fn revision_white_scale(layer: &CommittedLayer) -> f32 {
     let white = layer
         .revision
@@ -436,7 +449,7 @@ impl StrokePainter {
             renderer.clear([0.; 4])?;
             return self.history(frame, app, 0, None, white);
         }
-        if first < app.history.doc.strokes.len() {
+        if first < app.history.strokes().len() {
             set_scale(renderer, frame.scale)?;
             self.history(frame, app, first, None, white)?;
         }
@@ -474,7 +487,7 @@ impl StrokePainter {
         white: f32,
     ) -> Result<(), String> {
         let bounds = region.map(|_| app.history.stroke_bounds());
-        for (index, stroke) in app.history.doc.strokes.iter().enumerate().skip(first) {
+        for (index, stroke) in app.history.strokes().iter().enumerate().skip(first) {
             if let Some(region) = region
                 && bounds.as_ref().unwrap()[index].is_none_or(|bounds| {
                     !region.intersects(bounds.path.padded(stroke.max_radius() * 2. + frame.aa))
@@ -1006,6 +1019,96 @@ mod tests {
     }
 
     #[test]
+    fn marker_split_updates_a_crossing_away_from_the_cut() {
+        let canvas = TestCanvas::new([600, 160]);
+        let full = TestCanvas::new([600, 160]);
+        let mut app = app();
+        let mut ink = Ink::default();
+        commit(
+            &mut app,
+            Tool::Marker,
+            [255, 200, 0],
+            &[
+                [20., 60.],
+                [180., 60.],
+                [300., 60.],
+                [380., 60.],
+                [420., 60.],
+                [460., 60.],
+                [540., 60.],
+                [540., 130.],
+                [100., 130.],
+                [100., 20.],
+            ],
+        );
+        let crossing = |canvas: &TestCanvas| canvas.pixel(100, 60);
+        canvas.history(&mut ink, &mut app);
+        let before = crossing(&canvas);
+        assert_eq!(before, canvas.pixel(160, 60));
+
+        app.erase_sample(1, Point::new(420., 60., 1., [0.; 2]));
+        canvas.history(&mut ink, &mut app);
+        full.history(&mut Ink::default(), &mut app);
+        let split = crossing(&full);
+        assert!(split[3] > before[3]);
+        assert_eq!(crossing(&canvas), split);
+
+        app.reset_contacts();
+        canvas.history(&mut ink, &mut app);
+        assert_eq!(crossing(&canvas), before);
+
+        app.erase_sample(2, Point::new(420., 60., 1., [0.; 2]));
+        canvas.history(&mut ink, &mut app);
+        app.commit_erase(2);
+        canvas.history(&mut ink, &mut app);
+        assert_eq!(app.history.strokes().len(), 2);
+        assert_eq!(crossing(&canvas), split);
+        app.history.undo();
+        canvas.history(&mut ink, &mut app);
+        assert_eq!(crossing(&canvas), before);
+        app.history.redo();
+        canvas.history(&mut ink, &mut app);
+        assert_eq!(crossing(&canvas), split);
+    }
+
+    #[test]
+    fn small_extended_cache_releases_its_layer_after_erase() {
+        let canvas = TestCanvas::new([320, 160]);
+        let mut app = app();
+        let mut ink = Ink::default();
+        commit(
+            &mut app,
+            Tool::Pen,
+            [255, 200, 0],
+            &[[10., 60.], [300., 60.]],
+        );
+        assert!(!extended_cache_needed(&app));
+        for (id, x) in [(1, 100.), (2, 180.)] {
+            app.erase_sample(id, Point::new(x, 60., 1., [0.; 2]));
+            canvas.history(&mut ink, &mut app);
+            // Exercise the lifetime policy with a software-backed target.
+            ink.layer.as_mut().unwrap().format = SDL_PIXELFORMAT_RGBA64_FLOAT;
+            ink.release_unused_extended_layer(&app);
+            assert_eq!(ink.extended_bytes(), extended_bytes([320, 160]));
+
+            if id == 1 {
+                app.commit_erase(id);
+            } else {
+                app.reset_contacts();
+            }
+            assert!(!extended_cache_needed(&app));
+            ink.release_unused_extended_layer(&app);
+            assert!(ink.layer.is_none());
+            assert_eq!(ink.extended_bytes(), 0);
+        }
+
+        let stroke = (*app.history.strokes()[0]).clone();
+        app.history
+            .append(std::iter::repeat_n(stroke, EXTENDED_CACHE_STROKES));
+        assert!(extended_cache_needed(&app));
+    }
+
+    #[test]
     fn local_erase_matches_a_full_rebuild_at_fractional_scale() {
         let canvas = TestCanvas::new([840, 240]);
         let full = TestCanvas::new([840, 240]);
@@ -1127,7 +1230,7 @@ mod tests {
         }
         app.input.pending_erasures.insert(0, draft);
         app.commit_erase(0);
-        assert_eq!(app.history.doc.strokes.len(), 10_000);
+        assert_eq!(app.history.strokes().len(), 10_000);
         canvas.history(&mut ink, &mut app);
         let full_indices = std::mem::take(&mut ink.painter.submitted_indices);
         app.erase_sample(1, Point::new(500., 350., 1., [0.; 2]));

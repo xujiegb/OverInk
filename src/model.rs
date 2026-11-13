@@ -307,10 +307,11 @@ impl Default for Document {
 struct HistoryStep {
     strokes: Vec<Arc<Stroke>>,
     bytes: usize,
+    point_count: usize,
 }
 
 impl HistoryStep {
-    fn new(strokes: Vec<Arc<Stroke>>) -> Self {
+    fn new(strokes: Vec<Arc<Stroke>>, point_count: usize) -> Self {
         let entries = strokes.capacity() * size_of::<Arc<Stroke>>();
         let bytes = strokes.iter().fold(entries, |total, stroke| {
             total.saturating_add(
@@ -319,13 +320,18 @@ impl HistoryStep {
                     + stroke.points.capacity() * size_of::<Point>(),
             )
         });
-        Self { strokes, bytes }
+        Self {
+            strokes,
+            bytes,
+            point_count,
+        }
     }
 }
 
 #[derive(Default)]
 pub struct History {
-    pub doc: Document,
+    doc: Document,
+    point_count: usize,
     pub active: Option<Stroke>,
     undo: VecDeque<HistoryStep>,
     redo: VecDeque<HistoryStep>,
@@ -338,6 +344,18 @@ pub struct History {
     pub changed: bool,
 }
 impl History {
+    pub fn document(&self) -> &Document {
+        &self.doc
+    }
+
+    pub fn strokes(&self) -> &[Arc<Stroke>] {
+        &self.doc.strokes
+    }
+
+    pub fn set_size(&mut self, size: [f32; 2]) {
+        self.doc.size = size;
+    }
+
     pub fn append_revision(&self) -> u64 {
         self.append_revision
     }
@@ -351,11 +369,7 @@ impl History {
     }
 
     pub fn point_count(&self) -> usize {
-        self.doc
-            .strokes
-            .iter()
-            .map(|stroke| stroke.points.len())
-            .sum()
+        self.point_count
     }
 
     pub fn stroke_bounds(&self) -> Ref<'_, [Option<StrokeBounds>]> {
@@ -383,7 +397,7 @@ impl History {
         // Committed strokes are immutable, so snapshots share their samples.
         self.redo.clear();
         self.undo
-            .push_back(HistoryStep::new(self.doc.strokes.clone()));
+            .push_back(HistoryStep::new(self.doc.strokes.clone(), self.point_count));
         self.trim_steps();
         self.changed = true;
     }
@@ -425,7 +439,11 @@ impl History {
         let mut strokes = strokes.peekable();
         if strokes.peek().is_some() {
             self.snapshot();
-            self.doc.strokes.extend(strokes.map(Arc::new));
+            self.doc.strokes.extend(
+                strokes
+                    .inspect(|stroke| self.point_count += stroke.points.len())
+                    .map(Arc::new),
+            );
             self.append_revision = self.append_revision.wrapping_add(1);
         }
     }
@@ -437,26 +455,30 @@ impl History {
             .filter(|stroke| !stroke.points.is_empty());
         self.append(active.into_iter());
     }
+    fn apply_step(&mut self, step: HistoryStep) -> HistoryStep {
+        let strokes = std::mem::replace(&mut self.doc.strokes, step.strokes);
+        let point_count = std::mem::replace(&mut self.point_count, step.point_count);
+        self.invalidate_stroke_bounds();
+        self.changed = true;
+        self.ink_revision = self.ink_revision.wrapping_add(1);
+        HistoryStep::new(strokes, point_count)
+    }
+
     pub fn undo(&mut self) {
         self.active = None;
-        if let Some(s) = self.undo.pop_back() {
-            let replaced = std::mem::replace(&mut self.doc.strokes, s.strokes);
-            self.invalidate_stroke_bounds();
-            self.redo.push_back(HistoryStep::new(replaced));
+        if let Some(step) = self.undo.pop_back() {
+            let previous = self.apply_step(step);
+            self.redo.push_back(previous);
             self.trim_steps();
-            self.changed = true;
-            self.ink_revision = self.ink_revision.wrapping_add(1);
         }
     }
+
     pub fn redo(&mut self) {
         self.active = None;
-        if let Some(s) = self.redo.pop_back() {
-            let replaced = std::mem::replace(&mut self.doc.strokes, s.strokes);
-            self.invalidate_stroke_bounds();
-            self.undo.push_back(HistoryStep::new(replaced));
+        if let Some(step) = self.redo.pop_back() {
+            let previous = self.apply_step(step);
+            self.undo.push_back(previous);
             self.trim_steps();
-            self.changed = true;
-            self.ink_revision = self.ink_revision.wrapping_add(1);
         }
     }
     pub fn clear(&mut self) {
@@ -464,18 +486,22 @@ impl History {
         if !self.doc.strokes.is_empty() {
             self.snapshot_replacement();
             self.doc.strokes = Vec::new();
+            self.point_count = 0;
         }
     }
     pub fn set_document(&mut self, doc: Document, restore: bool) {
+        let point_count = doc.strokes.iter().map(|stroke| stroke.points.len()).sum();
         if restore {
             *self = Self {
                 doc,
+                point_count,
                 ink_revision: self.ink_revision.wrapping_add(1),
                 ..Self::default()
             };
         } else {
             self.snapshot_replacement();
             self.doc = doc;
+            self.point_count = point_count;
             self.active = None;
         }
     }
@@ -557,13 +583,15 @@ mod tests {
     fn history_budget_counts_fragment_capacity_and_both_stacks() {
         let mut fragment = stroke();
         fragment.points.reserve(4096);
-        let step = HistoryStep::new(vec![Arc::new(fragment)]);
+        let point_count = fragment.points.len();
+        let step = HistoryStep::new(vec![Arc::new(fragment)], point_count);
         assert!(step.bytes > 4096 * size_of::<Point>());
         let mut history = History::default();
         for stack in [&mut history.undo, &mut history.redo] {
             stack.push_back(HistoryStep {
                 strokes: Vec::new(),
                 bytes: MAX_HISTORY_BYTES / 2,
+                point_count: 0,
             });
         }
         history.undo.push_back(step);
@@ -596,6 +624,29 @@ mod tests {
         assert!(Arc::ptr_eq(&original, &history.doc.strokes[0]));
         history.redo();
         assert!(Arc::ptr_eq(&original, &history.doc.strokes[0]));
+    }
+
+    #[test]
+    fn point_count_follows_document_replacement_and_history() {
+        let document = || Document {
+            strokes: vec![Arc::new(stroke())],
+            ..Document::default()
+        };
+        let mut history = History::default();
+        history.set_document(document(), true);
+        assert_eq!(history.point_count(), 2);
+        history.append([stroke(), stroke()].into_iter());
+        assert_eq!(history.point_count(), 6);
+        history.set_document(document(), false);
+        assert_eq!(history.point_count(), 2);
+        history.undo();
+        assert_eq!(history.point_count(), 6);
+        history.redo();
+        assert_eq!(history.point_count(), 2);
+        history.clear();
+        assert_eq!(history.point_count(), 0);
+        history.undo();
+        assert_eq!(history.point_count(), 2);
     }
 
     #[test]

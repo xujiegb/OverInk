@@ -423,6 +423,9 @@ impl Erasure {
         }
         history.snapshot();
         history.erase_revision = history.erase_revision.wrapping_add(1);
+        let committed_points = history.point_count as i64 + self.delta;
+        debug_assert!((0..=MAX_POINTS as i64).contains(&committed_points));
+        history.point_count = committed_points as usize;
         let previous = mem::take(&mut history.doc.strokes);
         let mut bounds = mem::take(history.stroke_bounds.get_mut()).into_iter();
         let mut remap = Vec::new();
@@ -615,12 +618,14 @@ impl Sweep {
         if tail.is_some() || next + 1 < points.len() {
             run_end(next, points.len(), tail, None, &mut damage);
         }
+        let marker_split = stroke.tool == Tool::Marker && kept.len() > 1;
         let damage = if !matches!(stroke.tool, Tool::Pen | Tool::Marker)
+            || marker_split
             || !fragment.bounds.well_spaced
             || kept.iter().any(|part| !part.bounds.well_spaced)
         {
-            // Shape conversion, pencil subdivision and sample deduplication
-            // can change geometry away from the cut.
+            // Separate marker masks can change opacity at remote crossings.
+            // Shape conversion and sample processing can also change distant pixels.
             fragment.bounds.path
         } else {
             damage.unwrap()
@@ -948,7 +953,7 @@ mod tests {
     #[test]
     fn skipped_samples_still_reach_the_release_point() {
         let mut history = History::default();
-        history.doc.strokes.push(Arc::new(Stroke {
+        history.append(std::iter::once(Stroke {
             width: 0.2,
             pressure_enabled: false,
             points: vec![Point::new(1.3, 0., 1., [0.; 2])],
