@@ -1,6 +1,14 @@
 © 2014-2021 Adobe (http://www.adobe.com/).
 
+Noto Sans SC Regular (Sans2.004) is from notofonts/noto-cjk.
 OverInk UI SC and TC are subsets of Noto Sans CJK Sans2.004.
+
+Copyright 2022 Google Inc.
+OverInk Color Emoji is based on Noto Color Emoji 2.055 from Google Fonts.
+The bundled version keeps the COLR/CPAL data and removes the SVG table.
+
+Copyright 2013 Google LLC.
+OverInk Mono Emoji is a regular-weight instance of Noto Emoji 3.002 from Google Fonts.
 
 This Font Software is licensed under the SIL Open Font License,
 Version 1.1.
