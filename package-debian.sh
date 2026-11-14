@@ -358,6 +358,26 @@ def extract_deb(deb_path, dest):
         if archive.wait():
             raise RuntimeError(f"Cannot extract {deb_path}")
 
+def fetch_deb(base_url, filename, checksum):
+    url = f"{base_url}/{filename}"
+    path = debs_dir / os.path.basename(filename)
+    if path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == checksum:
+        return path
+
+    partial = path.with_suffix(".deb.part")
+    try:
+        subprocess.run([
+            "curl", "-fsSL", "--retry", "3", "--retry-all-errors",
+            "--connect-timeout", "15", "--max-time", "120",
+            "--output", str(partial), url,
+        ], check=True)
+        if hashlib.sha256(partial.read_bytes()).hexdigest() != checksum:
+            raise RuntimeError(f"Bad SHA256: {url}")
+        partial.replace(path)
+    finally:
+        partial.unlink(missing_ok=True)
+    return path
+
 pkgs = parse_packages(fetch_index(repo, suite, arch))
 queue = [
     "libc6-dev", f"libgcc-{gcc_ver}-dev", f"libstdc++-{gcc_ver}-dev",
@@ -378,10 +398,7 @@ while queue:
     queue.extend(d for d in deps if d not in seen)
 
 for fname, checksum in files:
-    deb_path = debs_dir / os.path.basename(fname)
-    if not deb_path.exists(): urllib.request.urlretrieve(f"{repo}/{fname}", deb_path)
-    if hashlib.sha256(deb_path.read_bytes()).hexdigest() != checksum: raise RuntimeError(f"Bad SHA256: {fname}")
-    extract_deb(deb_path, sysroot)
+    extract_deb(fetch_deb(repo, fname, checksum), sysroot)
 
 if not shutil.which("wayland-scanner"):
     host_arch_map = {
@@ -394,11 +411,8 @@ if not shutil.which("wayland-scanner"):
     h_repo = "https://loong13.debian.net/debian-loong64" if h_arch == "loong64" else "https://deb.debian.org/debian"
     host_packages = parse_packages(fetch_index(h_repo, "trixie", h_arch))
     fname, _, checksum = host_packages["libwayland-bin"]
-    deb_path = debs_dir / os.path.basename(fname)
-    if not deb_path.exists(): urllib.request.urlretrieve(f"{h_repo}/{fname}", deb_path)
-    if hashlib.sha256(deb_path.read_bytes()).hexdigest() != checksum: raise RuntimeError(f"Bad SHA256: {fname}")
     (work / "host").mkdir(exist_ok=True)
-    extract_deb(deb_path, work / "host")
+    extract_deb(fetch_deb(h_repo, fname, checksum), work / "host")
 
 for name in ("lib", "lib64", "lib32", "libx32"):
     old, new = sysroot / name, sysroot / "usr" / name
