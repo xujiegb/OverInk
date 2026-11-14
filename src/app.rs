@@ -37,6 +37,11 @@ impl Pen {
         };
         Point::new(x, y, pressure, self.tilt)
     }
+    fn finish(&mut self) {
+        self.pressure = 0.;
+        self.has_pressure = false;
+        self.down = false;
+    }
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Source {
@@ -54,6 +59,8 @@ struct Contact {
     source: Source,
     gesture: Gesture,
     last: Point,
+    // Whether the stroke has received real pressure for its initial points.
+    measured_pressure: bool,
 }
 struct FingerStroke {
     gesture: Gesture,
@@ -380,6 +387,7 @@ impl App {
             source,
             gesture,
             last: p,
+            measured_pressure: false,
         });
     }
     fn motion(&mut self, source: Source, p: Point) {
@@ -413,18 +421,40 @@ impl App {
             }
         }
     }
+    fn pen_motion(&mut self, source: Source, p: Point, has_pressure: bool) {
+        if has_pressure
+            && let Some(contact) = &mut self.input.contact
+            && contact.source == source
+            && !contact.measured_pressure
+            && let Some(stroke) = &mut self.history.active
+            && stroke.pressure_enabled
+        {
+            for point in &mut stroke.points {
+                point.pressure = p.pressure;
+            }
+            contact.measured_pressure = true;
+        }
+        self.motion(source, p);
+    }
     fn append(stroke: &mut Stroke, p: Point, can_append: bool) {
+        let pressure_enabled = stroke.pressure_enabled;
+        let pencil = stroke.tool == Tool::Pencil;
         if stroke.tool.is_shape() {
             if stroke.points.len() == 1 && can_append {
                 stroke.points.push(p);
             } else if let Some(end) = stroke.points.get_mut(1) {
                 *end = p;
             }
+        } else if let Some(last) = stroke.points.last_mut()
+            && last.dist(p) <= Point::MERGE_DISTANCE
+        {
+            last.merge_sample(p, pressure_enabled, pencil);
         } else if can_append
             && stroke.points.len() < 100_000
             && stroke.points.last().is_none_or(|last| {
                 last.dist(p) > 0.15
-                    || (stroke.pressure_enabled && (last.pressure - p.pressure).abs() > 0.00001)
+                    || (pressure_enabled && (last.pressure - p.pressure).abs() > 0.00001)
+                    || (pencil && last.tilt != p.tilt)
             })
         {
             stroke.points.push(p);
@@ -440,12 +470,15 @@ impl App {
         }
     }
     fn finish_contact(&mut self) {
-        if let Some(Contact {
-            gesture: Gesture::Erase(id),
-            ..
-        }) = self.input.contact.take()
-        {
-            self.commit_erase(id);
+        if let Some(contact) = self.input.contact.take() {
+            if let Gesture::Erase(id) = contact.gesture {
+                self.commit_erase(id);
+            }
+            if let Source::Pen(id) = contact.source
+                && let Some(pen) = self.input.pens.get_mut(&id)
+            {
+                pen.down = false;
+            }
         }
         self.history.commit();
     }
@@ -457,8 +490,11 @@ impl App {
     fn stop(&mut self) {
         self.finish_contact();
         self.commit_touches();
+        self.reset_pens();
+    }
+    fn reset_pens(&mut self) {
         for pen in self.input.pens.values_mut() {
-            pen.down = false;
+            pen.finish();
         }
     }
     fn use_mouse(&mut self) {
@@ -503,9 +539,7 @@ impl App {
             }
         }
         self.input.pending_erasures.clear();
-        for pen in self.input.pens.values_mut() {
-            pen.down = false;
-        }
+        self.reset_pens();
         self.input.laser.clear();
     }
     fn swap_page(&mut self, id: u32) {
@@ -888,48 +922,56 @@ impl App {
                 }
                 SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP if e.ptouch.windowID == overlay => {
                     let t = e.ptouch;
-                    let pen = self.input.pens.entry(t.which.0).or_default();
-                    pen.down = t.down;
+                    let pen = *self.input.pens.entry(t.which.0).or_default();
+                    let source = Source::Pen(t.which.0);
                     let p = pen.point(t.x, t.y);
                     if t.down {
-                        self.begin(Source::Pen(t.which.0), p, t.eraser);
+                        self.begin(source, p, t.eraser);
+                        self.input.pens.entry(t.which.0).or_default().down = true;
+                        if let Some(contact) = &mut self.input.contact
+                            && contact.source == source
+                        {
+                            contact.measured_pressure = pen.has_pressure;
+                        }
                     } else {
-                        self.motion(Source::Pen(t.which.0), p);
-                        self.end(Source::Pen(t.which.0));
+                        self.pen_motion(source, p, pen.has_pressure);
+                        self.end(source);
                         if let Some(pen) = self.input.pens.get_mut(&t.which.0) {
-                            pen.pressure = 0.;
-                            pen.has_pressure = false;
+                            pen.finish();
                         }
                     }
                 }
                 SDL_EVENT_PEN_AXIS if e.paxis.windowID == overlay => {
                     let a = e.paxis;
+                    let source = Source::Pen(a.which.0);
                     let pen = self.input.pens.entry(a.which.0).or_default();
+                    let in_contact = pen.down || a.pen_state & SDL_PEN_INPUT_DOWN != 0;
                     match a.axis {
                         SDL_PEN_AXIS_PRESSURE if a.value.is_finite() => {
                             pen.pressure = a.value.clamp(0., 1.);
-                            pen.has_pressure = true;
+                            pen.has_pressure = in_contact || pen.pressure > 0.;
                         }
                         SDL_PEN_AXIS_XTILT => pen.tilt[0] = a.value.clamp(-90., 90.),
                         SDL_PEN_AXIS_YTILT => pen.tilt[1] = a.value.clamp(-90., 90.),
                         _ => {}
                     }
                     let point = pen.point(a.x, a.y);
-                    self.motion(Source::Pen(a.which.0), point);
+                    let has_pressure = pen.has_pressure;
+                    self.pen_motion(source, point, has_pressure);
                 }
                 SDL_EVENT_PEN_MOTION if e.pmotion.windowID == overlay => {
                     let m = e.pmotion;
-                    let point = self
-                        .input
-                        .pens
-                        .entry(m.which.0)
-                        .or_default()
-                        .point(m.x, m.y);
-                    self.motion(Source::Pen(m.which.0), point);
+                    let pen = *self.input.pens.entry(m.which.0).or_default();
+                    self.pen_motion(
+                        Source::Pen(m.which.0),
+                        pen.point(m.x, m.y),
+                        pen.has_pressure,
+                    );
                 }
                 SDL_EVENT_WINDOW_FOCUS_LOST if e.window.windowID == overlay => {
                     if self.multi {
                         self.finish_contact();
+                        self.reset_pens();
                     } else {
                         self.discard_touches();
                         self.stop();
@@ -1083,7 +1125,11 @@ impl App {
         self.stop();
         let p = PathBuf::from(&self.path).with_extension("svg");
         let data = export::svg(self.history.document());
-        match std::fs::write(&p, data) {
+        let result = p
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::write(&p, data));
+        match result {
             Ok(()) => self.status = text("Exported", "已导出", "已匯出").detail(p.display()),
             Err(e) => self.status = text("Export failed", "导出失败", "匯出失敗").detail(e),
         }
@@ -1929,7 +1975,13 @@ pub fn run(options: Options) -> Result<(), String> {
                 canvas.show(&toolbar, false)?;
             }
         } else if mode_changed || controller_bounds_changed {
-            canvases[active].keep_toolbar_above(&toolbar);
+            let toolbar_display = toolbar.display_id();
+            if let Some(canvas) = canvases
+                .iter()
+                .find(|canvas| canvas.visible && (wayland || canvas.output == toolbar_display))
+            {
+                canvas.keep_toolbar_above(&toolbar);
+            }
         }
         if !options.smoke
             && app.preferences.restore_session
@@ -2026,7 +2078,10 @@ fn smoke_events(app: &mut App, id: SDL_WindowID) -> Result<(), String> {
         ..Default::default()
     };
     app.event(&e, id, [1100., 720.]);
-    if app.history.strokes().len() != 1 || app.history.strokes()[0].points.len() < 128 {
+    if app.history.strokes().len() != 1
+        || app.history.strokes()[0].points.len() < 128
+        || app.history.strokes()[0].points[0].pressure != 0.
+    {
         return Err("Pen-event smoke failed".into());
     }
     for (i, tool) in [Tool::Arrow, Tool::Rectangle, Tool::Ellipse, Tool::Marker]
@@ -2428,6 +2483,78 @@ mod touch_tests {
         a.history.clear();
         finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 5, 0.4, 0.4);
         assert!(a.input.touches.is_empty() && a.input.pen_proximity.contains(&4));
+    }
+    #[test]
+    fn first_pen_pressure_replaces_fallback_and_stationary_samples_merge() {
+        let mut app = app();
+        app.tool = Tool::Pencil;
+        let id = SDL_WindowID(1);
+        let pen = SDL_PenID(4);
+        let size = [800., 600.];
+        let axis = |app: &mut App, axis, value, x, pen_state| {
+            app.event(
+                &SDL_Event {
+                    paxis: SDL_PenAxisEvent {
+                        r#type: SDL_EVENT_PEN_AXIS,
+                        windowID: id,
+                        which: pen,
+                        axis,
+                        value,
+                        x,
+                        y: 80.,
+                        pen_state,
+                        ..Default::default()
+                    },
+                },
+                id,
+                size,
+            );
+        };
+        let contact = |app: &mut App, down, x| {
+            app.event(
+                &SDL_Event {
+                    ptouch: SDL_PenTouchEvent {
+                        r#type: if down {
+                            SDL_EVENT_PEN_DOWN
+                        } else {
+                            SDL_EVENT_PEN_UP
+                        },
+                        windowID: id,
+                        which: pen,
+                        x,
+                        y: 80.,
+                        down,
+                        ..Default::default()
+                    },
+                },
+                id,
+                size,
+            );
+        };
+        let pressure = SDL_PEN_AXIS_PRESSURE;
+        let down = SDL_PEN_INPUT_DOWN;
+        let hover = Default::default();
+        axis(&mut app, pressure, 0., 100., hover);
+        contact(&mut app, true, 100.);
+        axis(&mut app, SDL_PEN_AXIS_XTILT, 20., 101., down);
+        axis(&mut app, pressure, 0.02, 101., down);
+        axis(&mut app, pressure, 0.7, 130., down);
+        axis(&mut app, pressure, 0.8, 130., down);
+        axis(&mut app, SDL_PEN_AXIS_XTILT, 60., 130., down);
+        axis(&mut app, pressure, 0.01, 130., down);
+        contact(&mut app, false, 130.);
+        let points = &app.history.strokes()[0].points;
+        assert_eq!(points.len(), 3);
+        assert_eq!([points[0].pressure, points[1].pressure], [0.02; 2]);
+        assert_eq!(points[2].pressure, 0.8);
+        assert_eq!(points[2].tilt[0], 60.);
+
+        // Windows can report the first nonzero pressure before the down event.
+        axis(&mut app, pressure, 0.03, 200., hover);
+        contact(&mut app, true, 200.);
+        axis(&mut app, pressure, 0.9, 240., down);
+        contact(&mut app, false, 240.);
+        assert_eq!(app.history.strokes()[1].points[0].pressure, 0.03);
     }
     #[test]
     fn laser_trails_are_separate_across_releases_and_fingers() {
@@ -2840,6 +2967,27 @@ mod touch_tests {
         assert!(Path::new(&private.path).is_file());
         private.load();
         assert_eq!(private.history.strokes()[0].points[0].x, 440.);
+        std::fs::remove_dir_all(state).unwrap();
+    }
+    #[test]
+    fn svg_export_creates_the_default_directory_on_first_launch() {
+        let state = std::env::temp_dir().join(format!("overink-svg-export-{}", std::process::id()));
+        let mut app = App::new(
+            true,
+            0,
+            vec![screen(10, 0, 60.)],
+            &state,
+            Preferences {
+                restore_session: false,
+                ..Preferences::default()
+            },
+        );
+        assert!(!state.exists());
+        add_ink(&mut app, &[20., 40.]);
+        app.export();
+        let svg = std::fs::read_to_string(Path::new(&app.path).with_extension("svg")).unwrap();
+        assert!(svg.starts_with("<svg"));
+        assert!(svg.contains("<path"));
         std::fs::remove_dir_all(state).unwrap();
     }
     #[test]

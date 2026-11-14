@@ -621,12 +621,6 @@ impl StrokePainter {
                         pixels.as_ptr().cast(),
                         PAPER_SIZE * 4,
                     ))?;
-                    // Only the pencil uses textured geometry on the canvas.
-                    check(SDL_SetRenderTextureAddressMode(
-                        renderer.raw,
-                        SDL_TEXTURE_ADDRESS_WRAP,
-                        SDL_TEXTURE_ADDRESS_WRAP,
-                    ))?;
                 }
                 Ok(texture)
             };

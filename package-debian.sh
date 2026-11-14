@@ -239,19 +239,6 @@ resolve_version() {
   echo "[*] Package version: $VERSION"
 }
 
-is_native_target() {
-  local short="$1"
-
-  case "$HOST_ARCH:$short" in
-    x86_64:x64|aarch64:arm64|i686:i386|i386:i386|ppc64le:ppc64le|riscv64:riscv64|loongarch64:loong64|s390x:s390x)
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
-
 prepare_loongarch_compiler() {
   LLVM_TOOL_BIN="${OVERINK_LLVM_BIN_DIR:-$(dirname "$(command -v clang)")}"
   [[ -x "$LLVM_TOOL_BIN/clang" && -x "$LLVM_TOOL_BIN/clang++" ]] || die "Clang/Clang++ not found in $LLVM_TOOL_BIN"
@@ -299,10 +286,6 @@ prepare_target_sdk() {
   SDK_WORK_DIR="$(mktemp -d)"
   mkdir -p "$SDK_WORK_DIR/sysroot/usr/share" "$SDK_WORK_DIR/debs" "$SDK_WORK_DIR/cc"
   prepare_loongarch_compiler "$short"
-
-  for share_dir in /usr/share/wayland /usr/share/wayland-protocols; do
-    [[ -d "$share_dir" ]] && cp -a "$share_dir" "$SDK_WORK_DIR/sysroot/usr/share/" || true
-  done
 
   if [[ "$deb_arch" == "loong64" ]]; then
     repo="https://loong13.debian.net/debian-loong64"
@@ -380,7 +363,7 @@ queue = [
     "libc6-dev", f"libgcc-{gcc_ver}-dev", f"libstdc++-{gcc_ver}-dev",
     "libx11-dev", "libxext-dev", "libxi-dev", "libxrandr-dev", "libxcursor-dev",
     "libxfixes-dev", "libxrender-dev", "libxss-dev", "libxtst-dev",
-    "libwayland-dev", "wayland-protocols", "libxkbcommon-dev", "libegl-dev", "libgl-dev",
+    "libwayland-dev", "libxkbcommon-dev", "libegl-dev", "libgl-dev",
 ]
 missing = [pkg for pkg in queue if pkg not in pkgs]
 if missing:
@@ -457,14 +440,6 @@ publish_binary() {
 
   CARGO_TARGET_DIR="$(mktemp -d)"
 
-  if [[ -z "$SDK_WORK_DIR" ]]; then
-    CC="$(command -v clang)" CXX="$(command -v clang++)" \
-    CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS" \
-    CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
-      cargo build --manifest-path "$PROJECT" --locked --release --target "$rust_target"
-    return 0
-  fi
-
   local sysroot="$SDK_WORK_DIR/sysroot"
   local multiarch="$triple"
   [[ "$triple" == "i686-linux-gnu" ]] && multiarch="i386-linux-gnu"
@@ -520,6 +495,7 @@ CMAKE
     CC="$LLVM_TOOL_BIN/clang" CXX="$LLVM_TOOL_BIN/clang++" \
     CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS" \
     CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
+    OVERINK_BUILD_VERSION="$VERSION" \
     PKG_CONFIG_ALLOW_CROSS=1 \
     PKG_CONFIG_SYSROOT_DIR="$sysroot" \
     PKG_CONFIG_LIBDIR="$sysroot/usr/lib/$multiarch/pkgconfig:$sysroot/usr/share/pkgconfig" \

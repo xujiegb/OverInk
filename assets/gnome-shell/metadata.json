@@ -1,6 +1,7 @@
 {
   "uuid": "overink-overlay@overink",
   "name": "OverInk Overlay",
+  "version": 1,
   "description": "Keep OverInk's native Wayland canvas above windows and place its toolbar at the left edge.",
   "shell-version": ["47", "48", "49"],
   "url": "https://github.com/xujiegb/OverInk"

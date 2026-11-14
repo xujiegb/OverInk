@@ -43,6 +43,8 @@ jobs:
 
   desktop:
     needs: prepare
+    env:
+      OVERINK_BUILD_VERSION: ${{ needs.prepare.outputs.version }}
     name: ${{ matrix.target }}
     strategy:
       fail-fast: false
@@ -128,10 +130,9 @@ jobs:
         shell: bash
         env:
           OVERINK_TARGET: ${{ matrix.target }}
-          OVERINK_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           python3 - <<'PY'
-          import os, pathlib, plistlib, shutil, subprocess, zipfile
+          import json, os, pathlib, plistlib, shutil, subprocess, zipfile
           target = os.environ['OVERINK_TARGET']
           dist = pathlib.Path('dist')
           dist.mkdir(exist_ok=True)
@@ -158,10 +159,15 @@ jobs:
               destination = contents / 'MacOS' / 'overink'
               shutil.copy2(binary, destination)
               destination.chmod(0o755)
+              version = os.environ.get('OVERINK_BUILD_VERSION')
+              if not version:
+                  metadata = json.loads(subprocess.check_output(
+                      ['cargo', 'metadata', '--locked', '--no-deps', '--format-version', '1']))
+                  version = next(p['version'] for p in metadata['packages'] if p['name'] == 'overink')
               info = dict(CFBundleName='OverInk', CFBundleDisplayName='OverInk',
                           CFBundleExecutable='overink', CFBundleIdentifier='org.overink.OverInk',
                           CFBundlePackageType='APPL',
-                          CFBundleShortVersionString=os.environ.get('OVERINK_RELEASE_VERSION') or '0.1.0',
+                          CFBundleShortVersionString=version,
                           CFBundleVersion='1', LSMinimumSystemVersion='11.0',
                           CFBundleDevelopmentRegion='en', CFBundleLocalizations=['en', 'zh-Hans', 'zh-Hant'],
                           CFBundleIconFile='OverInk.icns',
@@ -206,12 +212,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: macos-dmg-${{ matrix.arch }}
-      - name: Install create-dmg
-        run: |
-          set -euo pipefail
-          if ! command -v create-dmg >/dev/null 2>&1; then
-            HOMEBREW_NO_AUTO_UPDATE=1 brew install create-dmg
-          fi
       - name: Build and package DMG
         shell: bash
         env:
@@ -296,11 +296,13 @@ jobs:
           TARGET_ARCH: ${{ matrix.deb }}
           TARGET_MODE: ${{ matrix.mode }}
           ELF_MACHINE: ${{ matrix.machine }}
+          OVERINK_BUILD_VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/overink-linux-dist"
           docker run --rm -i --platform '${{ matrix.platform }}' \
             -e RUST_VERSION -e OVERINK_TARGET -e TARGET_TRIPLE -e TARGET_ARCH -e TARGET_MODE -e ELF_MACHINE \
+            -e OVERINK_BUILD_VERSION \
             -e GITHUB_REPOSITORY -e GITHUB_SHA -e GITHUB_EVENT_NAME \
             -e GITHUB_PR_NUMBER='${{ github.event.pull_request.number }}' \
             -v "$RUNNER_TEMP/overink-linux-dist:/out" \
@@ -734,6 +736,8 @@ jobs:
   freebsd:
     needs: prepare
     name: FreeBSD ${{ matrix.target }} · x64 VM
+    env:
+      OVERINK_BUILD_VERSION: ${{ needs.prepare.outputs.version }}
     runs-on: ubuntu-24.04
     timeout-minutes: 100
     strategy:
@@ -753,7 +757,7 @@ jobs:
           release: '15.1'
           usesh: true
           sync: scp
-          envs: RUST_VERSION
+          envs: RUST_VERSION OVERINK_BUILD_VERSION
           mem: 8192
           cpu: 3
           prepare: |

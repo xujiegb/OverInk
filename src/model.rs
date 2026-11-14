@@ -54,6 +54,8 @@ pub struct Point {
     pub tilt: [f32; 2],
 }
 impl Point {
+    pub const MERGE_DISTANCE: f32 = 0.05;
+
     pub fn new(x: f32, y: f32, pressure: f32, tilt: [f32; 2]) -> Self {
         Self {
             x: if x.is_finite() { x } else { 0.0 },
@@ -74,6 +76,14 @@ impl Point {
     }
     pub fn dist(self, b: Self) -> f32 {
         (self.x - b.x).hypot(self.y - b.y)
+    }
+    pub fn merge_sample(&mut self, other: Self, pressure_enabled: bool, pencil: bool) {
+        if pressure_enabled {
+            self.pressure = self.pressure.max(other.pressure);
+        }
+        if pencil {
+            self.tilt = other.tilt;
+        }
     }
     pub fn interpolate(self, b: Self, t: f32) -> Self {
         Self::new(

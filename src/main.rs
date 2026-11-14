@@ -23,6 +23,12 @@ mod picker;
 mod sdl;
 mod toolbar;
 mod touch;
+
+const VERSION: &str = match option_env!("OVERINK_BUILD_VERSION") {
+    Some(version) if !version.is_empty() => version,
+    _ => env!("CARGO_PKG_VERSION"),
+};
+
 fn main() {
     if let Err(e) = start() {
         eprintln!("OverInk: {e}");
@@ -42,7 +48,7 @@ fn start() -> Result<(), String> {
         match a.as_str() {
             "--help" | "-h" => {
                 println!(
-                    "OverInk 0.1.0 — Rust 2024 / egui / SDL3\n\n  --whiteboard   Start with an opaque white background\n  --x11         Select SDL's X11 backend in an X11 session\n  --sdr         Disable extended-linear-sRGB output\n  --display N   Start on display N (1-based)\n  --smoke-test  Render synthetic pen and touch events with SDL dummy video\n\nKeys (when an OverInk window has focus):\n  Space: click through / draw   H: hide / show\n  Esc: cancel stroke / click through   B: pencil   P/M/L/A/R/O/E/K: other tools\n  1–4: preset colors   Ctrl/Cmd+Z: undo   Ctrl/Cmd+Shift+Z: redo\n  Ctrl/Cmd+S: save   Ctrl/Cmd+O: open   Ctrl/Cmd+Shift+S: SVG\n\nDrag the control window to move a single canvas. Settings can assign a canvas to each display.\nDisconnected displays lose their page and undo history.\nFrame-rate choices: Auto, 120, 90, 60, 30 FPS. Auto follows the display.\nBackground choices: live desktop or frozen snapshot.\nThe separate control window remains usable in click-through mode.\nWhen session recovery is enabled, ink autosaves every 10 seconds and on normal exit.\nTouchscreens: draw with multiple fingers. Native pens take priority over finger drawing."
+                    "OverInk {VERSION} — Rust 2024 / egui / SDL3\n\n  --whiteboard   Start with an opaque white background\n  --x11         Select SDL's X11 backend in an X11 session\n  --sdr         Disable extended-linear-sRGB output\n  --display N   Start on display N (1-based)\n  --smoke-test  Render synthetic pen and touch events with SDL dummy video\n\nKeys (when an OverInk window has focus):\n  Space: click through / draw   H: hide / show\n  Esc: cancel stroke / click through   B: pencil   P/M/L/A/R/O/E/K: other tools\n  1–4: preset colors   Ctrl/Cmd+Z: undo   Ctrl/Cmd+Shift+Z: redo\n  Ctrl/Cmd+S: save   Ctrl/Cmd+O: open   Ctrl/Cmd+Shift+S: SVG\n\nDrag the control window to move a single canvas. Settings can assign a canvas to each display.\nDisconnected displays lose their page and undo history.\nFrame-rate choices: Auto, 120, 90, 60, 30 FPS. Auto follows the display.\nBackground choices: live desktop or frozen snapshot.\nThe separate control window remains usable in click-through mode.\nWhen session recovery is enabled, ink autosaves every 10 seconds and on normal exit.\nTouchscreens: draw with multiple fingers. Native pens take priority over finger drawing."
                 );
                 #[cfg(target_os = "linux")]
                 println!(
