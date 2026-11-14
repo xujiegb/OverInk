@@ -440,6 +440,7 @@ try {
         $env:CMAKE_GENERATOR = 'Ninja'
         $env:RUSTFLAGS = '-C target-feature=+crt-static'
         $env:CARGO_TARGET_DIR = Join-Path $root 'target'
+        $env:OVERINK_BUILD_VERSION = $Version
         $toolchainFile = Join-Path $work 'static-crt.cmake'
         [System.IO.File]::WriteAllLines($toolchainFile, @(
             'set(CMAKE_POLICY_DEFAULT_CMP0091 NEW)',

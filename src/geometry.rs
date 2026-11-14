@@ -168,8 +168,12 @@ pub fn paper_density(x: i32, y: i32) -> f32 {
     0.32 + 0.68 * (hash & 255) as f32 / 255.0
 }
 
-fn append_distinct(points: &mut Vec<Point>, p: Point) {
-    if points.last().is_none_or(|prev| prev.dist(p) > 0.05) {
+fn append_distinct(points: &mut Vec<Point>, p: Point, stroke: &Stroke) {
+    if let Some(prev) = points.last_mut()
+        && prev.dist(p) <= Point::MERGE_DISTANCE
+    {
+        prev.merge_sample(p, stroke.pressure_enabled, stroke.tool == Tool::Pencil);
+    } else {
         points.push(p);
     }
 }
@@ -195,13 +199,14 @@ pub fn prepare_samples(
                 append_distinct(
                     samples,
                     previous.interpolate(point, i as f32 / steps as f32),
+                    stroke,
                 );
             }
             previous = point;
         }
     } else {
         for point in points {
-            append_distinct(samples, point);
+            append_distinct(samples, point, stroke);
         }
     }
 }
@@ -324,6 +329,34 @@ mod tests {
                     .all(|v| v.xy.iter().all(|v| v.is_finite()))
             );
             assert!(m.indices.iter().all(|i| (*i as usize) < m.vertices.len()));
+        }
+    }
+    #[test]
+    fn overlapping_pencil_samples_keep_pressure_and_tilt() {
+        let stroke = Stroke {
+            tool: Tool::Pencil,
+            color: InkColor::default(),
+            width: 8.,
+            opacity: 0.68,
+            pressure_curve: 1.,
+            pressure_enabled: true,
+            points: vec![
+                Point::new(10., 10., 0.02, [0.; 2]),
+                Point::new(10., 10., 0.8, [0.; 2]),
+                Point::new(10., 10., 0.3, [70., 0.]),
+            ],
+        };
+        let mut samples = Vec::new();
+        for vertex_grain in [false, true] {
+            prepare_samples(
+                &stroke,
+                PointSpan::new(&stroke.points),
+                vertex_grain,
+                &mut samples,
+            );
+            assert_eq!(samples.len(), 1);
+            assert_eq!(samples[0].pressure, 0.8);
+            assert_eq!(samples[0].tilt, [70., 0.]);
         }
     }
     #[test]

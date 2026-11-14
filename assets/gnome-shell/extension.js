@@ -15,6 +15,10 @@ export default class OverInkOverlay extends Extension {
             this._watch(actor.meta_window);
         });
         this._workareas = global.display.connect('workareas-changed', () => this._queueLayout());
+        this._monitor = global.display.connect('window-entered-monitor', (_display, _monitor, window) => {
+            if (this._windows.has(window))
+                this._queueLayout();
+        });
         for (const actor of global.get_window_actors())
             this._watch(actor.meta_window);
     }
@@ -22,6 +26,7 @@ export default class OverInkOverlay extends Extension {
     disable() {
         global.window_manager.disconnect(this._map);
         global.display.disconnect(this._workareas);
+        global.display.disconnect(this._monitor);
         if (this._layout) {
             GLib.Source.remove(this._layout);
             this._layout = 0;
@@ -46,7 +51,7 @@ export default class OverInkOverlay extends Extension {
             return;
         }
 
-        const state = {canvas: title === CANVAS, placed: false, aboveAdded: false, lastResize: null, signals: []};
+        const state = {canvas: title === CANVAS, placement: null, aboveAdded: false, lastResize: null, signals: []};
         this._windows.set(window, state);
         state.signals.push(window.connect('unmanaged', () => this._unwatch(window)));
         if (state.canvas) {
@@ -54,9 +59,9 @@ export default class OverInkOverlay extends Extension {
                 state.signals.push(window.connect(`notify::maximized-${axis}`,
                     () => this._queueLayout()));
             }
-            for (const signal of ['position-changed', 'size-changed'])
-                state.signals.push(window.connect(signal, () => this._queueLayout()));
+            state.signals.push(window.connect('position-changed', () => this._queueLayout()));
         }
+        state.signals.push(window.connect('size-changed', () => this._queueLayout()));
         this._queueLayout();
     }
 
@@ -116,12 +121,16 @@ export default class OverInkOverlay extends Extension {
                     window.move_resize_frame(false, area.x, area.y, area.width, area.height);
                 }
             }
-        } else if (!state.placed) {
+        } else {
             const frame = window.get_frame_rect();
             if (frame.height > 0) {
                 const y = area.y + Math.max(0, Math.floor((area.height - frame.height) / 2));
-                window.move_frame(false, area.x, y);
-                state.placed = true;
+                const placement = [monitor, area.x, y].join(':');
+                if (placement !== state.placement) {
+                    state.placement = placement;
+                    if (frame.x !== area.x || frame.y !== y)
+                        window.move_frame(false, area.x, y);
+                }
             }
         }
 

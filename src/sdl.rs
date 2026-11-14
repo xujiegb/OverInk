@@ -62,9 +62,10 @@ impl Runtime {
             SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, c"1".as_ptr());
             // A canvas drag must release on entering the separate controller.
             SDL_SetHint(SDL_HINT_MOUSE_AUTO_CAPTURE, c"0".as_ptr());
+            let version = cstring(crate::VERSION);
             SDL_SetAppMetadata(
                 c"OverInk".as_ptr(),
-                c"0.1.0".as_ptr(),
+                version.as_ptr(),
                 c"org.overink.OverInk".as_ptr(),
             );
             SDL_ClearError();
@@ -232,15 +233,25 @@ impl Window {
             check(SDL_SetWindowSize(self.raw, w, h))?;
             let driver = driver();
             if bounded && driver != "wayland" {
-                let (mut x, mut y) = (0, 0);
-                if on_display.is_some() || !SDL_GetWindowPosition(self.raw, &mut x, &mut y) {
-                    x = bounds.x + if driver == "x11" { 0 } else { 8 };
-                    y = bounds.y + (bounds.h - h) / 2;
+                let (mut current_x, mut current_y) = (0, 0);
+                let positioned = SDL_GetWindowPosition(self.raw, &mut current_x, &mut current_y);
+                let (x, y) = if on_display.is_some() || !positioned {
+                    (
+                        bounds.x + if driver == "x11" { 0 } else { 8 },
+                        bounds.y + (bounds.h - h) / 2,
+                    )
+                } else {
+                    (current_x, current_y)
+                };
+                let x = x.clamp(bounds.x, bounds.x + (bounds.w - w).max(0));
+                let y = y.clamp(bounds.y, bounds.y + (bounds.h - h).max(0));
+                if !positioned || (x, y) != (current_x, current_y) {
+                    check(SDL_SetWindowPosition(self.raw, x, y))?;
                 }
-                x = x.clamp(bounds.x, bounds.x + (bounds.w - w).max(0));
-                y = y.clamp(bounds.y, bounds.y + (bounds.h - h).max(0));
-                check(SDL_SetWindowPosition(self.raw, x, y))?;
-                check(SDL_SyncWindow(self.raw))?;
+                // X11 reports the actual geometry through ConfigureNotify.
+                if driver != "x11" {
+                    check(SDL_SyncWindow(self.raw))?;
+                }
             }
             Ok(())
         }

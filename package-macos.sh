@@ -253,7 +253,7 @@ CMAKE
   if [[ $(rustc -vV | sed -n 's/^host: //p') == "$target" ]]; then
     cargo test --locked --release --target "$target"
   fi
-  cargo build --locked --release --target "$target"
+  OVERINK_BUILD_VERSION="$version" cargo build --locked --release --target "$target"
 
   binary="$CARGO_TARGET_DIR/$target/release/overink"
   [[ -s $binary ]] || { printf 'Missing binary: %s\n' "$binary" >&2; return 1; }

@@ -53,10 +53,14 @@ impl FrameRate {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
-        let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, serde_json::to_vec(&self).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
-        std::fs::rename(tmp, path).map_err(|e| e.to_string())
+        let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+        let data = serde_json::to_vec(&self).map_err(|e| e.to_string())?;
+        std::fs::write(&tmp, data)
+            .and_then(|()| std::fs::rename(&tmp, path))
+            .inspect_err(|_| {
+                let _ = std::fs::remove_file(&tmp);
+            })
+            .map_err(|e| e.to_string())
     }
 }
 

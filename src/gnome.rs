@@ -110,9 +110,9 @@ impl Guide {
             ),
             Self::Update => (
                 tr.text(
-                    "Update OverInk Overlay to support this GNOME Shell version.",
-                    "更新 OverInk Overlay 扩展以支持当前 GNOME Shell 版本。",
-                    "更新 OverInk Overlay 擴充套件以支援目前的 GNOME Shell 版本。",
+                    "Update OverInk Overlay to use native Wayland with this version of OverInk.",
+                    "请更新 OverInk Overlay 扩展，以继续使用原生 Wayland。",
+                    "請更新 OverInk Overlay 擴充套件，以繼續使用原生 Wayland。",
                 ),
                 tr.text("Update extension", "更新扩展", "更新擴充套件"),
             ),
@@ -311,10 +311,26 @@ fn extension_state(info: &ExtensionInfo) -> Option<f64> {
 fn inspect(shell: &Proxy<'_>) -> zbus::Result<Option<Guide>> {
     let info = extension_info(shell)?;
     let state = extension_state(&info);
-    if state == Some(ACTIVE) {
-        return Ok(None);
+    let bundled_revision = bundled_metadata()["version"]
+        .as_f64()
+        .expect("bundled GNOME version");
+    let old_bundle = matches!(state, Some(ACTIVE | INACTIVE | INITIALIZED))
+        && extension_version(&info) < bundled_revision;
+    if state == Some(OUT_OF_DATE) || old_bundle {
+        let version: String = shell.get_property("ShellVersion")?;
+        if bundled_supports(&version) {
+            return Ok(Some(if installed_bundle(&info) {
+                Guide::Relogin
+            } else {
+                Guide::Update
+            }));
+        }
+        if state == Some(OUT_OF_DATE) {
+            return Ok(Some(incompatible(version)));
+        }
     }
     let guide = match state {
+        Some(ACTIVE) => return Ok(None),
         Some(ERROR) => Guide::Unavailable(
             text(
                 "GNOME reported an extension error",
@@ -323,16 +339,6 @@ fn inspect(shell: &Proxy<'_>) -> zbus::Result<Option<Guide>> {
             )
             .detail(extension_error(&info).unwrap_or_default()),
         ),
-        Some(OUT_OF_DATE) => {
-            let version: String = shell.get_property("ShellVersion")?;
-            if !bundled_supports(&version) {
-                incompatible(version)
-            } else if installed_user_bundle() {
-                Guide::Relogin
-            } else {
-                Guide::Update
-            }
-        }
         Some(INACTIVE | INITIALIZED) => {
             if shell.get_property::<bool>("UserExtensionsEnabled")? {
                 Guide::Enable
@@ -386,6 +392,12 @@ fn extension_error(info: &ExtensionInfo) -> Option<&str> {
         .filter(|error| !error.is_empty())
 }
 
+fn extension_version(info: &ExtensionInfo) -> f64 {
+    info.get("version")
+        .and_then(|value| f64::try_from(value).ok())
+        .unwrap_or(0.)
+}
+
 fn enable() -> Result<(), String> {
     let shell = shell().map_err(|error| error.to_string())?;
     enable_extension(&shell)
@@ -418,11 +430,14 @@ fn enable_extension(shell: &Proxy<'_>) -> Result<(), String> {
 
 fn bundled_supports(shell_version: &str) -> bool {
     let major = shell_version.split('.').next().unwrap_or_default();
-    let metadata: serde_json::Value =
-        serde_json::from_str(METADATA).expect("bundled GNOME metadata");
-    metadata["shell-version"]
+    bundled_metadata()["shell-version"]
         .as_array()
         .is_some_and(|versions| versions.iter().any(|version| version == major))
+}
+
+fn bundled_metadata() -> &'static serde_json::Value {
+    static BUNDLE: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+    BUNDLE.get_or_init(|| serde_json::from_str(METADATA).expect("bundled GNOME metadata"))
 }
 
 fn user_data() -> Option<PathBuf> {
@@ -451,14 +466,22 @@ fn overlay_on_disk() -> bool {
         })
 }
 
-fn installed_user_bundle() -> bool {
-    user_data().is_some_and(|path| {
-        let extension = path.join(EXTENSIONS).join(UUID);
-        // Shell can still report its old metadata until the next login.
-        fs::read_to_string(extension.join("metadata.json")).is_ok_and(|data| data == METADATA)
-            && fs::read_to_string(extension.join("extension.js"))
-                .is_ok_and(|data| data == EXTENSION_JS)
-    })
+fn installed_bundle(info: &ExtensionInfo) -> bool {
+    let shell_path = info
+        .get("path")
+        .and_then(|value| <&str>::try_from(value).ok())
+        .map(PathBuf::from);
+    user_data()
+        .map(|path| path.join(EXTENSIONS).join(UUID))
+        .into_iter()
+        .chain(shell_path)
+        .filter(|path| path.is_absolute())
+        .any(|extension| {
+            // Shell can still report its old metadata until the next login.
+            fs::read_to_string(extension.join("metadata.json")).is_ok_and(|data| data == METADATA)
+                && fs::read_to_string(extension.join("extension.js"))
+                    .is_ok_and(|data| data == EXTENSION_JS)
+        })
 }
 
 fn install_files() -> Result<PathBuf, String> {
@@ -547,12 +570,14 @@ mod tests {
         version: &'static str,
         states: &'static [Option<f64>],
         next: AtomicUsize,
+        bundle_version: f64,
     }
 
     fn mock_shell(
         name: &str,
         version: &'static str,
         states: &'static [Option<f64>],
+        bundle_version: f64,
     ) -> Proxy<'static> {
         let service = Builder::session()
             .unwrap()
@@ -564,6 +589,7 @@ mod tests {
                     version,
                     states,
                     next: AtomicUsize::new(0),
+                    bundle_version,
                 },
             )
             .unwrap()
@@ -588,7 +614,10 @@ mod tests {
             assert_eq!(uuid, UUID);
             let index = self.next.fetch_add(1, Ordering::Relaxed);
             self.states[index.min(self.states.len() - 1)].map_or_else(HashMap::new, |state| {
-                HashMap::from([("state".into(), state.into())])
+                HashMap::from([
+                    ("state".into(), state.into()),
+                    ("version".into(), self.bundle_version.into()),
+                ])
             })
         }
 
@@ -604,6 +633,7 @@ mod tests {
             SHELL_BUS,
             "48.7",
             &[None, Some(INITIALIZED), Some(8.), Some(ACTIVE)],
+            bundled_metadata()["version"].as_f64().unwrap(),
         );
         assert!(matches!(
             inspect(&proxy).unwrap(),
@@ -617,7 +647,7 @@ mod tests {
     #[test]
     #[ignore = "requires an isolated session bus: dbus-run-session cargo test outdated_extension -- --ignored"]
     fn outdated_extension_can_be_updated_when_the_bundle_supports_shell() {
-        let expected = if installed_user_bundle() {
+        let expected = if installed_bundle(&HashMap::new()) {
             Guide::Relogin
         } else {
             Guide::Update
@@ -626,6 +656,7 @@ mod tests {
             "org.gnome.Shell.TestSupported",
             "49.2",
             &[Some(OUT_OF_DATE)],
+            0.,
         );
         let guide = inspect(&supported).unwrap().unwrap();
         assert_eq!(
@@ -636,10 +667,17 @@ mod tests {
             "org.gnome.Shell.TestUnsupported",
             "99.0",
             &[Some(OUT_OF_DATE)],
+            0.,
         );
         assert!(matches!(
             inspect(&unsupported).unwrap(),
             Some(Guide::Unavailable(_))
         ));
+        let active = mock_shell("org.gnome.Shell.TestOldActive", "49.2", &[Some(ACTIVE)], 0.);
+        let guide = inspect(&active).unwrap().unwrap();
+        assert_eq!(
+            std::mem::discriminant(&guide),
+            std::mem::discriminant(&expected)
+        );
     }
 }
