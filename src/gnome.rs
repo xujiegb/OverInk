@@ -20,6 +20,7 @@ use zbus::{
 const UUID: &str = "overink-overlay@overink";
 const EXTENSIONS: &str = "gnome-shell/extensions";
 const METADATA: &str = include_str!("../assets/gnome-shell/metadata.json");
+const EXTENSION_JS: &str = include_str!("../assets/gnome-shell/extension.js");
 const SHELL_BUS: &str = "org.gnome.Shell";
 const SHELL_PATH: &str = "/org/gnome/Shell";
 const SHELL_EXTENSIONS: &str = "org.gnome.Shell.Extensions";
@@ -69,6 +70,7 @@ pub enum Action {
 
 pub enum Guide {
     Install,
+    Update,
     Enable,
     Relogin,
     Unavailable(Status),
@@ -105,6 +107,14 @@ impl Guide {
                     "安裝 OverInk Overlay 擴充套件後，GNOME Wayland 才能將畫布置頂並定位工具列。",
                 ),
                 tr.text("Install extension", "安装扩展", "安裝擴充套件"),
+            ),
+            Self::Update => (
+                tr.text(
+                    "Update OverInk Overlay to support this GNOME Shell version.",
+                    "更新 OverInk Overlay 扩展以支持当前 GNOME Shell 版本。",
+                    "更新 OverInk Overlay 擴充套件以支援目前的 GNOME Shell 版本。",
+                ),
+                tr.text("Update extension", "更新扩展", "更新擴充套件"),
             ),
             Self::Enable => (
                 tr.text(
@@ -156,16 +166,16 @@ impl Guide {
             return Some(Decision::XWayland);
         }
         match self {
-            Self::Install => {
+            Self::Install | Self::Update => {
                 *self = match Self::check() {
                     None => return Some(Decision::Native),
-                    Some(Self::Install) => match install_files() {
+                    Some(Self::Install | Self::Update) => match install_files() {
                         Ok(_) => Self::Relogin,
                         Err(error) => Self::Unavailable(
                             text(
-                                "Extension installation failed",
-                                "安装扩展失败",
-                                "安裝擴充套件失敗",
+                                "Could not write the GNOME extension",
+                                "无法写入 GNOME 扩展",
+                                "無法寫入 GNOME 擴充套件",
                             )
                             .detail(error),
                         ),
@@ -304,13 +314,6 @@ fn inspect(shell: &Proxy<'_>) -> zbus::Result<Option<Guide>> {
     if state == Some(ACTIVE) {
         return Ok(None);
     }
-    let unsupported = || {
-        text(
-            "OverInk Overlay is incompatible with this GNOME Shell version",
-            "OverInk Overlay 与此 GNOME Shell 版本不兼容",
-            "OverInk Overlay 與此 GNOME Shell 版本不相容",
-        )
-    };
     let guide = match state {
         Some(ERROR) => Guide::Unavailable(
             text(
@@ -321,7 +324,14 @@ fn inspect(shell: &Proxy<'_>) -> zbus::Result<Option<Guide>> {
             .detail(extension_error(&info).unwrap_or_default()),
         ),
         Some(OUT_OF_DATE) => {
-            Guide::Unavailable(unsupported().detail(shell.get_property::<String>("ShellVersion")?))
+            let version: String = shell.get_property("ShellVersion")?;
+            if !bundled_supports(&version) {
+                incompatible(version)
+            } else if installed_user_bundle() {
+                Guide::Relogin
+            } else {
+                Guide::Update
+            }
         }
         Some(INACTIVE | INITIALIZED) => {
             if shell.get_property::<bool>("UserExtensionsEnabled")? {
@@ -340,7 +350,7 @@ fn inspect(shell: &Proxy<'_>) -> zbus::Result<Option<Guide>> {
         None if info.is_empty() => {
             let version: String = shell.get_property("ShellVersion")?;
             if !bundled_supports(&version) {
-                Guide::Unavailable(unsupported().detail(version))
+                incompatible(version)
             } else if overlay_on_disk() {
                 Guide::Relogin
             } else {
@@ -357,6 +367,17 @@ fn inspect(shell: &Proxy<'_>) -> zbus::Result<Option<Guide>> {
         ),
     };
     Ok(Some(guide))
+}
+
+fn incompatible(version: String) -> Guide {
+    Guide::Unavailable(
+        text(
+            "OverInk Overlay is incompatible with this GNOME Shell version",
+            "OverInk Overlay 与此 GNOME Shell 版本不兼容",
+            "OverInk Overlay 與此 GNOME Shell 版本不相容",
+        )
+        .detail(version),
+    )
 }
 
 fn extension_error(info: &ExtensionInfo) -> Option<&str> {
@@ -430,18 +451,22 @@ fn overlay_on_disk() -> bool {
         })
 }
 
+fn installed_user_bundle() -> bool {
+    user_data().is_some_and(|path| {
+        let extension = path.join(EXTENSIONS).join(UUID);
+        // Shell can still report its old metadata until the next login.
+        fs::read_to_string(extension.join("metadata.json")).is_ok_and(|data| data == METADATA)
+            && fs::read_to_string(extension.join("extension.js"))
+                .is_ok_and(|data| data == EXTENSION_JS)
+    })
+}
+
 fn install_files() -> Result<PathBuf, String> {
     let data = user_data().ok_or("No absolute XDG_DATA_HOME or HOME directory")?;
     let extension = data.join(EXTENSIONS).join(UUID);
     fs::create_dir_all(&extension)
         .map_err(|error| format!("Creating {} failed ({error})", extension.display()))?;
-    for (name, contents) in [
-        (
-            "extension.js",
-            include_str!("../assets/gnome-shell/extension.js"),
-        ),
-        ("metadata.json", METADATA),
-    ] {
+    for (name, contents) in [("extension.js", EXTENSION_JS), ("metadata.json", METADATA)] {
         let staged = extension.join(format!("{name}.{}.tmp", std::process::id()));
         let destination = extension.join(name);
         if let Err(error) =
@@ -518,13 +543,40 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
-    struct MockShell(AtomicUsize);
+    struct MockShell {
+        version: &'static str,
+        states: &'static [Option<f64>],
+        next: AtomicUsize,
+    }
+
+    fn mock_shell(
+        name: &str,
+        version: &'static str,
+        states: &'static [Option<f64>],
+    ) -> Proxy<'static> {
+        let service = Builder::session()
+            .unwrap()
+            .name(name)
+            .unwrap()
+            .serve_at(
+                SHELL_PATH,
+                MockShell {
+                    version,
+                    states,
+                    next: AtomicUsize::new(0),
+                },
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+        Proxy::new_owned(service, name.to_owned(), SHELL_PATH, SHELL_EXTENSIONS).unwrap()
+    }
 
     #[zbus::interface(name = "org.gnome.Shell.Extensions")]
     impl MockShell {
         #[zbus(property)]
         fn shell_version(&self) -> &str {
-            "48.7"
+            self.version
         }
 
         #[zbus(property)]
@@ -534,13 +586,10 @@ mod tests {
 
         fn get_extension_info(&self, uuid: &str) -> ExtensionInfo {
             assert_eq!(uuid, UUID);
-            let state = match self.0.fetch_add(1, Ordering::Relaxed) {
-                0 => return HashMap::new(),
-                1 => INITIALIZED,
-                2 => 8.,
-                _ => ACTIVE,
-            };
-            HashMap::from([("state".into(), state.into())])
+            let index = self.next.fetch_add(1, Ordering::Relaxed);
+            self.states[index.min(self.states.len() - 1)].map_or_else(HashMap::new, |state| {
+                HashMap::from([("state".into(), state.into())])
+            })
         }
 
         fn enable_extension(&self, uuid: &str) -> bool {
@@ -551,15 +600,11 @@ mod tests {
     #[test]
     #[ignore = "requires an isolated session bus: dbus-run-session cargo test shell_activation -- --ignored"]
     fn shell_activation_waits_for_the_extension_to_be_active() {
-        let _service = Builder::session()
-            .unwrap()
-            .name(SHELL_BUS)
-            .unwrap()
-            .serve_at(SHELL_PATH, MockShell(AtomicUsize::new(0)))
-            .unwrap()
-            .build()
-            .unwrap();
-        let proxy = shell().unwrap();
+        let proxy = mock_shell(
+            SHELL_BUS,
+            "48.7",
+            &[None, Some(INITIALIZED), Some(8.), Some(ACTIVE)],
+        );
         assert!(matches!(
             inspect(&proxy).unwrap(),
             Some(Guide::Install | Guide::Relogin)
@@ -567,5 +612,34 @@ mod tests {
         assert!(matches!(inspect(&proxy).unwrap(), Some(Guide::Enable)));
         enable_extension(&proxy).unwrap();
         assert!(inspect(&proxy).unwrap().is_none());
+    }
+
+    #[test]
+    #[ignore = "requires an isolated session bus: dbus-run-session cargo test outdated_extension -- --ignored"]
+    fn outdated_extension_can_be_updated_when_the_bundle_supports_shell() {
+        let expected = if installed_user_bundle() {
+            Guide::Relogin
+        } else {
+            Guide::Update
+        };
+        let supported = mock_shell(
+            "org.gnome.Shell.TestSupported",
+            "49.2",
+            &[Some(OUT_OF_DATE)],
+        );
+        let guide = inspect(&supported).unwrap().unwrap();
+        assert_eq!(
+            std::mem::discriminant(&guide),
+            std::mem::discriminant(&expected)
+        );
+        let unsupported = mock_shell(
+            "org.gnome.Shell.TestUnsupported",
+            "99.0",
+            &[Some(OUT_OF_DATE)],
+        );
+        assert!(matches!(
+            inspect(&unsupported).unwrap(),
+            Some(Guide::Unavailable(_))
+        ));
     }
 }

@@ -98,8 +98,7 @@ impl Gui {
     }
     pub fn input(&mut self, w: &Window) -> RawInput {
         let logical = w.size();
-        let density = unsafe { SDL_GetWindowPixelDensity(w.raw) }.max(0.1);
-        self.units = (w.scale() / density).max(0.5);
+        self.units = w.ui_scale().max(0.5);
         self.raw.screen_rect = Some(egui::Rect::from_min_size(
             egui::Pos2::ZERO,
             egui::vec2(logical[0] / self.units, logical[1] / self.units),

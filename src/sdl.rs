@@ -210,7 +210,7 @@ impl Window {
     }
     pub fn arrange_toolbar(&self, expanded: bool, on_display: Option<u32>) -> Result<(), String> {
         unsafe {
-            let units = self.scale() / SDL_GetWindowPixelDensity(self.raw).max(0.1);
+            let units = self.ui_scale();
             let width = crate::toolbar::WIDTH
                 + if expanded {
                     crate::toolbar::PANEL_WIDTH
@@ -254,6 +254,9 @@ impl Window {
     }
     pub fn scale(&self) -> f32 {
         unsafe { SDL_GetWindowDisplayScale(self.raw).max(1.) }
+    }
+    pub fn ui_scale(&self) -> f32 {
+        self.scale() / unsafe { SDL_GetWindowPixelDensity(self.raw) }.max(0.1)
     }
     pub fn show(&self, show: bool) -> Result<(), String> {
         unsafe {

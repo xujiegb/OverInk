@@ -8,6 +8,9 @@ use crate::{
 };
 use std::ptr;
 
+const WIDTH: i32 = 480;
+const HEIGHT: i32 = 180;
+
 pub(super) fn run(
     mut guide: Guide,
     preferences: Preferences,
@@ -16,7 +19,18 @@ pub(super) fn run(
     let runtime = Runtime::new(false, true, false).or_else(|wayland| {
         Runtime::new(true, false, false).map_err(|x11| format!("{wayland} · {x11}"))
     })?;
-    let window = Window::new("OverInk — GNOME Wayland", 480, 180, false)?;
+    let window = Window::new("OverInk — GNOME Wayland", WIDTH, HEIGHT, false)?;
+    // SDL's X11 window coordinates are pixels, while egui uses points.
+    let units = window.ui_scale();
+    if units > 1. && driver() == "x11" {
+        unsafe {
+            check(SDL_SetWindowSize(
+                window.raw,
+                (WIDTH as f32 * units).round() as i32,
+                (HEIGHT as f32 * units).round() as i32,
+            ))?;
+        }
+    }
     let renderer = Renderer::new(&window, true).or_else(|_| Renderer::software(&window))?;
     let mut gui = Gui::new();
     let language = preferences.language.unwrap_or_else(Language::system);
@@ -30,11 +44,17 @@ pub(super) fn run(
         let mut event = SDL_Event::default();
         while unsafe { SDL_PollEvent(&mut event) } {
             match unsafe { SDL_EventType(event.r#type) } {
-                SDL_EVENT_QUIT | SDL_EVENT_WINDOW_CLOSE_REQUESTED => {
-                    break 'dialog Decision::XWayland;
+                SDL_EVENT_WINDOW_CLOSE_REQUESTED => {
+                    // SDL also queues a quit for the last window. The main
+                    // app can reuse this runtime when the guide ran on X11.
+                    unsafe { SDL_FlushEvent(SDL_EVENT_QUIT.0) };
+                    break 'dialog close_decision(&guide);
                 }
-                SDL_EVENT_KEY_DOWN if unsafe { event.key.key } == SDLK_ESCAPE => {
-                    break 'dialog Decision::XWayland;
+                SDL_EVENT_QUIT => break 'dialog close_decision(&guide),
+                SDL_EVENT_KEY_DOWN
+                    if unsafe { event.key.key == SDLK_ESCAPE && !event.key.repeat } =>
+                {
+                    break 'dialog close_decision(&guide);
                 }
                 _ => gui.event(&event, window.id, window.size()),
             }
@@ -73,4 +93,27 @@ pub(super) fn run(
         }
     };
     Ok((decision, runtime))
+}
+
+fn close_decision(guide: &Guide) -> Decision {
+    if matches!(guide, Guide::Relogin) {
+        Decision::Relogin
+    } else {
+        Decision::XWayland
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gnome::Action;
+
+    #[test]
+    fn closing_after_installation_keeps_native_wayland_enabled() {
+        let mut guide = Guide::Relogin;
+        assert_eq!(Some(close_decision(&guide)), guide.act(Action::Proceed));
+        assert_eq!(guide.act(Action::Cancel), Some(Decision::XWayland));
+        assert_eq!(close_decision(&Guide::Install), Decision::XWayland);
+        assert_eq!(close_decision(&Guide::Update), Decision::XWayland);
+    }
 }
