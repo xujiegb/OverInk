@@ -569,16 +569,27 @@ impl App {
         ui.label(RichText::new(tr.text("Display", "显示器", "顯示器")).strong());
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         {
+            #[cfg(target_os = "linux")]
+            let can_toggle = self.gnome_guide.is_none();
+            #[cfg(target_os = "freebsd")]
+            let can_toggle = true;
             commands.preferences |= ui
-                .checkbox(
-                    &mut self.preferences.wayland,
-                    tr.text(
-                        "Native Wayland (restart to apply)",
-                        "原生 Wayland（重启后生效）",
-                        "原生 Wayland（重新啟動後生效）",
+                .add_enabled(
+                    can_toggle,
+                    egui::Checkbox::new(
+                        &mut self.preferences.wayland,
+                        tr.text(
+                            "Native Wayland (restart to apply)",
+                            "原生 Wayland（重启后生效）",
+                            "原生 Wayland（重新啟動後生效）",
+                        ),
                     ),
                 )
                 .changed();
+            #[cfg(target_os = "linux")]
+            if let Some(guide) = &self.gnome_guide {
+                commands.gnome_action = ui.group(|ui| guide.ui(ui, tr, false)).inner;
+            }
         }
         let per_display = ui
             .add_enabled_ui(video != "wayland", |ui| {
