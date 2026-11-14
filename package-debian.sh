@@ -239,6 +239,19 @@ resolve_version() {
   echo "[*] Package version: $VERSION"
 }
 
+is_native_target() {
+  local short="$1"
+
+  case "$HOST_ARCH:$short" in
+    x86_64:x64|aarch64:arm64|i686:i386|i386:i386|ppc64le:ppc64le|riscv64:riscv64|loongarch64:loong64|s390x:s390x)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 prepare_loongarch_compiler() {
   LLVM_TOOL_BIN="${OVERINK_LLVM_BIN_DIR:-$(dirname "$(command -v clang)")}"
   [[ -x "$LLVM_TOOL_BIN/clang" && -x "$LLVM_TOOL_BIN/clang++" ]] || die "Clang/Clang++ not found in $LLVM_TOOL_BIN"
@@ -286,6 +299,10 @@ prepare_target_sdk() {
   SDK_WORK_DIR="$(mktemp -d)"
   mkdir -p "$SDK_WORK_DIR/sysroot/usr/share" "$SDK_WORK_DIR/debs" "$SDK_WORK_DIR/cc"
   prepare_loongarch_compiler "$short"
+
+  for share_dir in /usr/share/wayland /usr/share/wayland-protocols; do
+    [[ -d "$share_dir" ]] && cp -a "$share_dir" "$SDK_WORK_DIR/sysroot/usr/share/" || true
+  done
 
   if [[ "$deb_arch" == "loong64" ]]; then
     repo="https://loong13.debian.net/debian-loong64"
@@ -358,32 +375,12 @@ def extract_deb(deb_path, dest):
         if archive.wait():
             raise RuntimeError(f"Cannot extract {deb_path}")
 
-def fetch_deb(base_url, filename, checksum):
-    url = f"{base_url}/{filename}"
-    path = debs_dir / os.path.basename(filename)
-    if path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == checksum:
-        return path
-
-    partial = path.with_suffix(".deb.part")
-    try:
-        subprocess.run([
-            "curl", "-fsSL", "--retry", "3", "--retry-all-errors",
-            "--connect-timeout", "15", "--max-time", "120",
-            "--output", str(partial), url,
-        ], check=True)
-        if hashlib.sha256(partial.read_bytes()).hexdigest() != checksum:
-            raise RuntimeError(f"Bad SHA256: {url}")
-        partial.replace(path)
-    finally:
-        partial.unlink(missing_ok=True)
-    return path
-
 pkgs = parse_packages(fetch_index(repo, suite, arch))
 queue = [
     "libc6-dev", f"libgcc-{gcc_ver}-dev", f"libstdc++-{gcc_ver}-dev",
     "libx11-dev", "libxext-dev", "libxi-dev", "libxrandr-dev", "libxcursor-dev",
     "libxfixes-dev", "libxrender-dev", "libxss-dev", "libxtst-dev",
-    "libwayland-dev", "libxkbcommon-dev", "libegl-dev", "libgl-dev",
+    "libwayland-dev", "wayland-protocols", "libxkbcommon-dev", "libegl-dev", "libgl-dev",
 ]
 missing = [pkg for pkg in queue if pkg not in pkgs]
 if missing:
@@ -398,7 +395,10 @@ while queue:
     queue.extend(d for d in deps if d not in seen)
 
 for fname, checksum in files:
-    extract_deb(fetch_deb(repo, fname, checksum), sysroot)
+    deb_path = debs_dir / os.path.basename(fname)
+    if not deb_path.exists(): urllib.request.urlretrieve(f"{repo}/{fname}", deb_path)
+    if hashlib.sha256(deb_path.read_bytes()).hexdigest() != checksum: raise RuntimeError(f"Bad SHA256: {fname}")
+    extract_deb(deb_path, sysroot)
 
 if not shutil.which("wayland-scanner"):
     host_arch_map = {
@@ -411,8 +411,11 @@ if not shutil.which("wayland-scanner"):
     h_repo = "https://loong13.debian.net/debian-loong64" if h_arch == "loong64" else "https://deb.debian.org/debian"
     host_packages = parse_packages(fetch_index(h_repo, "trixie", h_arch))
     fname, _, checksum = host_packages["libwayland-bin"]
+    deb_path = debs_dir / os.path.basename(fname)
+    if not deb_path.exists(): urllib.request.urlretrieve(f"{h_repo}/{fname}", deb_path)
+    if hashlib.sha256(deb_path.read_bytes()).hexdigest() != checksum: raise RuntimeError(f"Bad SHA256: {fname}")
     (work / "host").mkdir(exist_ok=True)
-    extract_deb(fetch_deb(h_repo, fname, checksum), work / "host")
+    extract_deb(deb_path, work / "host")
 
 for name in ("lib", "lib64", "lib32", "libx32"):
     old, new = sysroot / name, sysroot / "usr" / name
@@ -453,6 +456,14 @@ publish_binary() {
   local triple="$3"
 
   CARGO_TARGET_DIR="$(mktemp -d)"
+
+  if [[ -z "$SDK_WORK_DIR" ]]; then
+    CC="$(command -v clang)" CXX="$(command -v clang++)" \
+    CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS" \
+    CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
+      cargo build --manifest-path "$PROJECT" --locked --release --target "$rust_target"
+    return 0
+  fi
 
   local sysroot="$SDK_WORK_DIR/sysroot"
   local multiarch="$triple"
@@ -509,7 +520,6 @@ CMAKE
     CC="$LLVM_TOOL_BIN/clang" CXX="$LLVM_TOOL_BIN/clang++" \
     CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS" \
     CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
-    OVERINK_BUILD_VERSION="$VERSION" \
     PKG_CONFIG_ALLOW_CROSS=1 \
     PKG_CONFIG_SYSROOT_DIR="$sysroot" \
     PKG_CONFIG_LIBDIR="$sysroot/usr/lib/$multiarch/pkgconfig:$sysroot/usr/share/pkgconfig" \
