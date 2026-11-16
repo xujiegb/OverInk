@@ -58,7 +58,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
         with:
@@ -201,7 +201,7 @@ jobs:
           - {arch: x64, target: x86_64-apple-darwin, runner: macos-15-intel}
           - {arch: arm64, target: aarch64-apple-darwin, runner: macos-15}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
@@ -241,7 +241,7 @@ jobs:
           - {arch: i386, target: i686-pc-windows-msvc}
           - {arch: arm64, target: aarch64-pc-windows-msvc}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
       - uses: actions/setup-dotnet@v6
@@ -604,7 +604,7 @@ jobs:
           set -euo pipefail
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git ca-certificates curl python3
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
           fetch-depth: 0
@@ -701,7 +701,7 @@ jobs:
           dnf -y install rpm-build
           dnf -y install rpmdevtools
           rpmbuild --version
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
           fetch-depth: 0
@@ -748,7 +748,7 @@ jobs:
           - {target: aarch64-unknown-freebsd, cpu: aarch64, abi: aarch64, layout: arm64/aarch64, release: '15.1', machine: AArch64}
           - {target: riscv64gc-unknown-freebsd, cpu: riscv64, abi: riscv64, layout: riscv/riscv64, release: '15.1', machine: RISC-V}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: vmactions/freebsd-vm@v1
         with:
           arch: x86_64
@@ -898,7 +898,7 @@ jobs:
       group: overink-publish-${{ needs.prepare.outputs.tag }}
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
       - uses: actions/download-artifact@v4
