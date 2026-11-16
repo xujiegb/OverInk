@@ -263,8 +263,7 @@ impl App {
                             .inner
                             .clicked()
                         {
-                            self.reset_contacts();
-                            action(&mut self.history);
+                            self.change_history(action);
                             commands.redraw_canvas = true;
                         }
                     }
@@ -488,16 +487,19 @@ impl App {
             Space::Srgb => tr.text("sRGB color", "sRGB 颜色", "sRGB 色彩"),
             Space::DisplayP3 => tr.text("Display P3 color", "Display P3 颜色", "Display P3 色彩"),
         };
+        let mut space = self.color.space;
         egui::ComboBox::from_id_salt("source-gamut")
-            .selected_text(label(self.color.space))
+            .selected_text(label(space))
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.color.space, Space::Srgb, label(Space::Srgb));
-                ui.selectable_value(
-                    &mut self.color.space,
-                    Space::DisplayP3,
-                    label(Space::DisplayP3),
-                );
+                ui.selectable_value(&mut space, Space::Srgb, label(Space::Srgb));
+                ui.selectable_value(&mut space, Space::DisplayP3, label(Space::DisplayP3));
             });
+        if space != self.color.space {
+            commands.redraw_canvas |= self.apply_color(InkColor {
+                space,
+                ..self.color
+            });
+        }
     }
 
     fn background_controls(

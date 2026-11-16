@@ -519,11 +519,13 @@ impl History {
         Some(index)
     }
 
-    pub fn remove_text_box(&mut self, index: usize) {
-        if index < self.doc.text_boxes.len() {
-            self.snapshot();
-            self.doc.text_boxes.remove(index);
+    pub fn remove_text_box(&mut self, index: usize) -> bool {
+        if index >= self.doc.text_boxes.len() {
+            return false;
         }
+        self.snapshot();
+        self.doc.text_boxes.remove(index);
+        true
     }
 
     fn apply_step(&mut self, step: HistoryStep) -> HistoryStep {

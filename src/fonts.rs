@@ -63,31 +63,21 @@ impl FontFace {
         self.font().charmap().map(base).is_some()
     }
 
-    fn has_emoji_presentation(&self, base: char) -> bool {
-        self.font()
-            .charmap()
-            .map_variant(base, '\u{fe0f}')
-            .is_some()
-            || self.has_color_glyph(base)
-    }
-
-    fn has_color_glyph(&self, base: char) -> bool {
+    fn has_color_glyph(&self, glyph: GlyphId) -> bool {
         if !self.color {
             return false;
         }
         let font = self.font();
-        font.charmap().map(base).is_some_and(|glyph| {
-            font.color_glyphs().get(glyph).is_some()
-                || font
-                    .bitmap_strikes()
-                    .iter()
-                    .any(|strike| strike.get(glyph).is_some())
-        })
+        font.color_glyphs().get(glyph).is_some()
+            || font
+                .bitmap_strikes()
+                .iter()
+                .any(|strike| strike.get(glyph).is_some())
     }
 
-    fn shapes_sequence(&self, cluster: &str) -> bool {
+    fn shape_cluster(&self, cluster: &str) -> Option<GlyphId> {
         if !self.has_base(cluster.chars().next().unwrap()) {
-            return false;
+            return None;
         }
         let font = self.font();
         let mut buffer = harfrust::UnicodeBuffer::new();
@@ -99,7 +89,12 @@ impl FontFace {
             .shaper(&font)
             .build()
             .shape(buffer, Default::default());
-        matches!(glyphs.glyph_infos(), [glyph] if glyph.glyph_id != GlyphId::NOTDEF.to_u32())
+        match glyphs.glyph_infos() {
+            [glyph] if glyph.glyph_id != GlyphId::NOTDEF.to_u32() => {
+                Some(GlyphId::new(glyph.glyph_id))
+            }
+            _ => None,
+        }
     }
 }
 
@@ -245,20 +240,20 @@ impl TextFonts {
             .iter()
             .map(|font| (CUSTOM, &font.face))
             .chain(FALLBACK.into_iter().zip(&bundled().faces));
-        faces
-            .filter(|(name, face)| {
-                selector != Some('\u{fe0e}') || (*name != COLOR && !face.has_color_glyph(base))
-            })
-            .find(|(name, face)| {
-                if sequence {
-                    face.shapes_sequence(cluster)
-                } else if selector == Some('\u{fe0f}') && *name != MONO {
-                    face.has_emoji_presentation(base)
-                } else {
-                    face.has_base(base)
+        let mut monochrome_fallback = None;
+        for (name, face) in faces {
+            let Some(glyph) = face.shape_cluster(cluster) else {
+                continue;
+            };
+            match selector {
+                Some('\u{fe0f}') if !face.has_color_glyph(glyph) => {
+                    monochrome_fallback.get_or_insert(name);
                 }
-            })
-            .map_or(ANNOTATION, |(name, _)| name)
+                Some('\u{fe0e}') if name == COLOR || face.has_color_glyph(glyph) => (),
+                _ => return name,
+            }
+        }
+        monochrome_fallback.unwrap_or(ANNOTATION)
     }
 
     pub fn layout(
@@ -405,5 +400,13 @@ mod tests {
         let fonts = TextFonts::default();
         assert_eq!(glyphs(&fonts, "❤︎"), [('❤', false)]);
         assert_eq!(glyphs(&fonts, "❤"), [('❤', true)]);
+    }
+
+    #[test]
+    fn explicit_emoji_presentation_prefers_actual_color_over_a_default_outline() {
+        assert_eq!(
+            glyphs(&TextFonts::default(), "⚽ ⚽️ ⚽︎"),
+            [('⚽', false), ('⚽', true), ('⚽', false)]
+        );
     }
 }

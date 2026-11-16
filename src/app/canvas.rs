@@ -176,9 +176,9 @@ impl Canvas {
     pub fn renderer_reset(&mut self) {
         self.ink.reset_textures();
         // A new context recreates the glyph atlas for the new SDL renderer.
+        self.suspend_text_input();
         self.text = None;
         self.text_style = None;
-        self.text_repaint_at = None;
         self.background.invalidate_texture();
         self.dirty = true;
     }
@@ -192,6 +192,12 @@ impl Canvas {
 
     pub fn has_text_touch(&self, key: crate::touch::TouchKey) -> bool {
         self.text.as_ref().is_some_and(|gui| gui.has_touch(key))
+    }
+
+    pub fn cancel_text_touches(&mut self, app: &mut App) -> bool {
+        self.text
+            .as_mut()
+            .is_some_and(|gui| app.cancel_text_touches(gui))
     }
 
     pub fn text_event(&mut self, app: &mut App, event: &SDL_Event) -> bool {
@@ -225,9 +231,9 @@ impl Canvas {
         if !self.window.input_focused() {
             unsafe { SDL_RaiseWindow(self.window.raw) };
         }
-        self.text
-            .get_or_insert_with(Gui::new)
-            .sync_text_input(&self.window, true);
+        let gui = self.text.get_or_insert_with(Gui::new);
+        gui.clear_events();
+        gui.sync_text_input(&self.window, true);
         self.dirty = true;
     }
 
@@ -293,7 +299,7 @@ impl Canvas {
         app: &mut App,
         options: &Options,
         picker_choosing: bool,
-        wayland: bool,
+        toolbar_focused: bool,
         theme: egui::Theme,
         extended_ink_budget: usize,
     ) -> Result<bool, String> {
@@ -301,13 +307,14 @@ impl Canvas {
         if !self.visible || !(options.smoke || self.dirty || self.animation || text_repaint) {
             return Ok(false);
         }
-        if picker_choosing || wayland && !self.on_output(options.smoke) {
+        let on_output = self.on_output(options.smoke);
+        if picker_choosing || !on_output && driver() == "wayland" {
             self.render.begin(
                 &self.window,
                 [0., 0., 0., if picker_choosing { 1. / 255. } else { 0. }],
             )?;
             self.render.present()?;
-        } else if self.on_output(options.smoke) {
+        } else if on_output {
             app.on_page(self.output, |page| -> Result<(), String> {
                 self.set_page_geometry(page);
                 #[cfg(target_os = "macos")]
@@ -325,7 +332,7 @@ impl Canvas {
                     }
                 }
                 page.history.set_size(self.window.size());
-                self.ink.paint(
+                let scale = self.ink.paint(
                     page,
                     &self.render,
                     &self.window,
@@ -333,8 +340,9 @@ impl Canvas {
                     &mut self.background,
                     extended_ink_budget,
                 )?;
-                self.paint_text(page, theme)?;
-                self.ink.present(page, &self.render)?;
+                self.paint_text(page, theme, toolbar_focused)?;
+                self.ink
+                    .present(page, &self.render, &self.window, &self.color, scale)?;
                 self.animation = !page.input.laser.is_empty();
                 Ok(())
             })?;
@@ -345,15 +353,24 @@ impl Canvas {
         Ok(true)
     }
 
-    fn paint_text(&mut self, app: &mut App, theme: egui::Theme) -> Result<(), String> {
+    fn paint_text(
+        &mut self,
+        app: &mut App,
+        theme: egui::Theme,
+        toolbar_focused: bool,
+    ) -> Result<(), String> {
         let interactive = app.tool.is_text() && !app.pass;
         let editing = interactive && app.input.text.editing();
+        if !app.touch_enabled {
+            self.cancel_text_touches(app);
+        }
         if app.history.text_boxes().is_empty() && !editing {
             self.stop_text_input(interactive);
             return Ok(());
         }
         let style = (app.text_fonts.revision, self.color.revision);
         if self.text_style.is_some_and(|(_, color)| color != style.1) {
+            self.suspend_text_input();
             self.text = None;
             app.input.text.refocus();
         }
@@ -369,14 +386,15 @@ impl Canvas {
             gui.sync_text_input(&self.window, true);
         } else if interactive {
             gui.sync_text_input(&self.window, false);
+            gui.clear_events();
         } else {
             gui.suspend_input(&self.window);
         }
         let input = gui.canvas_input(&self.window);
         let composing = gui.composing();
-        let mut output = gui
-            .ctx
-            .run_ui(input, |ui| app.text_ui(ui, interactive, composing));
+        let mut output = gui.ctx.run_ui(input, |ui| {
+            app.text_ui(ui, interactive, composing, toolbar_focused)
+        });
         self.text_repaint_at = gui::repaint_at(&output);
         if editing && !app.input.text.editing() {
             gui.sync_text_input(&self.window, false);
@@ -390,6 +408,7 @@ impl Canvas {
         if interactive {
             if let Some(gui) = &mut self.text {
                 gui.sync_text_input(&self.window, false);
+                gui.clear_events();
             }
             self.text_repaint_at = None;
         } else {

@@ -23,6 +23,7 @@ pub struct Gui {
     touch_positions: BTreeMap<TouchKey, egui::Pos2>,
     font_language: Option<Language>,
     composing: bool,
+    composition_ended: bool,
 }
 impl Gui {
     pub fn new() -> Self {
@@ -55,6 +56,7 @@ impl Gui {
             touch_positions: BTreeMap::new(),
             font_language: None,
             composing: false,
+            composition_ended: false,
         }
     }
     pub fn set_language(&mut self, language: Language) {
@@ -139,7 +141,10 @@ impl Gui {
                 }
             }
         }
-        self.composing &= enabled;
+        if !enabled {
+            self.composing = false;
+            self.composition_ended = false;
+        }
     }
 
     fn input_with_units(&mut self, w: &Window, units: f32) -> RawInput {
@@ -161,7 +166,17 @@ impl Gui {
             .entry(egui::ViewportId::ROOT)
             .or_default()
             .native_pixels_per_point = Some(w.scale() / w.ui_scale() * units);
+        self.take_input()
+    }
+
+    pub fn take_input(&mut self) -> RawInput {
+        self.composition_ended = false;
         self.raw.take()
+    }
+
+    pub fn clear_events(&mut self) {
+        self.composition_ended = false;
+        self.raw.events.clear();
     }
 
     pub fn composing(&self) -> bool {
@@ -174,11 +189,17 @@ impl Gui {
     }
 
     fn cancel_composition(&mut self) {
-        if std::mem::take(&mut self.composing) {
+        if self.end_composition() {
             self.raw
                 .events
                 .push(Event::Ime(egui::ImeEvent::Commit(String::new())));
         }
+    }
+
+    fn end_composition(&mut self) -> bool {
+        let was_composing = std::mem::take(&mut self.composing);
+        self.composition_ended |= was_composing;
+        was_composing
     }
     /// SDL_Event is a tagged C union. Only the field selected by `type` is read.
     pub fn event(&mut self, e: &SDL_Event, id: SDL_WindowID, size: [f32; 2]) {
@@ -267,12 +288,22 @@ impl Gui {
                 }
                 SDL_EVENT_KEY_DOWN | SDL_EVENT_KEY_UP if e.key.windowID == id => {
                     let k = e.key;
+                    let m = modifiers(k.r#mod);
+                    let ended = k.down && std::mem::take(&mut self.composition_ended);
                     // SDL sends the result of any key handled by the IME as
                     // text input or an updated composition, not an editor key.
-                    if self.composing {
+                    // Some backends send the composition end before the same key.
+                    if self.composing
+                        || (ended
+                            && !m.command
+                            && !m.alt
+                            && matches!(
+                                k.key,
+                                SDLK_BACKSPACE | SDLK_ESCAPE | SDLK_RETURN | SDLK_KP_ENTER
+                            ))
+                    {
                         return;
                     }
-                    let m = modifiers(k.r#mod);
                     if k.down && m.command && k.key == SDLK_V {
                         let p = SDL_GetClipboardText();
                         if !p.is_null() {
@@ -304,13 +335,12 @@ impl Gui {
                     let p = e.text.text;
                     if !p.is_null() {
                         let text = CStr::from_ptr(p).to_string_lossy().into_owned();
-                        self.raw
-                            .events
-                            .push(if std::mem::take(&mut self.composing) {
-                                Event::Ime(egui::ImeEvent::Commit(text))
-                            } else {
-                                Event::Text(text)
-                            });
+                        let event = if self.end_composition() {
+                            Event::Ime(egui::ImeEvent::Commit(text))
+                        } else {
+                            Event::Text(text)
+                        };
+                        self.raw.events.push(event);
                     }
                 }
                 SDL_EVENT_TEXT_EDITING if e.edit.windowID == id => {
@@ -320,10 +350,11 @@ impl Gui {
                     } else {
                         CStr::from_ptr(edit.text).to_string_lossy().into_owned()
                     };
-                    let composing = !text.is_empty();
-                    if !std::mem::replace(&mut self.composing, composing) && !composing {
+                    if text.is_empty() {
+                        self.cancel_composition();
                         return;
                     }
+                    self.composing = true;
                     let active_range_chars = if edit.start >= 0 && edit.length >= 0 {
                         let count = text.chars().count();
                         let start = (edit.start as usize).min(count);

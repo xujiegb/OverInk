@@ -375,6 +375,7 @@ impl App {
         if self.pass
             || self.hidden
             || self.suspended
+            || self.tool.is_text()
             || self.input.protected.is_some_and(|r| r.contains(p.x, p.y))
         {
             return;
@@ -558,7 +559,7 @@ impl App {
         self.pass && !self.wait_for_mouse_up
     }
     fn reset_contacts(&mut self) {
-        self.input.text.deselect(&mut self.history);
+        self.input.text = text::TextInput::default();
         self.history.active = None;
         self.input.contact = None;
         self.input.touches.clear();
@@ -570,6 +571,10 @@ impl App {
         self.input.pending_erasures.clear();
         self.reset_pens();
         self.input.laser.clear();
+    }
+    fn change_history(&mut self, action: fn(&mut History)) {
+        self.reset_contacts();
+        action(&mut self.history);
     }
     fn swap_page(&mut self, id: u32) {
         let previous = self.pages.active;
@@ -586,6 +591,7 @@ impl App {
     fn select_page(&mut self, id: u32) {
         if self.pages.active != Some(id) {
             if self.multi {
+                self.input.text.deselect(&mut self.history);
                 self.swap_page(id);
             } else {
                 self.stop();
@@ -695,6 +701,7 @@ impl App {
             self.history.can_undo(),
             self.history.can_redo(),
             !self.history.document().is_empty()
+                || self.input.text.editing()
                 || self.history.active.is_some()
                 || self
                     .input
@@ -825,6 +832,7 @@ impl App {
             || self.pass
             || self.hidden
             || self.suspended
+            || self.tool.is_text()
             || !self.input.pen_proximity.is_empty()
         {
             return;
@@ -897,9 +905,6 @@ impl App {
     }
     fn event(&mut self, e: &SDL_Event, overlay: SDL_WindowID, size: [f32; 2]) {
         self.track_pen(e);
-        if self.tool.is_text() {
-            return;
-        }
         unsafe {
             let ty = SDL_EventType(e.r#type);
             match ty {
@@ -1001,13 +1006,11 @@ impl App {
                     );
                 }
                 SDL_EVENT_WINDOW_FOCUS_LOST if e.window.windowID == overlay => {
-                    if self.multi {
-                        self.finish_contact();
-                        self.reset_pens();
-                    } else {
+                    if !self.multi {
                         self.discard_touches();
-                        self.stop();
                     }
+                    self.finish_contact();
+                    self.reset_pens();
                 }
                 SDL_EVENT_WINDOW_MOUSE_LEAVE
                     if e.window.windowID == overlay
@@ -1022,7 +1025,7 @@ impl App {
             }
         }
     }
-    fn keyboard(&mut self, e: &SDL_Event, editing_text: bool) -> Commands {
+    fn keyboard(&mut self, e: &SDL_Event, toolbar_keyboard: bool) -> Commands {
         let mut c = Commands::default();
         unsafe {
             if SDL_EventType(e.r#type) != SDL_EVENT_KEY_DOWN {
@@ -1033,7 +1036,7 @@ impl App {
                 return c;
             }
             let m = gui::modifiers(k.r#mod);
-            if editing_text {
+            if toolbar_keyboard || self.input.text.editing() {
                 return c;
             }
             if self.tool.is_text()
@@ -1056,18 +1059,9 @@ impl App {
             }
             if m.command {
                 match k.key {
-                    SDLK_Z if m.shift => {
-                        self.reset_contacts();
-                        self.history.redo()
-                    }
-                    SDLK_Z => {
-                        self.reset_contacts();
-                        self.history.undo()
-                    }
-                    SDLK_Y => {
-                        self.reset_contacts();
-                        self.history.redo()
-                    }
+                    SDLK_Z if m.shift => self.change_history(History::redo),
+                    SDLK_Z => self.change_history(History::undo),
+                    SDLK_Y => self.change_history(History::redo),
                     SDLK_S if m.shift => self.export(),
                     SDLK_S => self.save(),
                     SDLK_O => self.load(),
@@ -1442,6 +1436,11 @@ pub fn run(options: Options) -> Result<(), String> {
     unsafe { SDL_RaiseWindow(toolbar.raw) };
     if options.smoke {
         app.history = History::default();
+        canvases[0].activate_text_editor();
+        if !unsafe { SDL_TextInputActive(canvases[0].window.raw) } {
+            return Err("Canvas text input smoke failed".into());
+        }
+        canvases[0].suspend_text_input();
         smoke_events(&mut app, canvases[0].window.id)?;
     }
     let mut picker = crate::picker::Picker::default();
@@ -1529,6 +1528,14 @@ pub fn run(options: Options) -> Result<(), String> {
                     controller_scale_changed |= ty == SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED;
                     topology_dirty |= !options.smoke && (moved || controller_scale_changed);
                     toolbar_dirty |= redraw;
+                    if matches!(
+                        ty,
+                        SDL_EVENT_WINDOW_FOCUS_GAINED | SDL_EVENT_WINDOW_FOCUS_LOST
+                    ) && app.input.text.editing()
+                    {
+                        let index = canvas::active_index(&canvases, app.pages.active);
+                        canvases[index].dirty = true;
+                    }
                 } else if let Some(canvas) =
                     canvases.iter_mut().find(|canvas| canvas.window.id == id)
                 {
@@ -1582,9 +1589,9 @@ pub fn run(options: Options) -> Result<(), String> {
             } else {
                 id.and_then(|id| canvases.iter().position(|c| c.window.id == id))
             };
-            let drawing = !was_picking && !toolbar_hidden && !app.suspended;
+            let drawing =
+                !was_picking && !toolbar_hidden && !app.suspended && !font_dialog.pending();
             gui.event(&event, toolbar.id, toolbar.size());
-            let mut canvas_editing = false;
             if ty == SDL_EVENT_PEN_PROXIMITY_OUT {
                 // A pen can leave proximity over a different window from the
                 // one that received its earlier packets.
@@ -1596,7 +1603,7 @@ pub fn run(options: Options) -> Result<(), String> {
             } else if let Some(index) =
                 target.or((ty == SDL_EVENT_FINGER_CANCELED && !app.multi).then_some(active))
             {
-                let canvas = &mut canvases[index];
+                let canvas = &canvases[index];
                 let activates = drawing
                     && canvas.visible
                     && canvas.on_output(options.smoke)
@@ -1609,13 +1616,18 @@ pub fn run(options: Options) -> Result<(), String> {
                                 SDL_EVENT_PEN_DOWN | SDL_EVENT_FINGER_DOWN | SDL_EVENT_KEY_DOWN
                             )
                     };
+                if activates
+                    && app.multi
+                    && let Some(output) = canvas.output
+                    && app.pages.active != Some(output)
+                {
+                    app.select_page(output);
+                    canvases[active].suspend_text_input();
+                    canvases[active].dirty = true;
+                    toolbar_dirty = true;
+                }
+                let canvas = &mut canvases[index];
                 if activates {
-                    if app.multi
-                        && let Some(output) = canvas.output
-                    {
-                        toolbar_dirty |= app.pages.active != Some(output);
-                        app.select_page(output);
-                    }
                     canvas.keep_toolbar_above(&toolbar);
                 }
                 let before = app.history_buttons();
@@ -1627,12 +1639,12 @@ pub fn run(options: Options) -> Result<(), String> {
                         canvas.set_page_geometry(app);
                         app.event(&event, canvas.window.id, canvas.window.size());
                         if app.tool.is_text() && !app.pass {
-                            canvas_editing = app.input.text.editing();
+                            let was_editing = app.input.text.editing();
                             let edited = canvas.text_event(app, &event);
-                            if !canvas_editing && app.input.text.editing() {
+                            if !was_editing && app.input.text.editing() {
                                 canvas.keep_toolbar_above(&toolbar);
                             }
-                            return edited;
+                            return edited || had_contacts || app.input.has_contacts();
                         }
                     } else {
                         app.track_pen(&event);
@@ -1659,31 +1671,38 @@ pub fn run(options: Options) -> Result<(), String> {
                     active
                 };
                 let canvas = &mut canvases[index];
-                canvas.dirty |= app.on_page(canvas.output, |page| {
+                let edited = app.on_page(canvas.output, |page| {
                     let had_touches = !page.input.touches.is_empty();
                     page.track_pen(&event);
-                    had_touches && page.input.touches.is_empty()
+                    let canceled_text = canvas.cancel_text_touches(page);
+                    canceled_text || (had_touches && page.input.touches.is_empty())
                 });
+                canvas.dirty |= edited;
             }
             toolbar_dirty |= app.panel == Some(crate::toolbar::Panel::Brush)
                 && matches!(ty, SDL_EVENT_PEN_AXIS | SDL_EVENT_PEN_PROXIMITY_OUT);
             if ty == SDL_EVENT_KEY_DOWN
                 && drawing
                 && (id == Some(toolbar.id)
-                    || target.is_some_and(|index| canvases[index].on_output(options.smoke)))
+                    || target.is_some_and(|index| {
+                        canvases[index].visible && canvases[index].on_output(options.smoke)
+                    }))
             {
                 toolbar_dirty = true;
                 for canvas in &mut canvases {
                     canvas.dirty = true;
                 }
                 let was_editing = app.input.text.editing();
-                let command = app.keyboard(
-                    &event,
-                    canvas_editing
-                        || id == Some(toolbar.id)
+                let command =
+                    app.keyboard(
+                        &event,
+                        id == Some(toolbar.id)
                             && (gui.ctx.egui_wants_keyboard_input()
-                                || egui::Popup::is_any_open(&gui.ctx)),
-                );
+                                || egui::Popup::is_any_open(&gui.ctx)
+                                || gui.raw.events.iter().any(|event| {
+                                    matches!(event, egui::Event::PointerButton { .. })
+                                })),
+                    );
                 if !was_editing && app.input.text.editing() {
                     let index = canvas::active_index(&canvases, app.pages.active);
                     let canvas = &mut canvases[index];
@@ -1760,6 +1779,7 @@ pub fn run(options: Options) -> Result<(), String> {
                 desired
             };
             let topology_changed = displays != app.displays;
+            let previous_page = app.pages.active;
             let (layout, removed) =
                 if topology_changed || target.is_some_and(|id| Some(id) != app.pages.active) {
                     toolbar_dirty = true;
@@ -1767,6 +1787,15 @@ pub fn run(options: Options) -> Result<(), String> {
                 } else {
                     (false, false)
                 };
+            if app.multi
+                && previous_page != app.pages.active
+                && let Some(canvas) = canvases
+                    .iter_mut()
+                    .find(|canvas| canvas.output == previous_page)
+            {
+                canvas.suspend_text_input();
+                canvas.dirty = true;
+            }
             if requested.is_some()
                 && !wayland
                 && let Err(error) = toolbar.arrange_toolbar(toolbar_expanded, app.pages.active)
@@ -1950,8 +1979,13 @@ pub fn run(options: Options) -> Result<(), String> {
             break;
         }
         mode_changed |= cmd.mode;
-        if cmd.choose_font {
+        if cmd.choose_font && !font_dialog.pending() {
             app.finish_all_contacts();
+            tooltips.clear();
+            for canvas in &mut canvases {
+                canvas.show(&toolbar, false)?;
+            }
+            gui.sync_text_input(&toolbar, false);
             font_dialog.open(&toolbar);
             cmd.redraw_canvas = true;
             toolbar_dirty = true;
@@ -2099,7 +2133,8 @@ pub fn run(options: Options) -> Result<(), String> {
                     && !app.suspended
                     && canvas.output.is_some_and(|id| connected.contains(&id)))
                 && (app.multi || index == active)
-                && (!picker.choosing() || index == active);
+                && (!picker.choosing() || index == active)
+                && !font_dialog.pending();
             canvas.show(&toolbar, visible)?;
             if visible {
                 if let Err(error) = canvas.update_guard(&toolbar, mouse) {
@@ -2115,7 +2150,7 @@ pub fn run(options: Options) -> Result<(), String> {
                     &mut app,
                     &options,
                     picker.choosing(),
-                    wayland,
+                    toolbar.input_focused(),
                     theme,
                     ink::MAX_EXTENDED_INK_TEXTURE_BYTES.saturating_sub(extended_ink_bytes),
                 )?;
@@ -2193,7 +2228,7 @@ pub fn run(options: Options) -> Result<(), String> {
         if presented {
             pacer.wait();
         } else if !toolbar_dirty && !topology_dirty {
-            let mut timeout = if app.wait_for_mouse_up || picker.active() {
+            let mut timeout = if app.wait_for_mouse_up || picker.active() || font_dialog.pending() {
                 Duration::from_millis(8)
             } else {
                 Duration::from_millis(500)
@@ -2325,6 +2360,17 @@ fn smoke_events(app: &mut App, id: SDL_WindowID) -> Result<(), String> {
         text: "OverInk 文字 😀".into(),
     };
     app.history.set_text_box(None, annotation);
+    app.tool = Tool::Laser;
+    app.begin(
+        Source::Mouse(LEFT_BUTTON),
+        Point::new(88., 103., 1., [0.; 2]),
+        false,
+    );
+    app.motion(
+        Source::Mouse(LEFT_BUTTON),
+        Point::new(340., 103., 1., [0.; 2]),
+    );
+    app.end(Source::Mouse(LEFT_BUTTON));
     Ok(())
 }
 
@@ -2386,6 +2432,44 @@ mod touch_tests {
             },
         };
         app.event(&event, SDL_WindowID(1), [800., 600.]);
+    }
+
+    #[test]
+    fn text_tool_accepts_ink_cleanup_events_and_rejects_new_strokes() {
+        let mut a = app();
+        finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 1, 0.1, 0.1);
+        finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 2, 0.3, 0.1);
+        a.begin(
+            Source::Mouse(LEFT_BUTTON),
+            Point::new(30., 30., 1., [0.; 2]),
+            false,
+        );
+        a.tool = Tool::Text;
+        finger(&mut a, SDL_EVENT_FINGER_UP, 1, 1, 0.2, 0.1);
+        finger(&mut a, SDL_EVENT_FINGER_CANCELED, 1, 2, 0.3, 0.1);
+        let overlay = SDL_WindowID(1);
+        a.event(
+            &SDL_Event {
+                window: SDL_WindowEvent {
+                    r#type: SDL_EVENT_WINDOW_FOCUS_LOST,
+                    windowID: overlay,
+                    ..Default::default()
+                },
+            },
+            overlay,
+            [800., 600.],
+        );
+        assert!(!a.input.has_contacts());
+        assert_eq!(a.history.strokes().len(), 2);
+
+        a.begin(
+            Source::Mouse(LEFT_BUTTON),
+            Point::new(30., 30., 1., [0.; 2]),
+            false,
+        );
+        finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 3, 0.4, 0.1);
+        assert!(!a.input.has_contacts());
+        assert!(a.history.active.is_none());
     }
     #[test]
     fn mouse_buttons_own_their_contacts_and_erase_is_one_edit() {

@@ -130,7 +130,7 @@ impl Ink {
         color: &ColorManager,
         background: &mut Background,
         extended_budget: usize,
-    ) -> Result<(), String> {
+    ) -> Result<[f32; 2], String> {
         let bg = if app.board && !app.pass {
             [0.97, 0.97, 0.96, 1.]
         } else {
@@ -164,6 +164,13 @@ impl Ink {
                 self.painter.stroke(&frame, stroke)?;
             }
         }
+        if !app.has_contacts() && self.painter.samples.capacity() > 128_000 {
+            self.painter.samples = Vec::new();
+        }
+        Ok(scale)
+    }
+
+    fn paint_laser(&mut self, frame: &Frame<'_>, app: &mut App) -> Result<(), String> {
         let now = Instant::now();
         app.input.laser.retain(|_, trail| {
             while trail
@@ -187,7 +194,7 @@ impl Ink {
             laser.points.clear();
             for sample in trail {
                 if sample.starts_segment && !laser.points.is_empty() {
-                    self.painter.stroke(&frame, &laser)?;
+                    self.painter.stroke(frame, &laser)?;
                     laser.points.clear();
                 }
                 laser.points.push(Point {
@@ -197,15 +204,30 @@ impl Ink {
                     ..sample.point
                 });
             }
-            self.painter.stroke(&frame, &laser)?;
-        }
-        if !app.has_contacts() && self.painter.samples.capacity() > 128_000 {
-            self.painter.samples = Vec::new();
+            self.painter.stroke(frame, &laser)?;
         }
         Ok(())
     }
 
-    pub fn present(&mut self, app: &App, renderer: &Renderer) -> Result<(), String> {
+    pub fn present(
+        &mut self,
+        app: &mut App,
+        renderer: &Renderer,
+        window: &Window,
+        color: &ColorManager,
+        scale: [f32; 2],
+    ) -> Result<(), String> {
+        if !app.input.laser.is_empty() {
+            let frame = Frame {
+                renderer,
+                color,
+                pixels: window.pixel_size(),
+                scale,
+                aa: 0.8 / scale[0].max(scale[1]),
+                extended_budget: 0,
+            };
+            self.paint_laser(&frame, app)?;
+        }
         if let Some(hole) = app.input.protected {
             clear_hole(renderer, hole)?;
         }
