@@ -183,7 +183,7 @@ jobs:
                   archive.write('LICENSE', 'LICENSE')
                   archive.write('assets/fonts/OFL.txt', 'OFL.txt')
           PY
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: OverInk-${{ matrix.target }}
           path: dist/*
@@ -222,7 +222,7 @@ jobs:
           bash package-macos.sh --arch '${{ matrix.arch }}' --version "$OVERINK_RELEASE_VERSION"
           mapfile_check=(dist/OverInk-*-macos-${{ matrix.arch }}.dmg)
           [[ ${#mapfile_check[@]} -eq 1 && -s ${mapfile_check[0]} ]] || exit 1
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: OverInk-dmg-macos-${{ matrix.arch }}
           path: dist/OverInk-*-macos-${{ matrix.arch }}.dmg
@@ -265,7 +265,7 @@ jobs:
           if ($packages.Count -ne 1 -or $packages[0].Length -le 0) {
             throw 'Expected exactly one non-empty Windows installer'
           }
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: OverInk-installer-windows-${{ matrix.arch }}
           path: dist/OverInk-*-windows-${{ matrix.arch }}-setup.exe
@@ -571,7 +571,7 @@ jobs:
           fi
           tar -czf "/out/OverInk-$OVERINK_TARGET.tar.gz" -C "$output" overink -C /src LICENSE assets/fonts/OFL.txt
           CONTAINER
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: OverInk-${{ matrix.target }}
           path: ${{ runner.temp }}/overink-linux-dist/*.tar.gz
@@ -628,7 +628,7 @@ jobs:
             test "$(rpm -qp --qf '%{ARCH}' "${files[0]}")" = "$PACKAGE_ARCH"
           fi
           cp "${files[0]}" dist/
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: OverInk-deb-${{ matrix.arch }}
           path: dist/*.deb
@@ -725,7 +725,7 @@ jobs:
             test "$(rpm -qp --qf '%{ARCH}' "${files[0]}")" = "$PACKAGE_ARCH"
           fi
           cp "${files[0]}" dist/
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: OverInk-rpm-${{ matrix.arch }}
           path: dist/*.rpm
@@ -881,7 +881,7 @@ jobs:
             fi
             mkdir -p dist
             tar -czf "dist/OverInk-$target.tar.gz" -C "$output" overink -C "$PWD" LICENSE assets/fonts/OFL.txt
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: OverInk-${{ matrix.target }}
           path: dist/*
