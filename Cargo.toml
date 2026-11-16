@@ -2,7 +2,7 @@
 name = "overink"
 version = "0.1.6"
 edition = "2024"
-rust-version = "1.95"
+rust-version = "1.100.0"
 description = "Pressure-sensitive desktop annotation with egui and native SDL3 input"
 license = "BSD-3-Clause"
 

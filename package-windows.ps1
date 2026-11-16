@@ -3,7 +3,7 @@ param(
     [ValidateSet('all', 'x64', 'i386', 'arm64')]
     [string]$Arch = 'all',
     [string]$Version,
-    [string]$RustVersion = '1.99.1',
+    [string]$RustVersion = '1.100.0',
     [string]$WixVersion = '7.0.1'
 )
 
