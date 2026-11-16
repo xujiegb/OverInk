@@ -14,13 +14,12 @@ headless-check = ["sdl3-sys/sdl-unix-console-build"]
 egui = { version = "=0.37.0", features = ["default_fonts"] }
 base64 = "0.23"
 epaint = { version = "=0.37.0", features = ["color_fonts"] }
-harfrust = "=0.12.0"
+harfrust = "=0.16.0"
 sdl3-sys = { version = "=0.7.3", default-features = false, features = ["build-from-source-static", "no-default-subsystems", "sdl-video", "sdl-render", "sdl-dialog"] }
-skrifa = "=0.44.0"
+skrifa = "=0.50.0"
 unicode-segmentation = "1"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
-libloading = "0.9"
 lcms2-sys = { version = "=4.0.7", features = ["static"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
@@ -33,15 +32,25 @@ strip = "debuginfo"
 [profile.dev]
 debug = 1
 
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))'.dependencies]
+libloading = "0.9"
+
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 async-channel = "2"
 futures-lite = "2"
-zbus = { version = "=5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
+zbus = { version = "=6.3.0", default-features = false, features = ["default-rt", "proxy", "service"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "=0.5.3"
-objc2-app-kit = { version = "=0.2.2", default-features = false, features = ["std", "NSColor", "NSColorSpace", "NSColorSampler", "block2"] }
-block2 = "=0.5.1"
+objc2 = "=0.6.5"
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "NSColor",
+    "NSColorSpace",
+    "NSColorSampler",
+    "block2",
+    "objc2-core-foundation",
+] }
+block2 = "=0.6.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "=0.62.2", features = [

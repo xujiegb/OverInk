@@ -34,7 +34,7 @@ struct CustomFont {
 
 struct FontFace {
     data: Arc<FontData>,
-    shaper: harfrust::ShaperData,
+    shaping_font: harfrust::Font,
     color: bool,
 }
 
@@ -47,10 +47,11 @@ impl FontFace {
             return Err("The font has no Unicode character map".into());
         }
         let color = font.colr().is_ok() || font.sbix().is_ok() || font.cbdt().is_ok();
-        let shaper = harfrust::ShaperData::new(&font);
+        let shaping_font = harfrust::Font::new(data.font.clone(), data.index)
+            .ok_or("Cannot prepare the font for text shaping")?;
         Ok(Self {
             data: Arc::new(data),
-            shaper,
+            shaping_font,
             color,
         })
     }
@@ -79,17 +80,16 @@ impl FontFace {
         if !self.has_base(cluster.chars().next().unwrap()) {
             return None;
         }
-        let font = self.font();
-        let mut buffer = harfrust::UnicodeBuffer::new();
+        let font = harfrust::ShaperFont::new(&self.shaping_font);
+        let mut buffer = harfrust::Buffer::new();
         buffer.set_flags(harfrust::BufferFlags::REMOVE_DEFAULT_IGNORABLES);
         buffer.push_str(cluster);
         buffer.guess_segment_properties();
-        let glyphs = self
-            .shaper
-            .shaper(&font)
-            .build()
-            .shape(buffer, Default::default());
-        match glyphs.glyph_infos() {
+        harfrust::shape(&font, &mut buffer, Default::default()).ok()?;
+        if !buffer.allocation_successful() {
+            return None;
+        }
+        match buffer.glyph_infos() {
             [glyph] if glyph.glyph_id != GlyphId::NOTDEF.to_u32() => {
                 Some(GlyphId::new(glyph.glyph_id))
             }

@@ -12,10 +12,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use zbus::{
-    blocking::{Proxy, connection::Builder},
-    zvariant::OwnedValue,
-};
+use zbus::{OwnedVariant, Proxy, connection::Builder};
 
 const UUID: &str = "overink-overlay@overink";
 const EXTENSIONS: &str = "gnome-shell/extensions";
@@ -84,18 +81,20 @@ const RELOGIN: Text = text(
 
 impl Guide {
     pub fn check() -> Option<Self> {
-        shell()
-            .and_then(|proxy| inspect(&proxy))
-            .unwrap_or_else(|error| {
-                Some(Self::Unavailable(
-                    text(
-                        "Could not check the GNOME extension",
-                        "无法检查 GNOME 扩展",
-                        "無法檢查 GNOME 擴充套件",
-                    )
-                    .detail(error),
-                ))
-            })
+        zbus::block_on(async {
+            let proxy = shell().await?;
+            inspect(&proxy).await
+        })
+        .unwrap_or_else(|error| {
+            Some(Self::Unavailable(
+                text(
+                    "Could not check the GNOME extension",
+                    "无法检查 GNOME 扩展",
+                    "無法檢查 GNOME 擴充套件",
+                )
+                .detail(error),
+            ))
+        })
     }
 
     pub fn ui(&self, ui: &mut egui::Ui, tr: Language, startup: bool) -> Option<Action> {
@@ -290,17 +289,18 @@ fn turn_off_wayland(preferences: &mut Preferences, path: &Path) -> Status {
     }
 }
 
-fn shell() -> zbus::Result<Proxy<'static>> {
-    let connection = Builder::session()?
+async fn shell() -> zbus::Result<Proxy<'static>> {
+    let connection = Builder::session()
         .method_timeout(Duration::from_secs(1))
-        .build()?;
-    Proxy::new_owned(connection, SHELL_BUS, SHELL_PATH, SHELL_EXTENSIONS)
+        .build()
+        .await?;
+    Proxy::new_owned(connection, SHELL_BUS, SHELL_PATH, SHELL_EXTENSIONS).await
 }
 
-type ExtensionInfo = HashMap<String, OwnedValue>;
+type ExtensionInfo = HashMap<String, OwnedVariant>;
 
-fn extension_info(shell: &Proxy<'_>) -> zbus::Result<ExtensionInfo> {
-    shell.call("GetExtensionInfo", &(UUID,))
+async fn extension_info(shell: &Proxy<'_>) -> zbus::Result<ExtensionInfo> {
+    shell.call("GetExtensionInfo", &(UUID,)).await
 }
 
 fn extension_state(info: &ExtensionInfo) -> Option<f64> {
@@ -308,8 +308,8 @@ fn extension_state(info: &ExtensionInfo) -> Option<f64> {
         .and_then(|state| f64::try_from(state).ok())
 }
 
-fn inspect(shell: &Proxy<'_>) -> zbus::Result<Option<Guide>> {
-    let info = extension_info(shell)?;
+async fn inspect(shell: &Proxy<'_>) -> zbus::Result<Option<Guide>> {
+    let info = extension_info(shell).await?;
     let state = extension_state(&info);
     let bundled_revision = bundled_metadata()["version"]
         .as_f64()
@@ -317,7 +317,7 @@ fn inspect(shell: &Proxy<'_>) -> zbus::Result<Option<Guide>> {
     let old_bundle = matches!(state, Some(ACTIVE | INACTIVE | INITIALIZED))
         && extension_version(&info) < bundled_revision;
     if state == Some(OUT_OF_DATE) || old_bundle {
-        let version: String = shell.get_property("ShellVersion")?;
+        let version: String = shell.get_property("ShellVersion").await?;
         if bundled_supports(&version) {
             return Ok(Some(if installed_bundle(&info) {
                 Guide::Relogin
@@ -340,7 +340,7 @@ fn inspect(shell: &Proxy<'_>) -> zbus::Result<Option<Guide>> {
             .detail(extension_error(&info).unwrap_or_default()),
         ),
         Some(INACTIVE | INITIALIZED) => {
-            if shell.get_property::<bool>("UserExtensionsEnabled")? {
+            if shell.get_property::<bool>("UserExtensionsEnabled").await? {
                 Guide::Enable
             } else {
                 Guide::Unavailable(
@@ -354,7 +354,7 @@ fn inspect(shell: &Proxy<'_>) -> zbus::Result<Option<Guide>> {
             }
         }
         None if info.is_empty() => {
-            let version: String = shell.get_property("ShellVersion")?;
+            let version: String = shell.get_property("ShellVersion").await?;
             if !bundled_supports(&version) {
                 incompatible(version)
             } else if overlay_on_disk() {
@@ -399,13 +399,12 @@ fn extension_version(info: &ExtensionInfo) -> f64 {
 }
 
 fn enable() -> Result<(), String> {
-    let shell = shell().map_err(|error| error.to_string())?;
+    let shell = zbus::block_on(shell()).map_err(|error| error.to_string())?;
     enable_extension(&shell)
 }
 
 fn enable_extension(shell: &Proxy<'_>) -> Result<(), String> {
-    if !shell
-        .call::<_, _, bool>("EnableExtension", &(UUID,))
+    if !zbus::block_on(shell.call::<_, _, bool>("EnableExtension", &(UUID,)))
         .map_err(|error| error.to_string())?
     {
         return Err("GNOME Shell rejected EnableExtension".into());
@@ -413,7 +412,7 @@ fn enable_extension(shell: &Proxy<'_>) -> Result<(), String> {
     // EnableExtension sets the preference before Shell loads the JavaScript.
     let deadline = Instant::now() + Duration::from_secs(1);
     loop {
-        let info = extension_info(shell).map_err(|error| error.to_string())?;
+        let info = zbus::block_on(extension_info(shell)).map_err(|error| error.to_string())?;
         match extension_state(&info) {
             Some(ACTIVE) => return Ok(()),
             Some(ERROR | OUT_OF_DATE) => {
@@ -579,23 +578,25 @@ mod tests {
         states: &'static [Option<f64>],
         bundle_version: f64,
     ) -> Proxy<'static> {
-        let service = Builder::session()
-            .unwrap()
-            .name(name)
-            .unwrap()
-            .serve_at(
-                SHELL_PATH,
-                MockShell {
-                    version,
-                    states,
-                    next: AtomicUsize::new(0),
-                    bundle_version,
-                },
-            )
-            .unwrap()
-            .build()
-            .unwrap();
-        Proxy::new_owned(service, name.to_owned(), SHELL_PATH, SHELL_EXTENSIONS).unwrap()
+        zbus::block_on(async {
+            let service = Builder::session()
+                .name(name)
+                .serve_at(
+                    SHELL_PATH,
+                    MockShell {
+                        version,
+                        states,
+                        next: AtomicUsize::new(0),
+                        bundle_version,
+                    },
+                )
+                .build()
+                .await
+                .unwrap();
+            Proxy::new_owned(service, name.to_owned(), SHELL_PATH, SHELL_EXTENSIONS)
+                .await
+                .unwrap()
+        })
     }
 
     #[zbus::interface(name = "org.gnome.Shell.Extensions")]
@@ -636,12 +637,15 @@ mod tests {
             bundled_metadata()["version"].as_f64().unwrap(),
         );
         assert!(matches!(
-            inspect(&proxy).unwrap(),
+            zbus::block_on(inspect(&proxy)).unwrap(),
             Some(Guide::Install | Guide::Relogin)
         ));
-        assert!(matches!(inspect(&proxy).unwrap(), Some(Guide::Enable)));
+        assert!(matches!(
+            zbus::block_on(inspect(&proxy)).unwrap(),
+            Some(Guide::Enable)
+        ));
         enable_extension(&proxy).unwrap();
-        assert!(inspect(&proxy).unwrap().is_none());
+        assert!(zbus::block_on(inspect(&proxy)).unwrap().is_none());
     }
 
     #[test]
@@ -658,7 +662,7 @@ mod tests {
             &[Some(OUT_OF_DATE)],
             0.,
         );
-        let guide = inspect(&supported).unwrap().unwrap();
+        let guide = zbus::block_on(inspect(&supported)).unwrap().unwrap();
         assert_eq!(
             std::mem::discriminant(&guide),
             std::mem::discriminant(&expected)
@@ -670,11 +674,11 @@ mod tests {
             0.,
         );
         assert!(matches!(
-            inspect(&unsupported).unwrap(),
+            zbus::block_on(inspect(&unsupported)).unwrap(),
             Some(Guide::Unavailable(_))
         ));
         let active = mock_shell("org.gnome.Shell.TestOldActive", "49.2", &[Some(ACTIVE)], 0.);
-        let guide = inspect(&active).unwrap().unwrap();
+        let guide = zbus::block_on(inspect(&active)).unwrap().unwrap();
         assert_eq!(
             std::mem::discriminant(&guide),
             std::mem::discriminant(&expected)
