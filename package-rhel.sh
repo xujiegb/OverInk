@@ -9,7 +9,7 @@ PKGROOT="OverInk-publish"
 PROJECT_HINT="Cargo.toml"
 RPM_TOPDIR="${OVERINK_OUTPUT_DIR:-${HOME}/rpmbuild}"
 
-RUST_VERSION="${RUST_VERSION:-1.99.1}"
+RUST_VERSION="${RUST_VERSION:-1.100.0}"
 CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}"
 CARGO_TARGET_DIR=""
 SDK_WORK_DIR=""
@@ -636,7 +636,7 @@ Name:           overink
 Version:        __VERSION__
 Release:        1%{?dist}
 Summary:        Pressure-sensitive desktop annotation with egui and native SDL3 input
-License:        BSD-3-Clause AND OFL-1.1
+License:        BSD-3-Clause AND OFL-1.1 AND CC-BY-SA-4.0
 URL:            https://github.com/xujiegb/OverInk
 Source0:        __PKGROOT__.tar.gz
 

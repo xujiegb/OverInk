@@ -8,7 +8,7 @@ pub const WIDTH: f32 = 56.;
 pub const HEIGHT: f32 = 580.;
 pub const PANEL_WIDTH: f32 = 312.;
 pub const GRIP_HEIGHT: f32 = 39.;
-const ACTIVE: Color32 = Color32::from_rgb(0, 122, 157);
+pub const ACTIVE: Color32 = Color32::from_rgb(0, 122, 157);
 
 pub struct Colors {
     pub rail: Color32,
@@ -246,6 +246,17 @@ fn paint(icon: Icon, p: &egui::Painter, center: Pos2, color: Color32) {
             p.circle_filled(at(17., 7.), 2.1, color);
             line(&[(17., 2.), (17., 3.5)]);
             line(&[(20.5, 7.), (22., 7.)]);
+        }
+        Icon::Tool(Tool::Text) => {
+            line(&[(4., 8.), (4., 5.), (20., 5.), (20., 8.)]);
+            line(&[(12., 5.), (12., 19.)]);
+            line(&[(8., 19.), (16., 19.)]);
+        }
+        Icon::Tool(Tool::Select) => {
+            line(&[(3., 8.), (3., 4.), (7., 4.)]);
+            line(&[(16., 4.), (20., 4.), (20., 8.)]);
+            line(&[(3., 16.), (3., 20.), (7., 20.)]);
+            line(&[(10., 9.), (21., 15.), (16., 16.), (14., 21.), (10., 9.)]);
         }
         Icon::Shapes => {
             square(4., 4., 11., 11.);

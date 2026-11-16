@@ -62,6 +62,7 @@ impl Runtime {
             SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, c"1".as_ptr());
             // A canvas drag must release on entering the separate controller.
             SDL_SetHint(SDL_HINT_MOUSE_AUTO_CAPTURE, c"0".as_ptr());
+            SDL_SetHint(SDL_HINT_IME_IMPLEMENTED_UI, c"composition".as_ptr());
             let version = cstring(crate::VERSION);
             SDL_SetAppMetadata(
                 c"OverInk".as_ptr(),
@@ -132,6 +133,10 @@ unsafe extern "C" fn toolbar_hit_test(
 }
 
 impl Window {
+    pub fn input_focused(&self) -> bool {
+        unsafe { (SDL_GetWindowFlags(self.raw) & SDL_WINDOW_INPUT_FOCUS).0 != 0 }
+    }
+
     pub fn new(title: &str, w: i32, h: i32, overlay: bool) -> Result<Self, String> {
         unsafe {
             let title = cstring(title);

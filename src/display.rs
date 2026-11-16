@@ -178,11 +178,11 @@ impl Pages {
     fn retain(&mut self, history: &mut History, connected: &BTreeSet<u32>) -> bool {
         self.parked.retain(|id, page| {
             let keep = connected.contains(id);
-            self.changed |= !keep && (page.changed || !page.strokes().is_empty());
+            self.changed |= !keep && (page.changed || !page.document().is_empty());
             keep
         });
         if self.active.is_some_and(|id| !connected.contains(&id)) {
-            self.changed |= history.changed || !history.strokes().is_empty();
+            self.changed |= history.changed || !history.document().is_empty();
             *history = History::default();
             self.active = None;
             true
@@ -236,7 +236,7 @@ impl Pages {
         }
     }
     pub fn save(&self, history: &History, path: &Path) -> Result<(), String> {
-        if self.active.is_none() && !history.strokes().is_empty() {
+        if self.active.is_none() && !history.document().is_empty() {
             return Err("No display for the restored legacy page".into());
         }
         let mut pages = self
@@ -317,7 +317,7 @@ impl Pages {
                     }
                 }
                 // An unmatched blank page cannot supply ink to another screen.
-                docs.retain(|_, doc| !doc.strokes.is_empty());
+                docs.retain(|_, doc| !doc.is_empty());
                 // Different backends can report different names for the same
                 // layout. Match unique origins only with the same screen count.
                 if saved_count == self.keys.len() {

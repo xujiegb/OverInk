@@ -4,16 +4,20 @@ use crate::{
     background::{self, Background, SnapshotMode},
     controller::{Guard, Rect},
     display::Display,
+    gui::{self, Gui},
     icc::ColorManager,
     native::{self, Passthrough},
     sdl::*,
 };
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, time::Instant};
 
 pub(super) struct Canvas {
     // SDL destroys textures with their renderer, and renderers with their window.
     pub background: Background,
     ink: Ink,
+    text: Option<Gui>,
+    text_style: Option<(u64, u64)>,
+    pub text_repaint_at: Option<Instant>,
     pub render: Renderer,
     native: Passthrough,
     pub window: Window,
@@ -56,6 +60,9 @@ impl Canvas {
         Ok(Self {
             background: Background::default(),
             ink: Ink::default(),
+            text: None,
+            text_style: None,
+            text_repaint_at: None,
             render,
             native,
             window,
@@ -94,6 +101,7 @@ impl Canvas {
         }
         self.output = output;
         self.bounds = bounds;
+        self.suspend_text_input();
         self.ink.invalidate_layer();
         self.surface_changed();
         self.guard_dirty = true;
@@ -114,6 +122,9 @@ impl Canvas {
             self.native.invalidate();
             if !visible && self.render.extended {
                 self.ink.invalidate_layer();
+            }
+            if !visible {
+                self.suspend_text_input();
             }
             if visible {
                 if let Some(id) = self.output
@@ -164,8 +175,106 @@ impl Canvas {
 
     pub fn renderer_reset(&mut self) {
         self.ink.reset_textures();
+        // A new context recreates the glyph atlas for the new SDL renderer.
+        self.suspend_text_input();
+        self.text = None;
+        self.text_style = None;
         self.background.invalidate_texture();
         self.dirty = true;
+    }
+
+    pub fn suspend_text_input(&mut self) {
+        if let Some(gui) = &mut self.text {
+            gui.suspend_input(&self.window);
+        }
+        self.text_repaint_at = None;
+    }
+
+    pub fn has_text_touch(&self, key: crate::touch::TouchKey) -> bool {
+        self.text.as_ref().is_some_and(|gui| gui.has_touch(key))
+    }
+
+    pub fn cancel_text_touches(&mut self, app: &mut App) -> bool {
+        self.text
+            .as_mut()
+            .is_some_and(|gui| app.cancel_text_touches(gui))
+    }
+
+    pub fn text_event(&mut self, app: &mut App, event: &SDL_Event) -> bool {
+        let ty = unsafe { SDL_EventType(event.r#type) };
+        let editing = app.input.text.editing();
+        if !editing
+            && matches!(
+                ty,
+                SDL_EVENT_KEY_DOWN
+                    | SDL_EVENT_KEY_UP
+                    | SDL_EVENT_TEXT_INPUT
+                    | SDL_EVENT_TEXT_EDITING
+            )
+        {
+            return false;
+        }
+        if ty == SDL_EVENT_FINGER_DOWN
+            && (!app.touch_enabled || !app.input.pen_proximity.is_empty())
+        {
+            return false;
+        }
+        let gui = self.text.get_or_insert_with(Gui::new);
+        let changed = app.text_event(gui, event, self.window.id, self.window.size());
+        if !editing && app.input.text.editing() {
+            self.activate_text_editor();
+        } else if editing
+            && matches!(
+                ty,
+                SDL_EVENT_WINDOW_FOCUS_GAINED | SDL_EVENT_WINDOW_FOCUS_LOST
+            )
+        {
+            gui.sync_text_input(&self.window, self.window.input_focused());
+        }
+        changed
+    }
+
+    pub fn activate_text_editor(&mut self) {
+        self.text.get_or_insert_with(Gui::new).clear_events();
+        self.focus_text_editor();
+    }
+
+    pub fn focus_text_editor(&mut self) {
+        if !self.window.input_focused() {
+            unsafe { SDL_RaiseWindow(self.window.raw) };
+        }
+        self.text
+            .get_or_insert_with(Gui::new)
+            .sync_text_input(&self.window, true);
+        self.dirty = true;
+    }
+
+    pub fn flush_text_events(&mut self, app: &mut App, theme: egui::Theme) -> Result<(), String> {
+        if app.input.text.editing()
+            && self
+                .text
+                .as_ref()
+                .is_some_and(|gui| !gui.raw.events.is_empty())
+            && let Some(mut output) = self.text_frame(app, theme, true)
+        {
+            // Apply input and upload texture deltas before a toolbar action changes the draft.
+            // The next canvas frame will paint the resulting document.
+            output.shapes.clear();
+            self.text
+                .as_mut()
+                .unwrap()
+                .paint(&self.render, &self.window, &self.color, output)?;
+            self.dirty = true;
+        }
+        Ok(())
+    }
+
+    pub fn finish_text_editor(&mut self, app: &mut App, theme: egui::Theme) -> Result<(), String> {
+        self.flush_text_events(app, theme)?;
+        app.input.text.finish(&mut app.history);
+        self.suspend_text_input();
+        self.dirty = true;
+        Ok(())
     }
 
     pub fn extended_ink_bytes(&self) -> usize {
@@ -230,19 +339,22 @@ impl Canvas {
         app: &mut App,
         options: &Options,
         picker_choosing: bool,
-        wayland: bool,
+        keep_editor_open: bool,
+        theme: egui::Theme,
         extended_ink_budget: usize,
     ) -> Result<bool, String> {
-        if !self.visible || !(options.smoke || self.dirty || self.animation) {
+        let text_repaint = self.text_repaint_at.is_some_and(|at| Instant::now() >= at);
+        if !self.visible || !(options.smoke || self.dirty || self.animation || text_repaint) {
             return Ok(false);
         }
-        if picker_choosing || wayland && !self.on_output(options.smoke) {
+        let on_output = self.on_output(options.smoke);
+        if picker_choosing || !on_output && driver() == "wayland" {
             self.render.begin(
                 &self.window,
                 [0., 0., 0., if picker_choosing { 1. / 255. } else { 0. }],
             )?;
             self.render.present()?;
-        } else if self.on_output(options.smoke) {
+        } else if on_output {
             app.on_page(self.output, |page| -> Result<(), String> {
                 self.set_page_geometry(page);
                 #[cfg(target_os = "macos")]
@@ -250,6 +362,7 @@ impl Canvas {
                     let extended = (self.background.frozen && self.window.hdr_enabled())
                         || page.has_wide_ink();
                     if extended != self.render.extended {
+                        page.input.text.refocus();
                         self.renderer_reset();
                         self.render.change_color_output(&self.window, extended)?;
                         self.extended_unavailable = extended && !self.render.extended;
@@ -259,7 +372,7 @@ impl Canvas {
                     }
                 }
                 page.history.set_size(self.window.size());
-                self.ink.paint(
+                let scale = self.ink.paint(
                     page,
                     &self.render,
                     &self.window,
@@ -267,6 +380,16 @@ impl Canvas {
                     &mut self.background,
                     extended_ink_budget,
                 )?;
+                if let Some(output) = self.text_frame(page, theme, keep_editor_open) {
+                    self.text.as_mut().unwrap().paint(
+                        &self.render,
+                        &self.window,
+                        &self.color,
+                        output,
+                    )?;
+                }
+                self.ink
+                    .present(page, &self.render, &self.window, &self.color, scale)?;
                 self.animation = !page.input.laser.is_empty();
                 Ok(())
             })?;
@@ -275,6 +398,77 @@ impl Canvas {
         }
         self.dirty = false;
         Ok(true)
+    }
+
+    fn text_frame(
+        &mut self,
+        app: &mut App,
+        theme: egui::Theme,
+        keep_editor_open: bool,
+    ) -> Option<egui::FullOutput> {
+        let interactive = app.tool.is_text() && !app.pass;
+        let editing = interactive && app.input.text.editing();
+        if !app.touch_enabled {
+            self.cancel_text_touches(app);
+        }
+        if app.history.text_boxes().is_empty() && !editing {
+            self.stop_text_input(interactive);
+            return None;
+        }
+        let style = (app.text_fonts.revision, self.color.revision);
+        if self.text_style.is_some_and(|(_, color)| color != style.1) {
+            self.suspend_text_input();
+            self.text = None;
+            app.input.text.refocus();
+        }
+        let gui = self.text.get_or_insert_with(Gui::new);
+        if self.text_style != Some(style) {
+            gui.ctx.set_fonts(app.text_fonts.definitions());
+            self.text_style = Some(style);
+        }
+        if gui.ctx.theme() != theme {
+            gui.ctx.set_theme(theme);
+        }
+        if editing {
+            if self.window.input_focused() {
+                gui.sync_text_input(&self.window, true);
+            }
+        } else if interactive {
+            gui.sync_text_input(&self.window, false);
+            gui.clear_events();
+        } else {
+            gui.suspend_input(&self.window);
+        }
+        let input = gui.canvas_input(&self.window);
+        let focused = input.focused;
+        let composing = gui.composing();
+        let mut output = gui.ctx.run_ui(input, |ui| {
+            app.text_ui(ui, interactive, composing, keep_editor_open)
+        });
+        self.text_repaint_at = gui::repaint_at(&output);
+        if !focused {
+            output.platform_output.ime = None;
+        }
+        if editing && !app.input.text.editing() {
+            gui.sync_text_input(&self.window, false);
+            output.platform_output.ime = None;
+            self.text_repaint_at = Some(Instant::now());
+        }
+        Some(output)
+    }
+
+    fn stop_text_input(&mut self, interactive: bool) {
+        if interactive {
+            if let Some(gui) = &mut self.text {
+                gui.sync_text_input(&self.window, false);
+                gui.clear_events();
+            }
+            self.text_repaint_at = None;
+        } else {
+            self.suspend_text_input();
+            self.text = None;
+            self.text_style = None;
+        }
     }
 }
 
@@ -349,6 +543,7 @@ pub(super) fn event_window(event: &SDL_Event, ty: SDL_EventType) -> Option<SDL_W
         let window = match ty {
             SDL_EVENT_MOUSE_BUTTON_DOWN | SDL_EVENT_MOUSE_BUTTON_UP => event.button.windowID,
             SDL_EVENT_MOUSE_MOTION => event.motion.windowID,
+            SDL_EVENT_MOUSE_WHEEL => event.wheel.windowID,
             SDL_EVENT_FINGER_DOWN
             | SDL_EVENT_FINGER_MOTION
             | SDL_EVENT_FINGER_UP
@@ -358,7 +553,11 @@ pub(super) fn event_window(event: &SDL_Event, ty: SDL_EventType) -> Option<SDL_W
             SDL_EVENT_PEN_MOTION => event.pmotion.windowID,
             SDL_EVENT_PEN_AXIS => event.paxis.windowID,
             SDL_EVENT_KEY_DOWN | SDL_EVENT_KEY_UP => event.key.windowID,
-            SDL_EVENT_WINDOW_FOCUS_LOST | SDL_EVENT_WINDOW_MOUSE_LEAVE => event.window.windowID,
+            SDL_EVENT_WINDOW_FOCUS_GAINED
+            | SDL_EVENT_WINDOW_FOCUS_LOST
+            | SDL_EVENT_WINDOW_MOUSE_LEAVE => event.window.windowID,
+            SDL_EVENT_TEXT_INPUT => event.text.windowID,
+            SDL_EVENT_TEXT_EDITING => event.edit.windowID,
             _ => return None,
         };
         (window.0 != 0).then_some(window)

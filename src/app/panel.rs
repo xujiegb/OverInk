@@ -16,13 +16,15 @@ impl App {
     pub(super) fn ui(
         &mut self,
         ui: &mut Ui,
-        render: &Renderer,
-        color: &ColorManager,
+        canvas: &super::canvas::Canvas,
         video: &str,
         freeze_unavailable: Option<Text>,
         mark: egui::TextureId,
+        font_dialog_open: bool,
     ) -> Commands {
         let mut commands = Commands::default();
+        let render = &canvas.render;
+        let color = &canvas.color;
         let tr = self.language;
         let available = ui.available_size();
         let opened = self.panel.filter(|_| !self.picking);
@@ -85,6 +87,7 @@ impl App {
                                                 color,
                                                 video,
                                                 &mut commands,
+                                                font_dialog_open,
                                             ),
                                         });
                                 });
@@ -182,7 +185,7 @@ impl App {
                         self.use_mouse();
                         commands.mode = true;
                     }
-                    for tool in DIRECT_TOOLS {
+                    for tool in DIRECT_TOOLS.into_iter().chain([Tool::Text, Tool::Select]) {
                         if toolbar::button(
                             ui,
                             Icon::Tool(tool),
@@ -196,7 +199,8 @@ impl App {
                             commands.mode = true;
                         }
                     }
-                    let shape_selected = !self.pass && !DIRECT_TOOLS.contains(&self.tool);
+                    let shape_selected =
+                        !self.pass && (self.tool.is_shape() || self.tool == Tool::Laser);
                     let shapes = if shape_selected {
                         Icon::Tool(self.tool)
                     } else {
@@ -235,7 +239,7 @@ impl App {
                                 "撤销 (Ctrl/Cmd+Z)",
                                 "復原 (Ctrl/Cmd+Z)",
                             ),
-                            crate::model::History::undo as fn(&mut crate::model::History),
+                            super::HistoryAction::Undo,
                         ),
                         (
                             Icon::Redo,
@@ -244,12 +248,12 @@ impl App {
                                 "重做 (Ctrl/Cmd+Shift+Z)",
                                 "重做 (Ctrl/Cmd+Shift+Z)",
                             ),
-                            crate::model::History::redo,
+                            super::HistoryAction::Redo,
                         ),
                         (
                             Icon::Clear,
                             tr.text("Clear this page", "清除当前页面", "清除目前頁面"),
-                            crate::model::History::clear,
+                            super::HistoryAction::Clear,
                         ),
                     ];
                     for (index, (icon, label, action)) in actions.into_iter().enumerate() {
@@ -259,10 +263,35 @@ impl App {
                             .inner
                             .clicked()
                         {
-                            self.reset_contacts();
-                            action(&mut self.history);
+                            self.change_history(action);
                             commands.redraw_canvas = true;
                         }
+                    }
+                    if self.tool.is_text()
+                        && !self.pass
+                        && ui
+                            .add_enabled_ui(
+                                self.input
+                                    .text
+                                    .selected
+                                    .is_some_and(|index| index < self.history.text_boxes().len()),
+                                |ui| {
+                                    toolbar::button(
+                                        ui,
+                                        Icon::Close,
+                                        tr.text(
+                                            "Delete selected text box (Delete)",
+                                            "删除选中的文字框（Delete）",
+                                            "刪除選取的文字框（Delete）",
+                                        ),
+                                        false,
+                                    )
+                                },
+                            )
+                            .inner
+                            .clicked()
+                    {
+                        commands.redraw_canvas |= self.delete_text_box();
                     }
                     self.panel_button(
                         ui,
@@ -291,7 +320,7 @@ impl App {
                                 )
                                 .clicked()
                                 {
-                                    self.select_preset(*rgb);
+                                    commands.redraw_canvas |= self.select_preset(*rgb);
                                 }
                             }
                         });
@@ -336,7 +365,7 @@ impl App {
         ui.horizontal_wrapped(|ui| {
             for tool in Tool::ALL
                 .into_iter()
-                .filter(|tool| !DIRECT_TOOLS.contains(tool))
+                .filter(|tool| tool.is_shape() || *tool == Tool::Laser)
             {
                 if toolbar::button(
                     ui,
@@ -402,7 +431,8 @@ impl App {
             ui.label(tr.text("Palette", "色盘", "調色盤"));
             let mut rgb = self.color.channels8();
             if ui.color_edit_button_srgb(&mut rgb).changed() {
-                self.select_color(InkColor::from_channels(rgb, self.color.space));
+                commands.redraw_canvas |=
+                    self.select_color(InkColor::from_channels(rgb, self.color.space));
             }
             if toolbar::hint(
                 ui.button(tr.text("Pick screen", "屏幕取色", "螢幕取色")),
@@ -436,7 +466,7 @@ impl App {
                 if (response.changed() || accept)
                     && let Some(color) = self.hex_entry.apply(self.color.space)
                 {
-                    self.color = color;
+                    commands.redraw_canvas |= self.apply_color(color);
                 }
                 if response.lost_focus() || accept {
                     self.hex_entry.normalize();
@@ -457,16 +487,19 @@ impl App {
             Space::Srgb => tr.text("sRGB color", "sRGB 颜色", "sRGB 色彩"),
             Space::DisplayP3 => tr.text("Display P3 color", "Display P3 颜色", "Display P3 色彩"),
         };
+        let mut space = self.color.space;
         egui::ComboBox::from_id_salt("source-gamut")
-            .selected_text(label(self.color.space))
+            .selected_text(label(space))
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.color.space, Space::Srgb, label(Space::Srgb));
-                ui.selectable_value(
-                    &mut self.color.space,
-                    Space::DisplayP3,
-                    label(Space::DisplayP3),
-                );
+                ui.selectable_value(&mut space, Space::Srgb, label(Space::Srgb));
+                ui.selectable_value(&mut space, Space::DisplayP3, label(Space::DisplayP3));
             });
+        if space != self.color.space {
+            commands.redraw_canvas |= self.apply_color(InkColor {
+                space,
+                ..self.color
+            });
+        }
     }
 
     fn background_controls(
@@ -535,6 +568,7 @@ impl App {
         color: &ColorManager,
         video: &str,
         commands: &mut Commands,
+        font_dialog_open: bool,
     ) {
         let tr = self.language;
         ui.horizontal(|ui| {
@@ -565,6 +599,53 @@ impl App {
                     }
                 });
         });
+        ui.separator();
+        ui.label(RichText::new(tr.text("Annotation font", "标注字体", "標註字型")).strong());
+        ui.label(self.text_fonts.name().unwrap_or_else(|| {
+            tr.text(
+                "Included · Noto Sans SC",
+                "内置 · Noto Sans SC",
+                "內建 · Noto Sans SC",
+            )
+        }));
+        ui.add_enabled_ui(!font_dialog_open, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .button(tr.text("Choose font file…", "选择字体文件…", "選擇字型檔案…"))
+                    .clicked()
+                {
+                    commands.choose_font = true;
+                }
+                if self.text_fonts.name().is_some()
+                    && ui
+                        .button(tr.text("Use included font", "使用内置字体", "使用內建字型"))
+                        .clicked()
+                {
+                    commands.reset_font = true;
+                }
+            });
+        });
+        if let Some(path) = &mut self.font_path_input {
+            let entry = ui.add(
+                egui::TextEdit::singleline(path)
+                    .id(egui::Id::unique(super::FONT_PATH_FIELD))
+                    .hint_text(tr.text("Font file path", "字体文件路径", "字型檔案路徑")),
+            );
+            let submitted =
+                entry.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+            let usable = !path.trim().is_empty();
+            if (submitted
+                || ui
+                    .add_enabled(
+                        usable,
+                        egui::Button::new(tr.text("Apply font", "应用字体", "套用字型")),
+                    )
+                    .clicked())
+                && usable
+            {
+                commands.font_path = Some(std::path::PathBuf::from(path.trim()));
+            }
+        }
         ui.separator();
         ui.label(RichText::new(tr.text("Display", "显示器", "顯示器")).strong());
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -759,5 +840,11 @@ fn tool_label(tool: Tool, tr: Language) -> &'static str {
         Tool::Ellipse => tr.text("Ellipse", "椭圆", "橢圓"),
         Tool::Eraser => tr.text("Eraser", "橡皮擦", "橡皮擦"),
         Tool::Laser => tr.text("Laser", "激光笔", "雷射筆"),
+        Tool::Text => tr.text("Text (T)", "文字（T）", "文字（T）"),
+        Tool::Select => tr.text(
+            "Select and move text (V)",
+            "选择和移动文字（V）",
+            "選取和移動文字（V）",
+        ),
     }
 }

@@ -11,6 +11,7 @@ mod color;
 mod controller;
 mod display;
 mod export;
+mod fonts;
 mod frame_rate;
 mod geometry;
 #[cfg(target_os = "linux")]

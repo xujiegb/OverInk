@@ -2,7 +2,7 @@
 name = "overink"
 version = "0.1.6"
 edition = "2024"
-rust-version = "1.95"
+rust-version = "1.100.0"
 description = "Pressure-sensitive desktop annotation with egui and native SDL3 input"
 license = "BSD-3-Clause"
 
@@ -12,7 +12,12 @@ headless-check = ["sdl3-sys/sdl-unix-console-build"]
 
 [dependencies]
 egui = { version = "=0.37.0", features = ["default_fonts"] }
-sdl3-sys = { version = "=0.7.3", default-features = false, features = ["build-from-source-static", "no-default-subsystems", "sdl-video", "sdl-render"] }
+base64 = "0.22"
+epaint = { version = "=0.37.0", features = ["color_fonts"] }
+harfrust = "=0.12.0"
+sdl3-sys = { version = "=0.7.3", default-features = false, features = ["build-from-source-static", "no-default-subsystems", "sdl-video", "sdl-render", "sdl-dialog"] }
+skrifa = "=0.44.0"
+unicode-segmentation = "1"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 libloading = "0.8"

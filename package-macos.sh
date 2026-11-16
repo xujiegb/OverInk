@@ -6,7 +6,7 @@ usage() {
 Usage: ./package-macos.sh [--arch x64|arm64|all] [--version X.Y.Z] [--output DIR]
 
 Environment:
-  RUST_VERSION               Rust toolchain version (default: 1.99.1)
+  RUST_VERSION               Rust toolchain version (default: 1.100.0)
   MACOSX_DEPLOYMENT_TARGET   Minimum macOS version (default: 11.0)
   CODESIGN_IDENTITY          Developer ID Application identity (default: -)
   NOTARYTOOL_PROFILE         Optional notarytool keychain profile
@@ -52,7 +52,7 @@ fi
   printf 'Invalid release version: %s\n' "$version" >&2; exit 1;
 }
 
-rust_version=${RUST_VERSION:-1.99.1}
+rust_version=${RUST_VERSION:-1.100.0}
 export RUSTUP_TOOLCHAIN="$rust_version"
 export MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-11.0}
 identity=${CODESIGN_IDENTITY:--}
