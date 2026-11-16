@@ -231,7 +231,7 @@ pub fn start_video(
             None,
         ));
     };
-    let status = match dialog::run(guide, preferences) {
+    let status = match dialog::run(guide, &preferences) {
         Ok((Decision::Native, runtime)) if driver() == "wayland" => {
             // Keep the display connection when the compositor supplied WAYLAND_SOCKET.
             return Ok((runtime, preferences, None));
@@ -546,7 +546,7 @@ mod tests {
             language: Some(Language::Traditional),
             per_display_windows: true,
             restore_session: false,
-            ..preferences
+            ..preferences.clone()
         };
         saved.save(&path).unwrap();
         assert!(matches!(

@@ -39,7 +39,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub fn start(display: u32) -> Result<Job, String> {
+pub fn start<T: Send + 'static>(
+    display: u32,
+    prepare: impl FnOnce(Image) -> Result<T, String> + Send + 'static,
+) -> Result<Job<T>, String> {
     let monitor = unsafe {
         SDL_GetPointerProperty(
             SDL_GetDisplayProperties(SDL_DisplayID(display)),
@@ -51,10 +54,13 @@ pub fn start(display: u32) -> Result<Job, String> {
         return Err("The Windows display handle is unavailable".into());
     }
     let handle = monitor as usize;
-    Job::start(move |cancelled| {
-        capture(HMONITOR(handle as *mut _), cancelled)
-            .map_err(|error| format!("Windows floating-point desktop capture: {error}"))
-    })
+    Job::start(
+        move |cancelled| {
+            capture(HMONITOR(handle as *mut _), cancelled)
+                .map_err(|error| format!("Windows floating-point desktop capture: {error}"))
+        },
+        prepare,
+    )
 }
 
 struct Apartment;

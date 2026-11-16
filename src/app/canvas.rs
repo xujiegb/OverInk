@@ -234,6 +234,13 @@ impl Canvas {
         changed
     }
 
+    pub fn screenshot_event(&mut self, event: &SDL_Event) -> bool {
+        let gui = self.text.get_or_insert_with(Gui::new);
+        let before = gui.raw.events.len();
+        gui.event(event, self.window.id, self.window.size());
+        gui.raw.events.len() != before
+    }
+
     pub fn activate_text_editor(&mut self) {
         self.text.get_or_insert_with(Gui::new).clear_events();
         self.focus_text_editor();
@@ -372,14 +379,18 @@ impl Canvas {
                     }
                 }
                 page.history.set_size(self.window.size());
-                let scale = self.ink.paint(
-                    page,
-                    &self.render,
-                    &self.window,
-                    &self.color,
-                    &mut self.background,
-                    extended_ink_budget,
-                )?;
+                let scale = if page.hidden {
+                    self.render.begin(&self.window, [0.; 4])?
+                } else {
+                    self.ink.paint(
+                        page,
+                        &self.render,
+                        &self.window,
+                        &self.color,
+                        &mut self.background,
+                        extended_ink_budget,
+                    )?
+                };
                 if let Some(output) = self.text_frame(page, theme, keep_editor_open) {
                     self.text.as_mut().unwrap().paint(
                         &self.render,
@@ -388,8 +399,12 @@ impl Canvas {
                         output,
                     )?;
                 }
-                self.ink
-                    .present(page, &self.render, &self.window, &self.color, scale)?;
+                if page.hidden {
+                    self.render.present()?;
+                } else {
+                    self.ink
+                        .present(page, &self.render, &self.window, &self.color, scale)?;
+                }
                 self.animation = !page.input.laser.is_empty();
                 Ok(())
             })?;
@@ -406,12 +421,13 @@ impl Canvas {
         theme: egui::Theme,
         keep_editor_open: bool,
     ) -> Option<egui::FullOutput> {
-        let interactive = app.tool.is_text() && !app.pass;
+        let screenshot = app.screenshot.targets(self.window.id);
+        let interactive = !app.screenshot.active() && app.tool.is_text() && !app.pass;
         let editing = interactive && app.input.text.editing();
         if !app.touch_enabled {
             self.cancel_text_touches(app);
         }
-        if app.history.text_boxes().is_empty() && !editing {
+        if app.history.text_boxes().is_empty() && !editing && !screenshot {
             self.stop_text_input(interactive);
             return None;
         }
@@ -433,9 +449,8 @@ impl Canvas {
             if self.window.input_focused() {
                 gui.sync_text_input(&self.window, true);
             }
-        } else if interactive {
+        } else if interactive || screenshot {
             gui.sync_text_input(&self.window, false);
-            gui.clear_events();
         } else {
             gui.suspend_input(&self.window);
         }
@@ -443,7 +458,12 @@ impl Canvas {
         let focused = input.focused;
         let composing = gui.composing();
         let mut output = gui.ctx.run_ui(input, |ui| {
-            app.text_ui(ui, interactive, composing, keep_editor_open)
+            if !app.hidden {
+                app.text_ui(ui, interactive, composing, keep_editor_open);
+            }
+            if screenshot {
+                app.screenshot.ui(ui, app.language);
+            }
         });
         self.text_repaint_at = gui::repaint_at(&output);
         if !focused {

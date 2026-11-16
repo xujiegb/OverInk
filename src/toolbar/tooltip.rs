@@ -1,4 +1,4 @@
-use crate::{appearance::Language, gui::Gui, icc::ColorManager, sdl::*};
+use crate::{gui::Gui, icc::ColorManager, sdl::*};
 use egui::{Color32, FontId, Id, Response, Theme, Tooltip, Vec2, pos2, vec2};
 
 const WRAP_WIDTH: f32 = 280.;
@@ -62,7 +62,6 @@ struct Content {
     hint: Hint,
     units: f32,
     theme: Theme,
-    language: Language,
     color_revision: u64,
 }
 
@@ -76,7 +75,7 @@ impl Tooltips {
         }
     }
 
-    pub fn update(&mut self, parent: &Window, gui: &Gui, language: Language, color: &ColorManager) {
+    pub fn update(&mut self, parent: &Window, gui: &Gui, color: &ColorManager) {
         let Some(hint) = gui.ctx.data_mut(|data| data.remove_temp::<Hint>(hint_id())) else {
             self.clear();
             return;
@@ -85,7 +84,6 @@ impl Tooltips {
             hint,
             units: gui.units,
             theme: gui.ctx.theme(),
-            language,
             color_revision: color.revision,
         };
         if self
@@ -123,7 +121,6 @@ impl Tooltips {
                 content,
             })
         };
-        popup.gui.set_language(popup.content.language);
         popup.gui.ctx.set_theme(popup.content.theme);
         popup.window.show(true)?;
         popup.paint(color)

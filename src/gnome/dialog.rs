@@ -13,7 +13,7 @@ const HEIGHT: i32 = 180;
 
 pub(super) fn run(
     mut guide: Guide,
-    preferences: Preferences,
+    preferences: &Preferences,
 ) -> Result<(Decision, Runtime), String> {
     // The guide is a normal toplevel and can open even without XWayland.
     let runtime = Runtime::new(false, true, false).or_else(|wayland| {
@@ -34,7 +34,6 @@ pub(super) fn run(
     let renderer = Renderer::new(&window, true).or_else(|_| Renderer::software(&window))?;
     let mut gui = Gui::new();
     let language = preferences.language.unwrap_or_else(Language::system);
-    gui.set_language(language);
     let mut appearance = ThemeMonitor::default();
     let mut color = ColorManager::default();
     color.refresh(&window, renderer.extended);

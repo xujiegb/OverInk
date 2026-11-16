@@ -21,10 +21,18 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub fn start(bounds: [i32; 4], pixels: [i32; 2], mode: SnapshotMode) -> Result<Job, String> {
+pub fn start<T: Send + 'static>(
+    bounds: [i32; 4],
+    pixels: [i32; 2],
+    mode: SnapshotMode,
+    prepare: impl FnOnce(Image) -> Result<T, String> + Send + 'static,
+) -> Result<Job<T>, String> {
     match mode {
-        SnapshotMode::Sdr => Job::start(move |cancelled| sdr_capture(bounds, cancelled)),
-        SnapshotMode::Linear => Job::start(move |cancelled| hdr_capture(bounds, pixels, cancelled)),
+        SnapshotMode::Sdr => Job::start(move |cancelled| sdr_capture(bounds, cancelled), prepare),
+        SnapshotMode::Linear => Job::start(
+            move |cancelled| hdr_capture(bounds, pixels, cancelled),
+            prepare,
+        ),
         SnapshotMode::LiveOnly(reason) => {
             Err(reason.get(crate::appearance::Language::English).into())
         }
@@ -276,7 +284,7 @@ fn sdr_capture(bounds: [i32; 4], cancelled: &AtomicBool) -> CaptureResult {
             }
             if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
                 if !status.success() {
-                    return Err("Allow OverInk Screen Recording access in macOS System Settings, then retry freezing the desktop".into());
+                    return Err("Allow OverInk Screen Recording access in macOS System Settings, then retry the screenshot".into());
                 }
                 return Image::load(&file).map(Some);
             }

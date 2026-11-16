@@ -61,6 +61,7 @@ pub enum Icon {
     Eye,
     EyeOff,
     Pointer,
+    Screenshot,
     Tool(Tool),
     Shapes,
     Brush,
@@ -140,6 +141,34 @@ pub fn swatch(ui: &mut Ui, size: Vec2, rgb: [u8; 3], label: &str, selected: bool
     hint(response, label)
 }
 
+pub fn context_menu_rect(anchor: Rect, screen: Rect, size: Vec2, protected: Option<Rect>) -> Rect {
+    let gap = 6.;
+    let inner = screen.shrink(gap);
+    let x =
+        (anchor.right() - size.x).clamp(inner.left(), (inner.right() - size.x).max(inner.left()));
+    let below = anchor.bottom() + gap;
+    let y = if below + size.y <= inner.bottom() {
+        below
+    } else {
+        (anchor.bottom().min(screen.bottom()) - gap - size.y).max(inner.top())
+    };
+    let mut rect = Rect::from_min_size(egui::pos2(x, y), size);
+    if let Some(hole) = protected.filter(|hole| hole.intersects(rect)) {
+        let right = hole.right() + gap;
+        let left = hole.left() - gap - size.x;
+        if right + size.x <= inner.right() {
+            rect = rect.translate(vec2(right - x, 0.));
+        } else if left >= inner.left() {
+            rect = rect.translate(vec2(left - x, 0.));
+        } else if hole.bottom() + gap + size.y <= inner.bottom() {
+            rect = rect.translate(vec2(0., hole.bottom() + gap - y));
+        } else if hole.top() - gap - size.y >= inner.top() {
+            rect = rect.translate(vec2(0., hole.top() - gap - size.y - y));
+        }
+    }
+    rect
+}
+
 fn paint(icon: Icon, p: &egui::Painter, center: Pos2, color: Color32) {
     let at = |x: f32, y: f32| center + vec2(x - 12., y - 12.);
     let stroke = Stroke::new(1.65, color);
@@ -178,6 +207,13 @@ fn paint(icon: Icon, p: &egui::Painter, center: Pos2, color: Color32) {
             }
         }
         Icon::Pointer => line(&[(5., 3.), (19., 12.), (12., 13.), (8., 20.), (5., 3.)]),
+        Icon::Screenshot => {
+            line(&[(3., 8.), (3., 4.), (8., 4.)]);
+            line(&[(16., 4.), (21., 4.), (21., 8.)]);
+            line(&[(21., 16.), (21., 20.), (16., 20.)]);
+            line(&[(8., 20.), (3., 20.), (3., 16.)]);
+            p.circle_stroke(at(12., 12.), 3.7, stroke);
+        }
         Icon::Tool(Tool::Pen) => {
             line(&[
                 (5., 19.),

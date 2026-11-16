@@ -1,11 +1,12 @@
 use super::App;
 use crate::{
     appearance::text,
-    color::InkColor,
+    color::{InkColor, PRESETS},
     fonts::TextFonts,
     gui::Gui,
     model::{History, MAX_TEXT_BOXES, MAX_TEXT_CHARS, TextBox, Tool},
     sdl::{SDL_Event, SDL_WindowID},
+    toolbar,
 };
 use egui::{
     Color32, Event, ImeEvent, Key, PointerButton, Pos2, Rect, Stroke, StrokeKind, TextBuffer, Ui,
@@ -14,6 +15,14 @@ use egui::{
     vec2,
 };
 use std::time::{Duration, Instant};
+
+const MENU_BUTTON: Vec2 = vec2(30., 28.);
+const MENU_GAP: f32 = 2.;
+const MENU_PADDING: f32 = 4.;
+const MENU_SIZE: Vec2 = vec2(
+    7. * MENU_BUTTON.x + 6. * MENU_GAP + 2. * MENU_PADDING,
+    MENU_BUTTON.y + 2. * MENU_PADDING,
+);
 
 #[derive(Default)]
 pub(super) struct ToolbarTextFocus {
@@ -105,7 +114,9 @@ impl TextInput {
             .as_ref()
             .is_some_and(|draft| match self.selected {
                 Some(index) => history.text_boxes().get(index).is_some_and(|original| {
-                    original.text != draft.committed || original.color != draft.item.color
+                    original.text != draft.committed
+                        || original.color != draft.item.color
+                        || original.font_size != draft.item.font_size
                 }),
                 None => !draft.committed.trim().is_empty(),
             })
@@ -189,7 +200,7 @@ impl App {
 
         let ty = unsafe { SDL_EventType(event.r#type) };
         let editing = self.input.text.editing();
-        if !editing {
+        if !editing && self.input.text.selected.is_none() {
             gui.clear_events();
         }
         let first = gui.raw.events.len();
@@ -207,8 +218,14 @@ impl App {
         if editing {
             return changed || gui.raw.events.len() != first;
         }
-        for event in gui.raw.events.drain(first..) {
+        let events: Vec<_> = gui.raw.events.drain(first..).collect();
+        for event in events {
+            let had_selection = self.input.text.selected.is_some();
             changed |= self.text_pointer(&event, size);
+            if had_selection || self.input.text.selected.is_some() {
+                gui.raw.events.push(event);
+                changed = true;
+            }
         }
         changed
     }
@@ -232,6 +249,13 @@ impl App {
                 {
                     return false;
                 }
+                if self
+                    .text_menu_rect(canvas)
+                    .is_some_and(|rect| rect.contains(pos))
+                {
+                    return true;
+                }
+                let state = &mut self.input.text;
                 state.press = Some(Press {
                     origin: pos,
                     target: text_hit(&self.history, state.selected, pos, self.input.canvas_units),
@@ -363,6 +387,144 @@ impl App {
         true
     }
 
+    fn text_menu_rect(&self, canvas: Rect) -> Option<Rect> {
+        let state = &self.input.text;
+        let item = self.history.text_boxes().get(state.selected?)?;
+        let item = state
+            .press
+            .as_ref()
+            .and_then(|press| press.preview.as_ref())
+            .unwrap_or(item);
+        let protected = self.input.protected.map(|hole| {
+            Rect::from_min_size(
+                pos2(hole.x as f32, hole.y as f32),
+                vec2(hole.w as f32, hole.h as f32),
+            )
+        });
+        Some(toolbar::context_menu_rect(
+            item.rect(),
+            canvas,
+            MENU_SIZE,
+            protected,
+        ))
+    }
+
+    fn resize_text_font(&mut self, step: f32) {
+        let resize = |item: &mut TextBox| {
+            item.font_size = (item.font_size + step)
+                .clamp(*TextBox::FONT_SIZE.start(), *TextBox::FONT_SIZE.end());
+        };
+        if let Some(draft) = &mut self.input.text.draft {
+            resize(&mut draft.item);
+        } else if let Some(index) = self.input.text.selected
+            && let Some(item) = self.history.text_boxes().get(index)
+        {
+            let mut item = (**item).clone();
+            resize(&mut item);
+            self.history.set_text_box(Some(index), item);
+        }
+    }
+
+    fn text_menu(&mut self, ui: &mut Ui, rect: Rect) {
+        let Some(item) = self
+            .input
+            .text
+            .draft
+            .as_ref()
+            .map(|draft| &draft.item)
+            .or_else(|| {
+                self.input
+                    .text
+                    .selected
+                    .and_then(|index| self.history.text_boxes().get(index))
+                    .map(|item| &**item)
+            })
+        else {
+            return;
+        };
+        let color = item.color;
+        let font_size = item.font_size;
+        let tr = self.language;
+        ui.painter().rect(
+            rect,
+            6.,
+            ui.visuals().window_fill(),
+            ui.visuals().window_stroke(),
+            StrokeKind::Inside,
+        );
+        let mut menu = ui.new_child(
+            UiBuilder::new()
+                .id_salt("annotation-actions")
+                .max_rect(rect.shrink(MENU_PADDING))
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        menu.spacing_mut().item_spacing.x = MENU_GAP;
+        menu.spacing_mut().button_padding.x = 4.;
+        let mut acted = false;
+        if menu
+            .add_sized(MENU_BUTTON, egui::Button::new("×"))
+            .on_hover_text(tr.text("Delete text box", "删除文本框", "刪除文字框"))
+            .clicked()
+        {
+            acted = self.delete_text_box();
+        }
+        for (label, hint, step, enabled) in [
+            (
+                "A+",
+                tr.text("Increase font size", "加大字号", "加大字級"),
+                2.,
+                font_size < *TextBox::FONT_SIZE.end(),
+            ),
+            (
+                "A−",
+                tr.text("Decrease font size", "缩小字号", "縮小字級"),
+                -2.,
+                font_size > *TextBox::FONT_SIZE.start(),
+            ),
+        ] {
+            if menu
+                .add_enabled_ui(enabled, |ui| {
+                    ui.add_sized(MENU_BUTTON, egui::Button::new(label))
+                })
+                .inner
+                .on_hover_text(hint)
+                .clicked()
+            {
+                self.resize_text_font(step);
+                acted = true;
+            }
+        }
+        for rgb in PRESETS {
+            let preset = InkColor::from_rgb8(rgb);
+            let label = format!(
+                "{} {}",
+                tr.text("Text color", "文字颜色", "文字顏色"),
+                preset.hex()
+            );
+            if toolbar::swatch(&mut menu, MENU_BUTTON, rgb, &label, color.srgb8() == rgb)
+                .on_hover_text(label)
+                .clicked()
+            {
+                acted |= self.recolor_text(preset.converted(color.space));
+            }
+        }
+        if acted {
+            ui.ctx().request_repaint();
+        }
+        if self.input.text.editing()
+            && ui.input(|input| {
+                input
+                    .pointer
+                    .interact_pos()
+                    .is_some_and(|p| rect.contains(p))
+                    && input.pointer.primary_clicked()
+            })
+        {
+            let id = ui.make_persistent_id("annotation-editor");
+            ui.memory_mut(|mem| mem.request_focus(id));
+        }
+    }
+
     pub(super) fn text_key(&mut self, key: crate::sdl::SDL_Keycode) -> bool {
         use crate::sdl::*;
         let state = &mut self.input.text;
@@ -412,8 +574,9 @@ impl App {
             draw_text_box(ui, &self.text_fonts, item);
         }
         if interactive {
+            let menu = self.text_menu_rect(ui.clip_rect());
             if self.input.text.editing() {
-                self.text_editor(ui, composing, keep_editor_open);
+                self.text_editor(ui, composing, keep_editor_open, menu);
             } else if let Some(item) =
                 selected.and_then(|index| self.history.text_boxes().get(index))
             {
@@ -425,10 +588,19 @@ impl App {
                 painter.rect_filled(resize.shrink(2.), 2., color);
                 painter.circle_filled(font.center(), (font.width() / 2. - 2.).max(1.), color);
             }
+            if let Some(rect) = menu {
+                self.text_menu(ui, rect);
+            }
         }
     }
 
-    fn text_editor(&mut self, ui: &mut Ui, composing: bool, keep_editor_open: bool) {
+    fn text_editor(
+        &mut self,
+        ui: &mut Ui,
+        composing: bool,
+        keep_editor_open: bool,
+        menu: Option<Rect>,
+    ) {
         let draft = self.input.text.draft.as_mut().unwrap();
         let rect = draft.item.rect();
         let text_rect = draft.item.text_rect();
@@ -446,12 +618,14 @@ impl App {
             Stroke::new(1., crate::toolbar::ACTIVE),
             StrokeKind::Inside,
         );
-        let (focused, finish, committed_input) = ui.input(|input| {
+        let (focused, finish, committed_input, menu_clicked) = ui.input(|input| {
             // A pointer can start editing before SDL grants keyboard focus.
             // Keep the draft available to toolbar actions such as Redo or Clear.
             let lost_window_focus = !keep_editor_open && !input.focused
                 && (draft.had_input_focus
                     || input.events.iter().any(|event| matches!(event, Event::WindowFocused(false))));
+            let clicked = input.pointer.primary_clicked().then(|| input.pointer.interact_pos()).flatten();
+            let menu_clicked = clicked.is_some_and(|point| menu.is_some_and(|menu| menu.contains(point)));
             let finish = lost_window_focus
                 || (!composing
                     && (input.key_pressed(Key::Escape)
@@ -460,15 +634,11 @@ impl App {
                     key: Key::Enter, pressed: true, modifiers, ..
                 } if modifiers.command)
                         })))
-                || (input.pointer.primary_clicked()
-                    && input
-                        .pointer
-                        .interact_pos()
-                        .is_some_and(|point| !rect.contains(point)));
+                || (!menu_clicked && clicked.is_some_and(|point| !rect.contains(point)));
             let committed_input = input.events.iter().any(|event| {
                 matches!(event, Event::Text(value) | Event::Paste(value) | Event::Ime(ImeEvent::Commit(value)) if !value.is_empty())
             });
-            (input.focused, finish, committed_input)
+            (input.focused, finish, committed_input, menu_clicked)
         });
         draft.had_input_focus |= focused;
         let font_size = draft.item.font_size;
@@ -524,7 +694,9 @@ impl App {
                 draft.cursor = Some(CCursorRange::one(preedit.sorted_cursors()[0]));
             }
         }
-        if finish || (focused && !started && !composing && output.response.lost_focus()) {
+        if finish
+            || (focused && !started && !composing && !menu_clicked && output.response.lost_focus())
+        {
             self.input.text.finish(&mut self.history);
             ui.memory_mut(|mem| mem.surrender_focus(id));
             ui.ctx().request_repaint();
@@ -1135,6 +1307,53 @@ mod tests {
             app.history.undo();
         }
         assert_eq!(app.history.text_boxes(), &[original]);
+    }
+
+    #[test]
+    fn context_menu_acts_on_the_selected_box_and_fits_at_the_bottom_edge() {
+        let mut app = app();
+        let mut gui = Gui::new();
+        gui.ctx.set_fonts(app.text_fonts.definitions());
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::from(SIZE));
+        let mut item = TextBox::new(pos2(500., 300.), screen, InkColor::default());
+        item.text = "Selected text".into();
+        let index = app.history.set_text_box(None, item.clone()).unwrap();
+        app.tool = Tool::Select;
+        assert!(app.text_menu_rect(screen).is_none());
+        click(&mut app, item.rect().center());
+        let menu = app.text_menu_rect(screen).unwrap();
+        assert!(menu.top() > item.rect().bottom());
+        render(&mut app, &mut gui);
+        let bigger = menu.min
+            + vec2(
+                MENU_PADDING + MENU_BUTTON.x * 1.5 + MENU_GAP,
+                MENU_SIZE.y / 2.,
+            );
+        gui.raw.events.push(Event::PointerMoved(bigger));
+        for pressed in [true, false] {
+            let event = Event::PointerButton {
+                pos: bigger,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            app.text_pointer(&event, SIZE);
+            gui.raw.events.push(event);
+            render(&mut app, &mut gui);
+        }
+        assert_eq!(
+            app.history.text_boxes()[index].font_size,
+            item.font_size + 2.
+        );
+        assert!(app.input.text.press.is_none());
+        app.history.undo();
+        assert_eq!(app.history.text_boxes()[index].font_size, item.font_size);
+        item.move_to(pos2(500., 580.), screen);
+        app.history.set_text_box(Some(index), item.clone());
+        let menu = app.text_menu_rect(screen).unwrap();
+        assert!(item.rect().contains_rect(menu));
+        click(&mut app, pos2(50., 50.));
+        assert!(app.text_menu_rect(screen).is_none());
     }
 
     #[test]

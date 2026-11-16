@@ -131,10 +131,10 @@ impl Ink {
         background: &mut Background,
         extended_budget: usize,
     ) -> Result<[f32; 2], String> {
-        let bg = if app.board && !app.pass {
-            [0.97, 0.97, 0.96, 1.]
-        } else {
-            [0., 0., 0., if app.pass { 0. } else { 1. / 255. }]
+        let bg = match (app.board, app.pass) {
+            (Some(super::Board::White), false) => [0.97, 0.97, 0.96, 1.],
+            (Some(super::Board::Black), false) => [0., 0., 0., 1.],
+            (_, pass) => [0., 0., 0., if pass { 0. } else { 1. / 255. }],
         };
         let scale = renderer.begin(window, bg)?;
         let frame = Frame {

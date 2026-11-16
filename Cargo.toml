@@ -23,6 +23,8 @@ serde_json = "1"
 lcms2-sys = { version = "=4.0.7", features = ["static"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+png = "0.18"
+tempfile = "3"
 
 [profile.release]
 lto = "thin"

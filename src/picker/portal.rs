@@ -1,8 +1,11 @@
-use super::PickResult;
-use crate::color::{InkColor, Space};
+use crate::{
+    background::Image,
+    color::{InkColor, Space},
+};
 use futures_lite::{StreamExt, future};
 use std::{
     collections::HashMap,
+    path::PathBuf,
     sync::{
         atomic::{AtomicU64, Ordering},
         mpsc,
@@ -11,47 +14,113 @@ use std::{
 };
 use zbus::{Connection, OwnedObjectPath, OwnedVariant, Proxy, Structure, Variant};
 
-pub struct SystemJob {
-    receiver: mpsc::Receiver<PickResult>,
+type PortalResult<T> = Result<Option<T>, String>;
+
+pub struct SystemJob<T = InkColor> {
+    receiver: mpsc::Receiver<PortalResult<T>>,
     cancel: async_channel::Sender<()>,
 }
-impl SystemJob {
+impl SystemJob<InkColor> {
     pub fn start() -> Result<Self, String> {
+        Self::spawn("overink-color-portal", |cancelled| {
+            zbus::block_on(pick(cancelled)).map_err(|error| {
+                format!(
+                    "Screen picker: {error}. A Screenshot/PickColor portal backend is required."
+                )
+            })
+        })
+    }
+}
+impl SystemJob<Image> {
+    pub fn screenshot(
+        prepare: impl FnOnce(Image) -> Result<Image, String> + Send + 'static,
+    ) -> Result<Self, String> {
+        Self::spawn("overink-screenshot-portal", |cancelled| {
+            let values = zbus::block_on(request("Screenshot", cancelled)).map_err(|error| {
+                format!("Screen capture: {error}. A Screenshot portal backend is required.")
+            })?;
+            let Some(mut values) = values else {
+                return Ok(None);
+            };
+            let uri = values
+                .remove("uri")
+                .ok_or("Portal returned no screenshot")?;
+            let uri = <&str>::try_from(&*uri).map_err(|error| error.to_string())?;
+            let path = local_file(uri)?;
+            prepare(Image::load(&path)?).map(Some)
+        })
+    }
+}
+impl<T: Send + 'static> SystemJob<T> {
+    fn spawn(
+        thread_name: &str,
+        request: impl FnOnce(&async_channel::Receiver<()>) -> PortalResult<T> + Send + 'static,
+    ) -> Result<Self, String> {
         let (sender, receiver) = mpsc::channel();
         let (cancel, cancelled) = async_channel::bounded(1);
         thread::Builder::new()
-            .name("overink-color-portal".into())
+            .name(thread_name.into())
             .spawn(move || {
-                let result = zbus::block_on(pick(&cancelled)).map_err(|e| {
-                    format!(
-                        "Screen picker: {e}. A Screenshot/PickColor portal backend is required."
-                    )
-                });
-                let _ = sender.send(result);
+                let _ = sender.send(request(&cancelled));
             })
-            .map_err(|e| e.to_string())?;
+            .map_err(|error| error.to_string())?;
         Ok(Self { receiver, cancel })
     }
-    pub fn poll(&mut self) -> Option<PickResult> {
+    pub fn poll(&self) -> Option<PortalResult<T>> {
         match self.receiver.try_recv() {
-            Ok(v) => Some(v),
+            Ok(value) => Some(value),
             Err(mpsc::TryRecvError::Empty) => None,
-            Err(_) => Some(Err("Screen picker disconnected".into())),
+            Err(_) => Some(Err("Screenshot portal disconnected".into())),
         }
     }
-    pub fn cancel(&mut self) {
+}
+impl<T> SystemJob<T> {
+    pub fn cancel(&self) {
         self.cancel.close();
     }
 }
-impl Drop for SystemJob {
+impl<T> Drop for SystemJob<T> {
     fn drop(&mut self) {
         self.cancel();
     }
 }
+
+fn local_file(uri: &str) -> Result<PathBuf, String> {
+    use std::os::unix::ffi::OsStringExt as _;
+    let path = uri
+        .strip_prefix("file://")
+        .ok_or("Screenshot URI is not a local file")?;
+    let path = path.strip_prefix("localhost").unwrap_or(path);
+    if !path.starts_with('/') {
+        return Err("Screenshot URI is not a local file".into());
+    }
+    let mut decoded = Vec::with_capacity(path.len());
+    let mut bytes = path.bytes();
+    while let Some(byte) = bytes.next() {
+        let byte = if byte == b'%' {
+            let mut hex = || {
+                bytes
+                    .next()
+                    .and_then(|value| char::from(value).to_digit(16))
+            };
+            let high = hex().ok_or("Invalid screenshot URI")?;
+            let low = hex().ok_or("Invalid screenshot URI")?;
+            (high * 16 + low) as u8
+        } else {
+            byte
+        };
+        if byte == 0 {
+            return Err("Invalid screenshot URI".into());
+        }
+        decoded.push(byte);
+    }
+    Ok(std::ffi::OsString::from_vec(decoded).into())
+}
+
 async fn pick(
     cancelled: &async_channel::Receiver<()>,
 ) -> Result<Option<InkColor>, Box<dyn std::error::Error + Send + Sync>> {
-    let Some(mut values) = request(cancelled).await? else {
+    let Some(mut values) = request("PickColor", cancelled).await? else {
         return Ok(None);
     };
     let value = values.remove("color").ok_or("Portal returned no color")?;
@@ -74,6 +143,7 @@ async fn pick(
     }))
 }
 async fn request(
+    method: &str,
     cancelled: &async_channel::Receiver<()>,
 ) -> Result<Option<HashMap<String, OwnedVariant>>, Box<dyn std::error::Error + Send + Sync>> {
     let connection = Connection::session().await?;
@@ -84,13 +154,13 @@ async fn request(
         "org.freedesktop.portal.Screenshot",
     )
     .await?;
-    let _: u32 = screenshot.get_property("version").await?;
+    let version: u32 = screenshot.get_property("version").await?;
     if cancelled.is_closed() {
         return Ok(None);
     }
     static NEXT: AtomicU64 = AtomicU64::new(1);
     let token = format!(
-        "overink_color_{}_{}",
+        "overink_capture_{}_{}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     );
@@ -108,13 +178,24 @@ async fn request(
         "org.freedesktop.portal.Request",
     )
     .await?;
-    // Install the response subscription before invoking PickColor.
+    // Install the response subscription before invoking the portal method.
     let mut responses = request.receive_signal("Response").await?;
     if cancelled.is_closed() {
         return Ok(None);
     }
-    let options = HashMap::from([("handle_token", Variant::from(token))]);
-    let handle: OwnedObjectPath = screenshot.call("PickColor", &("", options)).await?;
+    let mut options = HashMap::from([("handle_token", Variant::from(token))]);
+    if method == "Screenshot" {
+        if version >= 2 {
+            options.insert("interactive", Variant::from(false));
+        }
+        if version >= 3
+            && let Ok(targets) = screenshot.get_property::<u32>("AvailableTargets").await
+            && targets & 1 != 0
+        {
+            options.insert("target", Variant::from(1_u32));
+        }
+    }
+    let handle: OwnedObjectPath = screenshot.call(method, &("", options)).await?;
     if handle.as_str() != path {
         return Err("Portal returned an unexpected request handle".into());
     }
@@ -237,7 +318,7 @@ mod tests {
         assert_eq!(color.srgb8(), [0x12, 0xab, 0xef]);
         assert_eq!(color.space, Space::Srgb);
 
-        let mut job = SystemJob::start().unwrap();
+        let job = SystemJob::start().unwrap();
         requested.recv_timeout(timeout).unwrap();
         job.cancel();
         acknowledged.recv_timeout(timeout).unwrap();

@@ -1,20 +1,17 @@
-use crate::sdl::{self, Window};
 use egui::{
     Color32, FontData, FontDefinitions, FontFamily, FontId, Ui,
     text::{Galley, LayoutJob, TextFormat},
 };
-use flate2::read::GzDecoder;
 use skrifa::{FontRef, GlyphId, MetadataProvider, string::StringId};
 use std::{
-    ffi::{CStr, c_char, c_int, c_void},
     fs::{self, File},
     io::{self, Read},
-    path::{Path, PathBuf},
-    sync::{Arc, OnceLock, mpsc},
+    path::Path,
+    sync::{Arc, OnceLock},
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-const DEFAULT: &str = "Noto Sans SC";
+pub const INCLUDED_FONT: &str = "Sarasa Fixed Slab SC";
 const COLOR: &str = "OpenMoji Color";
 const MONO: &str = "OpenMoji Black";
 const CUSTOM: &str = "Custom annotation font";
@@ -98,7 +95,7 @@ impl FontFace {
     }
 }
 
-const FALLBACK: [&str; 3] = [DEFAULT, COLOR, MONO];
+const FALLBACK: [&str; 3] = [INCLUDED_FONT, COLOR, MONO];
 
 struct BundledFonts {
     faces: [FontFace; 3],
@@ -108,14 +105,12 @@ struct BundledFonts {
 fn bundled() -> &'static BundledFonts {
     static BUNDLED: OnceLock<BundledFonts> = OnceLock::new();
     BUNDLED.get_or_init(|| {
-        let mut noto = Vec::new();
-        GzDecoder::new(&include_bytes!("../assets/fonts/NotoSansSC-Regular.otf.gz")[..])
-            .read_to_end(&mut noto)
-            .expect("bundled Noto Sans SC font");
         let faces = [
-            FontData::from_owned(noto),
             FontData::from_static(include_bytes!(
-                "../assets/fonts/OpenMoji-color-colr0_svg.ttf"
+                "../assets/fonts/SarasaFixedSlabSC-Regular.ttf"
+            )),
+            FontData::from_static(include_bytes!(
+                "../assets/fonts/OpenMoji-color-glyf_colr_0.ttf"
             )),
             FontData::from_static(include_bytes!("../assets/fonts/OpenMoji-black-glyf.ttf")),
         ]
@@ -131,8 +126,19 @@ fn bundled() -> &'static BundledFonts {
             FontFamily::Name(ANNOTATION.into()),
             FALLBACK.map(str::to_owned).to_vec(),
         );
+        for family in [FontFamily::Proportional, FontFamily::Monospace] {
+            definitions
+                .families
+                .entry(family)
+                .or_default()
+                .splice(..0, FALLBACK.map(str::to_owned));
+        }
         BundledFonts { faces, definitions }
     })
+}
+
+pub fn ui_definitions() -> FontDefinitions {
+    bundled().definitions.clone()
 }
 
 impl CustomFont {
@@ -292,70 +298,6 @@ impl TextFonts {
     }
 }
 
-type DialogResult = Result<Option<PathBuf>, String>;
-
-#[derive(Default)]
-pub struct FontDialog(Option<mpsc::Receiver<DialogResult>>);
-
-impl FontDialog {
-    pub fn pending(&self) -> bool {
-        self.0.is_some()
-    }
-
-    pub fn open(&mut self, parent: &Window) {
-        if self.pending() {
-            return;
-        }
-        let (send, receive) = mpsc::channel();
-        self.0 = Some(receive);
-        unsafe {
-            sdl3_sys::dialog::SDL_ShowOpenFileDialog(
-                Some(font_chosen),
-                Box::into_raw(Box::new(send)).cast(),
-                parent.raw,
-                std::ptr::null(),
-                0,
-                std::ptr::null(),
-                false,
-            );
-        }
-    }
-
-    pub fn poll(&mut self) -> Option<DialogResult> {
-        let result = match self.0.as_ref()?.try_recv() {
-            Ok(result) => result,
-            Err(mpsc::TryRecvError::Empty) => return None,
-            Err(mpsc::TryRecvError::Disconnected) => Err("Font picker closed".into()),
-        };
-        self.0 = None;
-        Some(result)
-    }
-}
-
-unsafe extern "C" fn font_chosen(user: *mut c_void, files: *const *const c_char, _filter: c_int) {
-    // SDL invokes the callback once, on a platform thread or synchronously on
-    // failure. Copy the result before SDL releases its file list.
-    unsafe {
-        let send = Box::from_raw(user.cast::<mpsc::Sender<DialogResult>>());
-        let result = if files.is_null() {
-            Err(sdl::error())
-        } else if (*files).is_null() {
-            Ok(None)
-        } else {
-            let path = CStr::from_ptr(*files);
-            #[cfg(unix)]
-            let path = {
-                use std::os::unix::ffi::OsStrExt as _;
-                std::ffi::OsStr::from_bytes(path.to_bytes())
-            };
-            #[cfg(not(unix))]
-            let path = path.to_string_lossy().into_owned();
-            Ok(Some(PathBuf::from(path)))
-        };
-        let _ = send.send(result);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,8 +340,7 @@ mod tests {
     #[test]
     fn explicit_text_presentation_can_use_the_mono_emoji() {
         let fonts = TextFonts::default();
-        assert_eq!(glyphs(&fonts, "❤︎"), [('❤', false)]);
-        assert_eq!(glyphs(&fonts, "❤"), [('❤', true)]);
+        assert_eq!(glyphs(&fonts, "✏︎ ✏️"), [('✏', false), ('✏', true)]);
     }
 
     #[test]

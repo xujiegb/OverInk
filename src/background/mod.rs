@@ -1,5 +1,7 @@
 #[cfg(target_os = "macos")]
 mod macos;
+mod png;
+pub mod screenshot;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod system;
 #[cfg(target_os = "windows")]
@@ -64,6 +66,27 @@ impl Image {
             encoding,
         })
     }
+    pub fn crop(mut self, [left, top, right, bottom]: [u32; 4]) -> Result<Self, String> {
+        if left >= right || top >= bottom || right > self.width || bottom > self.height {
+            return Err("The selection is outside the screenshot".into());
+        }
+        let [width, height] = [right - left, bottom - top];
+        if width != self.width || height != self.height {
+            let bytes = self.encoding.bytes_per_pixel();
+            let row_bytes = width as usize * bytes;
+            for (row, y) in (top..bottom).enumerate() {
+                let offset = (y as usize * self.width as usize + left as usize) * bytes;
+                self.rgba
+                    .copy_within(offset..offset + row_bytes, row * row_bytes);
+            }
+            self.rgba.truncate(height as usize * row_bytes);
+            self.rgba.shrink_to_fit();
+            self.width = width;
+            self.height = height;
+        }
+        Ok(self)
+    }
+
     #[cfg(any(target_os = "windows", target_os = "macos", test))]
     /// The source must contain initialized pixels in each row. Padding is never read.
     unsafe fn copy_hdr_rows(
@@ -89,7 +112,7 @@ impl Image {
         }
         Ok(())
     }
-    #[cfg(any(target_os = "macos", test))]
+    #[cfg(any(not(target_os = "windows"), test))]
     pub fn load(path: &std::path::Path) -> Result<Self, String> {
         use image::ImageDecoder;
         let mut reader = image::ImageReader::open(path)
@@ -348,7 +371,7 @@ enum Capture {
     Idle,
     Wait(Instant),
     #[cfg(any(target_os = "windows", target_os = "macos"))]
-    System(system::Job),
+    System(system::Job<Snapshot>),
 }
 pub struct Background {
     pub frozen: bool,
@@ -505,9 +528,14 @@ impl Background {
         #[cfg(any(target_os = "windows", target_os = "macos"))]
         {
             #[cfg(target_os = "windows")]
-            let job = windows::start(id);
+            let job = windows::start(id, Snapshot::compress);
             #[cfg(target_os = "macos")]
-            let job = macos::start(self.bounds, window.pixel_size(), self.mode);
+            let job = macos::start(
+                self.bounds,
+                window.pixel_size(),
+                self.mode,
+                Snapshot::compress,
+            );
             let _ = id;
             match job {
                 Ok(job) => {
