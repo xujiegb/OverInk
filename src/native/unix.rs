@@ -7,7 +7,7 @@ use std::{
     sync::OnceLock,
 };
 fn library(names: &[&str]) -> Result<Library, String> {
-    for name in names {
+    for &name in names {
         if let Ok(lib) = unsafe { Library::new(name) } {
             return Ok(lib);
         }

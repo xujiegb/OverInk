@@ -1,35 +1,28 @@
 use super::PickResult;
 use crate::color::{InkColor, Space};
+use futures_lite::{StreamExt, future};
 use std::{
     collections::HashMap,
     sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicU64, Ordering},
         mpsc,
     },
     thread,
 };
-use zbus::{
-    blocking::{Connection, Proxy},
-    zvariant::{OwnedObjectPath, OwnedValue, Structure, Value},
-};
-pub(crate) type CloseHandle = (Connection, String);
+use zbus::{Connection, OwnedObjectPath, OwnedVariant, Proxy, Structure, Variant};
+
 pub struct SystemJob {
     receiver: mpsc::Receiver<PickResult>,
-    cancelled: Arc<AtomicBool>,
-    close: Arc<Mutex<Option<CloseHandle>>>,
+    cancel: async_channel::Sender<()>,
 }
 impl SystemJob {
     pub fn start() -> Result<Self, String> {
         let (sender, receiver) = mpsc::channel();
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let close = Arc::new(Mutex::new(None));
-        let cancel_flag = cancelled.clone();
-        let close_handle = close.clone();
+        let (cancel, cancelled) = async_channel::bounded(1);
         thread::Builder::new()
             .name("overink-color-portal".into())
             .spawn(move || {
-                let result = pick(&cancel_flag, &close_handle).map_err(|e| {
+                let result = zbus::block_on(pick(&cancelled)).map_err(|e| {
                     format!(
                         "Screen picker: {e}. A Screenshot/PickColor portal backend is required."
                     )
@@ -37,11 +30,7 @@ impl SystemJob {
                 let _ = sender.send(result);
             })
             .map_err(|e| e.to_string())?;
-        Ok(Self {
-            receiver,
-            cancelled,
-            close,
-        })
+        Ok(Self { receiver, cancel })
     }
     pub fn poll(&mut self) -> Option<PickResult> {
         match self.receiver.try_recv() {
@@ -51,24 +40,7 @@ impl SystemJob {
         }
     }
     pub fn cancel(&mut self) {
-        self.cancelled.store(true, Ordering::Relaxed);
-        if let Some((connection, path)) =
-            self.close.lock().ok().and_then(|mut handle| handle.take())
-        {
-            let _ = thread::Builder::new()
-                .name("overink-close-color-portal".into())
-                .spawn(move || {
-                    if let Ok(proxy) = Proxy::new(
-                        &connection,
-                        "org.freedesktop.portal.Desktop",
-                        path.as_str(),
-                        "org.freedesktop.portal.Request",
-                    ) {
-                        let _: Result<(), _> = proxy.call("Close", &());
-                    }
-                    let _ = connection.close();
-                });
-        }
+        self.cancel.close();
     }
 }
 impl Drop for SystemJob {
@@ -76,11 +48,10 @@ impl Drop for SystemJob {
         self.cancel();
     }
 }
-fn pick(
-    cancelled: &AtomicBool,
-    close: &Mutex<Option<CloseHandle>>,
+async fn pick(
+    cancelled: &async_channel::Receiver<()>,
 ) -> Result<Option<InkColor>, Box<dyn std::error::Error + Send + Sync>> {
-    let Some(mut values) = request("PickColor", HashMap::new(), cancelled, close)? else {
+    let Some(mut values) = request(cancelled).await? else {
         return Ok(None);
     };
     let value = values.remove("color").ok_or("Portal returned no color")?;
@@ -102,21 +73,19 @@ fn pick(
         space: Space::Srgb,
     }))
 }
-pub(crate) fn request(
-    method: &str,
-    mut options: HashMap<&str, Value<'_>>,
-    cancelled: &AtomicBool,
-    close: &Mutex<Option<CloseHandle>>,
-) -> Result<Option<HashMap<String, OwnedValue>>, Box<dyn std::error::Error + Send + Sync>> {
-    let connection = Connection::session()?;
+async fn request(
+    cancelled: &async_channel::Receiver<()>,
+) -> Result<Option<HashMap<String, OwnedVariant>>, Box<dyn std::error::Error + Send + Sync>> {
+    let connection = Connection::session().await?;
     let screenshot = Proxy::new(
         &connection,
         "org.freedesktop.portal.Desktop",
         "/org/freedesktop/portal/desktop",
         "org.freedesktop.portal.Screenshot",
-    )?;
-    let _: u32 = screenshot.get_property("version")?;
-    if cancelled.load(Ordering::Relaxed) {
+    )
+    .await?;
+    let _: u32 = screenshot.get_property("version").await?;
+    if cancelled.is_closed() {
         return Ok(None);
     }
     static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -137,29 +106,32 @@ pub(crate) fn request(
         "org.freedesktop.portal.Desktop",
         path.as_str(),
         "org.freedesktop.portal.Request",
-    )?;
+    )
+    .await?;
     // Install the response subscription before invoking PickColor.
-    let mut responses = request.receive_signal("Response")?;
-    options.insert("handle_token", Value::from(token));
-    let handle: OwnedObjectPath = screenshot.call(method, &("", options))?;
+    let mut responses = request.receive_signal("Response").await?;
+    if cancelled.is_closed() {
+        return Ok(None);
+    }
+    let options = HashMap::from([("handle_token", Variant::from(token))]);
+    let handle: OwnedObjectPath = screenshot.call("PickColor", &("", options)).await?;
     if handle.as_str() != path {
         return Err("Portal returned an unexpected request handle".into());
     }
-    if let Ok(mut state) = close.lock() {
-        *state = Some((connection.clone(), path.clone()));
-    }
-    if cancelled.load(Ordering::Relaxed) {
-        let _: Result<(), _> = request.call("Close", &());
+    let response = future::or(
+        async {
+            let _ = cancelled.recv().await;
+            None
+        },
+        responses.next(),
+    )
+    .await;
+    if cancelled.is_closed() {
+        let _ = request.call_noreply("Close", &()).await;
         return Ok(None);
     }
-    let Some(message) = responses.next() else {
-        return if cancelled.load(Ordering::Relaxed) {
-            Ok(None)
-        } else {
-            Err("Portal closed without a response".into())
-        };
-    };
-    let (code, values): (u32, HashMap<String, OwnedValue>) = message.body().deserialize()?;
+    let message = response.ok_or("Portal closed without a response")?;
+    let (code, values): (u32, HashMap<String, OwnedVariant>) = message.body().deserialize()?;
     if code == 1 {
         return Ok(None);
     }
@@ -172,7 +144,23 @@ pub(crate) fn request(
 #[cfg(test)]
 mod tests {
     use super::*;
-    struct MockScreenshot;
+    use std::{sync::atomic::AtomicBool, time::Duration};
+
+    struct MockScreenshot {
+        await_close: AtomicBool,
+        pending: mpsc::Sender<()>,
+        closed: mpsc::Sender<()>,
+    }
+
+    struct MockRequest(mpsc::Sender<()>);
+
+    #[zbus::interface(name = "org.freedesktop.portal.Request")]
+    impl MockRequest {
+        fn close(&self) {
+            self.0.send(()).unwrap();
+        }
+    }
+
     #[zbus::interface(name = "org.freedesktop.portal.Screenshot")]
     impl MockScreenshot {
         #[zbus(property, name = "version")]
@@ -182,7 +170,7 @@ mod tests {
         async fn pick_color(
             &self,
             _parent: &str,
-            options: HashMap<String, OwnedValue>,
+            options: HashMap<String, OwnedVariant>,
             #[zbus(header)] header: zbus::message::Header<'_>,
             #[zbus(connection)] connection: &zbus::Connection,
         ) -> zbus::fdo::Result<OwnedObjectPath> {
@@ -193,8 +181,16 @@ mod tests {
                 sender.as_str().trim_start_matches(':').replace('.', "_"),
                 token
             );
+            if self.await_close.swap(true, Ordering::Relaxed) {
+                connection
+                    .object_server()
+                    .at(path.as_str(), MockRequest(self.closed.clone()))
+                    .await?;
+                self.pending.send(()).unwrap();
+                return Ok(OwnedObjectPath::try_from(path).unwrap());
+            }
             let color =
-                OwnedValue::try_from(Structure::from((18. / 255., 171. / 255., 239. / 255.)))
+                OwnedVariant::try_from(Structure::from((18. / 255., 171. / 255., 239. / 255.)))
                     .unwrap();
             let values = HashMap::from([("color", color)]);
             // Intentionally respond before the method reply to exercise the subscription race.
@@ -212,29 +208,45 @@ mod tests {
     }
     #[test]
     #[ignore = "requires an isolated session bus: dbus-run-session cargo test portal_response -- --ignored"]
-    fn portal_response_before_method_reply_is_received() {
-        let _service = zbus::blocking::connection::Builder::session()
+    fn portal_response_before_method_reply_and_cancellation() {
+        let (pending, requested) = mpsc::channel();
+        let (closed, acknowledged) = mpsc::channel();
+        let _service = zbus::block_on(async {
+            zbus::connection::Builder::session()
+                .name("org.freedesktop.portal.Desktop")
+                .serve_at(
+                    "/org/freedesktop/portal/desktop",
+                    MockScreenshot {
+                        await_close: AtomicBool::new(false),
+                        pending,
+                        closed,
+                    },
+                )
+                .build()
+                .await
+                .unwrap()
+        });
+        let timeout = Duration::from_secs(5);
+        let job = SystemJob::start().unwrap();
+        let color = job
+            .receiver
+            .recv_timeout(timeout)
             .unwrap()
-            .name("org.freedesktop.portal.Desktop")
             .unwrap()
-            .serve_at("/org/freedesktop/portal/desktop", MockScreenshot)
-            .unwrap()
-            .build()
             .unwrap();
+        assert_eq!(color.srgb8(), [0x12, 0xab, 0xef]);
+        assert_eq!(color.space, Space::Srgb);
+
         let mut job = SystemJob::start().unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            if let Some(result) = job.poll() {
-                let color = result.unwrap().unwrap();
-                assert_eq!(color.srgb8(), [0x12, 0xab, 0xef]);
-                assert_eq!(color.space, Space::Srgb);
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "Portal response was lost"
-            );
-            thread::sleep(std::time::Duration::from_millis(10));
-        }
+        requested.recv_timeout(timeout).unwrap();
+        job.cancel();
+        acknowledged.recv_timeout(timeout).unwrap();
+        assert!(
+            job.receiver
+                .recv_timeout(timeout)
+                .unwrap()
+                .unwrap()
+                .is_none()
+        );
     }
 }

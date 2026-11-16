@@ -6,11 +6,7 @@ use std::{
     thread,
     time::Duration,
 };
-use zbus::{
-    Proxy,
-    connection::Builder,
-    zvariant::{OwnedValue, Value},
-};
+use zbus::{OwnedVariant, Proxy, Variant, connection::Builder};
 
 const APPEARANCE: &str = "org.freedesktop.appearance";
 const COLOR_SCHEME: &str = "color-scheme";
@@ -30,7 +26,7 @@ impl Monitor {
         let _ = thread::Builder::new()
             .name("overink-system-theme".into())
             .spawn(move || {
-                future::block_on(future::race(
+                zbus::block_on(future::race(
                     async {
                         let _ = watch(&update, wake).await;
                     },
@@ -62,17 +58,11 @@ impl Drop for Monitor {
 }
 
 async fn watch(update: &Mutex<Option<u32>>, wake: u32) -> zbus::Result<()> {
-    let connection = Builder::session()?
+    let connection = Builder::session()
         .method_timeout(Duration::from_millis(500))
-        .internal_executor(false)
         .build()
         .await?;
-    future::race(listen(&connection, update, wake), async {
-        loop {
-            connection.executor().tick().await;
-        }
-    })
-    .await
+    listen(&connection, update, wake).await
 }
 
 async fn listen(
@@ -94,7 +84,7 @@ async fn listen(
     publish(update, wake, read_scheme(&proxy).await.unwrap_or(initial));
     while let Some(signal) = signals.next().await {
         if let Ok((APPEARANCE, COLOR_SCHEME, value)) =
-            signal.body().deserialize::<(&str, &str, Value<'_>)>()
+            signal.body().deserialize::<(&str, &str, Variant<'_>)>()
         {
             publish(update, wake, scheme(&value));
         }
@@ -104,9 +94,9 @@ async fn listen(
 
 async fn read_scheme(proxy: &Proxy<'_>) -> zbus::Result<u32> {
     let setting = (APPEARANCE, COLOR_SCHEME);
-    let value: OwnedValue = match proxy.call("ReadOne", &setting).await {
-        Err(zbus::Error::MethodError(name, _, _))
-            if name.as_str() == "org.freedesktop.DBus.Error.UnknownMethod" =>
+    let value: OwnedVariant = match proxy.call("ReadOne", &setting).await {
+        Err(zbus::Error::FDO(error))
+            if matches!(error.as_ref(), zbus::fdo::Error::UnknownMethod(_)) =>
         {
             proxy.call("Read", &setting).await?
         }
@@ -115,9 +105,9 @@ async fn read_scheme(proxy: &Proxy<'_>) -> zbus::Result<u32> {
     Ok(scheme(&value))
 }
 
-fn scheme(value: &Value<'_>) -> u32 {
+fn scheme(value: &Variant<'_>) -> u32 {
     let value = match value {
-        Value::Value(inner) => inner.as_ref(),
+        Variant::Variant(inner) => inner.as_ref(),
         value => value,
     };
     u32::try_from(value).unwrap_or(0)
@@ -134,5 +124,39 @@ fn publish(update: &Mutex<Option<u32>>, wake: u32, value: u32) {
             event.r#type = wake;
             unsafe { SDL_PushEvent(&mut event) };
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct LegacySettings;
+
+    #[zbus::interface(name = "org.freedesktop.portal.Settings")]
+    impl LegacySettings {
+        fn read(&self, namespace: &str, key: &str) -> OwnedVariant {
+            assert_eq!((namespace, key), (APPEARANCE, COLOR_SCHEME));
+            OwnedVariant::try_from(Variant::Variant(Box::new(Variant::U32(1)))).unwrap()
+        }
+    }
+
+    #[test]
+    #[ignore = "requires an isolated session bus: dbus-run-session cargo test portal_response -- --ignored"]
+    fn portal_response_falls_back_to_legacy_settings_read() {
+        zbus::block_on(async {
+            let name = "org.freedesktop.portal.LegacySettingsTest";
+            let path = "/org/freedesktop/portal/desktop";
+            let service = Builder::session()
+                .name(name)
+                .serve_at(path, LegacySettings)
+                .build()
+                .await
+                .unwrap();
+            let proxy = Proxy::new(&service, name, path, "org.freedesktop.portal.Settings")
+                .await
+                .unwrap();
+            assert_eq!(read_scheme(&proxy).await.unwrap(), 1);
+        });
     }
 }

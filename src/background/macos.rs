@@ -87,13 +87,13 @@ fn hdr_capture(bounds: [i32; 4], pixels: [i32; 2], cancelled: &AtomicBool) -> Ca
     let (sender, receiver) = mpsc::channel();
     autoreleasepool(|_| {
         let shareable =
-            AnyClass::get("SCShareableContent").ok_or("ScreenCaptureKit is unavailable")?;
+            AnyClass::get(c"SCShareableContent").ok_or("ScreenCaptureKit is unavailable")?;
         let configuration =
-            AnyClass::get("SCStreamConfiguration").ok_or("ScreenCaptureKit is unavailable")?;
+            AnyClass::get(c"SCStreamConfiguration").ok_or("ScreenCaptureKit is unavailable")?;
         let supported: bool = unsafe {
             msg_send![configuration, respondsToSelector: sel!(streamConfigurationWithPreset:)]
         };
-        if !supported || AnyClass::get("SCScreenshotManager").is_none() {
+        if !supported || AnyClass::get(c"SCScreenshotManager").is_none() {
             return Err("HDR screenshots require macOS 15 or later".to_string());
         }
         let completion =
@@ -148,11 +148,12 @@ fn begin_screenshot(
     [width, height]: [i32; 2],
     sender: mpsc::Sender<CaptureResult>,
 ) -> Result<(), String> {
-    let filter_class = AnyClass::get("SCContentFilter").ok_or("ScreenCaptureKit is unavailable")?;
+    let filter_class =
+        AnyClass::get(c"SCContentFilter").ok_or("ScreenCaptureKit is unavailable")?;
     let configuration =
-        AnyClass::get("SCStreamConfiguration").ok_or("ScreenCaptureKit is unavailable")?;
-    let manager = AnyClass::get("SCScreenshotManager").ok_or("ScreenCaptureKit is unavailable")?;
-    let array = AnyClass::get("NSArray").ok_or("NSArray is unavailable")?;
+        AnyClass::get(c"SCStreamConfiguration").ok_or("ScreenCaptureKit is unavailable")?;
+    let manager = AnyClass::get(c"SCScreenshotManager").ok_or("ScreenCaptureKit is unavailable")?;
+    let array = AnyClass::get(c"NSArray").ok_or("NSArray is unavailable")?;
     unsafe {
         let displays: *mut AnyObject = msg_send![content, displays];
         let count: usize = msg_send![displays, count];
