@@ -11,7 +11,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     ffi::CStr,
     ptr,
-    time::Instant,
+    time::{Duration, Instant},
 };
 pub struct Gui {
     pub ctx: Context,
@@ -22,6 +22,7 @@ pub struct Gui {
     touch_primary: Option<TouchKey>,
     touch_positions: BTreeMap<TouchKey, egui::Pos2>,
     font_language: Option<Language>,
+    composing: bool,
 }
 impl Gui {
     pub fn new() -> Self {
@@ -53,6 +54,7 @@ impl Gui {
             touch_primary: None,
             touch_positions: BTreeMap::new(),
             font_language: None,
+            composing: false,
         }
     }
     pub fn set_language(&mut self, language: Language) {
@@ -97,8 +99,53 @@ impl Gui {
         self.ctx.set_fonts(fonts);
     }
     pub fn input(&mut self, w: &Window) -> RawInput {
+        self.input_with_units(w, w.ui_scale().max(0.5))
+    }
+
+    pub fn canvas_input(&mut self, w: &Window) -> RawInput {
+        self.input_with_units(w, 1.)
+    }
+
+    pub fn suspend_input(&mut self, window: &Window) {
+        self.sync_text_input(window, false);
+        self.cancel_touches();
+        self.raw.events.push(Event::PointerGone);
+        self.raw.events.retain(|event| {
+            matches!(
+                event,
+                Event::PointerGone
+                    | Event::PointerMoved(_)
+                    | Event::PointerButton { pressed: false, .. }
+            )
+        });
+        self.ctx.stop_dragging();
+    }
+
+    pub fn has_touch(&self, key: TouchKey) -> bool {
+        self.touch_positions.contains_key(&key)
+    }
+
+    pub fn primary_touch(&self) -> Option<TouchKey> {
+        self.touch_primary
+    }
+
+    pub fn sync_text_input(&mut self, window: &Window, enabled: bool) {
+        unsafe {
+            if enabled != SDL_TextInputActive(window.raw) {
+                if enabled {
+                    SDL_StartTextInput(window.raw);
+                } else {
+                    SDL_StopTextInput(window.raw);
+                }
+            }
+        }
+        self.composing &= enabled;
+    }
+
+    fn input_with_units(&mut self, w: &Window, units: f32) -> RawInput {
         let logical = w.size();
-        self.units = w.ui_scale().max(0.5);
+        self.units = units;
+        self.raw.focused = w.input_focused();
         self.raw.screen_rect = Some(egui::Rect::from_min_size(
             egui::Pos2::ZERO,
             egui::vec2(logical[0] / self.units, logical[1] / self.units),
@@ -113,8 +160,25 @@ impl Gui {
             .viewports
             .entry(egui::ViewportId::ROOT)
             .or_default()
-            .native_pixels_per_point = Some(w.scale());
+            .native_pixels_per_point = Some(w.scale() / w.ui_scale() * units);
         self.raw.take()
+    }
+
+    pub fn composing(&self) -> bool {
+        self.composing
+    }
+
+    pub fn clear_composition(&mut self, window: &Window) {
+        unsafe { SDL_ClearComposition(window.raw) };
+        self.cancel_composition();
+    }
+
+    fn cancel_composition(&mut self) {
+        if std::mem::take(&mut self.composing) {
+            self.raw
+                .events
+                .push(Event::Ime(egui::ImeEvent::Commit(String::new())));
+        }
     }
     /// SDL_Event is a tagged C union. Only the field selected by `type` is read.
     pub fn event(&mut self, e: &SDL_Event, id: SDL_WindowID, size: [f32; 2]) {
@@ -151,18 +215,20 @@ impl Gui {
                         modifiers: modifiers(SDL_GetModState()),
                     });
                 }
-                SDL_EVENT_FINGER_DOWN
-                | SDL_EVENT_FINGER_MOTION
-                | SDL_EVENT_FINGER_UP
-                | SDL_EVENT_FINGER_CANCELED
+                SDL_EVENT_FINGER_DOWN | SDL_EVENT_FINGER_MOTION | SDL_EVENT_FINGER_UP
                     if e.tfinger.windowID == id =>
                 {
+                    self.touch_event(e.tfinger, size);
+                }
+                SDL_EVENT_FINGER_CANCELED if self.has_touch(TouchKey::from(e.tfinger)) => {
                     self.touch_event(e.tfinger, size);
                 }
                 SDL_EVENT_PEN_MOTION if e.pmotion.windowID == id => self.raw.events.push(
                     Event::PointerMoved(egui::pos2(e.pmotion.x / scale, e.pmotion.y / scale)),
                 ),
-                SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP if e.ptouch.windowID == id => {
+                SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP
+                    if e.ptouch.windowID == id && !e.ptouch.eraser =>
+                {
                     let p = e.ptouch;
                     self.raw.events.push(Event::PointerButton {
                         pos: egui::pos2(p.x / scale, p.y / scale),
@@ -188,6 +254,7 @@ impl Gui {
                 }
                 SDL_EVENT_WINDOW_FOCUS_LOST if e.window.windowID == id => {
                     self.cancel_touches();
+                    self.cancel_composition();
                     self.raw.focused = false;
                     self.raw.events.push(Event::WindowFocused(false));
                 }
@@ -200,6 +267,11 @@ impl Gui {
                 }
                 SDL_EVENT_KEY_DOWN | SDL_EVENT_KEY_UP if e.key.windowID == id => {
                     let k = e.key;
+                    // SDL sends the result of any key handled by the IME as
+                    // text input or an updated composition, not an editor key.
+                    if self.composing {
+                        return;
+                    }
                     let m = modifiers(k.r#mod);
                     if k.down && m.command && k.key == SDLK_V {
                         let p = SDL_GetClipboardText();
@@ -231,10 +303,39 @@ impl Gui {
                 SDL_EVENT_TEXT_INPUT if e.text.windowID == id => {
                     let p = e.text.text;
                     if !p.is_null() {
-                        self.raw.events.push(Event::Text(
-                            CStr::from_ptr(p).to_string_lossy().into_owned(),
-                        ));
+                        let text = CStr::from_ptr(p).to_string_lossy().into_owned();
+                        self.raw
+                            .events
+                            .push(if std::mem::take(&mut self.composing) {
+                                Event::Ime(egui::ImeEvent::Commit(text))
+                            } else {
+                                Event::Text(text)
+                            });
                     }
+                }
+                SDL_EVENT_TEXT_EDITING if e.edit.windowID == id => {
+                    let edit = e.edit;
+                    let text = if edit.text.is_null() {
+                        String::new()
+                    } else {
+                        CStr::from_ptr(edit.text).to_string_lossy().into_owned()
+                    };
+                    let composing = !text.is_empty();
+                    if !std::mem::replace(&mut self.composing, composing) && !composing {
+                        return;
+                    }
+                    let active_range_chars = if edit.start >= 0 && edit.length >= 0 {
+                        let count = text.chars().count();
+                        let start = (edit.start as usize).min(count);
+                        let end = (start + edit.length as usize).min(count);
+                        Some(start..end)
+                    } else {
+                        None
+                    };
+                    self.raw.events.push(Event::Ime(egui::ImeEvent::Preedit {
+                        text,
+                        active_range_chars,
+                    }));
                 }
                 _ => {}
             }
@@ -313,7 +414,7 @@ impl Gui {
             self.touch_positions.remove(&key);
         }
     }
-    fn cancel_touches(&mut self) {
+    pub fn cancel_touches(&mut self) {
         for (key, pos) in std::mem::take(&mut self.touch_positions) {
             self.raw.events.push(Event::Touch {
                 device_id: egui::TouchDeviceId(key.device),
@@ -345,15 +446,48 @@ impl Gui {
         mut output: egui::FullOutput,
     ) -> Result<(), String> {
         unsafe {
+            if let Some(ime) = output.platform_output.ime {
+                let cursor = ime.cursor_rect;
+                let area = SDL_Rect {
+                    x: (cursor.left() * self.units).round() as i32,
+                    y: (cursor.top() * self.units).round() as i32,
+                    w: 1,
+                    h: (cursor.height() * self.units).ceil() as i32,
+                };
+                SDL_SetTextInputArea(window.raw, &area, 0);
+                if ime.should_interrupt_composition {
+                    self.clear_composition(window);
+                }
+            }
             for (id, deltas) in output.textures_delta.set.drain() {
                 for delta in deltas {
                     let egui::ImageData::Color(image) = delta.image;
                     let [w, h] = image.size;
-                    let bytes: Vec<u8> = image
+                    let mut bytes: Vec<u8> = image
                         .pixels
                         .iter()
                         .flat_map(|p| p.to_srgba_unmultiplied())
                         .collect();
+                    if self.units == 1. && self.font_language.is_none() && !color.is_identity() {
+                        // The font atlas carries the color of emoji, while
+                        // monochrome glyphs are tinted with mapped vertices.
+                        for (rgba, pixel) in bytes
+                            .as_chunks_mut::<4>()
+                            .0
+                            .iter_mut()
+                            .zip(image.pixels.iter())
+                        {
+                            let [red, green, blue, _] = *rgba;
+                            if pixel.a() != 0 && [red, green, blue] != [255; 3] {
+                                let rgb = color.map(
+                                    [red, green, blue].map(|channel| f32::from(channel) / 255.),
+                                );
+                                rgba[..3].copy_from_slice(
+                                    &rgb.map(|channel| (channel * 255.).round() as u8),
+                                );
+                            }
+                        }
+                    }
                     let texture = if delta.pos.is_none() {
                         if let Some(old) = self.textures.remove(&id) {
                             SDL_DestroyTexture(old)
@@ -469,10 +603,21 @@ impl Gui {
         }
     }
 }
+
+pub fn repaint_at(output: &egui::FullOutput) -> Option<Instant> {
+    output
+        .viewport_output
+        .get(&egui::ViewportId::ROOT)
+        .and_then(|viewport| {
+            // A zero delay is used for the one follow-up frame after input.
+            Instant::now().checked_add(viewport.repaint_delay.max(Duration::from_millis(1)))
+        })
+}
+
 impl Drop for Gui {
     fn drop(&mut self) {
-        for (_, p) in self.textures.drain() {
-            unsafe { SDL_DestroyTexture(p) }
+        for (_, texture) in self.textures.drain() {
+            unsafe { SDL_DestroyTexture(texture) };
         }
     }
 }
@@ -496,7 +641,7 @@ pub fn key(k: SDL_Keycode) -> Option<Key> {
         SDLK_ESCAPE => Key::Escape,
         SDLK_TAB => Key::Tab,
         SDLK_BACKSPACE => Key::Backspace,
-        SDLK_RETURN => Key::Enter,
+        SDLK_RETURN | SDLK_KP_ENTER => Key::Enter,
         SDLK_SPACE => Key::Space,
         SDLK_DELETE => Key::Delete,
         SDLK_LEFT => Key::ArrowLeft,

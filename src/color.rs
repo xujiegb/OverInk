@@ -15,7 +15,7 @@ pub enum Space {
     DisplayP3,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InkColor {
     pub rgb: [f32; 3],
     pub space: Space,

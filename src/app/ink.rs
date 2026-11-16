@@ -199,11 +199,15 @@ impl Ink {
             }
             self.painter.stroke(&frame, &laser)?;
         }
-        if let Some(hole) = app.input.protected {
-            clear_hole(renderer, hole)?;
-        }
         if !app.has_contacts() && self.painter.samples.capacity() > 128_000 {
             self.painter.samples = Vec::new();
+        }
+        Ok(())
+    }
+
+    pub fn present(&mut self, app: &App, renderer: &Renderer) -> Result<(), String> {
+        if let Some(hole) = app.input.protected {
+            clear_hole(renderer, hole)?;
         }
         renderer.present()?;
         // A small canvas can use its FP16 layer for the final erase frame.

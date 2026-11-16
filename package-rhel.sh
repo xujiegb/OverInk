@@ -636,7 +636,7 @@ Name:           overink
 Version:        __VERSION__
 Release:        1%{?dist}
 Summary:        Pressure-sensitive desktop annotation with egui and native SDL3 input
-License:        BSD-3-Clause AND OFL-1.1
+License:        BSD-3-Clause AND OFL-1.1 AND CC-BY-SA-4.0
 URL:            https://github.com/xujiegb/OverInk
 Source0:        __PKGROOT__.tar.gz
 

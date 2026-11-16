@@ -8,7 +8,9 @@ use std::{
 };
 
 mod eraser;
+mod text_box;
 pub use eraser::{EraseError, Erasure};
+pub use text_box::{MAX_TEXT_BOXES, MAX_TEXT_CHARS, TextBox};
 
 pub const MAX_POINTS: usize = 1_000_000;
 pub const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
@@ -25,9 +27,11 @@ pub enum Tool {
     Ellipse,
     Eraser,
     Laser,
+    Text,
+    Select,
 }
 impl Tool {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 11] = [
         Self::Pen,
         Self::Pencil,
         Self::Marker,
@@ -37,6 +41,8 @@ impl Tool {
         Self::Ellipse,
         Self::Eraser,
         Self::Laser,
+        Self::Text,
+        Self::Select,
     ];
 
     pub fn is_shape(self) -> bool {
@@ -44,6 +50,10 @@ impl Tool {
             self,
             Self::Line | Self::Arrow | Self::Rectangle | Self::Ellipse
         )
+    }
+
+    pub fn is_text(self) -> bool {
+        matches!(self, Self::Text | Self::Select)
     }
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -303,6 +313,8 @@ pub struct Document {
     pub version: u32,
     pub size: [f32; 2],
     pub strokes: Vec<Arc<Stroke>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub text_boxes: Vec<Arc<TextBox>>,
 }
 impl Default for Document {
     fn default() -> Self {
@@ -310,18 +322,20 @@ impl Default for Document {
             version: 1,
             size: [1920., 1080.],
             strokes: vec![],
+            text_boxes: vec![],
         }
     }
 }
 
 struct HistoryStep {
     strokes: Vec<Arc<Stroke>>,
+    text_boxes: Vec<Arc<TextBox>>,
     bytes: usize,
     point_count: usize,
 }
 
 impl HistoryStep {
-    fn new(strokes: Vec<Arc<Stroke>>, point_count: usize) -> Self {
+    fn new(strokes: Vec<Arc<Stroke>>, text_boxes: Vec<Arc<TextBox>>, point_count: usize) -> Self {
         let entries = strokes.capacity() * size_of::<Arc<Stroke>>();
         let bytes = strokes.iter().fold(entries, |total, stroke| {
             total.saturating_add(
@@ -330,8 +344,17 @@ impl HistoryStep {
                     + stroke.points.capacity() * size_of::<Point>(),
             )
         });
+        let bytes = text_boxes.iter().fold(
+            bytes.saturating_add(text_boxes.capacity() * size_of::<Arc<TextBox>>()),
+            |total, item| {
+                total.saturating_add(
+                    size_of::<TextBox>() + 2 * size_of::<usize>() + item.text.capacity(),
+                )
+            },
+        );
         Self {
             strokes,
+            text_boxes,
             bytes,
             point_count,
         }
@@ -347,7 +370,7 @@ pub struct History {
     redo: VecDeque<HistoryStep>,
     stroke_bounds: RefCell<Vec<Option<StrokeBounds>>>,
     // Appends can be painted over the committed layer. Erasure supplies its
-    // own damage, while undo, redo, clear and load invalidate the whole layer.
+    // own damage, while replacing committed ink invalidates the whole layer.
     append_revision: u64,
     erase_revision: u64,
     ink_revision: u64,
@@ -360,6 +383,10 @@ impl History {
 
     pub fn strokes(&self) -> &[Arc<Stroke>] {
         &self.doc.strokes
+    }
+
+    pub fn text_boxes(&self) -> &[Arc<TextBox>] {
+        &self.doc.text_boxes
     }
 
     pub fn set_size(&mut self, size: [f32; 2]) {
@@ -406,8 +433,11 @@ impl History {
     fn snapshot(&mut self) {
         // Committed strokes are immutable, so snapshots share their samples.
         self.redo.clear();
-        self.undo
-            .push_back(HistoryStep::new(self.doc.strokes.clone(), self.point_count));
+        self.undo.push_back(HistoryStep::new(
+            self.doc.strokes.clone(),
+            self.doc.text_boxes.clone(),
+            self.point_count,
+        ));
         self.trim_steps();
         self.changed = true;
     }
@@ -465,13 +495,52 @@ impl History {
             .filter(|stroke| !stroke.points.is_empty());
         self.append(active.into_iter());
     }
+
+    pub fn set_text_box(&mut self, index: Option<usize>, value: TextBox) -> Option<usize> {
+        if value.text.trim().is_empty() {
+            if let Some(index) = index {
+                self.remove_text_box(index);
+            }
+            return None;
+        }
+        if let Some(index) = index {
+            if **self.doc.text_boxes.get(index)? != value {
+                self.snapshot();
+                self.doc.text_boxes[index] = Arc::new(value);
+            }
+            return Some(index);
+        }
+        let index = self.doc.text_boxes.len();
+        if index >= MAX_TEXT_BOXES {
+            return None;
+        }
+        self.snapshot();
+        self.doc.text_boxes.push(Arc::new(value));
+        Some(index)
+    }
+
+    pub fn remove_text_box(&mut self, index: usize) {
+        if index < self.doc.text_boxes.len() {
+            self.snapshot();
+            self.doc.text_boxes.remove(index);
+        }
+    }
+
     fn apply_step(&mut self, step: HistoryStep) -> HistoryStep {
         let strokes = std::mem::replace(&mut self.doc.strokes, step.strokes);
+        let text_boxes = std::mem::replace(&mut self.doc.text_boxes, step.text_boxes);
         let point_count = std::mem::replace(&mut self.point_count, step.point_count);
-        self.invalidate_stroke_bounds();
+        if strokes.len() != self.doc.strokes.len()
+            || strokes
+                .iter()
+                .zip(&self.doc.strokes)
+                .any(|(a, b)| !Arc::ptr_eq(a, b))
+        {
+            self.invalidate_stroke_bounds();
+            self.ink_revision = self.ink_revision.wrapping_add(1);
+        }
         self.changed = true;
-        self.ink_revision = self.ink_revision.wrapping_add(1);
-        HistoryStep::new(strokes, point_count)
+        HistoryStep::new(strokes, text_boxes, point_count)
     }
 
     pub fn undo(&mut self) {
@@ -493,9 +562,14 @@ impl History {
     }
     pub fn clear(&mut self) {
         self.active = None;
-        if !self.doc.strokes.is_empty() {
-            self.snapshot_replacement();
+        if !self.doc.is_empty() {
+            if self.doc.strokes.is_empty() {
+                self.snapshot();
+            } else {
+                self.snapshot_replacement();
+            }
             self.doc.strokes = Vec::new();
+            self.doc.text_boxes = Vec::new();
             self.point_count = 0;
         }
     }
@@ -517,6 +591,10 @@ impl History {
     }
 }
 impl Document {
+    pub fn is_empty(&self) -> bool {
+        self.strokes.is_empty() && self.text_boxes.is_empty()
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.version != 1 {
             return Err("Unsupported session version".into());
@@ -532,6 +610,9 @@ impl Document {
             return Err("Session exceeds one million points".into());
         }
         for s in &self.strokes {
+            if s.tool.is_text() {
+                return Err("Text annotations must be stored in text boxes".into());
+            }
             if !s.width.is_finite()
                 || !(0.1..=500.).contains(&s.width)
                 || !s.opacity.is_finite()
@@ -560,6 +641,11 @@ impl Document {
                     return Err("Invalid pen sample".into());
                 }
             }
+        }
+        if self.text_boxes.len() > MAX_TEXT_BOXES
+            || self.text_boxes.iter().any(|item| !item.valid())
+        {
+            return Err("Invalid text annotation".into());
         }
         Ok(())
     }
@@ -594,12 +680,13 @@ mod tests {
         let mut fragment = stroke();
         fragment.points.reserve(4096);
         let point_count = fragment.points.len();
-        let step = HistoryStep::new(vec![Arc::new(fragment)], point_count);
+        let step = HistoryStep::new(vec![Arc::new(fragment)], Vec::new(), point_count);
         assert!(step.bytes > 4096 * size_of::<Point>());
         let mut history = History::default();
         for stack in [&mut history.undo, &mut history.redo] {
             stack.push_back(HistoryStep {
                 strokes: Vec::new(),
+                text_boxes: Vec::new(),
                 bytes: MAX_HISTORY_BYTES / 2,
                 point_count: 0,
             });
@@ -634,6 +721,31 @@ mod tests {
         assert!(Arc::ptr_eq(&original, &history.doc.strokes[0]));
         history.redo();
         assert!(Arc::ptr_eq(&original, &history.doc.strokes[0]));
+    }
+
+    #[test]
+    fn text_history_keeps_the_committed_ink_revision() {
+        let mut history = History::default();
+        history.append(std::iter::once(stroke()));
+        let ink_revision = history.ink_revision();
+        let item = TextBox {
+            origin: [10., 10.],
+            size: [150., 60.],
+            font_size: 28.,
+            color: InkColor::default(),
+            text: "Annotation".into(),
+        };
+        history.set_text_box(None, item.clone());
+        history.undo();
+        assert!(history.text_boxes().is_empty());
+        assert_eq!(history.ink_revision(), ink_revision);
+        history.redo();
+        assert_eq!(*history.text_boxes()[0], item);
+        assert_eq!(history.ink_revision(), ink_revision);
+        history.undo();
+        history.undo();
+        assert!(history.strokes().is_empty());
+        assert_ne!(history.ink_revision(), ink_revision);
     }
 
     #[test]

@@ -1,12 +1,14 @@
 mod canvas;
 mod ink;
 mod panel;
+mod text;
 
 use crate::{
     appearance::{Language, Preferences, Status, Text, ThemeMonitor, text},
     color::{InkColor, PRESETS},
     display::{Display, Pages},
     export,
+    fonts::{FontDialog, TextFonts},
     frame_rate::{FramePacer, FrameRate},
     gui,
     icc::ColorManager,
@@ -89,6 +91,9 @@ struct Commands {
     #[cfg(target_os = "linux")]
     gnome_action: Option<crate::gnome::Action>,
     redraw_canvas: bool,
+    choose_font: bool,
+    font_path: Option<PathBuf>,
+    reset_font: bool,
 }
 struct CanvasInput {
     protected: Option<crate::controller::Rect>,
@@ -101,6 +106,7 @@ struct CanvasInput {
     pending_erasures: BTreeMap<u64, Erasure>,
     ink_damage: Option<Bounds>,
     canvas_units: f32,
+    text: text::TextInput,
 }
 
 impl Default for CanvasInput {
@@ -116,6 +122,7 @@ impl Default for CanvasInput {
             pending_erasures: BTreeMap::new(),
             ink_damage: None,
             canvas_units: 1.,
+            text: text::TextInput::default(),
         }
     }
 }
@@ -165,6 +172,8 @@ struct App {
     pages: Pages,
     frame_rate: FrameRate,
     preferences: Preferences,
+    text_fonts: TextFonts,
+    font_path_input: Option<String>,
     #[cfg(target_os = "linux")]
     gnome_guide: Option<crate::gnome::Guide>,
     language: Language,
@@ -229,6 +238,8 @@ impl App {
             pages,
             frame_rate: FrameRate::load(&base.join("frame-rate.json")),
             preferences,
+            text_fonts: TextFonts::load(&base.join("annotation-font")),
+            font_path_input: None,
             #[cfg(target_os = "linux")]
             gnome_guide: None,
             language: preferences.language.unwrap_or_else(Language::system),
@@ -488,6 +499,8 @@ impl App {
         }
     }
     fn stop(&mut self) {
+        self.input.text.finish(&mut self.history);
+        self.input.text.cancel_press();
         self.finish_contact();
         self.commit_touches();
         self.reset_pens();
@@ -515,6 +528,21 @@ impl App {
         self.pass = false;
         self.wait_for_mouse_up = false;
         self.hidden = false;
+        if let Some(hint) = match tool {
+            Tool::Text => Some(text(
+                "Click to add or edit text. Ctrl/Cmd+Enter finishes.",
+                "单击添加或编辑文字，Ctrl/Cmd+Enter 完成。",
+                "點按新增或編輯文字，Ctrl/Cmd+Enter 完成。",
+            )),
+            Tool::Select => Some(text(
+                "Drag to move. Double-click to edit. Delete removes the box.",
+                "拖动移动，双击编辑，Delete 删除文字框。",
+                "拖曳移動，點兩下編輯，Delete 刪除文字框。",
+            )),
+            _ => None,
+        } {
+            self.status = hint.into();
+        }
     }
     fn toggle_mouse(&mut self) {
         if self.pass {
@@ -530,6 +558,7 @@ impl App {
         self.pass && !self.wait_for_mouse_up
     }
     fn reset_contacts(&mut self) {
+        self.input.text.deselect(&mut self.history);
         self.history.active = None;
         self.input.contact = None;
         self.input.touches.clear();
@@ -665,7 +694,7 @@ impl App {
         [
             self.history.can_undo(),
             self.history.can_redo(),
-            !self.history.strokes().is_empty()
+            !self.history.document().is_empty()
                 || self.history.active.is_some()
                 || self
                     .input
@@ -868,6 +897,9 @@ impl App {
     }
     fn event(&mut self, e: &SDL_Event, overlay: SDL_WindowID, size: [f32; 2]) {
         self.track_pen(e);
+        if self.tool.is_text() {
+            return;
+        }
         unsafe {
             let ty = SDL_EventType(e.r#type);
             match ty {
@@ -1004,6 +1036,15 @@ impl App {
             if editing_text {
                 return c;
             }
+            if self.tool.is_text()
+                && !self.pass
+                && !self.hidden
+                && !m.command
+                && self.text_key(k.key)
+            {
+                c.redraw_canvas = true;
+                return c;
+            }
             if k.key == SDLK_ESCAPE {
                 if self.input.contact.is_some() || !self.input.touches.is_empty() {
                     self.reset_contacts();
@@ -1045,7 +1086,8 @@ impl App {
                     self.hidden = !self.hidden;
                     c.mode = true
                 }
-                SDLK_P | SDLK_B | SDLK_M | SDLK_L | SDLK_A | SDLK_R | SDLK_O | SDLK_E | SDLK_K => {
+                SDLK_P | SDLK_B | SDLK_M | SDLK_L | SDLK_A | SDLK_R | SDLK_O | SDLK_E | SDLK_K
+                | SDLK_T | SDLK_V => {
                     let tool = match k.key {
                         SDLK_B => Tool::Pencil,
                         SDLK_M => Tool::Marker,
@@ -1055,15 +1097,17 @@ impl App {
                         SDLK_O => Tool::Ellipse,
                         SDLK_E => Tool::Eraser,
                         SDLK_K => Tool::Laser,
+                        SDLK_T => Tool::Text,
+                        SDLK_V => Tool::Select,
                         _ => Tool::Pen,
                     };
                     self.use_tool(tool);
                     c.mode = true;
                 }
-                SDLK_1 => self.select_preset(PRESETS[0]),
-                SDLK_2 => self.select_preset(PRESETS[1]),
-                SDLK_3 => self.select_preset(PRESETS[2]),
-                SDLK_4 => self.select_preset(PRESETS[3]),
+                SDLK_1 => c.redraw_canvas = self.select_preset(PRESETS[0]),
+                SDLK_2 => c.redraw_canvas = self.select_preset(PRESETS[1]),
+                SDLK_3 => c.redraw_canvas = self.select_preset(PRESETS[2]),
+                SDLK_4 => c.redraw_canvas = self.select_preset(PRESETS[3]),
                 _ => {}
             }
         }
@@ -1124,22 +1168,51 @@ impl App {
     fn export(&mut self) {
         self.stop();
         let p = PathBuf::from(&self.path).with_extension("svg");
-        let data = export::svg(self.history.document());
-        let result = p
-            .parent()
-            .map_or(Ok(()), std::fs::create_dir_all)
-            .and_then(|()| std::fs::write(&p, data));
+        let result = export::svg(self.history.document(), &self.text_fonts).and_then(|data| {
+            p.parent()
+                .map_or(Ok(()), std::fs::create_dir_all)
+                .and_then(|()| std::fs::write(&p, data))
+                .map_err(|error| error.to_string())
+        });
         match result {
             Ok(()) => self.status = text("Exported", "已导出", "已匯出").detail(p.display()),
             Err(e) => self.status = text("Export failed", "导出失败", "匯出失敗").detail(e),
         }
     }
-    fn select_preset(&mut self, rgb: [u8; 3]) {
-        self.select_color(InkColor::from_rgb8(rgb).converted(self.color.space));
+
+    fn install_annotation_font(&mut self, source: &Path, destination: &Path) -> bool {
+        match self.text_fonts.install(source, destination) {
+            Ok(()) => {
+                self.font_path_input = None;
+                self.status = text(
+                    "Annotation font updated",
+                    "已更新标注字体",
+                    "已更新標註字型",
+                )
+                .into();
+                true
+            }
+            Err(error) => {
+                self.status = text(
+                    "Could not use the annotation font",
+                    "无法使用此标注字体",
+                    "無法使用此標註字型",
+                )
+                .detail(error);
+                false
+            }
+        }
     }
-    fn select_color(&mut self, color: InkColor) {
-        self.color = color;
+    fn select_preset(&mut self, rgb: [u8; 3]) -> bool {
+        self.select_color(InkColor::from_rgb8(rgb).converted(self.color.space))
+    }
+    fn select_color(&mut self, color: InkColor) -> bool {
         self.hex_entry = crate::color::HexEntry::new(color);
+        self.apply_color(color)
+    }
+    fn apply_color(&mut self, color: InkColor) -> bool {
+        self.color = color;
+        self.recolor_text(color)
     }
 }
 fn pending_pages(count: usize) -> Status {
@@ -1366,15 +1439,14 @@ pub fn run(options: Options) -> Result<(), String> {
     if !options.smoke && !wayland {
         let _ = toolbar.arrange_toolbar(false, app.pages.active);
     }
-    unsafe {
-        SDL_StartTextInput(toolbar.raw);
-        SDL_RaiseWindow(toolbar.raw);
-    }
+    unsafe { SDL_RaiseWindow(toolbar.raw) };
     if options.smoke {
         app.history = History::default();
         smoke_events(&mut app, canvases[0].window.id)?;
     }
     let mut picker = crate::picker::Picker::default();
+    let mut font_dialog = FontDialog::default();
+    let annotation_font_path = base.join("annotation-font");
     let mut tooltips = crate::toolbar::Tooltips::default();
     let mut toolbar_hidden = false;
     let mut toolbar_expanded = false;
@@ -1490,21 +1562,29 @@ pub fn run(options: Options) -> Result<(), String> {
                 for canvas in &mut canvases {
                     canvas.renderer_reset();
                 }
+                app.for_each_page(|page| page.input.text.refocus());
                 toolbar_dirty = true;
             }
 
             let active = canvas::active_index(&canvases, app.pages.active);
             let was_picking = picker.active();
             picker.event(&event, &canvases[active].window);
-            gui.event(&event, toolbar.id, toolbar.size());
             let id = canvas::event_window(&event, ty);
             let target = if ty == SDL_EVENT_FINGER_CANCELED {
-                app.touch_page(unsafe { TouchKey::from(event.tfinger) })
+                let key = unsafe { TouchKey::from(event.tfinger) };
+                app.touch_page(key)
                     .and_then(|output| canvases.iter().position(|c| c.output == Some(output)))
+                    .or_else(|| {
+                        canvases
+                            .iter()
+                            .position(|canvas| canvas.has_text_touch(key))
+                    })
             } else {
                 id.and_then(|id| canvases.iter().position(|c| c.window.id == id))
             };
             let drawing = !was_picking && !toolbar_hidden && !app.suspended;
+            gui.event(&event, toolbar.id, toolbar.size());
+            let mut canvas_editing = false;
             if ty == SDL_EVENT_PEN_PROXIMITY_OUT {
                 // A pen can leave proximity over a different window from the
                 // one that received its earlier packets.
@@ -1539,12 +1619,21 @@ pub fn run(options: Options) -> Result<(), String> {
                     canvas.keep_toolbar_above(&toolbar);
                 }
                 let before = app.history_buttons();
+                let selection_before = app.input.text.selected;
                 let panel_before = app.panel;
                 let edited = app.on_page(canvas.output, |app| {
                     let had_contacts = app.input.has_contacts();
                     if drawing && canvas.visible && canvas.on_output(options.smoke) {
                         canvas.set_page_geometry(app);
                         app.event(&event, canvas.window.id, canvas.window.size());
+                        if app.tool.is_text() && !app.pass {
+                            canvas_editing = app.input.text.editing();
+                            let edited = canvas.text_event(app, &event);
+                            if !canvas_editing && app.input.text.editing() {
+                                canvas.keep_toolbar_above(&toolbar);
+                            }
+                            return edited;
+                        }
                     } else {
                         app.track_pen(&event);
                     }
@@ -1552,6 +1641,7 @@ pub fn run(options: Options) -> Result<(), String> {
                 });
                 canvas.dirty |= edited;
                 toolbar_dirty |= before != app.history_buttons();
+                toolbar_dirty |= selection_before != app.input.text.selected;
                 toolbar_dirty |= panel_before != app.panel;
                 toolbar_dirty |= app.panel.is_some() && (edited || activates);
             } else if matches!(
@@ -1586,12 +1676,20 @@ pub fn run(options: Options) -> Result<(), String> {
                 for canvas in &mut canvases {
                     canvas.dirty = true;
                 }
+                let was_editing = app.input.text.editing();
                 let command = app.keyboard(
                     &event,
-                    id == Some(toolbar.id)
-                        && (gui.ctx.egui_wants_keyboard_input()
-                            || egui::Popup::is_any_open(&gui.ctx)),
+                    canvas_editing
+                        || id == Some(toolbar.id)
+                            && (gui.ctx.egui_wants_keyboard_input()
+                                || egui::Popup::is_any_open(&gui.ctx)),
                 );
+                if !was_editing && app.input.text.editing() {
+                    let index = canvas::active_index(&canvases, app.pages.active);
+                    let canvas = &mut canvases[index];
+                    canvas.activate_text_editor();
+                    canvas.keep_toolbar_above(&toolbar);
+                }
                 mode_changed |= command.mode;
                 if command.quit {
                     running = false;
@@ -1601,6 +1699,29 @@ pub fn run(options: Options) -> Result<(), String> {
         }
         if !running {
             break;
+        }
+
+        if let Some(result) = font_dialog.poll() {
+            toolbar_dirty = true;
+            match result {
+                Ok(Some(path)) if app.install_annotation_font(&path, &annotation_font_path) => {
+                    for canvas in &mut canvases {
+                        canvas.dirty = true;
+                    }
+                }
+                Ok(_) => (),
+                Err(error) => {
+                    app.panel = Some(crate::toolbar::Panel::Settings);
+                    app.font_path_input.get_or_insert_with(String::new);
+                    app.status = text(
+                        "Enter a font file path",
+                        "请输入字体文件路径",
+                        "請輸入字型檔案路徑",
+                    )
+                    .detail(error)
+                }
+            }
+            unsafe { SDL_RaiseWindow(toolbar.raw) };
         }
 
         if !options.smoke
@@ -1792,6 +1913,9 @@ pub fn run(options: Options) -> Result<(), String> {
         if gui.ctx.theme() != theme {
             gui.ctx.set_theme(theme);
             toolbar_dirty = true;
+            for canvas in &mut canvases {
+                canvas.dirty = true;
+            }
         }
         let previous_preferences = app.preferences;
         let was_board = app.board;
@@ -1810,25 +1934,55 @@ pub fn run(options: Options) -> Result<(), String> {
             let frame = gui.ctx.run_ui(input, |ui| {
                 cmd = app.ui(
                     ui,
-                    &canvas.render,
-                    &canvas.color,
+                    canvas,
                     &video,
                     canvas
                         .snapshot_mode(&video, xwayland, options.sdr)
                         .unavailable(),
                     mark.id(),
+                    font_dialog.pending(),
                 )
             });
-            toolbar_repaint_at = frame
-                .viewport_output
-                .get(&egui::ViewportId::ROOT)
-                .and_then(|viewport| Instant::now().checked_add(viewport.repaint_delay));
+            toolbar_repaint_at = gui::repaint_at(&frame);
             output = Some(frame);
         }
         if cmd.quit {
             break;
         }
         mode_changed |= cmd.mode;
+        if cmd.choose_font {
+            app.finish_all_contacts();
+            font_dialog.open(&toolbar);
+            cmd.redraw_canvas = true;
+            toolbar_dirty = true;
+        }
+        if let Some(source) = cmd.font_path.take() {
+            app.finish_all_contacts();
+            cmd.redraw_canvas |= app.install_annotation_font(&source, &annotation_font_path);
+            toolbar_dirty = true;
+        }
+        if cmd.reset_font {
+            match app.text_fonts.reset(&annotation_font_path) {
+                Ok(()) => {
+                    app.status = text(
+                        "Using the included annotation font",
+                        "已切换到内置标注字体",
+                        "已切換至內建標註字型",
+                    )
+                    .into();
+                    cmd.redraw_canvas = true;
+                }
+                Err(error) => {
+                    app.status = text(
+                        "Could not reset the annotation font",
+                        "无法还原标注字体",
+                        "無法還原標註字型",
+                    )
+                    .detail(error)
+                }
+            }
+            toolbar_dirty = true;
+        }
         #[cfg(target_os = "linux")]
         let relogin = app.update_gnome_guide(&mut cmd, previous_preferences, options.smoke);
         if cmd.preferences {
@@ -1867,7 +2021,11 @@ pub fn run(options: Options) -> Result<(), String> {
             if picker.active() {
                 picker.cancel();
             } else {
-                app.finish_all_contacts();
+                if app.tool.is_text() && !app.pass {
+                    app.for_each_page(App::stop);
+                } else {
+                    app.finish_all_contacts();
+                }
                 app.picking = true;
                 picker.start(wayland || xwayland);
             }
@@ -1916,6 +2074,7 @@ pub fn run(options: Options) -> Result<(), String> {
         if let Some(output) = output {
             let rail = crate::toolbar::colors(theme == egui::Theme::Dark).rail;
             toolbar_render.begin(&toolbar, rail.to_array().map(|c| f32::from(c) / 255.))?;
+            gui.sync_text_input(&toolbar, output.platform_output.ime.is_some());
             gui.paint(&toolbar_render, &toolbar, &toolbar_color, output)?;
             toolbar_render.present()?;
             tooltips.update(&toolbar, &gui, app.language, &toolbar_color);
@@ -1949,16 +2108,21 @@ pub fn run(options: Options) -> Result<(), String> {
                     break;
                 }
                 let frozen = canvas.background.frozen;
+                let history_before = app.history_buttons();
+                let selection_before = app.input.text.selected;
                 extended_ink_bytes -= canvas.extended_ink_bytes();
                 presented |= canvas.paint(
                     &mut app,
                     &options,
                     picker.choosing(),
                     wayland,
+                    theme,
                     ink::MAX_EXTENDED_INK_TEXTURE_BYTES.saturating_sub(extended_ink_bytes),
                 )?;
                 extended_ink_bytes += canvas.extended_ink_bytes();
                 toolbar_dirty |= frozen != canvas.background.frozen;
+                toolbar_dirty |= history_before != app.history_buttons();
+                toolbar_dirty |= selection_before != app.input.text.selected;
                 if !options.smoke
                     && let Err(error) = canvas.apply_input(mouse)
                 {
@@ -2000,8 +2164,11 @@ pub fn run(options: Options) -> Result<(), String> {
         if options.smoke && frame >= 3 {
             let path = state_dir();
             std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
-            std::fs::write(path.join("smoke.svg"), export::svg(app.history.document()))
-                .map_err(|e| e.to_string())?;
+            std::fs::write(
+                path.join("smoke.svg"),
+                export::svg(app.history.document(), &app.text_fonts)?,
+            )
+            .map_err(|e| e.to_string())?;
             for (name, render) in [
                 ("smoke.bmp", &canvases[active].render),
                 ("toolbar.bmp", &toolbar_render),
@@ -2032,6 +2199,13 @@ pub fn run(options: Options) -> Result<(), String> {
                 Duration::from_millis(500)
             };
             if let Some(at) = toolbar_repaint_at {
+                timeout = timeout.min(at.saturating_duration_since(Instant::now()));
+            }
+            for at in canvases
+                .iter()
+                .filter(|canvas| canvas.visible)
+                .filter_map(|canvas| canvas.text_repaint_at)
+            {
                 timeout = timeout.min(at.saturating_duration_since(Instant::now()));
             }
             wait_for_events(timeout);
@@ -2143,6 +2317,14 @@ fn smoke_events(app: &mut App, id: SDL_WindowID) -> Result<(), String> {
     if app.history.strokes().len() != 7 || !app.input.touches.is_empty() {
         return Err("Multi-touch commit smoke failed".into());
     }
+    let annotation = crate::model::TextBox {
+        origin: [80., 70.],
+        size: [360., 80.],
+        font_size: 28.,
+        color: InkColor::default(),
+        text: "OverInk 文字 😀".into(),
+    };
+    app.history.set_text_box(None, annotation);
     Ok(())
 }
 
@@ -2172,6 +2354,8 @@ mod touch_tests {
             pages: Pages::default(),
             frame_rate: FrameRate::Auto,
             preferences: Preferences::default(),
+            text_fonts: TextFonts::default(),
+            font_path_input: None,
             #[cfg(target_os = "linux")]
             gnome_guide: None,
             language: Language::English,
