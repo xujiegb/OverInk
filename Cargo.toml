@@ -16,7 +16,7 @@ base64 = "0.23"
 epaint = { version = "=0.37.0", features = ["color_fonts"] }
 harfrust = "=0.12.0"
 sdl3-sys = { version = "=0.7.3", default-features = false, features = ["build-from-source-static", "no-default-subsystems", "sdl-video", "sdl-render", "sdl-dialog"] }
-skrifa = "=0.44.0"
+skrifa = "=0.50.0"
 unicode-segmentation = "1"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
