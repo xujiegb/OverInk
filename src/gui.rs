@@ -23,7 +23,7 @@ pub struct Gui {
     touch_positions: BTreeMap<TouchKey, egui::Pos2>,
     font_language: Option<Language>,
     composing: bool,
-    composition_ended: bool,
+    composition_ended: Option<u64>,
 }
 impl Gui {
     pub fn new() -> Self {
@@ -56,7 +56,7 @@ impl Gui {
             touch_positions: BTreeMap::new(),
             font_language: None,
             composing: false,
-            composition_ended: false,
+            composition_ended: None,
         }
     }
     pub fn set_language(&mut self, language: Language) {
@@ -143,7 +143,7 @@ impl Gui {
         }
         if !enabled {
             self.composing = false;
-            self.composition_ended = false;
+            self.composition_ended = None;
         }
     }
 
@@ -166,16 +166,11 @@ impl Gui {
             .entry(egui::ViewportId::ROOT)
             .or_default()
             .native_pixels_per_point = Some(w.scale() / w.ui_scale() * units);
-        self.take_input()
-    }
-
-    pub fn take_input(&mut self) -> RawInput {
-        self.composition_ended = false;
         self.raw.take()
     }
 
     pub fn clear_events(&mut self) {
-        self.composition_ended = false;
+        self.composition_ended = None;
         self.raw.events.clear();
     }
 
@@ -185,20 +180,22 @@ impl Gui {
 
     pub fn clear_composition(&mut self, window: &Window) {
         unsafe { SDL_ClearComposition(window.raw) };
-        self.cancel_composition();
+        self.cancel_composition(0);
     }
 
-    fn cancel_composition(&mut self) {
-        if self.end_composition() {
+    fn cancel_composition(&mut self, timestamp: u64) {
+        if self.end_composition(timestamp) {
             self.raw
                 .events
                 .push(Event::Ime(egui::ImeEvent::Commit(String::new())));
         }
     }
 
-    fn end_composition(&mut self) -> bool {
+    fn end_composition(&mut self, timestamp: u64) -> bool {
         let was_composing = std::mem::take(&mut self.composing);
-        self.composition_ended |= was_composing;
+        if was_composing {
+            self.composition_ended = (timestamp != 0).then_some(timestamp);
+        }
         was_composing
     }
     /// SDL_Event is a tagged C union. Only the field selected by `type` is read.
@@ -275,7 +272,8 @@ impl Gui {
                 }
                 SDL_EVENT_WINDOW_FOCUS_LOST if e.window.windowID == id => {
                     self.cancel_touches();
-                    self.cancel_composition();
+                    self.cancel_composition(0);
+                    self.composition_ended = None;
                     self.raw.focused = false;
                     self.raw.events.push(Event::WindowFocused(false));
                 }
@@ -289,12 +287,13 @@ impl Gui {
                 SDL_EVENT_KEY_DOWN | SDL_EVENT_KEY_UP if e.key.windowID == id => {
                     let k = e.key;
                     let m = modifiers(k.r#mod);
-                    let ended = k.down && std::mem::take(&mut self.composition_ended);
-                    // SDL sends the result of any key handled by the IME as
-                    // text input or an updated composition, not an editor key.
-                    // Some backends send the composition end before the same key.
+                    let same_ime_key = k.down
+                        && self.composition_ended.take().is_some_and(|at| {
+                            k.timestamp != 0 && k.timestamp.abs_diff(at) < 2_000_000
+                        });
+                    // Some backends deliver the composition and its initiating key together.
                     if self.composing
-                        || (ended
+                        || (same_ime_key
                             && !m.command
                             && !m.alt
                             && matches!(
@@ -335,7 +334,7 @@ impl Gui {
                     let p = e.text.text;
                     if !p.is_null() {
                         let text = CStr::from_ptr(p).to_string_lossy().into_owned();
-                        let event = if self.end_composition() {
+                        let event = if self.end_composition(e.text.timestamp) {
                             Event::Ime(egui::ImeEvent::Commit(text))
                         } else {
                             Event::Text(text)
@@ -351,10 +350,11 @@ impl Gui {
                         CStr::from_ptr(edit.text).to_string_lossy().into_owned()
                     };
                     if text.is_empty() {
-                        self.cancel_composition();
+                        self.cancel_composition(edit.timestamp);
                         return;
                     }
                     self.composing = true;
+                    self.composition_ended = None;
                     let active_range_chars = if edit.start >= 0 && edit.length >= 0 {
                         let count = text.chars().count();
                         let start = (edit.start as usize).min(count);

@@ -9,9 +9,59 @@ use crate::{
 };
 use egui::{
     Color32, Event, ImeEvent, Key, PointerButton, Pos2, Rect, Stroke, StrokeKind, TextBuffer, Ui,
-    UiBuilder, Vec2, pos2, text::CCursorRange,
+    UiBuilder, Vec2, pos2,
+    text::{CCursor, CCursorRange},
+    vec2,
 };
 use std::time::{Duration, Instant};
+
+#[derive(Default)]
+pub(super) struct ToolbarTextFocus {
+    pub deadline: Option<Instant>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum FocusAction {
+    Keep,
+    ReturnToCanvas,
+    Finish,
+}
+
+impl ToolbarTextFocus {
+    pub fn update(
+        &mut self,
+        now: Instant,
+        canvas_focused: bool,
+        toolbar_focused: bool,
+        toolbar_text: bool,
+        toolbar_busy: bool,
+    ) -> FocusAction {
+        if canvas_focused {
+            self.deadline = None;
+            return FocusAction::Keep;
+        }
+        if toolbar_focused && toolbar_text {
+            self.deadline = None;
+            return FocusAction::Finish;
+        }
+        if toolbar_focused && toolbar_busy {
+            self.deadline = None;
+            return FocusAction::Keep;
+        }
+        match self.deadline {
+            Some(deadline) if now >= deadline => {
+                self.deadline = None;
+                FocusAction::Finish
+            }
+            None if toolbar_focused => {
+                // Native window activation may complete asynchronously.
+                self.deadline = Some(now + Duration::from_millis(150));
+                FocusAction::ReturnToCanvas
+            }
+            _ => FocusAction::Keep,
+        }
+    }
+}
 
 #[derive(Default)]
 pub(super) struct TextInput {
@@ -24,7 +74,7 @@ pub(super) struct TextInput {
 struct Draft {
     item: TextBox,
     focus: bool,
-    had_window_focus: bool,
+    had_input_focus: bool,
     cursor: Option<CCursorRange>,
     scroll_offset: f32,
     // The widget's buffer may contain uncommitted IME preedit text.
@@ -50,6 +100,23 @@ impl TextInput {
         self.draft.is_some()
     }
 
+    pub fn has_edit(&self, history: &History) -> bool {
+        self.draft
+            .as_ref()
+            .is_some_and(|draft| match self.selected {
+                Some(index) => history.text_boxes().get(index).is_some_and(|original| {
+                    original.text != draft.committed || original.color != draft.item.color
+                }),
+                None => !draft.committed.trim().is_empty(),
+            })
+    }
+
+    pub fn saw_input_focus(&mut self) {
+        if let Some(draft) = &mut self.draft {
+            draft.had_input_focus = true;
+        }
+    }
+
     pub fn refocus(&mut self) {
         self.cancel_press();
         if let Some(draft) = &mut self.draft {
@@ -58,11 +125,22 @@ impl TextInput {
         }
     }
 
+    pub fn take_draft(&mut self, history: &History) -> Option<(Option<usize>, TextBox)> {
+        let draft = self.draft.take()?;
+        let mut item = draft.item;
+        item.text = draft.committed;
+        let original = self
+            .selected
+            .and_then(|index| history.text_boxes().get(index));
+        if original.is_none_or(|original| original.text != item.text) {
+            item.scroll_offset = draft.scroll_offset;
+        }
+        Some((self.selected, item))
+    }
+
     pub fn finish(&mut self, history: &mut History) {
-        if let Some(draft) = self.draft.take() {
-            let mut item = draft.item;
-            item.text = draft.committed;
-            self.selected = history.set_text_box(self.selected, item);
+        if let Some((index, item)) = self.take_draft(history) {
+            self.selected = history.set_text_box(index, item);
         }
     }
 
@@ -81,11 +159,11 @@ impl TextInput {
         self.selected = index;
         self.draft = Some(Draft {
             committed: item.text.clone(),
+            cursor: Some(CCursorRange::one(CCursor::new(item.text.chars().count()))),
+            scroll_offset: item.scroll_offset,
             item,
             focus: true,
-            had_window_focus: false,
-            cursor: None,
-            scroll_offset: 0.,
+            had_input_focus: false,
         });
     }
 }
@@ -312,7 +390,7 @@ impl App {
         ui: &mut Ui,
         interactive: bool,
         composing: bool,
-        toolbar_focused: bool,
+        keep_editor_open: bool,
     ) {
         let selected = self.input.text.selected;
         let draft = self.input.text.draft.as_ref();
@@ -335,7 +413,7 @@ impl App {
         }
         if interactive {
             if self.input.text.editing() {
-                self.text_editor(ui, composing, toolbar_focused);
+                self.text_editor(ui, composing, keep_editor_open);
             } else if let Some(item) =
                 selected.and_then(|index| self.history.text_boxes().get(index))
             {
@@ -350,7 +428,7 @@ impl App {
         }
     }
 
-    fn text_editor(&mut self, ui: &mut Ui, composing: bool, toolbar_focused: bool) {
+    fn text_editor(&mut self, ui: &mut Ui, composing: bool, keep_editor_open: bool) {
         let draft = self.input.text.draft.as_mut().unwrap();
         let rect = draft.item.rect();
         let text_rect = draft.item.text_rect();
@@ -371,8 +449,8 @@ impl App {
         let (focused, finish, committed_input) = ui.input(|input| {
             // A pointer can start editing before SDL grants keyboard focus.
             // Keep the draft available to toolbar actions such as Redo or Clear.
-            let lost_window_focus = !toolbar_focused && !input.focused
-                && (draft.had_window_focus
+            let lost_window_focus = !keep_editor_open && !input.focused
+                && (draft.had_input_focus
                     || input.events.iter().any(|event| matches!(event, Event::WindowFocused(false))));
             let finish = lost_window_focus
                 || (!composing
@@ -392,7 +470,7 @@ impl App {
             });
             (input.focused, finish, committed_input)
         });
-        draft.had_window_focus |= focused;
+        draft.had_input_focus |= focused;
         let font_size = draft.item.font_size;
         let color = ink(&draft.item);
         let mut child = ui.new_child(UiBuilder::new().max_rect(text_rect));
@@ -458,13 +536,11 @@ fn draw_text_box(ui: &Ui, fonts: &TextFonts, item: &TextBox) {
     let rect = item.text_rect();
     if ui.is_rect_visible(rect) {
         let color = ink(item);
+        let galley = fonts.layout(ui, &item.text, item.font_size, color, rect.width());
+        let offset = item.visible_scroll_offset(galley.size().y);
         ui.painter()
             .with_clip_rect(rect.intersect(ui.clip_rect()))
-            .galley(
-                rect.min,
-                fonts.layout(ui, &item.text, item.font_size, color, rect.width()),
-                color,
-            );
+            .galley(rect.min - vec2(0., offset), galley, color);
     }
 }
 
@@ -508,7 +584,11 @@ fn text_hit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{app::touch_tests::app, gui::Gui, sdl::*};
+    use crate::{
+        app::{HistoryAction, touch_tests::app},
+        gui::Gui,
+        sdl::*,
+    };
     use std::ffi::CString;
 
     const SIZE: [f32; 2] = [800., 600.];
@@ -534,7 +614,7 @@ mod tests {
     fn render_with_toolbar_focus(app: &mut App, gui: &mut Gui, toolbar_focused: bool) {
         gui.raw.screen_rect = Some(Rect::from_min_size(Pos2::ZERO, Vec2::from(SIZE)));
         let composing = gui.composing();
-        let input = gui.take_input();
+        let input = gui.raw.take();
         let output = gui.ctx.run_ui(input, |ui| {
             app.text_ui(ui, true, composing, toolbar_focused)
         });
@@ -542,12 +622,17 @@ mod tests {
     }
 
     fn ime(gui: &mut Gui, event_type: SDL_EventType, value: &str) {
+        ime_at(gui, event_type, value, 0);
+    }
+
+    fn ime_at(gui: &mut Gui, event_type: SDL_EventType, value: &str, timestamp: u64) {
         let value = CString::new(value).unwrap();
         let id = SDL_WindowID(1);
         let event = if event_type == SDL_EVENT_TEXT_EDITING {
             SDL_Event {
                 edit: SDL_TextEditingEvent {
                     r#type: event_type,
+                    timestamp,
                     windowID: id,
                     text: value.as_ptr(),
                     start: 0,
@@ -559,6 +644,7 @@ mod tests {
             SDL_Event {
                 text: SDL_TextInputEvent {
                     r#type: event_type,
+                    timestamp,
                     windowID: id,
                     text: value.as_ptr(),
                     ..Default::default()
@@ -569,11 +655,16 @@ mod tests {
     }
 
     fn key_down(gui: &mut Gui, key: SDL_Keycode) {
+        key_down_at(gui, key, 0);
+    }
+
+    fn key_down_at(gui: &mut Gui, key: SDL_Keycode, timestamp: u64) {
         let id = SDL_WindowID(1);
         gui.event(
             &SDL_Event {
                 key: SDL_KeyboardEvent {
                     r#type: SDL_EVENT_KEY_DOWN,
+                    timestamp,
                     windowID: id,
                     key,
                     down: true,
@@ -608,7 +699,7 @@ mod tests {
         assert!(!app.history.can_undo());
         app.stop();
         assert_eq!(app.history.text_boxes()[0].text, "中");
-        app.change_history(History::undo);
+        app.change_history(HistoryAction::Undo);
         assert!(app.history.text_boxes().is_empty());
         assert!(!app.history.can_undo());
     }
@@ -647,30 +738,59 @@ mod tests {
         for key in [SDLK_BACKSPACE, SDLK_ESCAPE] {
             ime(&mut gui, SDL_EVENT_TEXT_EDITING, "z");
             render(&mut app, &mut gui);
-            ime(&mut gui, SDL_EVENT_TEXT_EDITING, "");
-            key_down(&mut gui, key);
+            ime_at(&mut gui, SDL_EVENT_TEXT_EDITING, "", 10_000_000);
+            key_down_at(&mut gui, key, 10_000_000);
             render(&mut app, &mut gui);
             assert_eq!(app.input.text.draft.as_ref().unwrap().committed, "甲");
         }
 
         ime(&mut gui, SDL_EVENT_TEXT_EDITING, "yi");
         render(&mut app, &mut gui);
-        ime(&mut gui, SDL_EVENT_TEXT_EDITING, "");
-        ime(&mut gui, SDL_EVENT_TEXT_INPUT, "乙");
-        key_down(&mut gui, SDLK_RETURN);
+        ime_at(&mut gui, SDL_EVENT_TEXT_EDITING, "", 20_000_000);
+        ime_at(&mut gui, SDL_EVENT_TEXT_INPUT, "乙", 20_150_000);
+        key_down_at(&mut gui, SDLK_RETURN, 20_200_000);
         render(&mut app, &mut gui);
         assert_eq!(app.input.text.draft.as_ref().unwrap().committed, "甲乙");
 
         ime(&mut gui, SDL_EVENT_TEXT_EDITING, "bing");
         render(&mut app, &mut gui);
-        ime(&mut gui, SDL_EVENT_TEXT_INPUT, "丙");
-        key_down(&mut gui, SDLK_RETURN);
+        ime_at(&mut gui, SDL_EVENT_TEXT_INPUT, "丙", 30_000_000);
+        key_down_at(&mut gui, SDLK_RETURN, 30_400_000);
         render(&mut app, &mut gui);
         assert_eq!(app.input.text.draft.as_ref().unwrap().committed, "甲乙丙");
 
         key_down(&mut gui, SDLK_RETURN);
         render(&mut app, &mut gui);
         assert_eq!(app.input.text.draft.as_ref().unwrap().committed, "甲乙丙\n");
+    }
+
+    #[test]
+    fn independent_keys_work_in_the_same_batch_as_an_ime_commit() {
+        let mut app = app();
+        app.use_tool(Tool::Text);
+        click(&mut app, pos2(150., 120.));
+        let mut gui = Gui::new();
+        gui.ctx.set_fonts(app.text_fonts.definitions());
+        ime(&mut gui, SDL_EVENT_TEXT_INPUT, "甲");
+        render(&mut app, &mut gui);
+
+        for (key, value, clock, expected) in [
+            (SDLK_BACKSPACE, "乙", 10_000_000, "甲"),
+            (SDLK_RETURN, "丙", 40_000_000, "甲丙\n"),
+        ] {
+            ime(&mut gui, SDL_EVENT_TEXT_EDITING, "preedit");
+            render(&mut app, &mut gui);
+            ime_at(&mut gui, SDL_EVENT_TEXT_INPUT, value, clock);
+            key_down_at(&mut gui, key, clock + 15_000_000);
+            render(&mut app, &mut gui);
+            assert_eq!(app.input.text.draft.as_ref().unwrap().committed, expected);
+        }
+        ime(&mut gui, SDL_EVENT_TEXT_EDITING, "ding");
+        render(&mut app, &mut gui);
+        ime_at(&mut gui, SDL_EVENT_TEXT_INPUT, "丁", 70_000_000);
+        key_down_at(&mut gui, SDLK_ESCAPE, 85_000_000);
+        render(&mut app, &mut gui);
+        assert_eq!(app.history.text_boxes()[0].text, "甲丙\n丁");
     }
 
     #[test]
@@ -691,7 +811,7 @@ mod tests {
         };
         app.text_event(&mut gui, &focus_lost, window, SIZE);
         assert!(!gui.raw.events.is_empty());
-        app.change_history(History::clear);
+        app.change_history(HistoryAction::Clear);
         assert_eq!(app.history_buttons(), [false; 3]);
         for (ty, down) in [
             (SDL_EVENT_MOUSE_BUTTON_DOWN, true),
@@ -725,7 +845,7 @@ mod tests {
         let mut edited = (*original).clone();
         edited.text = "可重做".into();
         app.history.set_text_box(Some(0), edited.clone());
-        app.change_history(History::undo);
+        app.change_history(HistoryAction::Undo);
         click(&mut app, original.rect().center());
         let mut gui = Gui::new();
         gui.ctx.set_fonts(app.text_fonts.definitions());
@@ -749,9 +869,125 @@ mod tests {
         assert!(app.input.text.editing());
         assert_eq!(app.history.text_boxes(), &[original]);
 
-        app.change_history(History::redo);
+        app.change_history(HistoryAction::Redo);
         assert!(!app.input.text.editing());
         assert_eq!(*app.history.text_boxes()[0], edited);
+    }
+
+    #[test]
+    fn toolbar_undo_preserves_prior_annotations_and_can_redo_the_draft() {
+        for has_prior_box in [false, true] {
+            let mut app = app();
+            app.use_tool(Tool::Text);
+            if has_prior_box {
+                click(&mut app, pos2(20., 20.));
+                app.input.text.draft.as_mut().unwrap().committed = "原批注".into();
+                app.stop();
+            }
+            let previous = app.history.text_boxes().to_vec();
+            click(&mut app, pos2(470., 280.));
+            app.input.text.draft.as_mut().unwrap().committed = "重要批注".into();
+            assert!(app.history_buttons()[0]);
+            app.change_history(HistoryAction::Undo);
+            assert!(!app.input.text.editing());
+            assert_eq!(app.history.text_boxes(), previous);
+            assert_eq!(app.history.can_undo(), has_prior_box);
+            app.change_history(HistoryAction::Redo);
+            assert_eq!(app.history.text_boxes().last().unwrap().text, "重要批注");
+        }
+    }
+
+    #[test]
+    fn clearing_the_first_written_draft_is_one_undoable_action() {
+        let mut app = app();
+        app.use_tool(Tool::Text);
+        click(&mut app, pos2(150., 120.));
+        app.input.text.draft.as_mut().unwrap().committed = "首框".into();
+        app.change_history(HistoryAction::Clear);
+        assert!(app.history.document().is_empty());
+        assert!(app.history.can_undo());
+        app.change_history(HistoryAction::Undo);
+        assert_eq!(app.history.text_boxes()[0].text, "首框");
+        assert!(!app.history.can_undo());
+        app.change_history(HistoryAction::Redo);
+        assert!(app.history.document().is_empty());
+    }
+
+    #[test]
+    fn toolbar_releases_focus_after_actions_and_finishes_if_activation_fails() {
+        let mut focus = ToolbarTextFocus::default();
+        let now = Instant::now();
+        assert_eq!(
+            focus.update(now, false, true, false, true),
+            FocusAction::Keep
+        );
+        assert_eq!(
+            focus.update(now, false, true, false, false),
+            FocusAction::ReturnToCanvas
+        );
+        let expires = focus.deadline.unwrap();
+        assert_eq!(
+            focus.update(now, false, false, false, false),
+            FocusAction::Keep
+        );
+        assert_eq!(
+            focus.update(expires, true, false, false, false),
+            FocusAction::Keep
+        );
+        assert!(focus.deadline.is_none());
+        assert_eq!(
+            focus.update(now, false, true, true, true),
+            FocusAction::Finish
+        );
+        assert_eq!(
+            focus.update(now, false, true, false, false),
+            FocusAction::ReturnToCanvas
+        );
+        assert_eq!(
+            focus.update(expires, false, true, false, false),
+            FocusAction::Finish
+        );
+    }
+
+    #[test]
+    fn losing_toolbar_focus_finishes_an_editor_that_never_received_canvas_focus() {
+        let mut app = app();
+        app.use_tool(Tool::Text);
+        click(&mut app, pos2(150., 120.));
+        let mut gui = Gui::new();
+        gui.ctx.set_fonts(app.text_fonts.definitions());
+        gui.raw.focused = false;
+        app.input.text.saw_input_focus();
+        render_with_toolbar_focus(&mut app, &mut gui, true);
+        assert!(app.input.text.editing());
+        render(&mut app, &mut gui);
+        assert!(!app.input.text.editing());
+    }
+
+    #[test]
+    fn reopening_a_box_appends_at_the_end_and_commits_the_visible_scroll() {
+        let mut app = app();
+        app.use_tool(Tool::Text);
+        click(&mut app, pos2(150., 120.));
+        app.input.text.draft.as_mut().unwrap().committed = "首行\n\n\n\n\n末行".into();
+        app.stop();
+        assert!(app.text_key(SDLK_RETURN));
+        let mut gui = Gui::new();
+        gui.ctx.set_fonts(app.text_fonts.definitions());
+        render(&mut app, &mut gui);
+        ime(&mut gui, SDL_EVENT_TEXT_INPUT, "补充");
+        for _ in 0..12 {
+            render(&mut app, &mut gui);
+        }
+        app.stop();
+        let item = &app.history.text_boxes()[0];
+        assert!(item.text.ends_with("末行补充"));
+        assert!(item.scroll_offset > 0.);
+        let serialized = serde_json::to_string(item).unwrap();
+        assert_eq!(
+            &serde_json::from_str::<TextBox>(&serialized).unwrap(),
+            item.as_ref()
+        );
     }
 
     #[test]

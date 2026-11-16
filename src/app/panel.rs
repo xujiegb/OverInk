@@ -239,7 +239,7 @@ impl App {
                                 "撤销 (Ctrl/Cmd+Z)",
                                 "復原 (Ctrl/Cmd+Z)",
                             ),
-                            crate::model::History::undo as fn(&mut crate::model::History),
+                            super::HistoryAction::Undo,
                         ),
                         (
                             Icon::Redo,
@@ -248,12 +248,12 @@ impl App {
                                 "重做 (Ctrl/Cmd+Shift+Z)",
                                 "重做 (Ctrl/Cmd+Shift+Z)",
                             ),
-                            crate::model::History::redo,
+                            super::HistoryAction::Redo,
                         ),
                         (
                             Icon::Clear,
                             tr.text("Clear this page", "清除当前页面", "清除目前頁面"),
-                            crate::model::History::clear,
+                            super::HistoryAction::Clear,
                         ),
                     ];
                     for (index, (icon, label, action)) in actions.into_iter().enumerate() {
@@ -626,11 +626,11 @@ impl App {
             });
         });
         if let Some(path) = &mut self.font_path_input {
-            let entry = ui.add(egui::TextEdit::singleline(path).hint_text(tr.text(
-                "Font file path",
-                "字体文件路径",
-                "字型檔案路徑",
-            )));
+            let entry = ui.add(
+                egui::TextEdit::singleline(path)
+                    .id(egui::Id::unique(super::FONT_PATH_FIELD))
+                    .hint_text(tr.text("Font file path", "字体文件路径", "字型檔案路徑")),
+            );
             let submitted =
                 entry.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
             let usable = !path.trim().is_empty();

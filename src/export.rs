@@ -91,11 +91,16 @@ fn svg_text(out: &mut String, doc: &Document, fonts: &TextFonts) -> Result<(), S
             escape(&item.text)
         );
         let color = item.color.srgb8();
-        for row in &layout.unwrap().rows {
-            if rect.top() + row.pos.y > rect.bottom() {
+        let layout = layout.unwrap();
+        let start = rect.min - egui::vec2(0., item.visible_scroll_offset(layout.size().y));
+        for row in &layout.rows {
+            let origin = start + row.pos.to_vec2();
+            if origin.y > rect.bottom() {
                 break;
             }
-            let origin = rect.min + row.pos.to_vec2();
+            if origin.y + row.size.y < rect.top() {
+                continue;
+            }
             for glyph in &row.glyphs {
                 let uv = glyph.uv_rect;
                 if uv.is_nothing() {
@@ -212,6 +217,7 @@ mod tests {
             font_size: 28.,
             color: InkColor::from_rgb8([0, 0, 0]),
             text: "中😀".into(),
+            scroll_offset: 0.,
         };
         let doc = Document {
             text_boxes: vec![
@@ -229,5 +235,40 @@ mod tests {
         assert_eq!(svg.matches("<image ").count(), 3);
         assert_eq!(svg.matches("<use ").count(), 6);
         assert_eq!(svg.matches("href=\"#glyph-1\"").count(), 3);
+    }
+
+    #[test]
+    fn scrolled_annotations_export_the_visible_rows() {
+        let item = TextBox {
+            origin: [10., 10.],
+            size: [200., 56.],
+            font_size: 28.,
+            color: InkColor::default(),
+            text: "A\n\n\n\n\n😀".into(),
+            scroll_offset: 0.,
+        };
+        let fonts = TextFonts::default();
+        let render = |scroll_offset| {
+            svg(
+                &Document {
+                    text_boxes: vec![
+                        TextBox {
+                            scroll_offset,
+                            ..item.clone()
+                        }
+                        .into(),
+                    ],
+                    ..Document::default()
+                },
+                &fonts,
+            )
+            .unwrap()
+        };
+        let top = render(0.);
+        let bottom = render(1000.);
+        assert_eq!(top.matches("<use ").count(), 1);
+        assert_eq!(bottom.matches("<use ").count(), 1);
+        assert_ne!(top, bottom);
+        assert_eq!(render(2000.), bottom);
     }
 }

@@ -503,9 +503,20 @@ impl History {
             }
             return None;
         }
+        self.put_text_box(index, value, true)
+    }
+
+    fn put_text_box(
+        &mut self,
+        index: Option<usize>,
+        value: TextBox,
+        record: bool,
+    ) -> Option<usize> {
         if let Some(index) = index {
             if **self.doc.text_boxes.get(index)? != value {
-                self.snapshot();
+                if record {
+                    self.snapshot();
+                }
                 self.doc.text_boxes[index] = Arc::new(value);
             }
             return Some(index);
@@ -514,7 +525,9 @@ impl History {
         if index >= MAX_TEXT_BOXES {
             return None;
         }
-        self.snapshot();
+        if record {
+            self.snapshot();
+        }
         self.doc.text_boxes.push(Arc::new(value));
         Some(index)
     }
@@ -562,6 +575,14 @@ impl History {
             self.trim_steps();
         }
     }
+    pub fn clear_with_text(&mut self, draft: Option<(Option<usize>, TextBox)>) {
+        // The draft belongs to the single snapshot of the page being cleared.
+        if let Some((index, item)) = draft.filter(|(_, item)| !item.text.trim().is_empty()) {
+            self.put_text_box(index, item, false);
+        }
+        self.clear();
+    }
+
     pub fn clear(&mut self) {
         self.active = None;
         if !self.doc.is_empty() {
@@ -736,6 +757,7 @@ mod tests {
             font_size: 28.,
             color: InkColor::default(),
             text: "Annotation".into(),
+            scroll_offset: 0.,
         };
         history.set_text_box(None, item.clone());
         history.undo();

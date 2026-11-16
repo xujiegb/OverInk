@@ -223,18 +223,58 @@ impl Canvas {
         let changed = app.text_event(gui, event, self.window.id, self.window.size());
         if !editing && app.input.text.editing() {
             self.activate_text_editor();
+        } else if editing
+            && matches!(
+                ty,
+                SDL_EVENT_WINDOW_FOCUS_GAINED | SDL_EVENT_WINDOW_FOCUS_LOST
+            )
+        {
+            gui.sync_text_input(&self.window, self.window.input_focused());
         }
         changed
     }
 
     pub fn activate_text_editor(&mut self) {
+        self.text.get_or_insert_with(Gui::new).clear_events();
+        self.focus_text_editor();
+    }
+
+    pub fn focus_text_editor(&mut self) {
         if !self.window.input_focused() {
             unsafe { SDL_RaiseWindow(self.window.raw) };
         }
-        let gui = self.text.get_or_insert_with(Gui::new);
-        gui.clear_events();
-        gui.sync_text_input(&self.window, true);
+        self.text
+            .get_or_insert_with(Gui::new)
+            .sync_text_input(&self.window, true);
         self.dirty = true;
+    }
+
+    pub fn flush_text_events(&mut self, app: &mut App, theme: egui::Theme) -> Result<(), String> {
+        if app.input.text.editing()
+            && self
+                .text
+                .as_ref()
+                .is_some_and(|gui| !gui.raw.events.is_empty())
+            && let Some(mut output) = self.text_frame(app, theme, true)
+        {
+            // Apply input and upload texture deltas before a toolbar action changes the draft.
+            // The next canvas frame will paint the resulting document.
+            output.shapes.clear();
+            self.text
+                .as_mut()
+                .unwrap()
+                .paint(&self.render, &self.window, &self.color, output)?;
+            self.dirty = true;
+        }
+        Ok(())
+    }
+
+    pub fn finish_text_editor(&mut self, app: &mut App, theme: egui::Theme) -> Result<(), String> {
+        self.flush_text_events(app, theme)?;
+        app.input.text.finish(&mut app.history);
+        self.suspend_text_input();
+        self.dirty = true;
+        Ok(())
     }
 
     pub fn extended_ink_bytes(&self) -> usize {
@@ -299,7 +339,7 @@ impl Canvas {
         app: &mut App,
         options: &Options,
         picker_choosing: bool,
-        toolbar_focused: bool,
+        keep_editor_open: bool,
         theme: egui::Theme,
         extended_ink_budget: usize,
     ) -> Result<bool, String> {
@@ -340,7 +380,14 @@ impl Canvas {
                     &mut self.background,
                     extended_ink_budget,
                 )?;
-                self.paint_text(page, theme, toolbar_focused)?;
+                if let Some(output) = self.text_frame(page, theme, keep_editor_open) {
+                    self.text.as_mut().unwrap().paint(
+                        &self.render,
+                        &self.window,
+                        &self.color,
+                        output,
+                    )?;
+                }
                 self.ink
                     .present(page, &self.render, &self.window, &self.color, scale)?;
                 self.animation = !page.input.laser.is_empty();
@@ -353,12 +400,12 @@ impl Canvas {
         Ok(true)
     }
 
-    fn paint_text(
+    fn text_frame(
         &mut self,
         app: &mut App,
         theme: egui::Theme,
-        toolbar_focused: bool,
-    ) -> Result<(), String> {
+        keep_editor_open: bool,
+    ) -> Option<egui::FullOutput> {
         let interactive = app.tool.is_text() && !app.pass;
         let editing = interactive && app.input.text.editing();
         if !app.touch_enabled {
@@ -366,7 +413,7 @@ impl Canvas {
         }
         if app.history.text_boxes().is_empty() && !editing {
             self.stop_text_input(interactive);
-            return Ok(());
+            return None;
         }
         let style = (app.text_fonts.revision, self.color.revision);
         if self.text_style.is_some_and(|(_, color)| color != style.1) {
@@ -383,7 +430,9 @@ impl Canvas {
             gui.ctx.set_theme(theme);
         }
         if editing {
-            gui.sync_text_input(&self.window, true);
+            if self.window.input_focused() {
+                gui.sync_text_input(&self.window, true);
+            }
         } else if interactive {
             gui.sync_text_input(&self.window, false);
             gui.clear_events();
@@ -391,17 +440,21 @@ impl Canvas {
             gui.suspend_input(&self.window);
         }
         let input = gui.canvas_input(&self.window);
+        let focused = input.focused;
         let composing = gui.composing();
         let mut output = gui.ctx.run_ui(input, |ui| {
-            app.text_ui(ui, interactive, composing, toolbar_focused)
+            app.text_ui(ui, interactive, composing, keep_editor_open)
         });
         self.text_repaint_at = gui::repaint_at(&output);
+        if !focused {
+            output.platform_output.ime = None;
+        }
         if editing && !app.input.text.editing() {
             gui.sync_text_input(&self.window, false);
             output.platform_output.ime = None;
             self.text_repaint_at = Some(Instant::now());
         }
-        gui.paint(&self.render, &self.window, &self.color, output)
+        Some(output)
     }
 
     fn stop_text_input(&mut self, interactive: bool) {

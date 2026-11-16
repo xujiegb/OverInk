@@ -12,6 +12,8 @@ pub struct TextBox {
     pub font_size: f32,
     pub color: InkColor,
     pub text: String,
+    #[serde(default)]
+    pub scroll_offset: f32,
 }
 
 impl TextBox {
@@ -30,6 +32,7 @@ impl TextBox {
             font_size: 28.,
             color,
             text: String::new(),
+            scroll_offset: 0.,
         };
         item.move_to(position, canvas);
         item
@@ -75,10 +78,17 @@ impl TextBox {
                 .zip(Self::MIN_SIZE)
                 .all(|(value, min)| (min..=Self::MAX_SIZE).contains(&value))
             && Self::FONT_SIZE.contains(&self.font_size)
+            && self.scroll_offset.is_finite()
+            && self.scroll_offset >= 0.
             && self.color.rgb.iter().all(|v| (0. ..=1.).contains(v))
     }
 
     pub fn text_rect(&self) -> Rect {
         self.rect().shrink2(vec2(Self::PADDING, Self::PADDING))
+    }
+
+    pub fn visible_scroll_offset(&self, content_height: f32) -> f32 {
+        self.scroll_offset
+            .min((content_height - self.text_rect().height()).max(0.))
     }
 }

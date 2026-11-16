@@ -79,6 +79,7 @@ const LEFT_BUTTON: u8 = SDL_BUTTON_LEFT as u8;
 const RIGHT_BUTTON: u8 = SDL_BUTTON_RIGHT as u8;
 const LASER_LIFETIME: Duration = Duration::from_millis(900);
 const MAX_LASER_SAMPLES: usize = 4096;
+const FONT_PATH_FIELD: &str = "annotation-font-path";
 #[derive(Default)]
 struct Commands {
     mode: bool,
@@ -95,6 +96,13 @@ struct Commands {
     font_path: Option<PathBuf>,
     reset_font: bool,
 }
+
+enum HistoryAction {
+    Undo,
+    Redo,
+    Clear,
+}
+
 struct CanvasInput {
     protected: Option<crate::controller::Rect>,
     pens: HashMap<u32, Pen>,
@@ -572,9 +580,21 @@ impl App {
         self.reset_pens();
         self.input.laser.clear();
     }
-    fn change_history(&mut self, action: fn(&mut History)) {
+    fn change_history(&mut self, action: HistoryAction) {
+        let draft = match action {
+            HistoryAction::Undo => {
+                self.input.text.finish(&mut self.history);
+                None
+            }
+            HistoryAction::Redo => None,
+            HistoryAction::Clear => self.input.text.take_draft(&self.history),
+        };
         self.reset_contacts();
-        action(&mut self.history);
+        match action {
+            HistoryAction::Undo => self.history.undo(),
+            HistoryAction::Redo => self.history.redo(),
+            HistoryAction::Clear => self.history.clear_with_text(draft),
+        }
     }
     fn swap_page(&mut self, id: u32) {
         let previous = self.pages.active;
@@ -698,7 +718,7 @@ impl App {
     }
     fn history_buttons(&self) -> [bool; 3] {
         [
-            self.history.can_undo(),
+            self.history.can_undo() || self.input.text.has_edit(&self.history),
             self.history.can_redo(),
             !self.history.document().is_empty()
                 || self.input.text.editing()
@@ -1059,9 +1079,9 @@ impl App {
             }
             if m.command {
                 match k.key {
-                    SDLK_Z if m.shift => self.change_history(History::redo),
-                    SDLK_Z => self.change_history(History::undo),
-                    SDLK_Y => self.change_history(History::redo),
+                    SDLK_Z if m.shift => self.change_history(HistoryAction::Redo),
+                    SDLK_Z => self.change_history(HistoryAction::Undo),
+                    SDLK_Y => self.change_history(HistoryAction::Redo),
                     SDLK_S if m.shift => self.export(),
                     SDLK_S => self.save(),
                     SDLK_O => self.load(),
@@ -1436,11 +1456,7 @@ pub fn run(options: Options) -> Result<(), String> {
     unsafe { SDL_RaiseWindow(toolbar.raw) };
     if options.smoke {
         app.history = History::default();
-        canvases[0].activate_text_editor();
-        if !unsafe { SDL_TextInputActive(canvases[0].window.raw) } {
-            return Err("Canvas text input smoke failed".into());
-        }
-        canvases[0].suspend_text_input();
+        smoke_text_history(&mut app, &mut canvases[0])?;
         smoke_events(&mut app, canvases[0].window.id)?;
     }
     let mut picker = crate::picker::Picker::default();
@@ -1461,6 +1477,9 @@ pub fn run(options: Options) -> Result<(), String> {
     let mut appearance = ThemeMonitor::default();
     let mut toolbar_dirty = true;
     let mut toolbar_repaint_at: Option<Instant> = None;
+    let mut toolbar_text_input = false;
+    let mut restore_toolbar_focus = false;
+    let mut text_focus = text::ToolbarTextFocus::default();
     #[cfg(target_os = "macos")]
     drop(startup_pool);
     while running {
@@ -1533,6 +1552,7 @@ pub fn run(options: Options) -> Result<(), String> {
                         SDL_EVENT_WINDOW_FOCUS_GAINED | SDL_EVENT_WINDOW_FOCUS_LOST
                     ) && app.input.text.editing()
                     {
+                        app.input.text.saw_input_focus();
                         let index = canvas::active_index(&canvases, app.pages.active);
                         canvases[index].dirty = true;
                     }
@@ -1592,6 +1612,12 @@ pub fn run(options: Options) -> Result<(), String> {
             let drawing =
                 !was_picking && !toolbar_hidden && !app.suspended && !font_dialog.pending();
             gui.event(&event, toolbar.id, toolbar.size());
+            if id == Some(toolbar.id)
+                && ty == SDL_EVENT_WINDOW_FOCUS_LOST
+                && !toolbar.input_focused()
+            {
+                gui.sync_text_input(&toolbar, false);
+            }
             if ty == SDL_EVENT_PEN_PROXIMITY_OUT {
                 // A pen can leave proximity over a different window from the
                 // one that received its earlier packets.
@@ -1621,6 +1647,7 @@ pub fn run(options: Options) -> Result<(), String> {
                     && let Some(output) = canvas.output
                     && app.pages.active != Some(output)
                 {
+                    canvases[active].flush_text_events(&mut app, gui.ctx.theme())?;
                     app.select_page(output);
                     canvases[active].suspend_text_input();
                     canvases[active].dirty = true;
@@ -1693,16 +1720,31 @@ pub fn run(options: Options) -> Result<(), String> {
                     canvas.dirty = true;
                 }
                 let was_editing = app.input.text.editing();
-                let command =
-                    app.keyboard(
-                        &event,
-                        id == Some(toolbar.id)
-                            && (gui.ctx.egui_wants_keyboard_input()
-                                || egui::Popup::is_any_open(&gui.ctx)
-                                || gui.raw.events.iter().any(|event| {
-                                    matches!(event, egui::Event::PointerButton { .. })
-                                })),
-                    );
+                let from_toolbar = id == Some(toolbar.id);
+                let toolbar_claims_keys = from_toolbar
+                    && (toolbar_text_input
+                        || egui::Popup::is_any_open(&gui.ctx)
+                        || gui
+                            .raw
+                            .events
+                            .iter()
+                            .any(|event| matches!(event, egui::Event::PointerButton { .. })));
+                let key = unsafe { event.key };
+                if from_toolbar
+                    && was_editing
+                    && !toolbar_claims_keys
+                    && !key.repeat
+                    && (key.key == SDLK_ESCAPE
+                        || (matches!(key.key, SDLK_RETURN | SDLK_KP_ENTER)
+                            && gui::modifiers(key.r#mod).command))
+                {
+                    canvases[active].finish_text_editor(&mut app, gui.ctx.theme())?;
+                    continue;
+                }
+                let command = app.keyboard(
+                    &event,
+                    toolbar_claims_keys || from_toolbar && gui.ctx.egui_wants_keyboard_input(),
+                );
                 if !was_editing && app.input.text.editing() {
                     let index = canvas::active_index(&canvases, app.pages.active);
                     let canvas = &mut canvases[index];
@@ -1717,11 +1759,14 @@ pub fn run(options: Options) -> Result<(), String> {
             }
         }
         if !running {
+            let active = canvas::active_index(&canvases, app.pages.active);
+            canvases[active].flush_text_events(&mut app, gui.ctx.theme())?;
             break;
         }
 
         if let Some(result) = font_dialog.poll() {
             toolbar_dirty = true;
+            restore_toolbar_focus = true;
             match result {
                 Ok(Some(path)) if app.install_annotation_font(&path, &annotation_font_path) => {
                     for canvas in &mut canvases {
@@ -1732,6 +1777,8 @@ pub fn run(options: Options) -> Result<(), String> {
                 Err(error) => {
                     app.panel = Some(crate::toolbar::Panel::Settings);
                     app.font_path_input.get_or_insert_with(String::new);
+                    gui.ctx
+                        .memory_mut(|mem| mem.request_focus(egui::Id::unique(FONT_PATH_FIELD)));
                     app.status = text(
                         "Enter a font file path",
                         "请输入字体文件路径",
@@ -1740,7 +1787,6 @@ pub fn run(options: Options) -> Result<(), String> {
                     .detail(error)
                 }
             }
-            unsafe { SDL_RaiseWindow(toolbar.raw) };
         }
 
         if !options.smoke
@@ -1780,6 +1826,14 @@ pub fn run(options: Options) -> Result<(), String> {
             };
             let topology_changed = displays != app.displays;
             let previous_page = app.pages.active;
+            if target.is_some_and(|id| Some(id) != previous_page)
+                && displays
+                    .iter()
+                    .any(|display| Some(display.id) == previous_page)
+            {
+                let active = canvas::active_index(&canvases, previous_page);
+                canvases[active].flush_text_events(&mut app, gui.ctx.theme())?;
+            }
             let (layout, removed) =
                 if topology_changed || target.is_some_and(|id| Some(id) != app.pages.active) {
                     toolbar_dirty = true;
@@ -1956,6 +2010,16 @@ pub fn run(options: Options) -> Result<(), String> {
             || toolbar_repaint_at.is_some_and(|at| Instant::now() >= at)
         {
             toolbar_dirty = false;
+            if app.input.text.editing()
+                && (toolbar.input_focused()
+                    || gui
+                        .raw
+                        .events
+                        .iter()
+                        .any(|event| matches!(event, egui::Event::PointerButton { .. })))
+            {
+                canvases[active].flush_text_events(&mut app, theme)?;
+            }
             gui.set_language(app.language);
             let mut input = gui.input(&toolbar);
             input.predicted_dt = pacer.period.as_secs_f32();
@@ -1972,6 +2036,7 @@ pub fn run(options: Options) -> Result<(), String> {
                     font_dialog.pending(),
                 )
             });
+            toolbar_text_input = frame.platform_output.ime.is_some();
             toolbar_repaint_at = gui::repaint_at(&frame);
             output = Some(frame);
         }
@@ -2104,11 +2169,49 @@ pub fn run(options: Options) -> Result<(), String> {
             wait_for_events(Duration::from_millis(8));
             continue;
         }
+        if app.input.text.editing() {
+            let toolbar_focused = toolbar.input_focused();
+            if toolbar_focused {
+                app.input.text.saw_input_focus();
+            }
+            let canvas = &mut canvases[active];
+            let busy = toolbar_focused
+                && (controller_moved
+                    || !mouse_released()
+                    || gui.ctx.input(|input| input.pointer.any_down())
+                    || egui::Popup::is_any_open(&gui.ctx));
+            match text_focus.update(
+                Instant::now(),
+                canvas.window.input_focused(),
+                toolbar_focused,
+                toolbar_text_input,
+                busy,
+            ) {
+                text::FocusAction::Keep => (),
+                text::FocusAction::ReturnToCanvas => {
+                    gui.sync_text_input(&toolbar, false);
+                    canvas.focus_text_editor();
+                    canvas.keep_toolbar_above(&toolbar);
+                }
+                text::FocusAction::Finish => {
+                    canvas.finish_text_editor(&mut app, theme)?;
+                    toolbar_dirty = true;
+                }
+            }
+        } else {
+            text_focus.deadline = None;
+        }
+        // Stop the canvas editor before enabling the toolbar's IME.
+        let toolbar_ime_active =
+            toolbar_text_input && toolbar.input_focused() && !font_dialog.pending();
+        gui.sync_text_input(&toolbar, toolbar_ime_active);
         let mut presented = output.is_some();
-        if let Some(output) = output {
+        if let Some(mut output) = output {
+            if !toolbar_ime_active {
+                output.platform_output.ime = None;
+            }
             let rail = crate::toolbar::colors(theme == egui::Theme::Dark).rail;
             toolbar_render.begin(&toolbar, rail.to_array().map(|c| f32::from(c) / 255.))?;
-            gui.sync_text_input(&toolbar, output.platform_output.ime.is_some());
             gui.paint(&toolbar_render, &toolbar, &toolbar_color, output)?;
             toolbar_render.present()?;
             tooltips.update(&toolbar, &gui, app.language, &toolbar_color);
@@ -2121,6 +2224,7 @@ pub fn run(options: Options) -> Result<(), String> {
             controller_display = toolbar.display_id();
             follow_controller = true;
         }
+        let keep_editor_open = toolbar.input_focused() || text_focus.deadline.is_some();
         let mouse = !picker.choosing() && app.mouse_ready();
         let mut unsafe_layer = false;
         let mut extended_ink_bytes: usize = canvases
@@ -2150,7 +2254,7 @@ pub fn run(options: Options) -> Result<(), String> {
                     &mut app,
                     &options,
                     picker.choosing(),
-                    toolbar.input_focused(),
+                    keep_editor_open,
                     theme,
                     ink::MAX_EXTENDED_INK_TEXTURE_BYTES.saturating_sub(extended_ink_bytes),
                 )?;
@@ -2181,6 +2285,10 @@ pub fn run(options: Options) -> Result<(), String> {
             {
                 canvas.keep_toolbar_above(&toolbar);
             }
+        }
+        if restore_toolbar_focus && !font_dialog.pending() {
+            unsafe { SDL_RaiseWindow(toolbar.raw) };
+            restore_toolbar_focus = false;
         }
         if !options.smoke
             && app.preferences.restore_session
@@ -2230,9 +2338,14 @@ pub fn run(options: Options) -> Result<(), String> {
         } else if !toolbar_dirty && !topology_dirty {
             let mut timeout = if app.wait_for_mouse_up || picker.active() || font_dialog.pending() {
                 Duration::from_millis(8)
+            } else if app.input.text.editing() && toolbar.input_focused() {
+                Duration::from_millis(24)
             } else {
                 Duration::from_millis(500)
             };
+            if let Some(deadline) = text_focus.deadline {
+                timeout = timeout.min(deadline.saturating_duration_since(Instant::now()));
+            }
             if let Some(at) = toolbar_repaint_at {
                 timeout = timeout.min(at.saturating_duration_since(Instant::now()));
             }
@@ -2251,6 +2364,63 @@ pub fn run(options: Options) -> Result<(), String> {
     }
     Ok(())
 }
+
+fn smoke_text_history(app: &mut App, canvas: &mut canvas::Canvas) -> Result<(), String> {
+    app.use_tool(Tool::Text);
+    let window_id = canvas.window.id;
+    for (r#type, down) in [
+        (SDL_EVENT_MOUSE_BUTTON_DOWN, true),
+        (SDL_EVENT_MOUSE_BUTTON_UP, false),
+    ] {
+        canvas.text_event(
+            app,
+            &SDL_Event {
+                button: SDL_MouseButtonEvent {
+                    r#type,
+                    windowID: window_id,
+                    button: LEFT_BUTTON,
+                    down,
+                    x: 80.,
+                    y: 70.,
+                    ..Default::default()
+                },
+            },
+        );
+    }
+    if !unsafe { SDL_TextInputActive(canvas.window.raw) } {
+        return Err("Canvas text input smoke failed".into());
+    }
+    canvas.text_event(
+        app,
+        &SDL_Event {
+            text: SDL_TextInputEvent {
+                r#type: SDL_EVENT_TEXT_INPUT,
+                windowID: window_id,
+                text: c"Queued annotation".as_ptr(),
+                ..Default::default()
+            },
+        },
+    );
+    canvas.flush_text_events(app, egui::Theme::Light)?;
+    app.change_history(HistoryAction::Undo);
+    if !app.history.text_boxes().is_empty() || app.history.can_undo() {
+        return Err("Canvas text draft undo smoke failed".into());
+    }
+    app.change_history(HistoryAction::Redo);
+    if app
+        .history
+        .text_boxes()
+        .first()
+        .is_none_or(|item| item.text != "Queued annotation")
+    {
+        return Err("Canvas text draft redo smoke failed".into());
+    }
+    app.use_tool(Tool::Pen);
+    app.history = History::default();
+    canvas.suspend_text_input();
+    Ok(())
+}
+
 fn smoke_events(app: &mut App, id: SDL_WindowID) -> Result<(), String> {
     let mut e = SDL_Event::default();
     e.ptouch = SDL_PenTouchEvent {
@@ -2358,6 +2528,7 @@ fn smoke_events(app: &mut App, id: SDL_WindowID) -> Result<(), String> {
         font_size: 28.,
         color: InkColor::default(),
         text: "OverInk 文字 😀".into(),
+        scroll_offset: 0.,
     };
     app.history.set_text_box(None, annotation);
     app.tool = Tool::Laser;
