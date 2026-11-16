@@ -134,6 +134,15 @@ unsafe extern "C" fn toolbar_hit_test(
 }
 
 impl Window {
+    pub fn raise(&self) {
+        unsafe {
+            let window = SDL_GetWindowFromID(self.id);
+            if !window.is_null() && window == self.raw {
+                SDL_RaiseWindow(window);
+            }
+        }
+    }
+
     pub fn input_focused(&self) -> bool {
         unsafe { (SDL_GetWindowFlags(self.raw) & SDL_WINDOW_INPUT_FOCUS).0 != 0 }
     }

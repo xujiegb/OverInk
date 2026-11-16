@@ -162,6 +162,9 @@ impl Canvas {
     }
 
     pub fn keep_toolbar_above(&self, toolbar: &Window) {
+        if unsafe { SDL_GetWindowFlags(toolbar.raw) } & SDL_WINDOW_HIDDEN != 0 {
+            return;
+        }
         if self.output == toolbar.display_id() || driver() == "wayland" {
             native::keep_controller_above(&self.window, toolbar, &self.native);
         }
@@ -248,7 +251,7 @@ impl Canvas {
 
     pub fn focus_text_editor(&mut self) {
         if !self.window.input_focused() {
-            unsafe { SDL_RaiseWindow(self.window.raw) };
+            self.window.raise();
         }
         self.text
             .get_or_insert_with(Gui::new)

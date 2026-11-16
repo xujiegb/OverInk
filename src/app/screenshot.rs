@@ -98,6 +98,7 @@ impl Screenshot {
         self.cursor = None;
         self.action = None;
         self.error = None;
+        self.save_dialog = false;
     }
 
     pub fn event(&mut self, event: &SDL_Event, window: &Window) -> bool {
@@ -259,12 +260,11 @@ impl Screenshot {
             .filter(|folder| folder.is_dir())
             .or_else(|| downloads_folder().filter(|folder| folder.is_dir()));
         let location = folder.map(|folder| folder.join(format!("{}.png", file_stem())));
-        dialog.open(
+        self.save_dialog |= dialog.open(
             dialog::DialogKind::ScreenshotFile,
             window,
             location.as_deref(),
         );
-        self.save_dialog = true;
     }
 
     pub fn close_save_as(&mut self) {
