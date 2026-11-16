@@ -2247,10 +2247,7 @@ pub fn run(options: Options) -> Result<(), String> {
             file_dialog.open(DialogKind::ScreenshotFolder, &toolbar, location.as_deref());
             cmd.redraw_canvas = true;
         }
-        if cmd.screenshot
-            && !file_dialog.pending()
-            && !picker.active()
-            && !app.screenshot.saving()
+        if cmd.screenshot && !file_dialog.pending() && !picker.active() && !app.screenshot.saving()
         {
             if app.preferences.screenshot_hdr
                 && !cfg!(any(target_os = "windows", target_os = "macos"))
@@ -2565,8 +2562,11 @@ pub fn run(options: Options) -> Result<(), String> {
                     canvas.show(&toolbar, false)?;
                 }
             }
-            app.screenshot
-                .open_save_as(&mut file_dialog, &canvases[index].window, &app.preferences);
+            app.screenshot.open_save_as(
+                &mut file_dialog,
+                &canvases[index].window,
+                &app.preferences,
+            );
         }
         if screenshot_active && !app.screenshot.active() {
             toolbar_dirty |= capture_visibility(
