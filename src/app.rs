@@ -1311,7 +1311,7 @@ fn capture_visibility(
     screenshot_active: bool,
 ) -> Result<bool, String> {
     if hide_all {
-        for canvas in canvases {
+        for canvas in &mut *canvases {
             canvas.show(toolbar, false)?;
         }
     }
