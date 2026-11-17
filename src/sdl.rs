@@ -927,6 +927,137 @@ impl Drop for Window {
 /// The renderer must remain alive while a texture is active. On SDL renderer
 /// reset, callers must explicitly abandon invalidated handles rather than
 /// trying to destroy already-invalid textures.
+/// Owned background snapshot texture; native handles remain within SDL.
+///
+/// The caller must retain its renderer while the texture is live and abandon a
+/// handle after an SDL renderer reset, when SDL has already invalidated it.
+pub struct SnapshotTexture(*mut SDL_Texture);
+
+impl SnapshotTexture {
+    pub fn new(
+        renderer: &Renderer,
+        dimensions: [u32; 2],
+        linear: bool,
+        pixels: &[u8],
+    ) -> Result<Self, String> {
+        let [width, height] = dimensions;
+        let w = i32::try_from(width).map_err(|_| "Snapshot width is too large")?;
+        let h = i32::try_from(height).map_err(|_| "Snapshot height is too large")?;
+        let bytes_per_pixel = if linear { 8usize } else { 4usize };
+        let row_bytes = (width as usize)
+            .checked_mul(bytes_per_pixel)
+            .ok_or("Snapshot row is too wide")?;
+        let pitch = i32::try_from(row_bytes).map_err(|_| "Snapshot row is too wide")?;
+        let len = row_bytes
+            .checked_mul(height as usize)
+            .ok_or("Snapshot image is too large")?;
+        if w <= 0 || h <= 0 || pixels.len() != len {
+            return Err("Invalid snapshot image dimensions or pixel buffer".into());
+        }
+        if linear && !renderer.extended {
+            return Err("The renderer cannot display the captured HDR range".into());
+        }
+        unsafe {
+            let raw = if linear {
+                let props = SDL_CreateProperties();
+                if props.0 == 0 {
+                    return Err(error());
+                }
+                let result = (|| {
+                    check(SDL_SetNumberProperty(
+                        props,
+                        SDL_PROP_TEXTURE_CREATE_FORMAT_NUMBER,
+                        SDL_PIXELFORMAT_RGBA64_FLOAT.0 as i64,
+                    ))?;
+                    check(SDL_SetNumberProperty(
+                        props,
+                        SDL_PROP_TEXTURE_CREATE_COLORSPACE_NUMBER,
+                        SDL_COLORSPACE_SRGB_LINEAR.0 as i64,
+                    ))?;
+                    check(SDL_SetNumberProperty(
+                        props,
+                        SDL_PROP_TEXTURE_CREATE_WIDTH_NUMBER,
+                        width as i64,
+                    ))?;
+                    check(SDL_SetNumberProperty(
+                        props,
+                        SDL_PROP_TEXTURE_CREATE_HEIGHT_NUMBER,
+                        height as i64,
+                    ))?;
+                    // A display snapshot is already mapped. Do not tone-map it again.
+                    check(SDL_SetFloatProperty(
+                        props,
+                        SDL_PROP_TEXTURE_CREATE_HDR_HEADROOM_FLOAT,
+                        0.,
+                    ))?;
+                    Ok::<_, String>(SDL_CreateTextureWithProperties(renderer.raw, props))
+                })();
+                SDL_DestroyProperties(props);
+                result?
+            } else {
+                SDL_CreateTexture(
+                    renderer.raw,
+                    SDL_PIXELFORMAT_RGBA32,
+                    SDL_TEXTUREACCESS_STATIC,
+                    w,
+                    h,
+                )
+            };
+            if raw.is_null() {
+                return Err(error());
+            }
+            let texture = Self(raw);
+            check(SDL_UpdateTexture(
+                raw,
+                ptr::null(),
+                pixels.as_ptr().cast(),
+                pitch,
+            ))?;
+            check(SDL_SetTextureBlendMode(raw, SDL_BLENDMODE_NONE))?;
+            check(SDL_SetTextureScaleMode(raw, SDL_SCALEMODE_LINEAR))?;
+            Ok(texture)
+        }
+    }
+
+    pub fn draw(
+        &self,
+        renderer: &Renderer,
+        destination: &SDL_FRect,
+        linear: bool,
+    ) -> Result<(), String> {
+        let draw = || unsafe {
+            check(SDL_RenderTexture(
+                renderer.raw,
+                self.0,
+                ptr::null(),
+                destination,
+            ))
+        };
+        if !linear {
+            return draw();
+        }
+        let white = renderer.sdr_white_point();
+        if !white.is_finite() || white <= 0. {
+            return Err("Invalid SDR reference white level".into());
+        }
+        // SDL applies the SDR reference white to draws of linear snapshots.
+        // Cancel only that multiplier without changing the caller's color scale.
+        renderer.with_absolute_color_scale(1. / white, draw)
+    }
+
+    /// Renderer reset already invalidated the SDL texture; no native destructor
+    /// must touch the dangling handle.
+    pub fn abandon(self) {
+        std::mem::forget(self);
+    }
+}
+
+impl Drop for SnapshotTexture {
+    fn drop(&mut self) {
+        unsafe { SDL_DestroyTexture(self.0) }
+    }
+}
+
 pub struct GuiTexture(*mut SDL_Texture);
 
 impl GuiTexture {
@@ -1171,6 +1302,23 @@ impl Renderer {
     }
 
     /// Temporarily apply the SDL color scale, restoring it even if drawing fails.
+    /// Temporarily replace the color scale with an absolute value, preserving
+    /// the previous value even when the submitted drawing command fails.
+    pub fn with_absolute_color_scale(
+        &self,
+        scale: f32,
+        draw: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        unsafe {
+            let mut previous = 1.;
+            check(SDL_GetRenderColorScale(self.raw, &mut previous))?;
+            check(SDL_SetRenderColorScale(self.raw, scale))?;
+            let result = draw();
+            let restore = check(SDL_SetRenderColorScale(self.raw, previous));
+            result.and(restore)
+        }
+    }
+
     pub fn with_color_scale(
         &self,
         scale: f32,
