@@ -1676,6 +1676,8 @@ pub fn run(options: Options) -> Result<(), String> {
                     toolbar_text_input = false;
                     toolbar_repaint_at = None;
                     toolbar_dirty = true;
+                } else {
+                    tooltips.renderer_reset_window(id);
                 }
                 app.for_each_page(|page| page.input.text.refocus());
             }
