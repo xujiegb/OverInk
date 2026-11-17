@@ -11,6 +11,51 @@ use std::{
     ffi::c_void,
     hash::{Hash, Hasher},
 };
+/// Convert a captured RGBA8 image using the embedded input ICC profile.
+///
+/// Little CMS allows in-place RGBA8 transforms; the profile and transform stay
+/// inside this FFI boundary and are closed on all successful allocation paths.
+#[cfg(any(target_os = "linux", target_os = "freebsd", test))]
+pub(crate) fn convert_rgba8_to_srgb(pixels: &mut [u8], profile: &[u8]) {
+    if profile.is_empty()
+        || profile.len() > 16 * 1024 * 1024
+        || pixels.is_empty()
+        || !pixels.len().is_multiple_of(4)
+    {
+        return;
+    }
+    let Ok(count) = u32::try_from(pixels.len() / 4) else {
+        return;
+    };
+    unsafe {
+        let input = cms::cmsOpenProfileFromMem(profile.as_ptr().cast(), profile.len() as u32);
+        if input.is_null() {
+            return;
+        }
+        let srgb = cms::cmsCreate_sRGBProfile();
+        if srgb.is_null() {
+            cms::cmsCloseProfile(input);
+            return;
+        }
+        let transform = cms::cmsCreateTransform(
+            input,
+            cms::PixelFormat::RGBA_8,
+            srgb,
+            cms::PixelFormat::RGBA_8,
+            cms::Intent::RelativeColorimetric,
+            cms::FLAGS_COPY_ALPHA | cms::FLAGS_BLACKPOINTCOMPENSATION,
+        );
+        cms::cmsCloseProfile(input);
+        cms::cmsCloseProfile(srgb);
+        if !transform.is_null() {
+            // Little CMS explicitly supports transforming a buffer in place.
+            let ptr = pixels.as_mut_ptr();
+            cms::cmsDoTransform(transform, ptr.cast_const().cast(), ptr.cast(), count);
+            cms::cmsDeleteTransform(transform);
+        }
+    }
+}
+
 pub struct ColorManager {
     transform: cms::HTRANSFORM,
     pub status: Text,
