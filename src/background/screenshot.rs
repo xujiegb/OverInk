@@ -62,8 +62,49 @@ impl Job {
                 // If the extension is absent, report an explicit error rather
                 // than presenting an incomplete image as a successful capture.
                 // OverInk's own selection UI is never replaced by GNOME's.
-                return crate::picker::portal::SystemJob::shell_area(window, region, size)
-                    .map(Self::Shell);
+                // On XWayland prefer the Shell bridge (it captures both
+                // X11 and native Wayland windows without a second selector).
+                // If the extension is absent, use a composited screenshot
+                // portal only when the full-screen crop can be proven safe.
+                let fallback: Option<Box<dyn FnOnce(Image) -> Result<Image, String> + Send>> =
+                    if driver() == "x11" && _displays.len() == 1 {
+                        let mut x = 0;
+                        let mut y = 0;
+                        let position = unsafe {
+                            SDL_GetWindowPosition(window.raw, &mut x, &mut y)
+                        };
+                        let mapping = position.then(|| {
+                            let location = Rect::from_min_size(
+                                egui::pos2(x as f32, y as f32),
+                                egui::vec2(size[0], size[1]),
+                            );
+                            crop.for_portal(
+                                display,
+                                _displays,
+                                window.pixel_size().map(|n| n.max(0) as u32),
+                                None,
+                                None,
+                                Some(location),
+                            )
+                        });
+                        mapping.and_then(Result::ok).map(|(mapped, sizes)| {
+                            Box::new(move |image: Image| {
+                                if !sizes.contains(&[image.width, image.height]) {
+                                    return Err(
+                                        "The portal screenshot dimensions do not match the desktop"
+                                            .into(),
+                                    );
+                                }
+                                mapped.apply(image)
+                            }) as Box<dyn FnOnce(Image) -> Result<Image, String> + Send>
+                        })
+                    } else {
+                        None
+                    };
+                return crate::picker::portal::SystemJob::shell_area(
+                    window, region, size, fallback,
+                )
+                .map(Self::Shell);
             }
             if _hdr {
                 return Err("HDR capture is unavailable on this display backend".into());
