@@ -21,6 +21,17 @@ pub enum Job {
 }
 
 impl Job {
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    pub fn start_interactive(window: &Window) -> Result<Self, String> {
+        crate::picker::portal::SystemJob::screenshot(
+            false,
+            crate::picker::portal::screenshot_parent(window),
+            true,
+            Ok,
+        )
+        .map(Self::Portal)
+    }
+
     pub fn start(
         window: &Window,
         display: &Display,
@@ -111,7 +122,11 @@ impl Job {
                 };
                 let (crop, sizes) =
                     crop.for_portal(display, _displays, pixels, density, usable, location)?;
-                return crate::picker::portal::SystemJob::screenshot(multi, move |image| {
+                return crate::picker::portal::SystemJob::screenshot(
+                    multi,
+                    crate::picker::portal::screenshot_parent(window),
+                    false,
+                    move |image| {
                     if !sizes.contains(&[image.width, image.height]) {
                         return Err(
                             "The portal screenshot dimensions do not match the selected desktop"
@@ -119,7 +134,8 @@ impl Job {
                         );
                     }
                     crop.apply(image)
-                })
+                    },
+                )
                 .map(Self::Portal);
             }
             let image = crate::picker::desktop::capture(window)?;
