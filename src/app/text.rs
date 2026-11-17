@@ -35,6 +35,16 @@ struct TextMenus {
     palette: Option<(Rect, f32)>,
 }
 
+// A screen pick must not recolor a different annotation when the toolbar is
+// still interactive while the native picker is running.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct TextPickTarget {
+    selected: Option<usize>,
+    editing: bool,
+    item: TextBox,
+    committed: Option<String>,
+}
+
 impl TextMenus {
     fn contains(self, pos: Pos2) -> bool {
         self.actions.contains(pos) || self.palette.is_some_and(|(rect, _)| rect.contains(pos))
@@ -506,12 +516,23 @@ impl App {
         })
     }
 
-    pub(super) fn pick_text_color(&mut self, color: InkColor) -> InkColor {
-        let color = self
-            .text_menu_item()
-            .map_or(color, |item| color.converted(item.color.space));
-        self.recolor_text(color);
-        color
+    pub(super) fn text_pick_target(&self) -> Option<TextPickTarget> {
+        if !self.tool.is_text() || self.pass || self.hidden {
+            return None;
+        }
+        Some(TextPickTarget {
+            selected: self.input.text.selected,
+            editing: self.input.text.editing(),
+            item: self.text_menu_item()?.clone(),
+            committed: self.input.text.draft.as_ref().map(|draft| draft.committed.clone()),
+        })
+    }
+
+    pub(super) fn pick_text_color(&mut self, color: InkColor) -> Option<InkColor> {
+        let target = self.text_pick_target()?;
+        let color = color.converted(target.item.color.space);
+        // Picking an already selected color is still a successful pick.
+        (target.item.color == color || self.recolor_text(color)).then_some(color)
     }
 
     fn resize_text_font(&mut self, step: f32) {
@@ -1727,12 +1748,39 @@ mod tests {
         assert!(!app.input.text.take_screen_pick());
         assert!(app.input.text.color_wheel.is_none());
         let sampled = InkColor::from_rgb8([4, 171, 131]);
-        app.pick_text_color(sampled);
+        assert_eq!(app.pick_text_color(sampled), Some(sampled));
         let draft = app.input.text.draft.as_ref().unwrap();
         assert_eq!(draft.committed, "Draft");
         assert_eq!(draft.item.color, sampled);
         assert_eq!(app.color, original_brush);
         assert!(app.history.text_boxes().is_empty());
+    }
+
+    #[test]
+    fn screen_pick_rejects_stale_targets_and_invalid_modes() {
+        let mut app = app();
+        app.use_tool(Tool::Text);
+        click(&mut app, pos2(150., 120.));
+        let target = app.text_pick_target().unwrap();
+        let color = InkColor::from_rgb8([4, 171, 131]);
+
+        // A different text draft is not the target captured when picking began.
+        app.input.text.draft.as_mut().unwrap().committed = "changed".into();
+        assert_ne!(app.text_pick_target(), Some(target));
+        assert_eq!(app.pick_text_color(color), Some(color));
+        assert_eq!(app.pick_text_color(color), Some(color));
+
+        app.pass = true;
+        assert!(app.text_pick_target().is_none());
+        assert!(app.pick_text_color(color).is_none());
+        app.pass = false;
+        app.hidden = true;
+        assert!(app.text_pick_target().is_none());
+        assert!(app.pick_text_color(color).is_none());
+        app.hidden = false;
+        app.input.text = TextInput::default();
+        assert!(app.text_pick_target().is_none());
+        assert!(app.pick_text_color(color).is_none());
     }
 
     #[test]
