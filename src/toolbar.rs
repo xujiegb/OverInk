@@ -134,7 +134,13 @@ pub fn swatch(ui: &mut Ui, size: Vec2, rgb: [u8; 3], label: &str, selected: bool
 
 // Canvas-embedded text menus use egui's own tooltip. The native toolbar
 // hint is only appropriate for the separate SDL toolbar.
-pub fn swatch_button(ui: &mut Ui, size: Vec2, rgb: [u8; 3], label: &str, selected: bool) -> Response {
+pub fn swatch_button(
+    ui: &mut Ui,
+    size: Vec2,
+    rgb: [u8; 3],
+    label: &str,
+    selected: bool,
+) -> Response {
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     response.widget_info(|| {
         egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), selected, label)
@@ -451,13 +457,8 @@ mod tests {
         let screen = Rect::from_min_size(egui::pos2(0., 0.), vec2(800., 600.));
         let anchor = Rect::from_min_size(egui::pos2(340., 390.), vec2(120., 40.));
         let distant = Rect::from_min_size(egui::pos2(20., 15.), vec2(70., 65.));
-        let rect = context_menu_rect_avoiding(
-            anchor,
-            screen,
-            vec2(210., 160.),
-            &[anchor, distant],
-            1.,
-        );
+        let rect =
+            context_menu_rect_avoiding(anchor, screen, vec2(210., 160.), &[anchor, distant], 1.);
         assert!(!rect.intersects(anchor));
         assert!(!rect.intersects(distant));
         assert!(screen.contains_rect(rect));
