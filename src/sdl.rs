@@ -1145,6 +1145,55 @@ impl Renderer {
             SDL_SetRenderClipRect(self.raw, clip.map_or(ptr::null(), |rect| rect));
         }
     }
+    /// Query the renderer's SDR reference white, keeping SDL properties internal.
+    pub fn sdr_white_point(&self) -> f32 {
+        unsafe {
+            SDL_GetFloatProperty(
+                SDL_GetRendererProperties(self.raw),
+                SDL_PROP_RENDERER_SDR_WHITE_POINT_FLOAT,
+                1.,
+            )
+        }
+    }
+
+    pub fn set_render_scale(&self, scale: [f32; 2]) -> Result<(), String> {
+        unsafe { check(SDL_SetRenderScale(self.raw, scale[0], scale[1])) }
+    }
+
+    /// Set a clip region and return failures (unlike the UI's best-effort clip).
+    pub fn try_set_clip_rect(&self, clip: Option<&SDL_Rect>) -> Result<(), String> {
+        unsafe {
+            check(SDL_SetRenderClipRect(
+                self.raw,
+                clip.map_or(ptr::null(), |rect| rect),
+            ))
+        }
+    }
+
+    /// Temporarily apply the SDL color scale, restoring it even if drawing fails.
+    pub fn with_color_scale(
+        &self,
+        scale: f32,
+        draw: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        if scale == 1. {
+            return draw();
+        }
+        unsafe {
+            let mut previous = 1.;
+            check(SDL_GetRenderColorScale(self.raw, &mut previous))?;
+            check(SDL_SetRenderColorScale(self.raw, previous * scale))?;
+            let result = draw();
+            let restore = check(SDL_SetRenderColorScale(self.raw, previous));
+            result.and(restore)
+        }
+    }
+
+    pub fn flush(&self) -> Result<(), String> {
+        unsafe { check(SDL_FlushRenderer(self.raw)) }
+    }
+
+
 
     pub fn geometry(
         &self,
