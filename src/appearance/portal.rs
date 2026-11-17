@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use crate::sdl::*;
 use egui::Theme;
 use futures_lite::{StreamExt, future};
@@ -22,7 +24,7 @@ impl Monitor {
         let (stop, stopped) = async_channel::bounded::<()>(1);
         let scheme = Arc::new(Mutex::new(Some(0)));
         let update = scheme.clone();
-        let wake = *WAKE_EVENT.get_or_init(|| unsafe { SDL_RegisterEvents(1) });
+        let wake = *WAKE_EVENT.get_or_init(crate::sdl::register_user_event);
         let _ = thread::Builder::new()
             .name("overink-system-theme".into())
             .spawn(move || {
@@ -122,7 +124,7 @@ fn publish(update: &Mutex<Option<u32>>, wake: u32, value: u32) {
         if wake != 0 {
             let mut event = SDL_Event::default();
             event.r#type = wake;
-            unsafe { SDL_PushEvent(&mut event) };
+            crate::sdl::push_event(&mut event);
         }
     }
 }
