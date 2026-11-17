@@ -813,6 +813,27 @@ impl Window {
         }
     }
     /// Query the current X11/desktop position without exposing an unsafe FFI call.
+    /// Maintain an SDL Wayland transient parent only when it actually changes.
+    pub fn set_parent(&self, parent: Option<&Window>) -> Result<(), String> {
+        unsafe {
+            let raw = parent.map_or(ptr::null_mut(), |window| window.raw);
+            if SDL_GetWindowParent(self.raw) == raw {
+                return Ok(());
+            }
+            check(SDL_SetWindowParent(self.raw, raw))
+        }
+    }
+
+    /// SDL's border query can fail on window managers without server-side
+    /// decoration. Preserve the undecorated default in that case.
+    pub fn border_size(&self) -> [i32; 4] {
+        unsafe {
+            let (mut top, mut left, mut bottom, mut right) = (0, 0, 0, 0);
+            SDL_GetWindowBordersSize(self.raw, &mut top, &mut left, &mut bottom, &mut right);
+            [top, left, bottom, right]
+        }
+    }
+
     pub fn position(&self) -> Result<[i32; 2], String> {
         unsafe {
             let (mut x, mut y) = (0, 0);
