@@ -1192,6 +1192,7 @@ impl Renderer {
     pub fn flush(&self) -> Result<(), String> {
         unsafe { check(SDL_FlushRenderer(self.raw)) }
     }
+
     pub fn geometry(
         &self,
         texture: *mut SDL_Texture,
