@@ -1,6 +1,6 @@
+#![forbid(unsafe_code)]
+
 use crate::sdl::*;
-#[cfg(not(target_os = "windows"))]
-use std::ptr;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rect {
@@ -158,7 +158,7 @@ impl Guard {
         if cfg!(target_os = "macos") || crate::sdl::driver() == "x11" {
             return Ok((hole, false));
         }
-        if unsafe { SDL_GetWindowFlags(canvas.raw) } & SDL_WINDOW_TRANSPARENT == 0 {
+        if !canvas.transparent() {
             return Ok((None, false));
         }
         let size = canvas.pixel_size();
@@ -174,27 +174,15 @@ impl Guard {
         #[cfg(target_os = "windows")]
         crate::native::set_controller_region(canvas, size, pixels)?;
         #[cfg(not(target_os = "windows"))]
-        unsafe {
-            if let Some(hole) = pixels {
-                let surface = SDL_CreateSurface(size[0], size[1], SDL_PIXELFORMAT_RGBA32);
-                if surface.is_null() {
-                    return Err(crate::sdl::error());
-                }
-                let result = (|| {
-                    let opaque = SDL_MapSurfaceRGBA(surface, 255, 255, 255, 255);
-                    let transparent = SDL_MapSurfaceRGBA(surface, 0, 0, 0, 0);
-                    check(SDL_FillSurfaceRect(surface, ptr::null(), transparent))?;
-                    for area in outside(size, Some(hole)) {
-                        check(SDL_FillSurfaceRect(surface, &area.sdl(), opaque))?;
-                    }
-                    // SDL applies the mask to both rendering and native hit testing.
-                    check(SDL_SetWindowShape(canvas.raw, surface))
-                })();
-                SDL_DestroySurface(surface);
-                result?;
-            } else {
-                check(SDL_SetWindowShape(canvas.raw, ptr::null_mut()))?;
-            }
+        {
+            // SDL applies this mask to both rendering and native hit testing.
+            let opaque_regions = pixels.map(|hole| {
+                outside(size, Some(hole))
+                    .into_iter()
+                    .map(Rect::sdl)
+                    .collect::<Vec<_>>()
+            });
+            canvas.set_opaque_shape_regions(size, opaque_regions.as_deref())?;
         }
         self.last = Some((size, pixels));
         Ok((hole, true))
