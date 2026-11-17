@@ -302,14 +302,7 @@ impl Ink {
                 color: frame.color.revision,
                 history: app.history.ink_revision(),
                 white: if renderer.extended {
-                    unsafe {
-                        SDL_GetFloatProperty(
-                            SDL_GetRendererProperties(renderer.raw),
-                            SDL_PROP_RENDERER_SDR_WHITE_POINT_FLOAT,
-                            1.,
-                        )
-                        .max(f32::MIN_POSITIVE)
-                    }
+                    renderer.sdr_white_point().max(f32::MIN_POSITIVE)
                 } else {
                     0.
                 },
@@ -386,21 +379,11 @@ fn with_color_scale(
     scale: f32,
     draw: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
-    if scale == 1. {
-        return draw();
-    }
-    unsafe {
-        let mut previous = 1.;
-        check(SDL_GetRenderColorScale(renderer.raw, &mut previous))?;
-        check(SDL_SetRenderColorScale(renderer.raw, previous * scale))?;
-        let result = draw();
-        let restore = check(SDL_SetRenderColorScale(renderer.raw, previous));
-        result.and(restore)
-    }
+    renderer.with_color_scale(scale, draw)
 }
 
-fn set_scale(renderer: &Renderer, [x, y]: [f32; 2]) -> Result<(), String> {
-    unsafe { check(SDL_SetRenderScale(renderer.raw, x, y)) }
+fn set_scale(renderer: &Renderer, scale: [f32; 2]) -> Result<(), String> {
+    renderer.set_render_scale(scale)
 }
 
 fn dirty_rect(frame: &Frame<'_>, bounds: Bounds) -> Option<SDL_Rect> {
@@ -482,7 +465,7 @@ impl StrokePainter {
         if let Some(region) = damage.and_then(|bounds| dirty_rect(frame, bounds)) {
             // Set the clip in device pixels, including at fractional scale.
             set_scale(renderer, [1.; 2])?;
-            unsafe { check(SDL_SetRenderClipRect(renderer.raw, &region))? };
+            renderer.try_set_clip_rect(Some(&region))?;
             let rect = SDL_FRect {
                 x: region.x as f32,
                 y: region.y as f32,
@@ -498,7 +481,7 @@ impl StrokePainter {
             };
             let result = clear_rect(renderer, rect)
                 .and_then(|()| self.history(frame, app, 0, Some(bounds), white));
-            let reset_clip = unsafe { check(SDL_SetRenderClipRect(renderer.raw, ptr::null())) };
+            let reset_clip = renderer.try_set_clip_rect(None);
             result.and(reset_clip)?;
         }
         Ok(())
@@ -730,7 +713,7 @@ impl StrokePainter {
                 // apply the marker's opacity only once, after intersections.
                 self.queued = 0;
                 renderer.with_target(mask, || {
-                    unsafe { check(SDL_SetRenderScale(renderer.raw, 1., 1.))? };
+                    renderer.set_render_scale([1., 1.])?;
                     renderer.clear([1., 1., 1., 0.])?;
                     let visible = |a, b| {
                         region.is_none_or(|region| {
@@ -852,7 +835,7 @@ fn submit(
 ) -> Result<(), String> {
     for batch in indices.chunks(GEOMETRY_BATCH) {
         if *queued + batch.len() > GEOMETRY_BATCH {
-            unsafe { check(SDL_FlushRenderer(renderer.raw))? };
+            renderer.flush()?;
             *queued = 0;
         }
         renderer.geometry(texture, vertices, batch)?;
@@ -1272,9 +1255,7 @@ mod tests {
         let mut frame = canvas.frame();
         frame.scale = [2.; 2];
         frame.aa = 0.4;
-        unsafe {
-            assert!(SDL_SetRenderScale(canvas.renderer.raw, 2., 2.));
-        }
+        canvas.renderer.set_render_scale([2., 2.]).unwrap();
         canvas.renderer.clear([0.; 4]).unwrap();
         ink.committed(&frame, &mut app).unwrap();
         assert!(canvas.pixel(100, 32)[3] > 120);
