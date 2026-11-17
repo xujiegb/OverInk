@@ -7,10 +7,7 @@ use crate::{
 };
 use lcms2_sys as cms;
 use std::ptr;
-use std::{
-    ffi::c_void,
-    hash::{Hash, Hasher},
-};
+use std::hash::{Hash, Hasher};
 /// Convert a captured RGBA8 image using the embedded input ICC profile.
 ///
 /// Little CMS allows in-place RGBA8 transforms; the profile and transform stay
@@ -67,18 +64,6 @@ const SYSTEM_SRGB: Text = text(
     "sRGB 表面 / 系統合成",
 );
 
-fn query_profile(window: &Window, size: &mut usize) -> *mut c_void {
-    unsafe {
-        let profile = SDL_GetWindowICCProfile(window.raw, size);
-        if profile.is_null() {
-            // An ICC profile is optional. Do not leave this error behind for
-            // a later SDL operation that may fail without setting its own.
-            SDL_ClearError();
-        }
-        profile
-    }
-}
-
 impl Default for ColorManager {
     fn default() -> Self {
         Self {
@@ -107,25 +92,20 @@ impl ColorManager {
         if crate::sdl::driver() != "x11" {
             return;
         }
+        let Some(profile) = window.icc_profile() else {
+            self.status = text(
+                "X11 uses sRGB when an ICC profile is unavailable",
+                "X11 未找到 ICC 配置文件，按 sRGB 显示",
+                "X11 找不到 ICC 色彩描述檔，以 sRGB 顯示",
+            );
+            return;
+        };
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        profile.hash(&mut hash);
+        self.revision = hash.finish();
+
         unsafe {
-            let mut size = 0;
-            let data = query_profile(window, &mut size);
-            if data.is_null() || size == 0 || size > 16 * 1024 * 1024 {
-                if !data.is_null() {
-                    SDL_free(data)
-                }
-                self.status = text(
-                    "X11 uses sRGB when an ICC profile is unavailable",
-                    "X11 未找到 ICC 配置文件，按 sRGB 显示",
-                    "X11 找不到 ICC 色彩描述檔，以 sRGB 顯示",
-                );
-                return;
-            }
-            let mut hash = std::collections::hash_map::DefaultHasher::new();
-            std::slice::from_raw_parts(data.cast::<u8>(), size).hash(&mut hash);
-            self.revision = hash.finish();
-            let output = cms::cmsOpenProfileFromMem(data, size as u32);
-            SDL_free(data);
+            let output = cms::cmsOpenProfileFromMem(profile.as_ptr().cast(), profile.len() as u32);
             if output.is_null() {
                 self.status = text(
                     "Invalid ICC profile. X11 is using sRGB.",
@@ -135,6 +115,15 @@ impl ColorManager {
                 return;
             }
             let input = cms::cmsCreate_sRGBProfile();
+            if input.is_null() {
+                cms::cmsCloseProfile(output);
+                self.status = text(
+                    "ICC conversion failed. X11 is using sRGB.",
+                    "ICC 转换失败，X11 按 sRGB 显示",
+                    "ICC 轉換失敗，X11 以 sRGB 顯示",
+                );
+                return;
+            }
             self.transform = cms::cmsCreateTransform(
                 input,
                 cms::PixelFormat::RGB_FLT,
@@ -222,22 +211,22 @@ pub fn display_sample_to_srgb(window: &Window, rgb: [f32; 3]) -> crate::color::I
         rgb,
         space: crate::color::Space::Srgb,
     };
+    let Some(profile_data) = window.icc_profile() else {
+        return result;
+    };
     unsafe {
-        let mut size = 0;
-        let data = query_profile(window, &mut size);
-        if data.is_null() {
-            return result;
-        }
-        let profile = if size > 0 && size <= 16 * 1024 * 1024 {
-            cms::cmsOpenProfileFromMem(data, size as u32)
-        } else {
-            ptr::null_mut()
-        };
-        SDL_free(data);
+        let profile = cms::cmsOpenProfileFromMem(
+            profile_data.as_ptr().cast(),
+            profile_data.len() as u32,
+        );
         if profile.is_null() {
             return result;
         }
         let srgb = cms::cmsCreate_sRGBProfile();
+        if srgb.is_null() {
+            cms::cmsCloseProfile(profile);
+            return result;
+        }
         let transform = cms::cmsCreateTransform(
             profile,
             cms::PixelFormat::RGB_FLT,
