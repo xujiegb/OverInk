@@ -181,10 +181,7 @@ impl Wayland {
     }
     fn set(&mut self, w: &Window, pass: bool, hole: Option<Rect>) -> Result<(), String> {
         unsafe {
-            let surface = w
-                .wayland_surface()
-                .ok_or("No Wayland surface")?
-                .as_ptr();
+            let surface = w.wayland_surface().ok_or("No Wayland surface")?.as_ptr();
             // wl_region coordinates are surface-local logical units, not
             // physical pixels like XShape rectangles.
             let size = w.size().map(|v| v.ceil() as i32);
