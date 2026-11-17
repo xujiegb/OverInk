@@ -30,9 +30,7 @@ fn scaled_pixels(
             return Err("Invalid screen coordinate or window size".into());
         }
         let coordinate = (local[i] * physical[i] as f32 / logical[i]).floor();
-        if !coordinate.is_finite()
-            || !(i32::MIN as f32..2_147_483_648.).contains(&coordinate)
-        {
+        if !coordinate.is_finite() || !(i32::MIN as f32..2_147_483_648.).contains(&coordinate) {
             return Err("Screen coordinate is out of range".into());
         }
         pixels[i] = coordinate as i32;
