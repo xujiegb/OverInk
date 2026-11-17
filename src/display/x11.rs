@@ -105,9 +105,10 @@ impl Randr {
             let mut queried = false;
             let mut failed = false;
             for screen in 0..count(display) {
-                let Some(list) =
-                    OwnedRandr::from_native(resources(display, root(display, screen)), *free_resources)
-                else {
+                let Some(list) = OwnedRandr::from_native(
+                    resources(display, root(display, screen)),
+                    *free_resources,
+                ) else {
                     failed = true;
                     continue;
                 };
@@ -121,7 +122,8 @@ impl Randr {
                             failed = true;
                             continue;
                         };
-                        if info.data().mode != 0 && info.data().width > 0 && info.data().height > 0 {
+                        if info.data().mode != 0 && info.data().width > 0 && info.data().height > 0
+                        {
                             if let (Ok(width), Ok(height)) = (
                                 i32::try_from(info.data().width),
                                 i32::try_from(info.data().height),
