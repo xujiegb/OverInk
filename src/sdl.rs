@@ -137,11 +137,76 @@ pub fn desktop_display_mode(id: u32) -> Option<([i32; 2], f32)> {
     }
 }
 
+/// Read an SDL finger event only for a matching SDL event type.
+pub fn finger_event(event: &SDL_Event) -> Option<SDL_TouchFingerEvent> {
+    let ty = event_type(event);
+    if matches!(
+        ty,
+        SDL_EVENT_FINGER_DOWN
+            | SDL_EVENT_FINGER_MOTION
+            | SDL_EVENT_FINGER_UP
+            | SDL_EVENT_FINGER_CANCELED
+    ) {
+        Some(unsafe { event.tfinger })
+    } else {
+        None
+    }
+}
+
+/// Returns the owning SDL window for an event after checking its union tag.
+pub fn event_window(event: &SDL_Event, ty: SDL_EventType) -> Option<SDL_WindowID> {
+    unsafe {
+        let window = match ty {
+            SDL_EVENT_MOUSE_BUTTON_DOWN | SDL_EVENT_MOUSE_BUTTON_UP => event.button.windowID,
+            SDL_EVENT_MOUSE_MOTION => event.motion.windowID,
+            SDL_EVENT_MOUSE_WHEEL => event.wheel.windowID,
+            SDL_EVENT_FINGER_DOWN
+            | SDL_EVENT_FINGER_MOTION
+            | SDL_EVENT_FINGER_UP
+            | SDL_EVENT_FINGER_CANCELED => event.tfinger.windowID,
+            SDL_EVENT_PEN_PROXIMITY_IN | SDL_EVENT_PEN_PROXIMITY_OUT => event.pproximity.windowID,
+            SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP => event.ptouch.windowID,
+            SDL_EVENT_PEN_MOTION => event.pmotion.windowID,
+            SDL_EVENT_PEN_AXIS => event.paxis.windowID,
+            SDL_EVENT_KEY_DOWN | SDL_EVENT_KEY_UP => event.key.windowID,
+            SDL_EVENT_WINDOW_FOCUS_GAINED
+            | SDL_EVENT_WINDOW_FOCUS_LOST
+            | SDL_EVENT_WINDOW_MOUSE_LEAVE => event.window.windowID,
+            SDL_EVENT_TEXT_INPUT => event.text.windowID,
+            SDL_EVENT_TEXT_EDITING => event.edit.windowID,
+            _ => return None,
+        };
+        (window.0 != 0).then_some(window)
+    }
+}
+
+/// Query indirect touch device capability via SDL's native input API.
+pub fn indirect_touch_device(device: SDL_TouchID) -> bool {
+    unsafe {
+        SDL_WasInit(SDL_INIT_VIDEO) != 0
+            && matches!(
+                SDL_GetTouchDeviceType(device),
+                SDL_TOUCH_DEVICE_INDIRECT_ABSOLUTE | SDL_TOUCH_DEVICE_INDIRECT_RELATIVE
+            )
+    }
+}
+
+/// Sleep with SDL's precise delay without exposing raw native calls to users.
+pub fn delay_precise(nanoseconds: u64) {
+    unsafe { SDL_DelayPrecise(nanoseconds) }
+}
+
 pub struct Window {
     pub raw: *mut SDL_Window,
     pub id: SDL_WindowID,
 }
 impl Window {
+    pub fn set_always_on_top(&self, enabled: bool) {
+        unsafe {
+            let _ = SDL_SetWindowAlwaysOnTop(self.raw, enabled);
+        }
+    }
+
     pub fn raise(&self) {
         unsafe {
             let window = SDL_GetWindowFromID(self.id);
