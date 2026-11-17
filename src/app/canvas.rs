@@ -132,14 +132,12 @@ impl Canvas {
                 if let Some(id) = self.output
                     && let Some([x, y, w, h]) = self.bounds
                     && driver() != "wayland"
+                    && (self.window.position().ok() != Some([x, y])
+                        || self.window.size() != [w as f32, h as f32])
                 {
-                    if self.window.position().ok() != Some([x, y])
-                        || self.window.size() != [w as f32, h as f32]
-                    {
-                        self.window.place_on_display(id, true).map_err(|error| {
-                            format!("Positioning the drawing canvas failed ({error})")
-                        })?;
-                    }
+                    self.window.place_on_display(id, true).map_err(|error| {
+                        format!("Positioning the drawing canvas failed ({error})")
+                    })?;
                 }
                 self.window.set_always_on_top(true);
                 self.keep_toolbar_above(toolbar);
