@@ -18,6 +18,9 @@ use zbus::{Connection, OwnedObjectPath, OwnedVariant, Proxy, Structure, Variant}
 
 type PortalResult<T> = Result<Option<T>, String>;
 
+/// Owned full-screen Portal image conversion, transferred to the capture worker.
+pub(crate) type ScreenshotFallback = Box<dyn FnOnce(Image) -> Result<Image, String> + Send>;
+
 pub struct SystemJob<T = InkColor> {
     receiver: mpsc::Receiver<PortalResult<T>>,
     cancel: async_channel::Sender<()>,
@@ -61,7 +64,7 @@ impl SystemJob<Image> {
         window: &crate::sdl::Window,
         region: egui::Rect,
         canvas: [f32; 2],
-        portal_fallback: Option<Box<dyn FnOnce(Image) -> Result<Image, String> + Send>>,
+        portal_fallback: Option<ScreenshotFallback>,
     ) -> Result<Self, String> {
         static NEXT_SHELL_REQUEST: AtomicU64 = AtomicU64::new(1);
         let request_id = format!(
