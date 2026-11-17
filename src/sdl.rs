@@ -487,6 +487,7 @@ pub fn poll_event(event: &mut SDL_Event) -> bool {
 }
 
 /// Remove the leftover SDL quit event when dismissing a temporary guide.
+#[cfg(target_os = "linux")]
 pub fn flush_quit_event() {
     unsafe { SDL_FlushEvent(SDL_EVENT_QUIT.0) };
 }
@@ -589,6 +590,7 @@ impl Window {
         }
     }
 
+    #[cfg(target_os = "linux")]
     pub fn set_size(&self, width: i32, height: i32) -> Result<(), String> {
         unsafe { check(SDL_SetWindowSize(self.raw, width, height)) }
     }
@@ -826,6 +828,7 @@ impl Window {
 
     /// SDL's border query can fail on window managers without server-side
     /// decoration. Preserve the undecorated default in that case.
+    #[cfg(not(target_os = "windows"))]
     pub fn border_size(&self) -> [i32; 4] {
         unsafe {
             let (mut top, mut left, mut bottom, mut right) = (0, 0, 0, 0);
