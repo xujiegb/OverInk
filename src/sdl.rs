@@ -873,6 +873,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tagged_event_accessors_reject_other_union_members() {
+        let mut event = SDL_Event::default();
+        event.r#type = SDL_EVENT_MOUSE_MOTION.0;
+        assert!(mouse_motion_event(&event).is_some());
+        assert!(mouse_button_event(&event).is_none());
+        assert!(pen_touch_event(&event).is_none());
+        assert!(pen_motion_event(&event).is_none());
+        assert!(pen_proximity_event(&event).is_none());
+        assert!(key_event(&event).is_none());
+
+        event.r#type = SDL_EVENT_PEN_MOTION.0;
+        assert!(pen_motion_event(&event).is_some());
+        assert!(mouse_motion_event(&event).is_none());
+
+        event.r#type = SDL_EVENT_KEY_DOWN.0;
+        assert!(key_event(&event).is_some());
+        assert!(pen_motion_event(&event).is_none());
+    }
+
+    #[test]
     fn x11_is_default_and_wayland_is_opt_in() {
         assert_eq!(startup_driver(false, false, true), Some(c"wayland"));
         assert_eq!(startup_driver(true, false, true), Some(c"x11"));
