@@ -885,6 +885,47 @@ impl Window {
     }
     /// Copy SDL's optional ICC profile into Rust-owned memory and release
     /// SDL's native allocation before returning it to the color-management code.
+    /// Borrow the Win32 HWND backing this live SDL window.
+    #[cfg(target_os = "windows")]
+    pub fn win32_hwnd(&self) -> Option<std::ptr::NonNull<c_void>> {
+        // SAFETY: SDL owns this live window and exposes its native handle via
+        // the window property list. The caller must not outlive `self`.
+        unsafe {
+            std::ptr::NonNull::new(SDL_GetPointerProperty(
+                SDL_GetWindowProperties(self.raw),
+                SDL_PROP_WINDOW_WIN32_HWND_POINTER,
+                ptr::null_mut(),
+            ))
+        }
+    }
+
+    /// Borrow the native X11 Display for the lifetime of the SDL window.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    pub fn x11_display(&self) -> Option<std::ptr::NonNull<c_void>> {
+        // SAFETY: The X11 display pointer is held by SDL's video driver and
+        // stays valid while the corresponding SDL window remains live.
+        unsafe {
+            std::ptr::NonNull::new(SDL_GetPointerProperty(
+                SDL_GetWindowProperties(self.raw),
+                SDL_PROP_WINDOW_X11_DISPLAY_POINTER,
+                ptr::null_mut(),
+            ))
+        }
+    }
+
+    /// Return the X11 drawable ID associated with this window.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    pub fn x11_window_number(&self) -> u64 {
+        // SAFETY: Reading a number property does not transfer ownership.
+        unsafe {
+            SDL_GetNumberProperty(
+                SDL_GetWindowProperties(self.raw),
+                SDL_PROP_WINDOW_X11_WINDOW_NUMBER,
+                0,
+            ) as u64
+        }
+    }
+
     pub fn icc_profile(&self) -> Option<Vec<u8>> {
         unsafe {
             let mut size = 0;
