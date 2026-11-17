@@ -258,7 +258,9 @@ impl App {
                     for (index, (icon, label, action)) in actions.into_iter().enumerate() {
                         let enabled = self.history_buttons()[index];
                         if ui
-                            .add_enabled_ui(enabled, |ui| toolbar::rail_button(ui, icon, label, false))
+                            .add_enabled_ui(enabled, |ui| {
+                                toolbar::rail_button(ui, icon, label, false)
+                            })
                             .inner
                             .clicked()
                         {
