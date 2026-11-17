@@ -52,33 +52,41 @@ impl SystemJob<Image> {
     }
 }
 impl SystemJob<Image> {
-    /// GNOME Shell's OverInk extension captures the rectangle the user drew
-    /// in OverInk. This never launches GNOME's screenshot chooser.
+    /// GNOME Shell captures OverInk's selected rectangle, not a Shell picker.
+    /// The same D-Bus connection sends CancelCapture when the UI is cancelled.
     #[cfg(target_os = "linux")]
     pub fn shell_area(
         window: &crate::sdl::Window,
         region: egui::Rect,
         canvas: [f32; 2],
     ) -> Result<Self, String> {
+        static NEXT_SHELL_REQUEST: AtomicU64 = AtomicU64::new(1);
+        let request_id = format!(
+            "overink_{}_{}",
+            std::process::id(),
+            NEXT_SHELL_REQUEST.fetch_add(1, Ordering::Relaxed)
+        );
         let mut x = 0;
         let mut y = 0;
         let positioned = crate::sdl::driver() != "wayland"
             && unsafe { crate::sdl::SDL_GetWindowPosition(window.raw, &mut x, &mut y) };
-        // The compositor may manage multiple OverInk canvases on XWayland.
-        // Include SDL's actual window origin to identify the selected canvas.
-        let request = (
-            region.left() as f64,
-            region.top() as f64,
-            region.right() as f64,
-            region.bottom() as f64,
-            canvas[0] as f64,
-            canvas[1] as f64,
-            positioned,
-            f64::from(x),
-            f64::from(y),
-        );
         Self::spawn("overink-gnome-shell-capture", move |cancelled| {
-            let path: String = zbus::block_on(async {
+            let request = (
+                request_id.as_str(),
+                region.left() as f64,
+                region.top() as f64,
+                region.right() as f64,
+                region.bottom() as f64,
+                canvas[0] as f64,
+                canvas[1] as f64,
+                positioned,
+                f64::from(x),
+                f64::from(y),
+            );
+            let path: Option<String> = zbus::block_on(async {
+                if cancelled.is_closed() {
+                    return Ok(None);
+                }
                 let connection = Connection::session().await?;
                 let bridge = Proxy::new(
                     &connection,
@@ -87,11 +95,42 @@ impl SystemJob<Image> {
                     "org.overink.Overlay",
                 )
                 .await?;
-                bridge.call("CaptureArea", &request).await
+                if cancelled.is_closed() {
+                    return Ok(None);
+                }
+
+                let mut capture =
+                    std::pin::pin!(bridge.call::<_, _, String>("CaptureArea", &request));
+                let first = future::or(
+                    async { Some(capture.as_mut().await) },
+                    async {
+                        let _ = cancelled.recv().await;
+                        None
+                    },
+                )
+                .await;
+                match first {
+                    Some(response) => response.map(Some),
+                    None => {
+                        // Cancellation is scoped by the D-Bus unique sender and
+                        // request ID: another app cannot cancel a different job.
+                        let _ = bridge
+                            .call::<_, _, ()>("CancelCapture", &(request_id.as_str(),))
+                            .await;
+                        // Keep the original call alive to consume a late path
+                        // and unlink its PNG in case capture already completed.
+                        Ok(capture.await.ok())
+                    }
+                }
             })
-            .map_err(|error| format!(
-                "GNOME capture failed: {error}. Update and enable OverInk Overlay (revision 3), then log out and back in."
-            ))?;
+            .map_err(|error| {
+                format!(
+                    "GNOME capture failed: {error}. Enable OverInk Overlay (revision 4) in GNOME Wayland. XWayland alone cannot capture native Wayland windows."
+                )
+            })?;
+            let Some(path) = path else {
+                return Ok(None);
+            };
             let file = PathBuf::from(path);
             let expected = std::env::temp_dir()
                 .canonicalize()
@@ -109,8 +148,8 @@ impl SystemJob<Image> {
             {
                 return Err("GNOME capture returned an unexpected temporary file".into());
             }
-            // The Shell extension creates a private 0600 file. Always clean it up
-            // after decoding, including on cancellation or image decoding errors.
+            // A cancelled request can race with a completed D-Bus response.
+            // Always remove the compositor's PNG, even if no longer needed.
             let result = if cancelled.is_closed() {
                 Ok(None)
             } else {
