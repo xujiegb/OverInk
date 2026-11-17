@@ -302,18 +302,9 @@ pub fn keep_controller_above(canvas: &Window, controller: &Window, _native: &Pas
 
 pub fn show_canvas(canvas: &Window, controller: &Window, shown: bool) -> Result<(), String> {
     if crate::sdl::driver() == "wayland" {
-        unsafe {
-            // Transient toplevels stay above the fullscreen drawing surface.
-            // Detach before hiding it so Hide cannot also hide the controls.
-            let parent = if shown {
-                canvas.raw
-            } else {
-                std::ptr::null_mut()
-            };
-            if SDL_GetWindowParent(controller.raw) != parent {
-                check(SDL_SetWindowParent(controller.raw, parent))?;
-            }
-        }
+        // Transient toplevels stay above the fullscreen drawing surface.
+        // Detach before hiding it so Hide cannot also hide the controls.
+        controller.set_parent(shown.then_some(canvas))?;
     }
     canvas.show(shown)
 }
@@ -378,15 +369,10 @@ pub fn controller_bounds(canvas: &Window, controller: &Window) -> Option<[f32; 4
         ])
     }
     #[cfg(not(target_os = "windows"))]
-    unsafe {
-        let (mut x, mut y, mut cx, mut cy) = (0, 0, 0, 0);
-        if !SDL_GetWindowPosition(canvas.raw, &mut x, &mut y)
-            || !SDL_GetWindowPosition(controller.raw, &mut cx, &mut cy)
-        {
-            return None;
-        }
-        let (mut top, mut left, mut bottom, mut right) = (0, 0, 0, 0);
-        SDL_GetWindowBordersSize(controller.raw, &mut top, &mut left, &mut bottom, &mut right);
+    {
+        let [x, y] = canvas.position().ok()?;
+        let [cx, cy] = controller.position().ok()?;
+        let [top, left, bottom, right] = controller.border_size();
         let size = controller.size();
         Some([
             (cx - x - left) as f32,
