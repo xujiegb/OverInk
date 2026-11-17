@@ -292,17 +292,37 @@ class CaptureBridge {
             invocation.return_value(new GLib.Variant('(s)', [file.get_path()]));
             completed = true;
         } finally {
-            state.cancelAfterPaint?.();
-            state.dismissDialog?.();
-            for (const [actor, opacity] of hiddenActors)
-                actor.opacity = opacity;
-            if (io)
-                io.close(null);
-            if (!completed && file)
-                file.delete(null);
-            if (this._pending === state)
-                this._pending = null;
-            this._busy = false;
+            // A destroyed actor or a failed stream close must never leave the
+            // screenshot service permanently busy or a PNG file orphaned.
+            try {
+                state.cancelAfterPaint?.();
+                state.dismissDialog?.();
+                for (const [actor, opacity] of hiddenActors) {
+                    try {
+                        actor.opacity = opacity;
+                    } catch (error) {
+                        logError(error, 'OverInk restore screenshot actor');
+                    }
+                }
+                if (io) {
+                    try {
+                        io.close(null);
+                    } catch (error) {
+                        logError(error, 'OverInk close screenshot stream');
+                    }
+                }
+                if (!completed && file) {
+                    try {
+                        file.delete(null);
+                    } catch (error) {
+                        logError(error, 'OverInk delete cancelled PNG');
+                    }
+                }
+            } finally {
+                if (this._pending === state)
+                    this._pending = null;
+                this._busy = false;
+            }
         }
     }
 }
