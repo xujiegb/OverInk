@@ -154,6 +154,10 @@ pub fn finger_event(event: &SDL_Event) -> Option<SDL_TouchFingerEvent> {
 
 /// Returns the owning SDL window for an event after checking its union tag.
 pub fn event_window(event: &SDL_Event, ty: SDL_EventType) -> Option<SDL_WindowID> {
+    // Never use a caller-supplied tag to read a different SDL union member.
+    if event_type(event) != ty {
+        return None;
+    }
     unsafe {
         let window = match ty {
             SDL_EVENT_MOUSE_BUTTON_DOWN | SDL_EVENT_MOUSE_BUTTON_UP => event.button.windowID,
@@ -1638,6 +1642,14 @@ mod tests {
         event.r#type = SDL_EVENT_KEY_DOWN.0;
         assert!(key_event(&event).is_some());
         assert!(pen_motion_event(&event).is_none());
+    }
+
+    #[test]
+    fn event_window_rejects_a_mismatched_union_tag() {
+        let mut event = SDL_Event::default();
+        event.r#type = SDL_EVENT_MOUSE_MOTION.0;
+        assert_eq!(event_window(&event, SDL_EVENT_KEY_DOWN), None);
+        assert_eq!(event_window(&event, SDL_EVENT_TEXT_EDITING), None);
     }
 
     #[test]
