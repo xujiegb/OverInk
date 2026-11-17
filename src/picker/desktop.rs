@@ -135,7 +135,7 @@ mod x11 {
         unsafe {
             let lib = library()?;
             let d = display(window)?;
-            let id = window.x11_window_number() as c_ulong;
+            let id = window.x11_window_number();
             let geometry: Symbol<
                 unsafe extern "C" fn(
                     *mut c_void,
