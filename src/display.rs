@@ -418,6 +418,41 @@ mod tests {
     };
 
     #[test]
+    fn opening_legacy_page_discards_parked_and_unmatched_pages() {
+        let path = std::env::temp_dir().join(format!(
+            "overink-legacy-replace-{}.json",
+            std::process::id()
+        ));
+        let mut pages = Pages::new(Some(10));
+        let mut history = History::default();
+        pages.sync(
+            &mut history,
+            &[screen(10, "Left", 0), screen(20, "Right", 800)],
+        );
+        draw(&mut history, 10.);
+        pages.switch(&mut history, 20);
+        draw(&mut history, 20.);
+        assert!(!pages.parked.is_empty());
+        pages.unmatched.insert(
+            DisplayKey {
+                name: "Detached".into(),
+                origin: [1600, 0],
+                slot: 0,
+            },
+            Document::default(),
+        );
+        let mut legacy = History::default();
+        draw(&mut legacy, 99.);
+        fs::write(&path, serde_json::to_vec(legacy.document()).unwrap()).unwrap();
+
+        assert_eq!(pages.load(&mut history, &path, false).unwrap(), 0);
+        assert!(pages.parked.is_empty());
+        assert!(pages.unmatched.is_empty());
+        assert_eq!(history.strokes()[0].points[0].x, 99.);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn session_writer_enforces_its_limit_when_flushed() {
         let mut bytes = Vec::new();
         let mut writer = BufWriter::new(SessionWriter {
