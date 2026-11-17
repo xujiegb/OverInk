@@ -1,3 +1,5 @@
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use super::{Window, error};
 use sdl3_sys::dialog::*;
 use std::{
@@ -66,22 +68,6 @@ impl FileDialog {
     }
 
     pub fn open(&mut self, kind: DialogKind, window: &Window, location: Option<&Path>) -> bool {
-        // This callback is only passed to SDL. Its result list and strings
-        // are borrowed from SDL for the duration of the call.
-        extern "C" fn chosen(user: *mut c_void, files: *const *const c_char, _filter: c_int) {
-            complete(user.addr(), || {
-                if files.is_null() {
-                    return Err(error());
-                }
-                // SDL's file list has at least its null terminator.
-                let file = unsafe { *files };
-                if file.is_null() {
-                    return Ok(None);
-                }
-                path_from_c(unsafe { CStr::from_ptr(file) }).map(Some)
-            });
-        }
-
         let Some(id) = self.begin(kind) else {
             return false;
         };
@@ -97,6 +83,10 @@ impl FileDialog {
         };
         // SDL copies the initial location during the call. The filter must
         // remain valid until the callback and uses static storage.
+        // SAFETY: The user data is an opaque integer request ID, not a
+        // dereferenceable pointer. SDL borrows the initial C string during
+        // this call. PNG_FILTER is static and valid through any callback,
+        // and the parent window is either live or intentionally null.
         unsafe {
             match kind {
                 DialogKind::Font => SDL_ShowOpenFileDialog(
@@ -137,6 +127,25 @@ impl Drop for FileDialog {
     }
 }
 
+/// SDL owns `files` only until the callback returns. Copy its selected
+/// path into an owned PathBuf before publishing the result to the UI thread.
+extern "C" fn chosen(user: *mut c_void, files: *const *const c_char, _filter: c_int) {
+    complete(user.addr(), || {
+        if files.is_null() {
+            return Err(error());
+        }
+        // SAFETY: SDL guarantees that a non-null file list points to at
+        // least one element, terminated by a null pointer, for this callback.
+        let file = unsafe { *files };
+        if file.is_null() {
+            return Ok(None);
+        }
+        // SAFETY: SDL guarantees each selected path is a NUL-terminated
+        // UTF-8 string that remains live until this callback returns.
+        path_from_c(unsafe { CStr::from_ptr(file) }).map(Some)
+    });
+}
+
 fn complete(id: usize, value: impl FnOnce() -> ResultPath) {
     let mut callbacks = callbacks();
     let Some(result) = callbacks.results.get_mut(&id) else {
@@ -149,6 +158,8 @@ fn complete(id: usize, value: impl FnOnce() -> ResultPath) {
 
 pub fn downloads() -> Option<PathBuf> {
     use sdl3_sys::filesystem::{SDL_FOLDER_DOWNLOADS, SDL_GetUserFolder};
+    // SAFETY: SDL returns an optional, SDL-managed NUL-terminated path.
+    // Its storage remains valid while SDL is initialized; do not free it.
     unsafe {
         let path = SDL_GetUserFolder(SDL_FOLDER_DOWNLOADS);
         if path.is_null() {
@@ -224,6 +235,28 @@ mod tests {
             next.poll(),
             Some((DialogKind::ScreenshotFolder, Ok(None)))
         ));
+    }
+
+    #[test]
+    fn native_callback_cancellation_is_owned_and_consumed_once() {
+        let mut dialog = FileDialog::default();
+        let id = dialog.begin(DialogKind::Font).unwrap();
+        let list = [ptr::null()];
+        chosen(ptr::without_provenance_mut(id), list.as_ptr(), -1);
+        assert!(matches!(dialog.poll(), Some((DialogKind::Font, Ok(None)))));
+        assert!(dialog.poll().is_none());
+    }
+
+    #[test]
+    fn native_callback_error_returns_a_result_not_a_pending_dialog() {
+        let mut dialog = FileDialog::default();
+        let id = dialog.begin(DialogKind::ScreenshotFolder).unwrap();
+        chosen(ptr::without_provenance_mut(id), ptr::null(), -1);
+        assert!(matches!(
+            dialog.poll(),
+            Some((DialogKind::ScreenshotFolder, Err(_)))
+        ));
+        assert!(!dialog.pending());
     }
 
     #[test]
