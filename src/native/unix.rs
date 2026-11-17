@@ -217,10 +217,28 @@ impl Wayland {
                 }
                 if let Some(hole) = hole {
                     // wl_region.add = opcode 1; wl_region.subtract = opcode 2.
-                    (self.marshal)(p, 1, ptr::null(), (self.version)(p), 0,
-                        0_i32, 0_i32, size[0], size[1]);
-                    (self.marshal)(p, 2, ptr::null(), (self.version)(p), 0,
-                        hole.x, hole.y, hole.w, hole.h);
+                    (self.marshal)(
+                        p,
+                        1,
+                        ptr::null(),
+                        (self.version)(p),
+                        0,
+                        0_i32,
+                        0_i32,
+                        size[0],
+                        size[1],
+                    );
+                    (self.marshal)(
+                        p,
+                        2,
+                        ptr::null(),
+                        (self.version)(p),
+                        0,
+                        hole.x,
+                        hole.y,
+                        hole.w,
+                        hole.h,
+                    );
                 }
                 p
             } else {
