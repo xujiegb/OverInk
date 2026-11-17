@@ -509,6 +509,41 @@ impl Window {
         self.flags() & SDL_WINDOW_HIDDEN != 0
     }
 
+    /// Read the actual SDL window transparency flag.
+    pub fn transparent(&self) -> bool {
+        self.flags() & SDL_WINDOW_TRANSPARENT != 0
+    }
+
+    /// Apply an RGBA shape mask, or clear it when no regions are supplied.
+    /// Own and free the temporary surface even if an SDL operation fails.
+    #[cfg(not(target_os = "windows"))]
+    pub fn set_opaque_shape_regions(
+        &self,
+        size: [i32; 2],
+        opaque_regions: Option<&[SDL_Rect]>,
+    ) -> Result<(), String> {
+        unsafe {
+            let Some(regions) = opaque_regions else {
+                return check(SDL_SetWindowShape(self.raw, ptr::null_mut()));
+            };
+            let surface = SDL_CreateSurface(size[0], size[1], SDL_PIXELFORMAT_RGBA32);
+            if surface.is_null() {
+                return Err(error());
+            }
+            let result = (|| {
+                let opaque = SDL_MapSurfaceRGBA(surface, 255, 255, 255, 255);
+                let transparent = SDL_MapSurfaceRGBA(surface, 0, 0, 0, 0);
+                check(SDL_FillSurfaceRect(surface, ptr::null(), transparent))?;
+                for region in regions {
+                    check(SDL_FillSurfaceRect(surface, region, opaque))?;
+                }
+                check(SDL_SetWindowShape(self.raw, surface))
+            })();
+            SDL_DestroySurface(surface);
+            result
+        }
+    }
+
     fn flags(&self) -> SDL_WindowFlags {
         unsafe { SDL_GetWindowFlags(self.raw) }
     }
