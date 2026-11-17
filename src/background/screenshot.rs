@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use super::Image;
 use crate::{display::Display, sdl::*};
 use egui::Rect;
@@ -68,10 +70,7 @@ impl Job {
                 // portal only when the full-screen crop can be proven safe.
                 let fallback: Option<Box<dyn FnOnce(Image) -> Result<Image, String> + Send>> =
                     if driver() == "x11" && _displays.len() == 1 {
-                        let mut x = 0;
-                        let mut y = 0;
-                        let position = unsafe { SDL_GetWindowPosition(window.raw, &mut x, &mut y) };
-                        let mapping = position.then(|| {
+                        let mapping = window.position().ok().and_then(|[x, y]| {
                             let location = Rect::from_min_size(
                                 egui::pos2(x as f32, y as f32),
                                 egui::vec2(size[0], size[1]),
@@ -84,8 +83,9 @@ impl Job {
                                 None,
                                 Some(location),
                             )
+                            .ok()
                         });
-                        mapping.and_then(Result::ok).map(|(mapped, sizes)| {
+                        mapping.map(|(mapped, sizes)| {
                             Box::new(move |image: Image| {
                                 if !sizes.contains(&[image.width, image.height]) {
                                     return Err(
@@ -117,7 +117,7 @@ impl Job {
                             "Cannot map a multi-display portal screenshot in XWayland".into()
                         );
                     }
-                    if unsafe { SDL_GetHintBoolean(SDL_HINT_VIDEO_WAYLAND_SCALE_TO_DISPLAY, false) }
+                    if wayland_scale_to_display_forced()
                     {
                         return Err(
                             "Cannot map a multi-display portal screenshot with SDL scaling forced"
@@ -139,28 +139,22 @@ impl Job {
                 // Wayland maximization uses the work area on GNOME; that can be
                 // smaller than the display bounds (e.g. the top panel). Map the
                 // canvas into the display before cropping the portal's desktop.
-                let usable = unsafe {
-                    let mut bounds = SDL_Rect::default();
-                    SDL_GetDisplayUsableBounds(SDL_DisplayID(display.id), &mut bounds).then(|| {
-                        Rect::from_min_size(
-                            egui::pos2(bounds.x as f32, bounds.y as f32),
-                            egui::vec2(bounds.w as f32, bounds.h as f32),
-                        )
-                    })
-                };
+                let usable = usable_display_bounds(display.id).map(|[x, y, w, h]| {
+                    Rect::from_min_size(
+                        egui::pos2(x as f32, y as f32),
+                        egui::vec2(w as f32, h as f32),
+                    )
+                });
                 let location = if driver() == "wayland" {
                     // Wayland does not expose a toplevel window's global origin.
                     None
                 } else {
-                    let (mut x, mut y) = (0, 0);
-                    unsafe {
-                        SDL_GetWindowPosition(window.raw, &mut x, &mut y).then(|| {
-                            Rect::from_min_size(
-                                egui::pos2(x as f32, y as f32),
-                                egui::vec2(size[0], size[1]),
-                            )
-                        })
-                    }
+                    window.position().ok().map(|[x, y]| {
+                        Rect::from_min_size(
+                            egui::pos2(x as f32, y as f32),
+                            egui::vec2(size[0], size[1]),
+                        )
+                    })
                 };
                 let (crop, sizes) =
                     crop.for_portal(display, _displays, pixels, density, usable, location)?;
@@ -315,10 +309,8 @@ impl Crop {
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn display_density(display: &Display) -> Option<f32> {
     // SDL's Wayland desktop mode expresses the native pixels per logical point.
-    let mode = unsafe { SDL_GetDesktopDisplayMode(SDL_DisplayID(display.id)).as_ref()? };
-    let density = mode.pixel_density;
-    (mode.w == display.bounds[2]
-        && mode.h == display.bounds[3]
+    let (size, density) = desktop_display_mode(display.id)?;
+    (size == [display.bounds[2], display.bounds[3]]
         && density.is_finite()
         && density > 0.)
         .then_some(density)
