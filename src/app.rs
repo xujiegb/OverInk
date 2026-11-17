@@ -1276,26 +1276,14 @@ fn state_dir() -> PathBuf {
         .join(".local/state/overink")
 }
 fn mouse_released() -> bool {
-    // Cocoa can route the release to a different application during a focus
-    // change. Its global state reflects the physical buttons in that case.
-    #[cfg(target_os = "macos")]
-    unsafe {
-        SDL_GetGlobalMouseState(ptr::null_mut(), ptr::null_mut()).0 == 0
-    }
-    // Other backends keep the input region until SDL sees the matching up.
-    #[cfg(not(target_os = "macos"))]
-    unsafe {
-        SDL_GetMouseState(ptr::null_mut(), ptr::null_mut()).0 == 0
-    }
+    crate::sdl::mouse_buttons_released()
 }
 
 fn wait_for_events(timeout: Duration) {
     if !timeout.is_zero() {
         // Wait without removing the event from SDL's queue.
         let milliseconds = timeout.as_nanos().div_ceil(1_000_000).min(i32::MAX as u128);
-        unsafe {
-            SDL_WaitEventTimeout(ptr::null_mut(), milliseconds as i32);
-        }
+        crate::sdl::wait_for_event(milliseconds as i32);
     }
 }
 
@@ -1342,7 +1330,9 @@ fn handle_screenshot_event(
     if !screenshot.active() {
         return false;
     }
-    if ty == SDL_EVENT_KEY_DOWN && unsafe { !event.key.repeat && event.key.key == SDLK_ESCAPE } {
+    if ty == SDL_EVENT_KEY_DOWN
+        && key_event(event).is_some_and(|key| !key.repeat && key.key == SDLK_ESCAPE)
+    {
         screenshot.cancel();
         for canvas in canvases {
             canvas.dirty = true;
@@ -1559,7 +1549,7 @@ pub fn run(options: Options) -> Result<(), String> {
         // Keep the rest of this event batch modal even if Escape ends the screenshot.
         let screenshot_owns_input = app.screenshot.active();
         let mut event = SDL_Event::default();
-        while unsafe { SDL_PollEvent(&mut event) } {
+        while poll_event(&mut event) {
             let ty = event_type(&event);
             if ty == SDL_EVENT_QUIT {
                 running = false;
@@ -1573,11 +1563,13 @@ pub fn run(options: Options) -> Result<(), String> {
             if (SDL_EVENT_DISPLAY_FIRST..=SDL_EVENT_DISPLAY_LAST).contains(&ty) {
                 topology_dirty = !options.smoke;
                 if ty == SDL_EVENT_DISPLAY_REMOVED {
-                    disconnected.insert(unsafe { event.display.displayID.0 });
+                    if let Some(display) = removed_display_id(&event) {
+                        disconnected.insert(display);
+                    }
                 }
             }
             if (SDL_EVENT_WINDOW_FIRST..=SDL_EVENT_WINDOW_LAST).contains(&ty) {
-                let id = unsafe { event.window.windowID };
+                let id = window_event_id(&event).unwrap_or(SDL_WindowID(0));
                 let bounds_changed = matches!(
                     ty,
                     SDL_EVENT_WINDOW_MOVED
@@ -1659,7 +1651,7 @@ pub fn run(options: Options) -> Result<(), String> {
                 ty,
                 SDL_EVENT_RENDER_TARGETS_RESET | SDL_EVENT_RENDER_DEVICE_RESET
             ) {
-                let id = unsafe { event.render.windowID };
+                let id = render_reset_window_id(&event).unwrap_or(SDL_WindowID(0));
                 for canvas in canvases
                     .iter_mut()
                     .filter(|canvas| id.0 == 0 || canvas.window.id == id)
@@ -1719,7 +1711,8 @@ pub fn run(options: Options) -> Result<(), String> {
             let was_picking = picker.active();
             picker.event(&event, &canvases[active].window);
             let target = if ty == SDL_EVENT_FINGER_CANCELED {
-                let key = unsafe { TouchKey::from(event.tfinger) };
+                let key = touch::key_from_event(&event)
+                    .ok_or("SDL finger cancellation event has no finger data")?;
                 app.touch_page(key)
                     .and_then(|output| canvases.iter().position(|c| c.output == Some(output)))
                     .or_else(|| {
@@ -1759,15 +1752,15 @@ pub fn run(options: Options) -> Result<(), String> {
                 let activates = drawing
                     && canvas.visible
                     && canvas.on_output(options.smoke)
-                    && unsafe {
-                        (ty == SDL_EVENT_MOUSE_BUTTON_DOWN
-                            && event.button.which != SDL_TOUCH_MOUSEID
-                            && event.button.which != SDL_PEN_MOUSEID)
-                            || matches!(
-                                ty,
-                                SDL_EVENT_PEN_DOWN | SDL_EVENT_FINGER_DOWN | SDL_EVENT_KEY_DOWN
-                            )
-                    };
+                    && ((ty == SDL_EVENT_MOUSE_BUTTON_DOWN
+                        && mouse_button_event(&event).is_some_and(|button| {
+                            button.which != SDL_TOUCH_MOUSEID
+                                && button.which != SDL_PEN_MOUSEID
+                        }))
+                        || matches!(
+                            ty,
+                            SDL_EVENT_PEN_DOWN | SDL_EVENT_FINGER_DOWN | SDL_EVENT_KEY_DOWN
+                        ));
                 if activates
                     && app.multi
                     && let Some(output) = canvas.output
@@ -1855,7 +1848,8 @@ pub fn run(options: Options) -> Result<(), String> {
                             .events
                             .iter()
                             .any(|event| matches!(event, egui::Event::PointerButton { .. })));
-                let key = unsafe { event.key };
+                let key =
+                    key_event(&event).ok_or("SDL keyboard event has no keyboard data")?;
                 if from_toolbar
                     && was_editing
                     && !toolbar_claims_keys
@@ -2534,10 +2528,7 @@ pub fn run(options: Options) -> Result<(), String> {
             tooltips.update(&toolbar, &gui, app.language, &toolbar_color);
         }
         if !follow_controller {
-            unsafe {
-                SDL_SyncWindow(toolbar.raw);
-                SDL_PumpEvents();
-            }
+            toolbar.sync_and_pump_events();
             controller_display = toolbar.display_id();
             follow_controller = true;
         }
@@ -2813,7 +2804,7 @@ fn smoke_text_history(app: &mut App, canvas: &mut canvas::Canvas) -> Result<(), 
             },
         );
     }
-    if !unsafe { SDL_TextInputActive(canvas.window.raw) } {
+    if !canvas.window.text_input_active() {
         return Err("Canvas text input smoke failed".into());
     }
     canvas.text_event(
