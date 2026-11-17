@@ -35,7 +35,7 @@ pub fn configure_metal(raw: *mut SDL_Renderer, extended: bool) {
     #[link(name = "CoreGraphics", kind = "framework")]
     unsafe extern "C" {
         static kCGColorSpaceSRGB: *const c_void;
-        fn CGColorSpaceCreateWithName(name: *const c_void) -> *const ColorSpace;
+        fn CGColorSpaceCreateWithName(name: *const c_void) -> *const c_void;
     }
     #[link(name = "CoreFoundation", kind = "framework")]
     unsafe extern "C" {
@@ -50,8 +50,8 @@ pub fn configure_metal(raw: *mut SDL_Renderer, extended: bool) {
         if !extended {
             let srgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
             if !srgb.is_null() {
-                let _: () = msg_send![layer, setColorspace: srgb];
-                CFRelease(srgb.cast());
+                let _: () = msg_send![layer, setColorspace: srgb.cast::<ColorSpace>()];
+                CFRelease(srgb);
             }
         }
     }
