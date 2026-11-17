@@ -171,10 +171,10 @@ impl Content {
                 .display_id()
                 .and_then(crate::sdl::usable_display_bounds),
             parent.position(),
-        ) {
-            if parent_x + x + w > bx + bw && parent_x + left >= bx {
-                x = left;
-            }
+        ) && parent_x + x + w > bx + bw
+            && parent_x + left >= bx
+        {
+            x = left;
         }
         [x, y, w, h]
     }
