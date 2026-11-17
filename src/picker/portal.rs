@@ -59,6 +59,7 @@ impl SystemJob<Image> {
         window: &crate::sdl::Window,
         region: egui::Rect,
         canvas: [f32; 2],
+        portal_fallback: Option<Box<dyn FnOnce(Image) -> Result<Image, String> + Send>>,
     ) -> Result<Self, String> {
         static NEXT_SHELL_REQUEST: AtomicU64 = AtomicU64::new(1);
         let request_id = format!(
@@ -83,7 +84,7 @@ impl SystemJob<Image> {
                 f64::from(x),
                 f64::from(y),
             );
-            let path: Option<String> = zbus::block_on(async {
+            let shell_result: zbus::Result<Option<String>> = zbus::block_on(async {
                 if cancelled.is_closed() {
                     return Ok(None);
                 }
@@ -122,12 +123,35 @@ impl SystemJob<Image> {
                         Ok(capture.await.ok())
                     }
                 }
-            })
-            .map_err(|error| {
-                format!(
-                    "GNOME capture failed: {error}. Enable OverInk Overlay (revision 5) in GNOME Wayland. XWayland alone cannot capture native Wayland windows."
-                )
-            })?;
+            });
+            let path = match shell_result {
+                Ok(path) => path,
+                Err(error) if portal_fallback.is_some()
+                    && (error.to_string().contains("ServiceUnknown")
+                        || error.to_string().contains("NameHasNoOwner")) =>
+                {
+                    // XWayland needs a composited desktop image, never an X11
+                    // framebuffer (which silently omits native Wayland apps).
+                    // Only the known-safe screen-target portal path is used.
+                    let values = zbus::block_on(request("Screenshot", true, cancelled))
+                        .map_err(|error| format!("GNOME Overlay is unavailable; screenshot portal failed: {error}"))?;
+                    let Some(mut values) = values else {
+                        return Ok(None);
+                    };
+                    let uri = values
+                        .remove("uri")
+                        .ok_or("Screenshot portal returned no image")?;
+                    let uri = <&str>::try_from(&*uri).map_err(|error| error.to_string())?;
+                    let file = local_file(uri)?;
+                    let fallback = portal_fallback.expect("checked above");
+                    return fallback(Image::load(&file)?).map(Some);
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "GNOME capture failed: {error}. Enable OverInk Overlay (revision 6) in GNOME Wayland. XWayland alone cannot capture native Wayland windows."
+                    ));
+                }
+            };
             let Some(path) = path else {
                 return Ok(None);
             };
