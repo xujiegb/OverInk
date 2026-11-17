@@ -1,10 +1,7 @@
 //! On X11 the display usually does not transform sRGB windows. Use SDL's
 //! current-display ICC profile there. Other backends retain OS-managed sRGB /
 //! scRGB surfaces; applying an ICC transform there would double-manage color.
-use crate::{
-    appearance::{Text, text},
-    sdl::*,
-};
+use crate::appearance::{Text, text};
 use lcms2_sys as cms;
 use std::hash::{Hash, Hasher};
 use std::ptr;
