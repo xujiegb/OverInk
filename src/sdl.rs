@@ -926,7 +926,9 @@ impl Window {
                 0,
             )
         };
-        (tag != 0).then_some(tag).and_then(|tag| tag.try_into().ok())
+        (tag != 0)
+            .then_some(tag)
+            .and_then(|tag| tag.try_into().ok())
     }
 
     /// Borrow the native X11 Display for the lifetime of the SDL window.
