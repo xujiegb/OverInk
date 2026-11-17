@@ -28,25 +28,29 @@ pub fn start<T: Send + 'static>(
     prepare: impl FnOnce(Image) -> Result<T, String> + Send + 'static,
 ) -> Result<Job<T>, String> {
     match mode {
-        SnapshotMode::Sdr => Job::start(
-            move |cancelled| {
-                capture_permission()?;
-                if sdr_supported() {
-                    screen_capture(bounds, pixels, false, cancelled)
-                } else {
-                    // ScreenCaptureKit's single-frame API requires macOS 14.
-                    sdr_capture(bounds, cancelled)
-                }
-            },
-            prepare,
-        ),
-        SnapshotMode::Linear => Job::start(
-            move |cancelled| {
-                capture_permission()?;
-                screen_capture(bounds, pixels, true, cancelled)
-            },
-            prepare,
-        ),
+        SnapshotMode::Sdr => {
+            // Apple permission requests should start on the UI thread, not on
+            // the capture worker. A denied app only prompts once per process.
+            capture_permission()?;
+            Job::start(
+                move |cancelled| {
+                    if sdr_supported() {
+                        screen_capture(bounds, pixels, false, cancelled)
+                    } else {
+                        // ScreenCaptureKit's single-frame API requires macOS 14.
+                        sdr_capture(bounds, cancelled)
+                    }
+                },
+                prepare,
+            )
+        }
+        SnapshotMode::Linear => {
+            capture_permission()?;
+            Job::start(
+                move |cancelled| screen_capture(bounds, pixels, true, cancelled),
+                prepare,
+            )
+        }
         SnapshotMode::LiveOnly(reason) => {
             Err(reason.get(crate::appearance::Language::English).into())
         }
