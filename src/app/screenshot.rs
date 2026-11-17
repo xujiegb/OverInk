@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use crate::{
     appearance::{Language, Preferences},
     background::{Image, screenshot::Job},
@@ -71,74 +73,74 @@ enum SelectionEvent {
 impl SelectionEvent {
     fn from_sdl(event: &SDL_Event, size: [f32; 2], touch_enabled: bool) -> Option<Self> {
         let mouse = |id| id != SDL_TOUCH_MOUSEID && id != SDL_PEN_MOUSEID;
-        // Read only the union member selected by SDL's event type.
-        unsafe {
-            match event_type(event) {
-                ty @ (SDL_EVENT_MOUSE_BUTTON_DOWN | SDL_EVENT_MOUSE_BUTTON_UP) => {
-                    let b = event.button;
-                    if b.button != SDL_BUTTON_LEFT as u8 || !mouse(b.which) {
-                        return None;
-                    }
-                    let press = if ty == SDL_EVENT_MOUSE_BUTTON_DOWN {
-                        Self::Down
-                    } else {
-                        Self::Up
-                    };
-                    Some(press(Pointer::Mouse(b.which), pos2(b.x, b.y)))
+        match event_type(event) {
+            ty @ (SDL_EVENT_MOUSE_BUTTON_DOWN | SDL_EVENT_MOUSE_BUTTON_UP) => {
+                let b = mouse_button_event(event)?;
+                if b.button != SDL_BUTTON_LEFT as u8 || !mouse(b.which) {
+                    return None;
                 }
-                SDL_EVENT_MOUSE_MOTION if mouse(event.motion.which) => {
-                    let m = event.motion;
-                    Some(Self::Move(Pointer::Mouse(m.which), pos2(m.x, m.y)))
-                }
-                ty @ (SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP) if !event.ptouch.eraser => {
-                    let p = event.ptouch;
-                    let press = if ty == SDL_EVENT_PEN_DOWN {
-                        Self::Down
-                    } else {
-                        Self::Up
-                    };
-                    Some(press(Pointer::Pen(p.which), pos2(p.x, p.y)))
-                }
-                SDL_EVENT_PEN_MOTION => {
-                    let p = event.pmotion;
-                    Some(Self::Move(Pointer::Pen(p.which), pos2(p.x, p.y)))
-                }
-                SDL_EVENT_PEN_PROXIMITY_OUT => {
-                    Some(Self::Cancel(Some(Pointer::Pen(event.pproximity.which))))
-                }
-                ty @ (SDL_EVENT_FINGER_DOWN | SDL_EVENT_FINGER_MOTION | SDL_EVENT_FINGER_UP)
-                    if touch_enabled =>
-                {
-                    let finger = event.tfinger;
-                    let pointer = Pointer::Touch(finger.into());
-                    match ty {
-                        SDL_EVENT_FINGER_DOWN if !touch::is_indirect(finger.touchID) => {
-                            touch::point(finger, size).map(|p| Self::Down(pointer, pos2(p.x, p.y)))
-                        }
-                        SDL_EVENT_FINGER_MOTION => {
-                            touch::point(finger, size).map(|p| Self::Move(pointer, pos2(p.x, p.y)))
-                        }
-                        SDL_EVENT_FINGER_UP => Some(
-                            touch::point(finger, size).map_or(Self::Cancel(Some(pointer)), |p| {
-                                Self::Up(pointer, pos2(p.x, p.y))
-                            }),
-                        ),
-                        _ => None,
-                    }
-                }
-                SDL_EVENT_FINGER_CANCELED => {
-                    Some(Self::Cancel(Some(Pointer::Touch(event.tfinger.into()))))
-                }
-                SDL_EVENT_WINDOW_FOCUS_LOST => Some(Self::Cancel(None)),
-                _ => None,
+                let press = if ty == SDL_EVENT_MOUSE_BUTTON_DOWN {
+                    Self::Down
+                } else {
+                    Self::Up
+                };
+                Some(press(Pointer::Mouse(b.which), pos2(b.x, b.y)))
             }
+            SDL_EVENT_MOUSE_MOTION => {
+                let m = mouse_motion_event(event)?;
+                mouse(m.which).then_some(Self::Move(Pointer::Mouse(m.which), pos2(m.x, m.y)))
+            }
+            ty @ (SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP) => {
+                let p = pen_touch_event(event)?;
+                if p.eraser {
+                    return None;
+                }
+                let press = if ty == SDL_EVENT_PEN_DOWN {
+                    Self::Down
+                } else {
+                    Self::Up
+                };
+                Some(press(Pointer::Pen(p.which), pos2(p.x, p.y)))
+            }
+            SDL_EVENT_PEN_MOTION => {
+                let p = pen_motion_event(event)?;
+                Some(Self::Move(Pointer::Pen(p.which), pos2(p.x, p.y)))
+            }
+            SDL_EVENT_PEN_PROXIMITY_OUT => Some(Self::Cancel(Some(Pointer::Pen(
+                pen_proximity_event(event)?.which,
+            )))),
+            ty @ (SDL_EVENT_FINGER_DOWN | SDL_EVENT_FINGER_MOTION | SDL_EVENT_FINGER_UP)
+                if touch_enabled =>
+            {
+                let finger = finger_event(event)?;
+                let pointer = Pointer::Touch(finger.into());
+                match ty {
+                    SDL_EVENT_FINGER_DOWN if !touch::is_indirect(finger.touchID) => {
+                        touch::point(finger, size).map(|p| Self::Down(pointer, pos2(p.x, p.y)))
+                    }
+                    SDL_EVENT_FINGER_MOTION => {
+                        touch::point(finger, size).map(|p| Self::Move(pointer, pos2(p.x, p.y)))
+                    }
+                    SDL_EVENT_FINGER_UP => Some(
+                        touch::point(finger, size).map_or(Self::Cancel(Some(pointer)), |p| {
+                            Self::Up(pointer, pos2(p.x, p.y))
+                        }),
+                    ),
+                    _ => None,
+                }
+            }
+            SDL_EVENT_FINGER_CANCELED => Some(Self::Cancel(Some(Pointer::Touch(
+                finger_event(event)?.into(),
+            )))),
+            SDL_EVENT_WINDOW_FOCUS_LOST => Some(Self::Cancel(None)),
+            _ => None,
         }
     }
 }
 
 fn capture_mouse(pointer: Pointer, captured: bool) -> bool {
     if matches!(pointer, Pointer::Mouse(_)) {
-        unsafe { SDL_CaptureMouse(captured) }
+        crate::sdl::capture_mouse(captured)
     } else {
         true
     }
@@ -223,7 +225,7 @@ pub struct Screenshot {
     target: SDL_WindowID,
     hdr: bool,
     sdr_white: f32,
-    cursor: Option<Crosshair>,
+    cursor: Option<SystemCursor>,
     action: Option<MenuAction>,
     save_job: Option<SaveJob>,
     error: Option<String>,
@@ -236,20 +238,14 @@ impl Screenshot {
     pub fn start(&mut self, window: &Window, hdr: bool) {
         self.target = window.id;
         self.hdr = hdr && hdr_available(window);
-        let white = unsafe {
-            SDL_GetFloatProperty(
-                SDL_GetWindowProperties(window.raw),
-                SDL_PROP_WINDOW_SDR_WHITE_LEVEL_FLOAT,
-                1.,
-            )
-        };
+        let white = window.sdr_white_level();
         self.sdr_white = if white.is_finite() && white > 0. {
             white
         } else {
             1.
         };
         self.stage = Stage::Selecting(None);
-        self.cursor = Crosshair::new();
+        self.cursor = SystemCursor::crosshair();
         self.error = None;
         self.cancel_blocked = false;
         self.replace = None;
@@ -659,28 +655,6 @@ fn shade(ui: &Ui, screen: Rect, region: Option<Rect>, units: f32) {
     }
 }
 
-struct Crosshair(*mut SDL_Cursor);
-impl Crosshair {
-    fn new() -> Option<Self> {
-        unsafe {
-            let cursor = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_CROSSHAIR);
-            if cursor.is_null() {
-                return None;
-            }
-            SDL_SetCursor(cursor);
-            Some(Self(cursor))
-        }
-    }
-}
-impl Drop for Crosshair {
-    fn drop(&mut self) {
-        unsafe {
-            SDL_SetCursor(SDL_GetDefaultCursor());
-            SDL_DestroyCursor(self.0);
-        }
-    }
-}
-
 pub fn default_folder(preferences: &Preferences) -> Option<PathBuf> {
     preferences
         .screenshot_folder
@@ -714,17 +688,7 @@ pub enum Destination {
 }
 
 fn file_stem() -> String {
-    use sdl3_sys::time::{SDL_DateTime, SDL_GetCurrentTime, SDL_TimeToDateTime};
-    let mut time = 0;
-    let mut date = SDL_DateTime::default();
-    if unsafe { SDL_GetCurrentTime(&mut time) && SDL_TimeToDateTime(time, &mut date, true) } {
-        format!(
-            "OverInk-{:04}-{:02}-{:02}_{:02}-{:02}-{:02}",
-            date.year, date.month, date.day, date.hour, date.minute, date.second
-        )
-    } else {
-        "OverInk".into()
-    }
+    crate::sdl::screenshot_file_stem()
 }
 
 struct CancellableWriter<'a, W> {
