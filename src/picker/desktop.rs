@@ -22,10 +22,7 @@ fn scaled_pixels(
 ) -> Result<[i32; 2], String> {
     let mut pixels = [0; 2];
     for i in 0..2 {
-        if !local[i].is_finite()
-            || !logical[i].is_finite()
-            || logical[i] <= 0.
-            || physical[i] <= 0
+        if !local[i].is_finite() || !logical[i].is_finite() || logical[i] <= 0. || physical[i] <= 0
         {
             return Err("Invalid screen coordinate or window size".into());
         }
@@ -449,13 +446,19 @@ mod x11 {
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub use x11::{capture, is_xwayland, position, sample};
 
-#[cfg(all(test, any(target_os = "windows", target_os = "linux", target_os = "freebsd")))]
+#[cfg(all(
+    test,
+    any(target_os = "windows", target_os = "linux", target_os = "freebsd")
+))]
 mod coordinate_tests {
     use super::scaled_pixels;
 
     #[test]
     fn scales_and_rejects_invalid_window_dimensions() {
-        assert_eq!(scaled_pixels([10.5, 11.], [100., 100.], [200, 150]), Ok([21, 16]));
+        assert_eq!(
+            scaled_pixels([10.5, 11.], [100., 100.], [200, 150]),
+            Ok([21, 16])
+        );
         assert!(scaled_pixels([3., 4.], [0., 100.], [200, 200]).is_err());
         assert!(scaled_pixels([3., 4.], [100., 100.], [0, 200]).is_err());
         assert!(scaled_pixels([f32::NAN, 4.], [100., 100.], [200, 200]).is_err());
