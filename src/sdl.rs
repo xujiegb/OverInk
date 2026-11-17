@@ -846,6 +846,27 @@ impl Window {
         let id = unsafe { SDL_GetDisplayForWindow(self.raw) }.0;
         (id != 0).then_some(id)
     }
+    /// Copy SDL's optional ICC profile into Rust-owned memory and release
+    /// SDL's native allocation before returning it to the color-management code.
+    pub fn icc_profile(&self) -> Option<Vec<u8>> {
+        unsafe {
+            let mut size = 0;
+            let profile = SDL_GetWindowICCProfile(self.raw, &mut size);
+            if profile.is_null() {
+                // A missing ICC profile is normal; avoid leaving a stale SDL error.
+                SDL_ClearError();
+                return None;
+            }
+            let bytes = if size > 0 && size <= 16 * 1024 * 1024 {
+                Some(std::slice::from_raw_parts(profile.cast::<u8>(), size).to_vec())
+            } else {
+                None
+            };
+            SDL_free(profile);
+            bytes
+        }
+    }
+
     pub fn hdr_enabled(&self) -> bool {
         unsafe {
             SDL_GetBooleanProperty(
