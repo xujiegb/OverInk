@@ -56,6 +56,7 @@ class CaptureBridge {
     stop() {
         this._active = false;
         this._approved.clear();
+        this._trusted.clear();
         this._deniedUntil.clear();
         this._cancel(this._pending);
     }
@@ -146,7 +147,7 @@ class CaptureBridge {
                     if ((mode & 0o170000) !== 0o100000)
                         return null;
                     binary = [
-                        info.get_attribute_uint64('unix::device'),
+                        info.get_attribute_uint32('unix::device'),
                         info.get_attribute_uint64('unix::inode'),
                         info.get_size(),
                         info.get_attribute_uint64('time::modified'),
