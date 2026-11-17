@@ -1038,9 +1038,7 @@ impl App {
                     }
                 }
             }
-            SDL_EVENT_PEN_AXIS
-                if pen_axis_event(e).is_some_and(|pen| pen.windowID == overlay) =>
-            {
+            SDL_EVENT_PEN_AXIS if pen_axis_event(e).is_some_and(|pen| pen.windowID == overlay) => {
                 let Some(a) = pen_axis_event(e) else {
                     return;
                 };
@@ -1107,12 +1105,7 @@ impl App {
         if toolbar_keyboard || self.input.text.editing() {
             return c;
         }
-        if self.tool.is_text()
-            && !self.pass
-            && !self.hidden
-            && !m.command
-            && self.text_key(k.key)
-        {
+        if self.tool.is_text() && !self.pass && !self.hidden && !m.command && self.text_key(k.key) {
             c.redraw_canvas = true;
             return c;
         }
