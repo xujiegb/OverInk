@@ -258,7 +258,13 @@ impl Screenshot {
             // GNOME's portal v2 can select an area interactively but cannot
             // expose an overlay window's global Wayland position. Let GNOME
             // choose the region instead of blindly cropping the wrong pixels.
-            let job = Job::start_interactive(window)?;
+            let job = match Job::start_interactive(window) {
+                Ok(job) => job,
+                Err(error) => {
+                    self.clear_capture();
+                    return Err(error);
+                }
+            };
             self.hdr = false;
             self.stage = Stage::Capturing(Rect::NOTHING, job, Instant::now());
             self.cursor = None;
