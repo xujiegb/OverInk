@@ -5,7 +5,7 @@ mod tooltip;
 pub use tooltip::{Tooltips, hint};
 
 pub const WIDTH: f32 = 56.;
-pub const HEIGHT: f32 = 600.;
+pub const HEIGHT: f32 = 610.;
 pub const PANEL_WIDTH: f32 = 312.;
 pub const RAIL_BUTTON_SIZE: Vec2 = vec2(35., 28.);
 pub const MENU_FONT_SIZE: f32 = 16.;
