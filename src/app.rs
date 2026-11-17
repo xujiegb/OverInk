@@ -1684,7 +1684,7 @@ pub fn run(options: Options) -> Result<(), String> {
                 if id.0 == 0 || id == toolbar.id {
                     // Canvas and toolbar own different SDL renderers. The
                     // toolbar egui atlas/brand/tooltip textures must be rebuilt.
-                    gui.forget_renderer_textures();
+                    gui.reset_renderer_textures();
                     gui = gui::Gui::new();
                     mark = crate::toolbar::brand(&gui.ctx);
                     tooltips.renderer_reset();
