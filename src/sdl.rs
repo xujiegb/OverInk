@@ -928,6 +928,20 @@ impl Window {
         }
     }
 
+    /// Borrow the Wayland wl_surface from SDL for the lifetime of this window.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    pub fn wayland_surface(&self) -> Option<std::ptr::NonNull<c_void>> {
+        // SAFETY: The pointer is owned by the active SDL Wayland backend and
+        // may only be used while the corresponding SDL Window remains live.
+        unsafe {
+            std::ptr::NonNull::new(SDL_GetPointerProperty(
+                SDL_GetWindowProperties(self.raw),
+                SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER,
+                ptr::null_mut(),
+            ))
+        }
+    }
+
     /// Return the X11 drawable ID associated with this window.
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     pub fn x11_window_number(&self) -> std::ffi::c_ulong {
