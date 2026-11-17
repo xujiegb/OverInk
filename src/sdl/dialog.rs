@@ -1,12 +1,9 @@
-#![deny(clippy::undocumented_unsafe_blocks)]
+#![forbid(unsafe_code)]
 
-use super::{Window, error};
-use sdl3_sys::dialog::*;
+use super::{Window, dialog_native as native};
 use std::{
     collections::BTreeMap,
-    ffi::{CStr, CString, c_char, c_int, c_void},
     path::{Path, PathBuf},
-    ptr,
     sync::{Mutex, MutexGuard},
 };
 
@@ -22,11 +19,6 @@ type ResultPath = Result<Option<PathBuf>, String>;
 // Cocoa can access the SDL parent from the sheet completion handler, and
 // Windows can look up its native handle from a worker thread.
 pub const USE_WINDOW_PARENT: bool = !cfg!(any(windows, target_os = "macos"));
-
-const PNG_FILTER: &SDL_DialogFileFilter = &SDL_DialogFileFilter {
-    name: c"PNG".as_ptr(),
-    pattern: c"png".as_ptr(),
-};
 
 struct Callbacks {
     last_id: usize,
@@ -71,41 +63,7 @@ impl FileDialog {
         let Some(id) = self.begin(kind) else {
             return false;
         };
-        // SDL can call back during this call or from another thread. Userdata
-        // is an opaque ID with no borrowed Rust storage.
-        let user = ptr::without_provenance_mut(id);
-        let location = location.and_then(location_to_c);
-        let initial = location.as_ref().map_or(ptr::null(), |path| path.as_ptr());
-        let parent = if USE_WINDOW_PARENT {
-            window.raw
-        } else {
-            ptr::null_mut()
-        };
-        // SDL copies the initial location during the call. The filter must
-        // remain valid until the callback and uses static storage.
-        // SAFETY: The user data is an opaque integer request ID, not a
-        // dereferenceable pointer. SDL borrows the initial C string during
-        // this call. PNG_FILTER is static and valid through any callback,
-        // and the parent window is either live or intentionally null.
-        unsafe {
-            match kind {
-                DialogKind::Font => SDL_ShowOpenFileDialog(
-                    Some(chosen),
-                    user,
-                    parent,
-                    ptr::null(),
-                    0,
-                    initial,
-                    false,
-                ),
-                DialogKind::ScreenshotFolder => {
-                    SDL_ShowOpenFolderDialog(Some(chosen), user, parent, initial, false)
-                }
-                DialogKind::ScreenshotFile => {
-                    SDL_ShowSaveFileDialog(Some(chosen), user, parent, PNG_FILTER, 1, initial)
-                }
-            }
-        }
+        native::show(id, kind, window, location);
         true
     }
 
@@ -127,25 +85,6 @@ impl Drop for FileDialog {
     }
 }
 
-/// SDL owns `files` only until the callback returns. Copy its selected
-/// path into an owned PathBuf before publishing the result to the UI thread.
-extern "C" fn chosen(user: *mut c_void, files: *const *const c_char, _filter: c_int) {
-    complete(user.addr(), || {
-        if files.is_null() {
-            return Err(error());
-        }
-        // SAFETY: SDL guarantees that a non-null file list points to at
-        // least one element, terminated by a null pointer, for this callback.
-        let file = unsafe { *files };
-        if file.is_null() {
-            return Ok(None);
-        }
-        // SAFETY: SDL guarantees each selected path is a NUL-terminated
-        // UTF-8 string that remains live until this callback returns.
-        path_from_c(unsafe { CStr::from_ptr(file) }).map(Some)
-    });
-}
-
 fn complete(id: usize, value: impl FnOnce() -> ResultPath) {
     let mut callbacks = callbacks();
     let Some(result) = callbacks.results.get_mut(&id) else {
@@ -157,43 +96,13 @@ fn complete(id: usize, value: impl FnOnce() -> ResultPath) {
 }
 
 pub fn downloads() -> Option<PathBuf> {
-    use sdl3_sys::filesystem::{SDL_FOLDER_DOWNLOADS, SDL_GetUserFolder};
-    // SAFETY: SDL returns an optional, SDL-managed NUL-terminated path.
-    // Its storage remains valid while SDL is initialized; do not free it.
-    unsafe {
-        let path = SDL_GetUserFolder(SDL_FOLDER_DOWNLOADS);
-        if path.is_null() {
-            return None;
-        }
-        path_from_c(CStr::from_ptr(path)).ok()
-    }
-}
-
-fn location_to_c(path: &Path) -> Option<CString> {
-    #[cfg(any(windows, target_os = "macos"))]
-    let bytes = path.to_str()?.as_bytes();
-    #[cfg(not(any(windows, target_os = "macos")))]
-    let bytes = path.as_os_str().as_encoded_bytes();
-    CString::new(bytes).ok()
-}
-
-fn path_from_c(path: &CStr) -> Result<PathBuf, String> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt as _;
-        Ok(PathBuf::from(std::ffi::OsStr::from_bytes(path.to_bytes())))
-    }
-    #[cfg(not(unix))]
-    {
-        path.to_str()
-            .map(PathBuf::from)
-            .map_err(|error| format!("Invalid UTF-8 file dialog path: {error}"))
-    }
+    native::downloads()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ptr;
 
     #[test]
     fn delivers_a_callback_from_another_thread_once() {
@@ -203,7 +112,7 @@ mod tests {
         assert!(dialog.poll().is_none());
 
         std::thread::spawn(move || {
-            complete(id, || path_from_c(c"截图.png").map(Some));
+            complete(id, || native::path_from_c(c"截图.png").map(Some));
             complete(id, || panic!("A duplicate callback must be ignored"));
         })
         .join()
@@ -242,7 +151,7 @@ mod tests {
         let mut dialog = FileDialog::default();
         let id = dialog.begin(DialogKind::Font).unwrap();
         let list = [ptr::null()];
-        chosen(ptr::without_provenance_mut(id), list.as_ptr(), -1);
+        native::chosen(ptr::without_provenance_mut(id), list.as_ptr(), -1);
         assert!(matches!(dialog.poll(), Some((DialogKind::Font, Ok(None)))));
         assert!(dialog.poll().is_none());
     }
@@ -251,7 +160,7 @@ mod tests {
     fn native_callback_error_returns_a_result_not_a_pending_dialog() {
         let mut dialog = FileDialog::default();
         let id = dialog.begin(DialogKind::ScreenshotFolder).unwrap();
-        chosen(ptr::without_provenance_mut(id), ptr::null(), -1);
+        native::chosen(ptr::without_provenance_mut(id), ptr::null(), -1);
         assert!(matches!(
             dialog.poll(),
             Some((DialogKind::ScreenshotFolder, Err(_)))
@@ -265,10 +174,10 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::ffi::OsStrExt as _;
-            let native = path_from_c(path).unwrap();
+            let native = native::path_from_c(path).unwrap();
             assert_eq!(native.as_os_str().as_bytes(), path.to_bytes());
         }
         #[cfg(not(unix))]
-        assert!(path_from_c(path).is_err());
+        assert!(native::path_from_c(path).is_err());
     }
 }
