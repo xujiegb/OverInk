@@ -182,7 +182,7 @@ impl App {
                     }
                     self.rail_tool(ui, Tool::Select, commands);
                     if ui
-                        .add_enabled_ui(!self.suspended, |ui| {
+                        .add_enabled_ui(!self.suspended && !self.screenshot.saving(), |ui| {
                             toolbar::button(
                                 ui,
                                 Icon::Screenshot,
