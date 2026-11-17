@@ -68,7 +68,7 @@ impl Job {
                 // X11 and native Wayland windows without a second selector).
                 // If the extension is absent, use a composited screenshot
                 // portal only when the full-screen crop can be proven safe.
-                let fallback: Option<Box<dyn FnOnce(Image) -> Result<Image, String> + Send>> =
+                let fallback: Option<crate::picker::portal::ScreenshotFallback> =
                     if driver() == "x11" && _displays.len() == 1 {
                         let mapping = window.position().ok().and_then(|[x, y]| {
                             let location = Rect::from_min_size(
@@ -95,7 +95,7 @@ impl Job {
                                 }
                                 mapped.apply(image)
                             })
-                                as Box<dyn FnOnce(Image) -> Result<Image, String> + Send>
+                                as crate::picker::portal::ScreenshotFallback
                         })
                     } else {
                         None
