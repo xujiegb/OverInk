@@ -287,38 +287,60 @@ pub fn display_info() -> Result<Vec<DisplayInfo>, String> {
     }
 }
 
-/// SDL event union accessors: the type tag is checked before reading its payload.
+/// SDL event union accessors: check the tag before reading the corresponding
+/// field. Do not use `then_some(unsafe { ... })`: it evaluates eagerly.
 pub fn mouse_button_event(event: &SDL_Event) -> Option<SDL_MouseButtonEvent> {
-    matches!(
+    if matches!(
         event_type(event),
         SDL_EVENT_MOUSE_BUTTON_DOWN | SDL_EVENT_MOUSE_BUTTON_UP
-    )
-    .then(|| unsafe { event.button })
+    ) {
+        Some(unsafe { event.button })
+    } else {
+        None
+    }
 }
 
 pub fn mouse_motion_event(event: &SDL_Event) -> Option<SDL_MouseMotionEvent> {
-    (event_type(event) == SDL_EVENT_MOUSE_MOTION).then(|| unsafe { event.motion })
+    if event_type(event) == SDL_EVENT_MOUSE_MOTION {
+        Some(unsafe { event.motion })
+    } else {
+        None
+    }
 }
 
 pub fn pen_touch_event(event: &SDL_Event) -> Option<SDL_PenTouchEvent> {
-    matches!(event_type(event), SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP)
-        .then(|| unsafe { event.ptouch })
+    if matches!(event_type(event), SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP) {
+        Some(unsafe { event.ptouch })
+    } else {
+        None
+    }
 }
 
 pub fn pen_motion_event(event: &SDL_Event) -> Option<SDL_PenMotionEvent> {
-    (event_type(event) == SDL_EVENT_PEN_MOTION).then(|| unsafe { event.pmotion })
+    if event_type(event) == SDL_EVENT_PEN_MOTION {
+        Some(unsafe { event.pmotion })
+    } else {
+        None
+    }
 }
 
 pub fn pen_proximity_event(event: &SDL_Event) -> Option<SDL_PenProximityEvent> {
-    matches!(
+    if matches!(
         event_type(event),
         SDL_EVENT_PEN_PROXIMITY_IN | SDL_EVENT_PEN_PROXIMITY_OUT
-    )
-    .then(|| unsafe { event.pproximity })
+    ) {
+        Some(unsafe { event.pproximity })
+    } else {
+        None
+    }
 }
 
 pub fn key_event(event: &SDL_Event) -> Option<SDL_KeyboardEvent> {
-    matches!(event_type(event), SDL_EVENT_KEY_DOWN | SDL_EVENT_KEY_UP).then(|| unsafe { event.key })
+    if matches!(event_type(event), SDL_EVENT_KEY_DOWN | SDL_EVENT_KEY_UP) {
+        Some(unsafe { event.key })
+    } else {
+        None
+    }
 }
 
 pub fn capture_mouse(enable: bool) -> bool {
