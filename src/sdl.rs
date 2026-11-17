@@ -225,11 +225,13 @@ pub fn system_theme() -> SDL_SystemTheme {
 }
 
 /// Reserve a single SDL user event type, returning zero on failure.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub fn register_user_event() -> u32 {
     unsafe { SDL_RegisterEvents(1) }
 }
 
 /// Push a copied SDL event into its queue.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub fn push_event(event: &mut SDL_Event) -> bool {
     unsafe { SDL_PushEvent(event) }
 }
