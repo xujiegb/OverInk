@@ -72,7 +72,7 @@ impl SystemJob<Image> {
         let positioned = crate::sdl::driver() != "wayland"
             && unsafe { crate::sdl::SDL_GetWindowPosition(window.raw, &mut x, &mut y) };
         Self::spawn("overink-gnome-shell-capture", move |cancelled| {
-            let request = (
+            let shell_request = (
                 request_id.as_str(),
                 region.left() as f64,
                 region.top() as f64,
@@ -101,7 +101,7 @@ impl SystemJob<Image> {
                 }
 
                 let mut capture =
-                    std::pin::pin!(bridge.call::<_, _, String>("CaptureArea", &request));
+                    std::pin::pin!(bridge.call::<_, _, String>("CaptureArea", &shell_request));
                 let first = future::or(async { Some(capture.as_mut().await) }, async {
                     let _ = cancelled.recv().await;
                     None
