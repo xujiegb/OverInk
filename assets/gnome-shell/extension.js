@@ -350,6 +350,10 @@ export default class OverInkOverlay extends Extension {
             BUS_NAME,
             Gio.BusNameOwnerFlags.NONE,
             connection => {
+                // bus_own_name may complete after disable() has already
+                // invalidated the bridge during a fast extension reload.
+                if (!this._bridge || !this._windows)
+                    return;
                 this._dbus = Gio.DBusExportedObject.wrapJSObject(
                     CAPTURE_INTERFACE, this._bridge);
                 this._dbus.export(connection, BUS_PATH);
@@ -374,7 +378,8 @@ export default class OverInkOverlay extends Extension {
         this._bridge?.stop();
         this._dbus?.unexport();
         this._dbus = null;
-        Gio.bus_unown_name(this._busOwner);
+        if (this._busOwner)
+            Gio.bus_unown_name(this._busOwner);
         this._busOwner = 0;
         this._bridge = null;
         global.window_manager.disconnect(this._map);
@@ -389,6 +394,7 @@ export default class OverInkOverlay extends Extension {
             if (state.aboveAdded)
                 window.unmake_above();
         }
+        this._windows = null;
     }
 
     _watch(window) {
@@ -419,7 +425,9 @@ export default class OverInkOverlay extends Extension {
     }
 
     _unwatch(window) {
-        const state = this._windows.get(window);
+        const state = this._windows?.get(window);
+        if (!state)
+            return;
         for (const signal of state.signals)
             window.disconnect(signal);
         this._windows.delete(window);
