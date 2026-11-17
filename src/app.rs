@@ -940,128 +940,156 @@ impl App {
     }
     fn event(&mut self, e: &SDL_Event, overlay: SDL_WindowID, size: [f32; 2]) {
         self.track_pen(e);
-        unsafe {
-            let ty = SDL_EventType(e.r#type);
-            match ty {
-                SDL_EVENT_MOUSE_BUTTON_DOWN if e.button.windowID == overlay => {
-                    let b = e.button;
-                    if b.which == SDL_PEN_MOUSEID || b.which == SDL_TOUCH_MOUSEID {
-                        return;
-                    }
-                    if b.button == RIGHT_BUTTON
-                        || (b.button == LEFT_BUTTON
-                            && self
-                                .input
-                                .contact
-                                .is_none_or(|c| c.source != Source::Mouse(RIGHT_BUTTON)))
-                    {
-                        self.begin(
-                            Source::Mouse(b.button),
-                            Point::new(b.x, b.y, 1., [0.; 2]),
-                            b.button == RIGHT_BUTTON,
-                        );
-                    }
+        let ty = event_type(e);
+        match ty {
+            SDL_EVENT_MOUSE_BUTTON_DOWN
+                if mouse_button_event(e).is_some_and(|button| button.windowID == overlay) =>
+            {
+                let Some(b) = mouse_button_event(e) else {
+                    return;
+                };
+                if b.which == SDL_PEN_MOUSEID || b.which == SDL_TOUCH_MOUSEID {
+                    return;
                 }
-                SDL_EVENT_MOUSE_BUTTON_UP
-                    if e.button.windowID == overlay
-                        && e.button.which != SDL_PEN_MOUSEID
-                        && e.button.which != SDL_TOUCH_MOUSEID =>
-                {
-                    let b = e.button;
-                    let source = Source::Mouse(b.button);
-                    if self.input.contact.is_some_and(|contact| {
-                        contact.source == source && matches!(contact.gesture, Gesture::Erase(_))
-                    }) {
-                        self.motion(source, Point::new(b.x, b.y, 1., [0.; 2]));
-                    }
-                    self.end(source);
-                }
-                SDL_EVENT_MOUSE_MOTION if e.motion.windowID == overlay => {
-                    let m = e.motion;
-                    if m.which != SDL_PEN_MOUSEID
-                        && m.which != SDL_TOUCH_MOUSEID
-                        && let Some(contact) = self.input.contact
-                        && matches!(contact.source, Source::Mouse(_))
-                    {
-                        self.motion(contact.source, Point::new(m.x, m.y, 1., [0.; 2]));
-                    }
-                }
-                SDL_EVENT_FINGER_CANCELED => self.touch_event(e.tfinger, size),
-                SDL_EVENT_FINGER_DOWN | SDL_EVENT_FINGER_MOTION | SDL_EVENT_FINGER_UP
-                    if e.tfinger.windowID == overlay =>
-                {
-                    self.touch_event(e.tfinger, size);
-                }
-                SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP if e.ptouch.windowID == overlay => {
-                    let t = e.ptouch;
-                    let pen = *self.input.pens.entry(t.which.0).or_default();
-                    let source = Source::Pen(t.which.0);
-                    let p = pen.point(t.x, t.y);
-                    if t.down {
-                        self.begin(source, p, t.eraser);
-                        let accepted = self
-                            .input
-                            .contact
-                            .is_some_and(|contact| contact.source == source);
-                        self.input.pens.entry(t.which.0).or_default().down = accepted;
-                        if let Some(contact) = &mut self.input.contact
-                            && contact.source == source
-                        {
-                            contact.measured_pressure = pen.has_pressure;
-                        }
-                    } else {
-                        self.pen_motion(source, p, pen.has_pressure);
-                        self.end(source);
-                        if let Some(pen) = self.input.pens.get_mut(&t.which.0) {
-                            pen.finish();
-                        }
-                    }
-                }
-                SDL_EVENT_PEN_AXIS if e.paxis.windowID == overlay => {
-                    let a = e.paxis;
-                    let source = Source::Pen(a.which.0);
-                    let pen = self.input.pens.entry(a.which.0).or_default();
-                    let in_contact = pen.down || a.pen_state & SDL_PEN_INPUT_DOWN != 0;
-                    match a.axis {
-                        SDL_PEN_AXIS_PRESSURE if a.value.is_finite() => {
-                            pen.pressure = a.value.clamp(0., 1.);
-                            pen.has_pressure = in_contact || pen.pressure > 0.;
-                        }
-                        SDL_PEN_AXIS_XTILT => pen.tilt[0] = a.value.clamp(-90., 90.),
-                        SDL_PEN_AXIS_YTILT => pen.tilt[1] = a.value.clamp(-90., 90.),
-                        _ => {}
-                    }
-                    let point = pen.point(a.x, a.y);
-                    let has_pressure = pen.has_pressure;
-                    self.pen_motion(source, point, has_pressure);
-                }
-                SDL_EVENT_PEN_MOTION if e.pmotion.windowID == overlay => {
-                    let m = e.pmotion;
-                    let pen = *self.input.pens.entry(m.which.0).or_default();
-                    self.pen_motion(
-                        Source::Pen(m.which.0),
-                        pen.point(m.x, m.y),
-                        pen.has_pressure,
-                    );
-                }
-                SDL_EVENT_WINDOW_FOCUS_LOST if e.window.windowID == overlay => {
-                    if !self.multi {
-                        self.discard_touches();
-                    }
-                    self.finish_contact();
-                    self.reset_pens();
-                }
-                SDL_EVENT_WINDOW_MOUSE_LEAVE
-                    if e.window.windowID == overlay
+                if b.button == RIGHT_BUTTON
+                    || (b.button == LEFT_BUTTON
                         && self
                             .input
                             .contact
-                            .is_some_and(|contact| matches!(contact.source, Source::Mouse(_))) =>
+                            .is_none_or(|c| c.source != Source::Mouse(RIGHT_BUTTON)))
                 {
-                    self.finish_contact();
+                    self.begin(
+                        Source::Mouse(b.button),
+                        Point::new(b.x, b.y, 1., [0.; 2]),
+                        b.button == RIGHT_BUTTON,
+                    );
                 }
-                _ => {}
             }
+            SDL_EVENT_MOUSE_BUTTON_UP
+                if mouse_button_event(e).is_some_and(|button| {
+                    button.windowID == overlay
+                        && button.which != SDL_PEN_MOUSEID
+                        && button.which != SDL_TOUCH_MOUSEID
+                }) =>
+            {
+                let Some(b) = mouse_button_event(e) else {
+                    return;
+                };
+                let source = Source::Mouse(b.button);
+                if self.input.contact.is_some_and(|contact| {
+                    contact.source == source && matches!(contact.gesture, Gesture::Erase(_))
+                }) {
+                    self.motion(source, Point::new(b.x, b.y, 1., [0.; 2]));
+                }
+                self.end(source);
+            }
+            SDL_EVENT_MOUSE_MOTION
+                if mouse_motion_event(e).is_some_and(|motion| motion.windowID == overlay) =>
+            {
+                let Some(m) = mouse_motion_event(e) else {
+                    return;
+                };
+                if m.which != SDL_PEN_MOUSEID
+                    && m.which != SDL_TOUCH_MOUSEID
+                    && let Some(contact) = self.input.contact
+                    && matches!(contact.source, Source::Mouse(_))
+                {
+                    self.motion(contact.source, Point::new(m.x, m.y, 1., [0.; 2]));
+                }
+            }
+            SDL_EVENT_FINGER_CANCELED => {
+                if let Some(finger) = finger_event(e) {
+                    self.touch_event(finger, size);
+                }
+            }
+            SDL_EVENT_FINGER_DOWN | SDL_EVENT_FINGER_MOTION | SDL_EVENT_FINGER_UP
+                if finger_event(e).is_some_and(|finger| finger.windowID == overlay) =>
+            {
+                if let Some(finger) = finger_event(e) {
+                    self.touch_event(finger, size);
+                }
+            }
+            SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP
+                if pen_touch_event(e).is_some_and(|pen| pen.windowID == overlay) =>
+            {
+                let Some(t) = pen_touch_event(e) else {
+                    return;
+                };
+                let pen = *self.input.pens.entry(t.which.0).or_default();
+                let source = Source::Pen(t.which.0);
+                let p = pen.point(t.x, t.y);
+                if t.down {
+                    self.begin(source, p, t.eraser);
+                    let accepted = self
+                        .input
+                        .contact
+                        .is_some_and(|contact| contact.source == source);
+                    self.input.pens.entry(t.which.0).or_default().down = accepted;
+                    if let Some(contact) = &mut self.input.contact
+                        && contact.source == source
+                    {
+                        contact.measured_pressure = pen.has_pressure;
+                    }
+                } else {
+                    self.pen_motion(source, p, pen.has_pressure);
+                    self.end(source);
+                    if let Some(pen) = self.input.pens.get_mut(&t.which.0) {
+                        pen.finish();
+                    }
+                }
+            }
+            SDL_EVENT_PEN_AXIS
+                if pen_axis_event(e).is_some_and(|pen| pen.windowID == overlay) =>
+            {
+                let Some(a) = pen_axis_event(e) else {
+                    return;
+                };
+                let source = Source::Pen(a.which.0);
+                let pen = self.input.pens.entry(a.which.0).or_default();
+                let in_contact = pen.down || a.pen_state & SDL_PEN_INPUT_DOWN != 0;
+                match a.axis {
+                    SDL_PEN_AXIS_PRESSURE if a.value.is_finite() => {
+                        pen.pressure = a.value.clamp(0., 1.);
+                        pen.has_pressure = in_contact || pen.pressure > 0.;
+                    }
+                    SDL_PEN_AXIS_XTILT => pen.tilt[0] = a.value.clamp(-90., 90.),
+                    SDL_PEN_AXIS_YTILT => pen.tilt[1] = a.value.clamp(-90., 90.),
+                    _ => {}
+                }
+                let point = pen.point(a.x, a.y);
+                let has_pressure = pen.has_pressure;
+                self.pen_motion(source, point, has_pressure);
+            }
+            SDL_EVENT_PEN_MOTION
+                if pen_motion_event(e).is_some_and(|pen| pen.windowID == overlay) =>
+            {
+                let Some(m) = pen_motion_event(e) else {
+                    return;
+                };
+                let pen = *self.input.pens.entry(m.which.0).or_default();
+                self.pen_motion(
+                    Source::Pen(m.which.0),
+                    pen.point(m.x, m.y),
+                    pen.has_pressure,
+                );
+            }
+            SDL_EVENT_WINDOW_FOCUS_LOST if window_event_id(e) == Some(overlay) => {
+                if !self.multi {
+                    self.discard_touches();
+                }
+                self.finish_contact();
+                self.reset_pens();
+            }
+            SDL_EVENT_WINDOW_MOUSE_LEAVE
+                if window_event_id(e) == Some(overlay)
+                    && self
+                        .input
+                        .contact
+                        .is_some_and(|contact| matches!(contact.source, Source::Mouse(_))) =>
+            {
+                self.finish_contact();
+            }
+            _ => {}
         }
     }
     fn keyboard(&mut self, e: &SDL_Event, toolbar_keyboard: bool) -> Commands {
