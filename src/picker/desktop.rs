@@ -32,14 +32,10 @@ pub fn position(window: &Window, local: [f32; 2]) -> Result<ScreenPoint, String>
     }
     let [x, y] = local_pixels(window, local)?;
     let mut point = Point { x, y };
-    let hwnd = unsafe {
-        SDL_GetPointerProperty(
-            SDL_GetWindowProperties(window.raw),
-            SDL_PROP_WINDOW_WIN32_HWND_POINTER,
-            std::ptr::null_mut(),
-        )
-    };
-    if hwnd.is_null() || unsafe { ClientToScreen(hwnd, &mut point) } == 0 {
+    let hwnd = window.win32_hwnd().ok_or("No Win32 window handle")?;
+    // SAFETY: The HWND is borrowed from the still-live SDL window, and the
+    // output POINT is valid and writable for the duration of this call.
+    if unsafe { ClientToScreen(hwnd.as_ptr(), &mut point) } == 0 {
         return Err(std::io::Error::last_os_error().to_string());
     }
     Ok(ScreenPoint {
@@ -103,18 +99,10 @@ mod x11 {
         Err("X11 screen capture is unavailable".into())
     }
     fn display(window: &Window) -> Result<*mut c_void, String> {
-        let display = unsafe {
-            SDL_GetPointerProperty(
-                SDL_GetWindowProperties(window.raw),
-                SDL_PROP_WINDOW_X11_DISPLAY_POINTER,
-                ptr::null_mut(),
-            )
-        };
-        if display.is_null() {
-            Err("No X11 display for screen picking".into())
-        } else {
-            Ok(display)
-        }
+        window
+            .x11_display()
+            .map(|display| display.as_ptr())
+            .ok_or_else(|| "No X11 display for screen picking".into())
     }
     pub fn is_xwayland(window: &Window) -> bool {
         if std::env::var_os("WAYLAND_DISPLAY").is_some_and(|value| !value.is_empty())
@@ -150,11 +138,7 @@ mod x11 {
         unsafe {
             let lib = library()?;
             let d = display(window)?;
-            let id = SDL_GetNumberProperty(
-                SDL_GetWindowProperties(window.raw),
-                SDL_PROP_WINDOW_X11_WINDOW_NUMBER,
-                0,
-            ) as c_ulong;
+            let id = window.x11_window_number() as c_ulong;
             let geometry: Symbol<
                 unsafe extern "C" fn(
                     *mut c_void,
