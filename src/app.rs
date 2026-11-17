@@ -922,9 +922,7 @@ impl App {
             }
             SDL_EVENT_PEN_AXIS => pen_axis_event(event).map(|pen| pen.which.0),
             SDL_EVENT_PEN_MOTION => pen_motion_event(event).map(|pen| pen.which.0),
-            SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP => {
-                pen_touch_event(event).map(|pen| pen.which.0)
-            }
+            SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP => pen_touch_event(event).map(|pen| pen.which.0),
             _ => None,
         };
         let Some(id) = id else {
@@ -1758,8 +1756,7 @@ pub fn run(options: Options) -> Result<(), String> {
                     && canvas.on_output(options.smoke)
                     && ((ty == SDL_EVENT_MOUSE_BUTTON_DOWN
                         && mouse_button_event(&event).is_some_and(|button| {
-                            button.which != SDL_TOUCH_MOUSEID
-                                && button.which != SDL_PEN_MOUSEID
+                            button.which != SDL_TOUCH_MOUSEID && button.which != SDL_PEN_MOUSEID
                         }))
                         || matches!(
                             ty,
@@ -1852,8 +1849,7 @@ pub fn run(options: Options) -> Result<(), String> {
                             .events
                             .iter()
                             .any(|event| matches!(event, egui::Event::PointerButton { .. })));
-                let key =
-                    key_event(&event).ok_or("SDL keyboard event has no keyboard data")?;
+                let key = key_event(&event).ok_or("SDL keyboard event has no keyboard data")?;
                 if from_toolbar
                     && was_editing
                     && !toolbar_claims_keys
