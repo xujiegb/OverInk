@@ -164,10 +164,9 @@ impl Gui {
                     && m.which != SDL_TOUCH_MOUSEID
                     && m.which != SDL_PEN_MOUSEID
                 {
-                    self.raw.events.push(Event::PointerMoved(egui::pos2(
-                        m.x / scale,
-                        m.y / scale,
-                    )));
+                    self.raw
+                        .events
+                        .push(Event::PointerMoved(egui::pos2(m.x / scale, m.y / scale)));
                 }
             }
             SDL_EVENT_MOUSE_BUTTON_DOWN | SDL_EVENT_MOUSE_BUTTON_UP => {
@@ -265,9 +264,10 @@ impl Gui {
                 };
                 let m = modifiers(k.r#mod);
                 let same_ime_key = k.down
-                    && self.composition_ended.take().is_some_and(|at| {
-                        k.timestamp != 0 && k.timestamp.abs_diff(at) < 2_000_000
-                    });
+                    && self
+                        .composition_ended
+                        .take()
+                        .is_some_and(|at| k.timestamp != 0 && k.timestamp.abs_diff(at) < 2_000_000);
                 // Some backends deliver the composition and its initiating key together.
                 if self.composing
                     || (same_ime_key
