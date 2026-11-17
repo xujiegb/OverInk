@@ -1124,16 +1124,16 @@ mod tests {
         let state = AtomicU8::new(SAVE_PENDING);
         state.store(SAVE_CANCELLED, Ordering::Release);
         let image = Image::buffer(1, 1).unwrap();
-        assert!(
+        assert!(matches!(
             write_screenshot(
                 &image,
                 Destination::Replace(path.clone()),
                 false,
                 1.,
                 &state
-            )
-            .is_err()
-        );
+            ),
+            Err(SaveError::Cancelled)
+        ));
         assert_eq!(std::fs::read(path).unwrap(), b"original");
     }
 
