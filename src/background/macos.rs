@@ -17,7 +17,6 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
-    thread,
     time::{Duration, Instant},
 };
 
@@ -78,6 +77,7 @@ struct CGRect {
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
     fn CGGetDisplaysWithPoint(point: Point, max: u32, displays: *mut u32, count: *mut u32) -> i32;
+    fn CGDisplayCreateImage(display: u32) -> *const c_void;
     fn CGPreflightScreenCaptureAccess() -> bool;
     fn CGRequestScreenCaptureAccess() -> bool;
     fn CGColorSpaceCreateWithName(name: *const c_void) -> *const c_void;
@@ -459,40 +459,19 @@ fn copy_sdr_screenshot(image: *const c_void) -> Result<Image, String> {
 }
 
 fn sdr_capture(bounds: [i32; 4], cancelled: &AtomicBool) -> CaptureResult {
-    use std::{
-        process::Command,
-        time::{SystemTime, UNIX_EPOCH},
-    };
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("overink-freeze-{}-{unique}", std::process::id()));
-    std::fs::create_dir(&dir).map_err(|e| e.to_string())?;
-    let file = dir.join("desktop.png");
-    let result = (|| {
-        let [x, y, w, h] = bounds;
-        let mut child = Command::new("/usr/sbin/screencapture")
-            .args(["-x", "-t", "png", &format!("-R{x},{y},{w},{h}")])
-            .arg(&file)
-            .spawn()
-            .map_err(|e| e.to_string())?;
-        loop {
-            if cancelled.load(Ordering::Relaxed) {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Ok(None);
-            }
-            if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
-                if !status.success() {
-                    return Err("Allow OverInk Screen Recording access in macOS System Settings, then retry the screenshot".into());
-                }
-                return Image::load(&file).map(Some);
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
-    })();
-    let _ = std::fs::remove_file(file);
-    let _ = std::fs::remove_dir(dir);
-    result
+    if cancelled.load(Ordering::Relaxed) {
+        return Ok(None);
+    }
+    // macOS 11–13 fallback: capture directly in OverInk instead of spawning
+    // /usr/sbin/screencapture, which could trigger a different TCC identity.
+    let id = display_id(bounds)?;
+    let image = unsafe { CGDisplayCreateImage(id) };
+    if image.is_null() {
+        return Err("Core Graphics could not capture the display. Check Screen Recording permission.".into());
+    }
+    let image = Data(image);
+    if cancelled.load(Ordering::Relaxed) {
+        return Ok(None);
+    }
+    copy_sdr_screenshot(image.0).map(Some)
 }
