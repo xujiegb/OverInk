@@ -1,5 +1,6 @@
 //! SDL is owned by the main thread. Window/renderer pointers never cross threads.
 pub mod dialog;
+mod dialog_native;
 pub use sdl3_sys::{
     blendmode::*, clipboard::*, error::*, events::*, hints::*, init::*, keyboard::*, keycode::*,
     locale::*, mouse::*, pen::*, pixels::*, properties::*, rect::*, render::*, stdinc::*,
