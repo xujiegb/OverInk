@@ -9,14 +9,36 @@ pub struct ScreenPoint {
 
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
 fn local_pixels(window: &Window, local: [f32; 2]) -> Result<[i32; 2], String> {
-    let logical = window.size();
-    let physical = window.pixel_size();
-    if local.iter().any(|v| !v.is_finite()) {
-        return Err("Invalid screen coordinate".into());
+    scaled_pixels(local, window.size(), window.pixel_size())
+}
+
+/// Reject zero-sized/minimized windows and out-of-range coordinates before
+/// narrowing into the 32-bit pixel coordinates required by Win32 and X11.
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+fn scaled_pixels(
+    local: [f32; 2],
+    logical: [f32; 2],
+    physical: [i32; 2],
+) -> Result<[i32; 2], String> {
+    let mut pixels = [0; 2];
+    for i in 0..2 {
+        if !local[i].is_finite()
+            || !logical[i].is_finite()
+            || logical[i] <= 0.
+            || physical[i] <= 0
+        {
+            return Err("Invalid screen coordinate or window size".into());
+        }
+        let coordinate = (local[i] * physical[i] as f32 / logical[i]).floor();
+        if !coordinate.is_finite()
+            || coordinate < i32::MIN as f32
+            || coordinate >= 2_147_483_648.
+        {
+            return Err("Screen coordinate is out of range".into());
+        }
+        pixels[i] = coordinate as i32;
     }
-    Ok(std::array::from_fn(|i| {
-        (local[i] * physical[i] as f32 / logical[i]).floor() as i32
-    }))
+    Ok(pixels)
 }
 
 #[cfg(target_os = "windows")]
@@ -429,6 +451,20 @@ mod x11 {
 }
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub use x11::{capture, is_xwayland, position, sample};
+
+#[cfg(all(test, any(target_os = "windows", target_os = "linux", target_os = "freebsd")))]
+mod coordinate_tests {
+    use super::scaled_pixels;
+
+    #[test]
+    fn scales_and_rejects_invalid_window_dimensions() {
+        assert_eq!(scaled_pixels([10.5, 11.], [100., 100.], [200, 150]), Ok([21, 16]));
+        assert!(scaled_pixels([3., 4.], [0., 100.], [200, 200]).is_err());
+        assert!(scaled_pixels([3., 4.], [100., 100.], [0, 200]).is_err());
+        assert!(scaled_pixels([f32::NAN, 4.], [100., 100.], [200, 200]).is_err());
+        assert!(scaled_pixels([f32::MAX, 4.], [100., 100.], [200, 200]).is_err());
+    }
+}
 
 #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "freebsd")))]
 pub fn position(_window: &Window, _local: [f32; 2]) -> Result<ScreenPoint, String> {
