@@ -95,16 +95,27 @@ impl Job {
                         )
                     })
                 };
-                let (crop, sizes) = crop.for_portal(display, _displays, pixels, density, usable)?;
-                return crate::picker::portal::SystemJob::screenshot(multi, move |image| {
-                    if multi && !sizes.contains(&[image.width, image.height]) {
-                        return Err(
-                            "The portal screenshot dimensions do not match the desktop".into()
-                        );
+                let location = if driver() == "wayland" {
+                    // Wayland does not expose a toplevel window's global origin.
+                    None
+                } else {
+                    let (mut x, mut y) = (0, 0);
+                    unsafe {
+                        SDL_GetWindowPosition(window.raw, &mut x, &mut y).then(|| {
+                            Rect::from_min_size(
+                                egui::pos2(x as f32, y as f32),
+                                egui::vec2(size[0], size[1]),
+                            )
+                        })
                     }
-                    if !multi && !crop.matches_desktop_aspect([image.width, image.height]) {
+                };
+                let (crop, sizes) =
+                    crop.for_portal(display, _displays, pixels, density, usable, location)?;
+                return crate::picker::portal::SystemJob::screenshot(multi, move |image| {
+                    if !sizes.contains(&[image.width, image.height]) {
                         return Err(
-                            "The portal screenshot does not match the selected display".into()
+                            "The portal screenshot dimensions do not match the selected desktop"
+                                .into(),
                         );
                     }
                     crop.apply(image)
@@ -152,17 +163,6 @@ impl Crop {
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    fn matches_desktop_aspect(self, [width, height]: [u32; 2]) -> bool {
-        width > 0
-            && height > 0
-            && ((width as f64 / height as f64)
-                / (f64::from(self.size[0]) / f64::from(self.size[1]))
-                - 1.)
-                .abs()
-                < 0.03
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     fn for_portal(
         self,
         display: &Display,
@@ -170,7 +170,8 @@ impl Crop {
         pixels: [u32; 2],
         desktop_density: Option<f32>,
         usable: Option<Rect>,
-    ) -> Result<(Self, [[u32; 2]; 2]), String> {
+        location: Option<Rect>,
+    ) -> Result<(Self, [[u32; 2]; 3]), String> {
         let bounds = |[x, y, w, h]: [i32; 4]| {
             Rect::from_min_size(
                 egui::pos2(x as f32, y as f32),
@@ -186,18 +187,21 @@ impl Crop {
         {
             return Err("Invalid screenshot canvas size".into());
         }
-        // A maximized overlay can occupy the usable work area instead of the
-        // whole display. Prefer that exact inset when SDL reports it. If the
-        // compositor doesn't supply an accurate work area, map normalized canvas
-        // coordinates over the display instead of rejecting every screenshot.
-        let visible = usable
-            .filter(|area| {
-                area.is_positive()
-                    && monitor.contains_rect(*area)
-                    && (area.width() - self.size[0]).abs() <= 2.
-                    && (area.height() - self.size[1]).abs() <= 2.
+        // Never infer an unknown window origin from its size: doing so can
+        // silently capture a different portion of the desktop on Wayland.
+        let matches_canvas = |area: &Rect| {
+            area.is_positive()
+                && monitor.contains_rect(*area)
+                && (area.width() - self.size[0]).abs() <= 2.
+                && (area.height() - self.size[1]).abs() <= 2.
+        };
+        let visible = location
+            .filter(matches_canvas)
+            .or_else(|| {
+                (self.size == <[f32; 2]>::from(monitor.size())).then_some(monitor)
             })
-            .unwrap_or(monitor);
+            .or_else(|| usable.filter(matches_canvas))
+            .ok_or("Cannot determine the screenshot canvas position on this display")?;
         let scale_x = visible.width() / self.size[0];
         let scale_y = visible.height() / self.size[1];
         let map = |point: egui::Pos2| {
@@ -225,14 +229,20 @@ impl Crop {
         }
         let offset = monitor.min - desktop.min;
         let size: [f32; 2] = desktop.size().into();
-        let pixels =
-            desktop_density.map_or(pixels, |density| size.map(|n| (n * density).round() as u32));
+        let display_pixels = size.map(|n| (n * display.scale).round() as u32);
+        let native_pixels =
+            desktop_density.map_or(display_pixels, |density| size.map(|n| (n * density).round() as u32));
+        let fullscreen_pixels = if (visible.size() - monitor.size()).length() <= 2. {
+            pixels
+        } else {
+            [0, 0]
+        };
         Ok((
             Self {
                 region: mapped.translate(offset),
                 size,
             },
-            [size.map(|n| n as u32), pixels],
+            [size.map(|n| n as u32), native_pixels, fullscreen_pixels],
         ))
     }
 }
