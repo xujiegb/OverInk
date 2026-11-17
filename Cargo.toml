@@ -27,7 +27,7 @@ png = "0.18"
 tempfile = "3"
 
 [profile.release]
-lto = "thin"
+lto = "fat"
 codegen-units = 1
 strip = "debuginfo"
 
