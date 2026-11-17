@@ -655,7 +655,11 @@ impl Window {
             .ok_or_else(error)?;
             let opaque = SDL_MapSurfaceRGBA(surface.as_ptr(), 255, 255, 255, 255);
             let transparent = SDL_MapSurfaceRGBA(surface.as_ptr(), 0, 0, 0, 0);
-            check(SDL_FillSurfaceRect(surface.as_ptr(), ptr::null(), transparent))?;
+            check(SDL_FillSurfaceRect(
+                surface.as_ptr(),
+                ptr::null(),
+                transparent,
+            ))?;
             for region in regions {
                 check(SDL_FillSurfaceRect(surface.as_ptr(), region, opaque))?;
             }
@@ -1519,9 +1523,8 @@ impl Renderer {
     /// The returned surface is always destroyed, including on write failures.
     pub fn save_bmp(&self, path: &std::path::Path) -> Result<(), String> {
         unsafe {
-            let surface =
-                OwnedSurface::from_native(SDL_RenderReadPixels(self.raw, ptr::null()))
-                    .ok_or_else(error)?;
+            let surface = OwnedSurface::from_native(SDL_RenderReadPixels(self.raw, ptr::null()))
+                .ok_or_else(error)?;
             let name = cstring(&path.to_string_lossy());
             check(SDL_SaveBMP(surface.as_ptr(), name.as_ptr()))
         }
