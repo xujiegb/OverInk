@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause
+#![forbid(unsafe_code)]
 use super::{Decision, Guide};
 use crate::{
     appearance::{Language, Preferences, ThemeMonitor},
@@ -6,7 +7,6 @@ use crate::{
     icc::ColorManager,
     sdl::*,
 };
-use std::ptr;
 
 const WIDTH: i32 = 480;
 const HEIGHT: i32 = 180;
@@ -23,13 +23,10 @@ pub(super) fn run(
     // SDL's X11 window coordinates are pixels, while egui uses points.
     let units = window.ui_scale();
     if units > 1. && driver() == "x11" {
-        unsafe {
-            check(SDL_SetWindowSize(
-                window.raw,
-                (WIDTH as f32 * units).round() as i32,
-                (HEIGHT as f32 * units).round() as i32,
-            ))?;
-        }
+        window.set_size(
+            (WIDTH as f32 * units).round() as i32,
+            (HEIGHT as f32 * units).round() as i32,
+        )?;
     }
     let renderer = Renderer::new(&window, true).or_else(|_| Renderer::software(&window))?;
     let mut gui = Gui::new();
@@ -38,20 +35,21 @@ pub(super) fn run(
     let mut color = ColorManager::default();
     color.refresh(&window, renderer.extended);
     window.show(true)?;
-    unsafe { SDL_RaiseWindow(window.raw) };
+    window.raise();
     let decision = 'dialog: loop {
         let mut event = SDL_Event::default();
-        while unsafe { SDL_PollEvent(&mut event) } {
-            match unsafe { SDL_EventType(event.r#type) } {
+        while poll_event(&mut event) {
+            match event_type(&event) {
                 SDL_EVENT_WINDOW_CLOSE_REQUESTED => {
                     // SDL also queues a quit for the last window. The main
                     // app can reuse this runtime when the guide ran on X11.
-                    unsafe { SDL_FlushEvent(SDL_EVENT_QUIT.0) };
+                    flush_quit_event();
                     break 'dialog close_decision(&guide);
                 }
                 SDL_EVENT_QUIT => break 'dialog close_decision(&guide),
                 SDL_EVENT_KEY_DOWN
-                    if unsafe { event.key.key == SDLK_ESCAPE && !event.key.repeat } =>
+                    if key_event(&event)
+                        .is_some_and(|key| key.key == SDLK_ESCAPE && !key.repeat) =>
                 {
                     break 'dialog close_decision(&guide);
                 }
@@ -88,7 +86,7 @@ pub(super) fn run(
                 break decision;
             }
         } else if delay != 0 {
-            unsafe { SDL_WaitEventTimeout(ptr::null_mut(), delay as i32) };
+            wait_for_event(delay as i32);
         }
     };
     Ok((decision, runtime))
