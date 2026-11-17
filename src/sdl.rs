@@ -196,6 +196,35 @@ pub fn delay_precise(nanoseconds: u64) {
     unsafe { SDL_DelayPrecise(nanoseconds) }
 }
 
+/// Enumerate SDL preferred locales and release SDL-owned storage before return.
+pub fn preferred_locales() -> Vec<(String, String)> {
+    unsafe {
+        let mut count = 0;
+        let locales = SDL_GetPreferredLocales(&mut count);
+        if locales.is_null() {
+            return Vec::new();
+        }
+        let name = |ptr: *const std::ffi::c_char| {
+            if ptr.is_null() {
+                String::new()
+            } else {
+                CStr::from_ptr(ptr).to_str().unwrap_or_default().to_owned()
+            }
+        };
+        let result = (0..count.max(0) as usize)
+            .filter_map(|i| (*locales.add(i)).as_ref())
+            .map(|locale| (name(locale.language), name(locale.country)))
+            .collect();
+        SDL_free(locales.cast());
+        result
+    }
+}
+
+/// Query the operating system's theme through SDL.
+pub fn system_theme() -> SDL_SystemTheme {
+    unsafe { SDL_GetSystemTheme() }
+}
+
 pub struct Window {
     pub raw: *mut SDL_Window,
     pub id: SDL_WindowID,
