@@ -288,6 +288,53 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    fn portal_crop_accounts_for_gnome_work_area() {
+        let display = Display {
+            id: 7,
+            name: "GNOME".into(),
+            bounds: [0, 0, 1440, 900],
+            refresh: 60.,
+            scale: 1.,
+        };
+        // The maximized Wayland overlay starts below a 34-point system bar.
+        let selected = Crop {
+            region: Rect::from_min_size(egui::pos2(100., 50.), egui::vec2(200., 150.)),
+            size: [1440., 866.],
+        };
+        let usable = Rect::from_min_size(egui::pos2(0., 34.), egui::vec2(1440., 866.));
+        let (crop, _) = selected
+            .for_portal(&display, &[display.clone()], [1440, 866], None, Some(usable))
+            .unwrap();
+        assert_eq!(crop.size, [1440., 900.]);
+        assert_eq!(crop.region.min, egui::pos2(100., 84.));
+        assert_eq!(crop.region.max, egui::pos2(300., 234.));
+        assert!(crop.matches_desktop_aspect([2880, 1800]));
+        assert!(!crop.matches_desktop_aspect([1920, 1080]));
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    fn portal_crop_normalizes_an_unreported_work_area() {
+        let display = Display {
+            id: 7,
+            name: "GNOME".into(),
+            bounds: [0, 0, 1200, 900],
+            refresh: 60.,
+            scale: 1.,
+        };
+        let selection = Crop {
+            region: Rect::from_min_size(egui::pos2(100., 100.), egui::vec2(200., 100.)),
+            size: [600., 450.],
+        };
+        let (crop, _) = selection
+            .for_portal(&display, &[display], [1200, 900], None, None)
+            .unwrap();
+        assert_eq!(crop.region.min, egui::pos2(200., 200.));
+        assert_eq!(crop.region.max, egui::pos2(600., 400.));
+    }
+
+    #[test]
     fn logical_selection_crops_fractional_scale_to_pixel_edges() {
         let mut image = Image::buffer(5, 5).unwrap();
         for (i, pixel) in image.rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
