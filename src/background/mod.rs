@@ -171,10 +171,12 @@ impl Image {
             cms::cmsCloseProfile(input);
             cms::cmsCloseProfile(srgb);
             if !transform.is_null() {
+                // Both FFI pointers describe the same in-place pixel buffer.
+                let pixels = self.rgba.as_mut_ptr();
                 cms::cmsDoTransform(
                     transform,
-                    self.rgba.as_ptr().cast(),
-                    self.rgba.as_mut_ptr().cast(),
+                    pixels.cast_const().cast(),
+                    pixels.cast(),
                     self.width * self.height,
                 );
                 cms::cmsDeleteTransform(transform);

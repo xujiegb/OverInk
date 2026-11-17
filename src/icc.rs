@@ -144,11 +144,14 @@ impl ColorManager {
                 .iter()
                 .map(|v| [v[0] as f32 / 255., v[1] as f32 / 255., v[2] as f32 / 255.])
                 .collect();
+            // Derive both FFI aliases from a single mutable raw pointer.
+            // Little CMS explicitly supports in-place transformations.
+            let pixels = rgb.as_mut_ptr();
             unsafe {
                 cms::cmsDoTransform(
                     self.transform,
-                    rgb.as_ptr().cast(),
-                    rgb.as_mut_ptr().cast(),
+                    pixels.cast_const().cast(),
+                    pixels.cast(),
                     rgb.len() as u32,
                 );
             }

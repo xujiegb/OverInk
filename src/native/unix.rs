@@ -22,7 +22,7 @@ struct Wayland {
     queue: *mut c_void,
     compositor: *mut c_void,
     region_interface: *const c_void,
-    applied: Option<(*mut c_void, bool)>,
+    applied: Option<(*mut c_void, bool, Option<Rect>, [i32; 2])>,
     marshal: Marshal,
     version: Version,
     destroy: Destroy,
@@ -179,7 +179,7 @@ impl Wayland {
             })
         }
     }
-    fn set(&mut self, w: &Window, pass: bool) -> Result<(), String> {
+    fn set(&mut self, w: &Window, pass: bool, hole: Option<Rect>) -> Result<(), String> {
         unsafe {
             let surface = SDL_GetPointerProperty(
                 SDL_GetWindowProperties(w.raw),
@@ -189,10 +189,21 @@ impl Wayland {
             if surface.is_null() {
                 return Err("No Wayland surface".into());
             }
-            if self.applied == Some((surface, pass)) {
+            // wl_region coordinates are surface-local logical units, not
+            // physical pixels like XShape rectangles.
+            let size = w.size().map(|v| v.ceil() as i32);
+            let hole = if pass {
+                None
+            } else {
+                hole.and_then(|area| area.clipped(size))
+            };
+            if self.applied == Some((surface, pass, hole, size)) {
                 return Ok(());
             }
-            let region = if pass {
+            // A NULL input region means the full surface. An empty region
+            // means passthrough. For a controller hole, add the full region
+            // and subtract only the protected controller rectangle.
+            let region = if pass || hole.is_some() {
                 let p = (self.marshal)(
                     self.compositor,
                     1,
@@ -204,6 +215,31 @@ impl Wayland {
                 if p.is_null() {
                     return Err("Cannot create input region".into());
                 }
+                if let Some(hole) = hole {
+                    // wl_region.add = opcode 1; wl_region.subtract = opcode 2.
+                    (self.marshal)(
+                        p,
+                        1,
+                        ptr::null(),
+                        (self.version)(p),
+                        0,
+                        0_i32,
+                        0_i32,
+                        size[0],
+                        size[1],
+                    );
+                    (self.marshal)(
+                        p,
+                        2,
+                        ptr::null(),
+                        (self.version)(p),
+                        0,
+                        hole.x,
+                        hole.y,
+                        hole.w,
+                        hole.h,
+                    );
+                }
                 p
             } else {
                 ptr::null_mut()
@@ -213,7 +249,7 @@ impl Wayland {
             if !region.is_null() {
                 (self.marshal)(region, 0, ptr::null(), (self.version)(region), 1);
             }
-            self.applied = Some((surface, pass));
+            self.applied = Some((surface, pass, hole, size));
             Ok(())
         }
     }
@@ -392,7 +428,7 @@ impl Passthrough {
     ) -> Result<(), String> {
         match &mut self.backend {
             Backend::X11(x11) => x11.set(w, pass, hole),
-            Backend::Wayland(wayland) => wayland.set(w, pass),
+            Backend::Wayland(wayland) => wayland.set(w, pass, hole),
             Backend::Unavailable(error) if pass || hole.is_some() => Err(error.clone()),
             Backend::Unavailable(_) => Ok(()),
         }

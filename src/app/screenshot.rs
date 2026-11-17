@@ -763,6 +763,16 @@ fn begin_publish(cancelled: &AtomicU8) -> io::Result<()> {
         .map_err(|_| io::Error::other("Screenshot save cancelled"))
 }
 
+// Preserve cancellation as a distinct result even when a PNG writer surfaces
+// it through an ordinary io::Error or an encoder error string.
+fn save_failure(cancelled: &AtomicU8, error: impl ToString) -> SaveError {
+    if cancelled.load(Ordering::Acquire) == SAVE_CANCELLED {
+        SaveError::Cancelled
+    } else {
+        SaveError::Failed(error.to_string())
+    }
+}
+
 fn retry_after_name_conflict(cancelled: &AtomicU8) -> Result<(), SaveError> {
     if cancelled
         .compare_exchange(
@@ -798,7 +808,7 @@ fn write_screenshot(
     white: f32,
     cancelled: &AtomicU8,
 ) -> SaveResult {
-    check_cancelled(cancelled).map_err(|error| error.to_string())?;
+    check_cancelled(cancelled).map_err(|error| save_failure(cancelled, error))?;
     let destination = match destination {
         Destination::File(path) => Destination::File(png_path(path)),
         folder => folder,
@@ -815,8 +825,12 @@ fn write_screenshot(
         writer: output.as_file_mut(),
         cancelled,
     });
-    image.write_png(&mut writer, hdr, white)?;
-    writer.flush().map_err(|error| error.to_string())?;
+    image
+        .write_png(&mut writer, hdr, white)
+        .map_err(|error| save_failure(cancelled, error))?;
+    writer
+        .flush()
+        .map_err(|error| save_failure(cancelled, error))?;
     drop(writer);
     // Cancellation releases the UI immediately. Check before publishing a
     // file, including each retry. An in-flight filesystem call may still finish.
@@ -830,7 +844,7 @@ fn write_screenshot(
                     format!("{stem}-{suffix}.png")
                 };
                 let path = folder.join(name);
-                begin_publish(cancelled).map_err(|error| error.to_string())?;
+                begin_publish(cancelled).map_err(|_| SaveError::Cancelled)?;
                 match output.persist_noclobber(&path) {
                     Ok(_) => return Ok(path),
                     Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -843,7 +857,7 @@ fn write_screenshot(
             unreachable!()
         }
         Destination::File(path) => {
-            begin_publish(cancelled).map_err(|error| error.to_string())?;
+            begin_publish(cancelled).map_err(|_| SaveError::Cancelled)?;
             output.persist_noclobber(&path).map_err(|error| {
                 if error.error.kind() == io::ErrorKind::AlreadyExists {
                     SaveError::Exists(path.clone())
@@ -854,7 +868,7 @@ fn write_screenshot(
             Ok(path)
         }
         Destination::Replace(path) => {
-            begin_publish(cancelled).map_err(|error| error.to_string())?;
+            begin_publish(cancelled).map_err(|_| SaveError::Cancelled)?;
             output
                 .persist(&path)
                 .map_err(|error| error.error.to_string())?;
@@ -1110,16 +1124,16 @@ mod tests {
         let state = AtomicU8::new(SAVE_PENDING);
         state.store(SAVE_CANCELLED, Ordering::Release);
         let image = Image::buffer(1, 1).unwrap();
-        assert!(
+        assert!(matches!(
             write_screenshot(
                 &image,
                 Destination::Replace(path.clone()),
                 false,
                 1.,
                 &state
-            )
-            .is_err()
-        );
+            ),
+            Err(SaveError::Cancelled)
+        ));
         assert_eq!(std::fs::read(path).unwrap(), b"original");
     }
 

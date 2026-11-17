@@ -117,7 +117,7 @@ mod x11 {
         }
     }
     pub fn is_xwayland(window: &Window) -> bool {
-        if std::env::var_os("WAYLAND_DISPLAY").is_some()
+        if std::env::var_os("WAYLAND_DISPLAY").is_some_and(|value| !value.is_empty())
             || std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland")
         {
             return true;

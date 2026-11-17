@@ -390,7 +390,13 @@ impl Window {
 }
 impl Drop for Window {
     fn drop(&mut self) {
-        unsafe { SDL_DestroyWindow(self.raw) }
+        // Destroying an SDL parent also destroys its popup descendants.
+        // Never dereference a popup whose parent has already been dropped.
+        unsafe {
+            if !self.raw.is_null() && SDL_GetWindowFromID(self.id) == self.raw {
+                SDL_DestroyWindow(self.raw);
+            }
+        }
     }
 }
 pub struct Renderer {

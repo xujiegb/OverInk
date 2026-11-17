@@ -345,13 +345,18 @@ export default class OverInkOverlay extends Extension {
     enable() {
         this._windows = new Map();
         this._bridge = new CaptureBridge(this);
+        const bridge = this._bridge;
         this._busOwner = Gio.bus_own_name(
             Gio.BusType.SESSION,
             BUS_NAME,
             Gio.BusNameOwnerFlags.NONE,
             connection => {
+                // A previous bus-owner callback can arrive after disable and
+                // even after a new enable has installed a different bridge.
+                if (this._bridge !== bridge || !this._windows)
+                    return;
                 this._dbus = Gio.DBusExportedObject.wrapJSObject(
-                    CAPTURE_INTERFACE, this._bridge);
+                    CAPTURE_INTERFACE, bridge);
                 this._dbus.export(connection, BUS_PATH);
             },
             () => {},
@@ -374,7 +379,8 @@ export default class OverInkOverlay extends Extension {
         this._bridge?.stop();
         this._dbus?.unexport();
         this._dbus = null;
-        Gio.bus_unown_name(this._busOwner);
+        if (this._busOwner)
+            Gio.bus_unown_name(this._busOwner);
         this._busOwner = 0;
         this._bridge = null;
         global.window_manager.disconnect(this._map);
@@ -389,6 +395,7 @@ export default class OverInkOverlay extends Extension {
             if (state.aboveAdded)
                 window.unmake_above();
         }
+        this._windows = null;
     }
 
     _watch(window) {
@@ -419,7 +426,9 @@ export default class OverInkOverlay extends Extension {
     }
 
     _unwatch(window) {
-        const state = this._windows.get(window);
+        const state = this._windows?.get(window);
+        if (!state)
+            return;
         for (const signal of state.signals)
             window.disconnect(signal);
         this._windows.delete(window);

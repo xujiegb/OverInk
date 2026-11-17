@@ -125,7 +125,7 @@ impl SystemJob<Image> {
             })
             .map_err(|error| {
                 format!(
-                    "GNOME capture failed: {error}. Enable OverInk Overlay (revision 4) in GNOME Wayland. XWayland alone cannot capture native Wayland windows."
+                    "GNOME capture failed: {error}. Enable OverInk Overlay (revision 5) in GNOME Wayland. XWayland alone cannot capture native Wayland windows."
                 )
             })?;
             let Some(path) = path else {

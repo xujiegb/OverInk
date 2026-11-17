@@ -129,6 +129,18 @@ fn button_sized(ui: &mut Ui, icon: Icon, label: &str, selected: bool, size: Vec2
 }
 
 pub fn swatch(ui: &mut Ui, size: Vec2, rgb: [u8; 3], label: &str, selected: bool) -> Response {
+    hint(swatch_button(ui, size, rgb, label, selected), label)
+}
+
+// Canvas-embedded text menus use egui's own tooltip. The native toolbar
+// hint is only appropriate for the separate SDL toolbar.
+pub fn swatch_button(
+    ui: &mut Ui,
+    size: Vec2,
+    rgb: [u8; 3],
+    label: &str,
+    selected: bool,
+) -> Response {
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     response.widget_info(|| {
         egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), selected, label)
@@ -148,7 +160,7 @@ pub fn swatch(ui: &mut Ui, size: Vec2, rgb: [u8; 3], label: &str, selected: bool
             egui::StrokeKind::Inside,
         );
     }
-    hint(response, label)
+    response
 }
 
 const MENU_EDGE: f32 = 6.;
@@ -194,6 +206,52 @@ pub fn context_menu_rect(
         // If no side fits, keep the screen-clamped anchor, allowing the overlap.
     }
     rect
+}
+
+/// Place a menu while checking each protected region independently.
+/// Never merge separated regions into a large bounding rectangle: the
+/// empty space between them must remain usable for the menu.
+pub fn context_menu_rect_avoiding(
+    anchor: Rect,
+    screen: Rect,
+    size: Vec2,
+    protected: &[Rect],
+    scale: f32,
+) -> Rect {
+    let preferred = context_menu_rect(anchor, screen, size, None, scale);
+    if !protected.iter().any(|hole| hole.intersects(preferred)) {
+        return preferred;
+    }
+    let gap = MENU_EDGE * scale;
+    let inner = screen.shrink(gap);
+    if inner.width() < size.x || inner.height() < size.y {
+        return preferred;
+    }
+    let mut xs = vec![preferred.left()];
+    let mut ys = vec![preferred.top()];
+    for hole in protected {
+        xs.extend([hole.left() - gap - size.x, hole.right() + gap]);
+        ys.extend([hole.top() - gap - size.y, hole.bottom() + gap]);
+    }
+    let mut best = None;
+    for x in xs {
+        for &y in &ys {
+            let candidate = Rect::from_min_size(egui::pos2(x, y), size);
+            if candidate.left() < inner.left()
+                || candidate.top() < inner.top()
+                || candidate.right() > inner.right()
+                || candidate.bottom() > inner.bottom()
+                || protected.iter().any(|hole| hole.intersects(candidate))
+            {
+                continue;
+            }
+            let distance = (candidate.min - preferred.min).length_sq();
+            if best.as_ref().is_none_or(|(score, _)| distance < *score) {
+                best = Some((distance, candidate));
+            }
+        }
+    }
+    best.map_or(preferred, |(_, rect)| rect)
 }
 
 fn paint(icon: Icon, p: &egui::Painter, center: Pos2, color: Color32) {
@@ -387,5 +445,22 @@ fn paint(icon: Icon, p: &egui::Painter, center: Pos2, color: Color32) {
                 (16., 5.),
             ]);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn palette_avoids_individual_regions_without_treating_gap_as_obstacle() {
+        let screen = Rect::from_min_size(egui::pos2(0., 0.), vec2(800., 600.));
+        let anchor = Rect::from_min_size(egui::pos2(340., 390.), vec2(120., 40.));
+        let distant = Rect::from_min_size(egui::pos2(20., 15.), vec2(70., 65.));
+        let rect =
+            context_menu_rect_avoiding(anchor, screen, vec2(210., 160.), &[anchor, distant], 1.);
+        assert!(!rect.intersects(anchor));
+        assert!(!rect.intersects(distant));
+        assert!(screen.contains_rect(rect));
     }
 }

@@ -67,6 +67,18 @@ struct Content {
 }
 
 impl Tooltips {
+    pub fn renderer_reset(&mut self) {
+        if let Some(mut popup) = self.0.take() {
+            popup.gui.forget_renderer_textures();
+        }
+    }
+
+    pub fn renderer_reset_window(&mut self, id: SDL_WindowID) {
+        if self.0.as_ref().is_some_and(|popup| popup.window.id == id) {
+            self.renderer_reset();
+        }
+    }
+
     pub fn clear(&mut self) {
         if let Some(popup) = &self.0
             && popup.visible()
