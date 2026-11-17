@@ -1044,7 +1044,10 @@ mod tests {
     fn cancelled_during_filename_collision_prevents_retry() {
         let state = AtomicU8::new(SAVE_PUBLISHING);
         state.store(SAVE_CANCEL_REQUESTED, Ordering::Release);
-        assert!(matches!(retry_after_name_conflict(&state), Err(SaveError::Cancelled)));
+        assert!(matches!(
+            retry_after_name_conflict(&state),
+            Err(SaveError::Cancelled)
+        ));
         assert_eq!(state.load(Ordering::Acquire), SAVE_CANCELLED);
 
         let state = AtomicU8::new(SAVE_PUBLISHING);
