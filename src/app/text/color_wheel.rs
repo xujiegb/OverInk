@@ -103,7 +103,6 @@ pub(super) fn paint_disc(painter: &Painter, center: Pos2, radius: f32, value: f3
 mod tests {
     use super::*;
 
-
     #[test]
     fn choosing_hue_from_black_produces_visible_color_without_brightness_drag() {
         let mut wheel = ColorWheel::new(InkColor::from_rgb8([0, 0, 0]));
@@ -112,6 +111,7 @@ mod tests {
         assert_eq!(wheel.chosen_color().unwrap().srgb8(), [255, 0, 0]);
         assert_eq!(wheel.value.v, 1.);
     }
+
     #[test]
     fn the_wheel_selects_hue_and_saturation_without_changing_brightness() {
         let mut wheel = ColorWheel::new(InkColor::from_rgb8([128; 3]));
