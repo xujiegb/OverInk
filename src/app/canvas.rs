@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use super::{App, Options, ink::Ink};
 use crate::{
     appearance::{Text, text},
@@ -131,12 +133,7 @@ impl Canvas {
                     && let Some([x, y, w, h]) = self.bounds
                     && driver() != "wayland"
                 {
-                    let (mut actual_x, mut actual_y) = (0, 0);
-                    let positioned = unsafe {
-                        SDL_GetWindowPosition(self.window.raw, &mut actual_x, &mut actual_y)
-                    };
-                    if !positioned
-                        || [actual_x, actual_y] != [x, y]
+                    if self.window.position().ok() != Some([x, y])
                         || self.window.size() != [w as f32, h as f32]
                     {
                         self.window.place_on_display(id, true).map_err(|error| {
@@ -144,7 +141,7 @@ impl Canvas {
                         })?;
                     }
                 }
-                unsafe { SDL_SetWindowAlwaysOnTop(self.window.raw, true) };
+                self.window.set_always_on_top(true);
                 self.keep_toolbar_above(toolbar);
             }
         }
@@ -562,29 +559,7 @@ fn reconcile_windows(
 }
 
 pub(super) fn event_window(event: &SDL_Event, ty: SDL_EventType) -> Option<SDL_WindowID> {
-    unsafe {
-        let window = match ty {
-            SDL_EVENT_MOUSE_BUTTON_DOWN | SDL_EVENT_MOUSE_BUTTON_UP => event.button.windowID,
-            SDL_EVENT_MOUSE_MOTION => event.motion.windowID,
-            SDL_EVENT_MOUSE_WHEEL => event.wheel.windowID,
-            SDL_EVENT_FINGER_DOWN
-            | SDL_EVENT_FINGER_MOTION
-            | SDL_EVENT_FINGER_UP
-            | SDL_EVENT_FINGER_CANCELED => event.tfinger.windowID,
-            SDL_EVENT_PEN_PROXIMITY_IN | SDL_EVENT_PEN_PROXIMITY_OUT => event.pproximity.windowID,
-            SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP => event.ptouch.windowID,
-            SDL_EVENT_PEN_MOTION => event.pmotion.windowID,
-            SDL_EVENT_PEN_AXIS => event.paxis.windowID,
-            SDL_EVENT_KEY_DOWN | SDL_EVENT_KEY_UP => event.key.windowID,
-            SDL_EVENT_WINDOW_FOCUS_GAINED
-            | SDL_EVENT_WINDOW_FOCUS_LOST
-            | SDL_EVENT_WINDOW_MOUSE_LEAVE => event.window.windowID,
-            SDL_EVENT_TEXT_INPUT => event.text.windowID,
-            SDL_EVENT_TEXT_EDITING => event.edit.windowID,
-            _ => return None,
-        };
-        (window.0 != 0).then_some(window)
-    }
+    crate::sdl::event_window(event, ty)
 }
 
 pub(super) fn failure(error: impl ToString) -> crate::appearance::Status {
