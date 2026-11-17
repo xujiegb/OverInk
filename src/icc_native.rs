@@ -16,13 +16,13 @@ impl Profile {
         let len = u32::try_from(bytes.len()).ok()?;
         // SAFETY: Little CMS borrows this byte slice only during this call.
         let raw = unsafe { cms::cmsOpenProfileFromMem(bytes.as_ptr().cast(), len) };
-        (!raw.is_null()).then_some(Self(raw))
+        (!raw.is_null()).then(|| Self(raw))
     }
 
     fn srgb() -> Option<Self> {
         // SAFETY: The returned handle is owned and closed by Profile::drop.
         let raw = unsafe { cms::cmsCreate_sRGBProfile() };
-        (!raw.is_null()).then_some(Self(raw))
+        (!raw.is_null()).then(|| Self(raw))
     }
 }
 
@@ -55,7 +55,7 @@ impl Transform {
                 cms::FLAGS_BLACKPOINTCOMPENSATION,
             )
         };
-        (!raw.is_null()).then_some(Self(raw))
+        (!raw.is_null()).then(|| Self(raw))
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd", test))]
@@ -72,7 +72,7 @@ impl Transform {
                 cms::FLAGS_COPY_ALPHA | cms::FLAGS_BLACKPOINTCOMPENSATION,
             )
         };
-        (!raw.is_null()).then_some(Self(raw))
+        (!raw.is_null()).then(|| Self(raw))
     }
 
     pub fn from_srgb_to_display(bytes: &[u8]) -> Result<Self, DisplayError> {
