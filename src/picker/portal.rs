@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use crate::{
     background::Image,
     color::{InkColor, Space},
@@ -67,10 +69,13 @@ impl SystemJob<Image> {
             std::process::id(),
             NEXT_SHELL_REQUEST.fetch_add(1, Ordering::Relaxed)
         );
-        let mut x = 0;
-        let mut y = 0;
-        let positioned = crate::sdl::driver() != "wayland"
-            && unsafe { crate::sdl::SDL_GetWindowPosition(window.raw, &mut x, &mut y) };
+        let position = if crate::sdl::driver() == "wayland" {
+            None
+        } else {
+            window.position().ok()
+        };
+        let [x, y] = position.unwrap_or([0, 0]);
+        let positioned = position.is_some();
         Self::spawn("overink-gnome-shell-capture", move |cancelled| {
             let shell_request = (
                 request_id.as_str(),
