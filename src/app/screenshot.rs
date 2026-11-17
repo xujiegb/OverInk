@@ -18,7 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const MENU_BUTTON: Vec2 = vec2(108., 44.);
+const MENU_BUTTON: Vec2 = vec2(90., 34.);
 const MENU_PADDING: f32 = 6.;
 const MENU_GAP: f32 = 5.;
 const MENU_SIZE: Vec2 = vec2(
