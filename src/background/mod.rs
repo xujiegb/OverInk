@@ -39,7 +39,7 @@ pub struct Image {
     encoding: Encoding,
 }
 impl Image {
-    #[cfg(any(target_os = "linux", target_os = "freebsd", test))]
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos", test))]
     pub fn buffer(width: u32, height: u32) -> Result<Self, String> {
         Self::allocate(width, height, Encoding::Srgb8)
     }
@@ -120,7 +120,7 @@ impl Image {
         }
         Ok(())
     }
-    #[cfg(any(not(target_os = "windows"), test))]
+    #[cfg(any(target_os = "linux", target_os = "freebsd", test))]
     pub fn load(path: &std::path::Path) -> Result<Self, String> {
         use image::ImageDecoder;
         let mut reader = image::ImageReader::open(path)
@@ -148,7 +148,7 @@ impl Image {
         }
         Ok(result)
     }
-    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd", test))]
+    #[cfg(any(target_os = "linux", target_os = "freebsd", test))]
     pub fn convert_to_srgb(&mut self, profile: &[u8]) {
         use lcms2_sys as cms;
         if profile.is_empty() || profile.len() > 16 * 1024 * 1024 {

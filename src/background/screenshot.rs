@@ -83,11 +83,39 @@ impl Job {
                 } else {
                     None
                 };
-                let (crop, sizes) = crop.for_portal(display, _displays, pixels, density)?;
+                // Wayland maximization uses the work area on GNOME; that can be
+                // smaller than the display bounds (e.g. the top panel). Map the
+                // canvas into the display before cropping the portal's desktop.
+                let usable = unsafe {
+                    let mut bounds = SDL_Rect::default();
+                    SDL_GetDisplayUsableBounds(SDL_DisplayID(display.id), &mut bounds).then(|| {
+                        Rect::from_min_size(
+                            egui::pos2(bounds.x as f32, bounds.y as f32),
+                            egui::vec2(bounds.w as f32, bounds.h as f32),
+                        )
+                    })
+                };
+                let location = if driver() == "wayland" {
+                    // Wayland does not expose a toplevel window's global origin.
+                    None
+                } else {
+                    let (mut x, mut y) = (0, 0);
+                    unsafe {
+                        SDL_GetWindowPosition(window.raw, &mut x, &mut y).then(|| {
+                            Rect::from_min_size(
+                                egui::pos2(x as f32, y as f32),
+                                egui::vec2(size[0], size[1]),
+                            )
+                        })
+                    }
+                };
+                let (crop, sizes) =
+                    crop.for_portal(display, _displays, pixels, density, usable, location)?;
                 return crate::picker::portal::SystemJob::screenshot(multi, move |image| {
                     if !sizes.contains(&[image.width, image.height]) {
                         return Err(
-                            "The portal screenshot dimensions do not match the desktop".into()
+                            "The portal screenshot dimensions do not match the selected desktop"
+                                .into(),
                         );
                     }
                     crop.apply(image)
@@ -141,7 +169,9 @@ impl Crop {
         displays: &[Display],
         pixels: [u32; 2],
         desktop_density: Option<f32>,
-    ) -> Result<(Self, [[u32; 2]; 2]), String> {
+        usable: Option<Rect>,
+        location: Option<Rect>,
+    ) -> Result<(Self, [[u32; 2]; 3]), String> {
         let bounds = |[x, y, w, h]: [i32; 4]| {
             Rect::from_min_size(
                 egui::pos2(x as f32, y as f32),
@@ -149,9 +179,41 @@ impl Crop {
             )
         };
         let monitor = bounds(display.bounds);
-        if self.size != <[f32; 2]>::from(monitor.size()) {
-            return Err("The screenshot canvas does not cover the selected display".into());
+        if !monitor.is_positive()
+            || self
+                .size
+                .iter()
+                .any(|size| !size.is_finite() || *size <= 0.)
+        {
+            return Err("Invalid screenshot canvas size".into());
         }
+        // Never infer an unknown window origin from its size: doing so can
+        // silently capture a different portion of the desktop on Wayland.
+        let matches_canvas = |area: &Rect| {
+            area.is_positive()
+                && monitor.contains_rect(*area)
+                && (area.width() - self.size[0]).abs() <= 2.
+                && (area.height() - self.size[1]).abs() <= 2.
+        };
+        let visible = if let Some(area) = location {
+            // A reported X11 window origin takes precedence. Never replace
+            // an invalid actual location with a guessed fullscreen rectangle.
+            matches_canvas(&area).then_some(area)
+        } else {
+            (self.size == <[f32; 2]>::from(monitor.size()))
+                .then_some(monitor)
+                .or_else(|| usable.filter(matches_canvas))
+        }
+        .ok_or("Cannot determine the screenshot canvas position on this display")?;
+        let scale_x = visible.width() / self.size[0];
+        let scale_y = visible.height() / self.size[1];
+        let map = |point: egui::Pos2| {
+            egui::pos2(
+                visible.min.x - monitor.min.x + point.x * scale_x,
+                visible.min.y - monitor.min.y + point.y * scale_y,
+            )
+        };
+        let mapped = Rect::from_min_max(map(self.region.min), map(self.region.max));
         let mut desktop = monitor;
         if desktop_density.is_some() {
             for (index, output) in displays.iter().enumerate() {
@@ -170,14 +232,27 @@ impl Crop {
         }
         let offset = monitor.min - desktop.min;
         let size: [f32; 2] = desktop.size().into();
-        let pixels =
-            desktop_density.map_or(pixels, |density| size.map(|n| (n * density).round() as u32));
+        let scale = if display.scale.is_finite() && display.scale > 0. {
+            display.scale
+        } else {
+            1.
+        };
+        let display_pixels = size.map(|n| (n * scale).round() as u32);
+        let native_pixels = desktop_density.map_or(display_pixels, |density| {
+            size.map(|n| (n * density).round() as u32)
+        });
+        let fullscreen_pixels =
+            if displays.len() == 1 && (visible.size() - monitor.size()).length() <= 2. {
+                pixels
+            } else {
+                [0, 0]
+            };
         Ok((
             Self {
-                region: self.region.translate(offset),
+                region: mapped.translate(offset),
                 size,
             },
-            [size.map(|n| n as u32), pixels],
+            [size.map(|n| n as u32), native_pixels, fullscreen_pixels],
         ))
     }
 }
@@ -216,9 +291,16 @@ mod tests {
             size: [800., 600.],
         };
         let (crop, sizes) = selection
-            .for_portal(&right, &[left, right.clone()], [1200, 900], Some(1.5))
+            .for_portal(
+                &right,
+                &[left, right.clone()],
+                [1200, 900],
+                Some(1.5),
+                None,
+                None,
+            )
             .unwrap();
-        assert_eq!(sizes, [[1600, 800], [2400, 1200]]);
+        assert_eq!(sizes, [[1600, 800], [2400, 1200], [0, 0]]);
         assert_eq!(crop.region, local.translate(egui::vec2(800., 200.)));
         assert!(!sizes.contains(&[1200, 900]));
         assert!(!sizes.contains(&[3200, 1600]));
@@ -228,10 +310,86 @@ mod tests {
                     &right,
                     &[right.clone(), right.clone()],
                     [1200, 900],
-                    Some(1.5)
+                    Some(1.5),
+                    None,
+                    None,
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    fn portal_crop_accounts_for_gnome_work_area() {
+        let display = Display {
+            id: 7,
+            name: "GNOME".into(),
+            bounds: [0, 0, 1440, 900],
+            refresh: 60.,
+            scale: 1.,
+        };
+        // The maximized Wayland overlay starts below a 34-point system bar.
+        let selected = Crop {
+            region: Rect::from_min_size(egui::pos2(100., 50.), egui::vec2(200., 150.)),
+            size: [1440., 866.],
+        };
+        let usable = Rect::from_min_size(egui::pos2(0., 34.), egui::vec2(1440., 866.));
+        let (crop, _) = selected
+            .for_portal(
+                &display,
+                std::slice::from_ref(&display),
+                [1440, 866],
+                None,
+                Some(usable),
+                None,
+            )
+            .unwrap();
+        assert_eq!(crop.size, [1440., 900.]);
+        assert_eq!(crop.region.min, egui::pos2(100., 84.));
+        assert_eq!(crop.region.max, egui::pos2(300., 234.));
+        assert_eq!(crop.size, [1440., 900.]);
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    fn portal_crop_rejects_unknown_position_instead_of_guessing() {
+        let display = Display {
+            id: 7,
+            name: "GNOME".into(),
+            bounds: [0, 0, 1200, 900],
+            refresh: 60.,
+            scale: 1.,
+        };
+        let selection = Crop {
+            region: Rect::from_min_size(egui::pos2(100., 100.), egui::vec2(200., 100.)),
+            size: [600., 450.],
+        };
+        assert!(
+            selection
+                .for_portal(
+                    &display,
+                    std::slice::from_ref(&display),
+                    [1200, 900],
+                    None,
+                    None,
+                    None,
+                )
+                .is_err()
+        );
+        // XWayland can supply the actual global window rectangle.
+        let location = Rect::from_min_size(egui::pos2(300., 200.), egui::vec2(600., 450.));
+        let (crop, _) = selection
+            .for_portal(
+                &display,
+                std::slice::from_ref(&display),
+                [1200, 900],
+                None,
+                None,
+                Some(location),
+            )
+            .unwrap();
+        assert_eq!(crop.region.min, egui::pos2(400., 300.));
+        assert_eq!(crop.region.max, egui::pos2(600., 400.));
     }
 
     #[test]

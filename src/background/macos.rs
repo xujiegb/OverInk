@@ -17,7 +17,6 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
-    thread,
     time::{Duration, Instant},
 };
 
@@ -28,11 +27,29 @@ pub fn start<T: Send + 'static>(
     prepare: impl FnOnce(Image) -> Result<T, String> + Send + 'static,
 ) -> Result<Job<T>, String> {
     match mode {
-        SnapshotMode::Sdr => Job::start(move |cancelled| sdr_capture(bounds, cancelled), prepare),
-        SnapshotMode::Linear => Job::start(
-            move |cancelled| hdr_capture(bounds, pixels, cancelled),
-            prepare,
-        ),
+        SnapshotMode::Sdr => {
+            // Apple permission requests should start on the UI thread, not on
+            // the capture worker. A denied app only prompts once per process.
+            capture_permission()?;
+            Job::start(
+                move |cancelled| {
+                    if sdr_supported() {
+                        screen_capture(bounds, pixels, false, cancelled)
+                    } else {
+                        // ScreenCaptureKit's single-frame API requires macOS 14.
+                        sdr_capture(bounds, cancelled)
+                    }
+                },
+                prepare,
+            )
+        }
+        SnapshotMode::Linear => {
+            capture_permission()?;
+            Job::start(
+                move |cancelled| screen_capture(bounds, pixels, true, cancelled),
+                prepare,
+            )
+        }
         SnapshotMode::LiveOnly(reason) => {
             Err(reason.get(crate::appearance::Language::English).into())
         }
@@ -45,9 +62,37 @@ struct Point {
     y: f64,
 }
 
+#[repr(C)]
+struct Size {
+    width: f64,
+    height: f64,
+}
+
+#[repr(C)]
+struct CGRect {
+    origin: Point,
+    size: Size,
+}
+
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
     fn CGGetDisplaysWithPoint(point: Point, max: u32, displays: *mut u32, count: *mut u32) -> i32;
+    fn CGDisplayCreateImage(display: u32) -> *const c_void;
+    fn CGPreflightScreenCaptureAccess() -> bool;
+    fn CGRequestScreenCaptureAccess() -> bool;
+    fn CGColorSpaceCreateWithName(name: *const c_void) -> *const c_void;
+    fn CGBitmapContextCreate(
+        data: *mut c_void,
+        width: usize,
+        height: usize,
+        bits_per_component: usize,
+        bytes_per_row: usize,
+        color_space: *const c_void,
+        bitmap_info: u32,
+    ) -> *mut c_void;
+    fn CGContextDrawImage(context: *mut c_void, rect: CGRect, image: *const c_void);
+    #[cfg(test)]
+    fn CGBitmapContextCreateImage(context: *mut c_void) -> *const c_void;
     fn CGImageGetWidth(image: *const c_void) -> usize;
     fn CGImageGetHeight(image: *const c_void) -> usize;
     fn CGImageGetBitsPerComponent(image: *const c_void) -> usize;
@@ -59,6 +104,7 @@ unsafe extern "C" {
     fn CGImageGetDataProvider(image: *const c_void) -> *const c_void;
     fn CGDataProviderCopyData(provider: *const c_void) -> *const c_void;
     static kCGColorSpaceExtendedLinearSRGB: *const c_void;
+    static kCGColorSpaceSRGB: *const c_void;
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -92,6 +138,33 @@ fn screen_capture_kit() -> Result<(), String> {
         .as_ref()
         .map(|_| ())
         .map_err(Clone::clone)
+}
+
+fn capture_permission() -> Result<(), String> {
+    if unsafe { CGPreflightScreenCaptureAccess() } {
+        return Ok(());
+    }
+    // TCC may cache a denial until the application is restarted. Request once
+    // per process rather than showing another OS alert for every screenshot.
+    static REQUESTED: OnceLock<bool> = OnceLock::new();
+    if *REQUESTED.get_or_init(|| unsafe { CGRequestScreenCaptureAccess() }) {
+        // A newly granted permission may be usable immediately even if TCC's
+        // preflight result remains cached until the next process launch.
+        Ok(())
+    } else {
+        Err("Allow OverInk in macOS System Settings > Privacy & Security > Screen & System Audio Recording, then quit and reopen OverInk".into())
+    }
+}
+
+fn sdr_supported() -> bool {
+    screen_capture_kit().is_ok()
+        && AnyClass::get(c"SCShareableContent").is_some()
+        && AnyClass::get(c"SCStreamConfiguration").is_some()
+        && AnyClass::get(c"SCScreenshotManager").is_some_and(|manager| unsafe {
+            msg_send![
+                manager, respondsToSelector: sel!(captureImageWithFilter:configuration:completionHandler:)
+            ]
+        })
 }
 
 pub fn hdr_supported() -> bool {
@@ -148,9 +221,17 @@ fn apple_silicon() -> bool {
     }
 }
 
-fn hdr_capture(bounds: [i32; 4], pixels: [i32; 2], cancelled: &AtomicBool) -> CaptureResult {
-    if !hdr_supported() {
+fn screen_capture(
+    bounds: [i32; 4],
+    pixels: [i32; 2],
+    hdr: bool,
+    cancelled: &AtomicBool,
+) -> CaptureResult {
+    if hdr && !hdr_supported() {
         return Err("HDR screenshots require macOS 15 or later on Apple silicon".into());
+    }
+    if pixels.iter().any(|&dimension| dimension <= 0) {
+        return Err("Invalid macOS screenshot dimensions".into());
     }
     let id = display_id(bounds)?;
     let (sender, receiver) = mpsc::channel();
@@ -161,8 +242,9 @@ fn hdr_capture(bounds: [i32; 4], pixels: [i32; 2], cancelled: &AtomicBool) -> Ca
             block2::RcBlock::new(move |content: *mut AnyObject, error: *mut AnyObject| {
                 autoreleasepool(|_| {
                     if content.is_null() {
-                        let _ = sender.send(Err(capture_error(error)));
-                    } else if let Err(error) = begin_screenshot(content, id, pixels, sender.clone())
+                        let _ = sender.send(Err(capture_error(error, hdr)));
+                    } else if let Err(error) =
+                        begin_screenshot(content, id, pixels, hdr, sender.clone())
                     {
                         let _ = sender.send(Err(error));
                     }
@@ -177,7 +259,7 @@ fn hdr_capture(bounds: [i32; 4], pixels: [i32; 2], cancelled: &AtomicBool) -> Ca
     let deadline = Instant::now() + Duration::from_secs(30);
     while !cancelled.load(Ordering::Relaxed) {
         if Instant::now() >= deadline {
-            return Err("The macOS HDR screenshot timed out".into());
+            return Err("The macOS screenshot timed out".into());
         }
         match receiver.recv_timeout(Duration::from_millis(25)) {
             Ok(result) => return result,
@@ -190,9 +272,15 @@ fn hdr_capture(bounds: [i32; 4], pixels: [i32; 2], cancelled: &AtomicBool) -> Ca
     Ok(None)
 }
 
-fn capture_error(error: *mut AnyObject) -> String {
+fn capture_error(error: *mut AnyObject, hdr: bool) -> String {
+    if error.is_null() {
+        return "macOS screenshot returned no image or error".into();
+    }
     let description = unsafe {
         let message: *mut AnyObject = msg_send![error, localizedDescription];
+        if message.is_null() {
+            return "macOS screenshot returned an error without a description".into();
+        }
         let text: *const c_char = msg_send![message, UTF8String];
         if text.is_null() {
             "No image returned".into()
@@ -200,13 +288,15 @@ fn capture_error(error: *mut AnyObject) -> String {
             CStr::from_ptr(text).to_string_lossy()
         }
     };
-    format!("macOS HDR screenshot: {description}. Check Screen Recording permission.")
+    let mode = if hdr { "HDR" } else { "SDR" };
+    format!("macOS {mode} screenshot: {description}. Check Screen Recording permission.")
 }
 
 fn begin_screenshot(
     content: *mut AnyObject,
     id: u32,
     [width, height]: [i32; 2],
+    hdr: bool,
     sender: mpsc::Sender<CaptureResult>,
 ) -> Result<(), String> {
     let filter_class =
@@ -215,6 +305,9 @@ fn begin_screenshot(
         AnyClass::get(c"SCStreamConfiguration").ok_or("ScreenCaptureKit is unavailable")?;
     let manager = AnyClass::get(c"SCScreenshotManager").ok_or("ScreenCaptureKit is unavailable")?;
     let array = AnyClass::get(c"NSArray").ok_or("NSArray is unavailable")?;
+    if width <= 0 || height <= 0 {
+        return Err("Invalid macOS screenshot dimensions".into());
+    }
     unsafe {
         let displays: *mut AnyObject = msg_send![content, displays];
         let count: usize = msg_send![displays, count];
@@ -235,27 +328,46 @@ fn begin_screenshot(
         let filter: *mut AnyObject =
             msg_send![filter, initWithDisplay: display, excludingWindows: empty];
         let filter = Retained::from_raw(filter).ok_or("Cannot configure the selected display")?;
-        // SCStreamConfigurationPresetCaptureHDRScreenshotLocalDisplay.
-        let config: *mut AnyObject =
-            msg_send![configuration, streamConfigurationWithPreset: 2_isize];
-        if config.is_null() {
-            return Err("Cannot configure an HDR screenshot".into());
+        // The HDR preset is available on supported Apple silicon systems.
+        // Ordinary SDR captures use the standard configuration on macOS 14+.
+        // The HDR preset is autoreleased (+0); +new returns an owned (+1)
+        // object. Retained balances both cases, including early returns.
+        let config: *mut AnyObject = if hdr {
+            msg_send![configuration, streamConfigurationWithPreset: 2_isize]
+        } else {
+            msg_send![configuration, new]
+        };
+        let config = if hdr {
+            Retained::retain(config)
+        } else {
+            Retained::from_raw(config)
         }
-        let _: () = msg_send![config, setWidth: width as usize];
-        let _: () = msg_send![config, setHeight: height as usize];
-        let _: () = msg_send![config, setShowsCursor: false];
-        let _: () = msg_send![config, setPixelFormat: u32::from_be_bytes(*b"RGhA")];
-        let _: () = msg_send![config, setColorSpaceName: kCGColorSpaceExtendedLinearSRGB];
+        .ok_or("Cannot configure the macOS screenshot")?;
+        let _: () = msg_send![&*config, setWidth: width as usize];
+        let _: () = msg_send![&*config, setHeight: height as usize];
+        let _: () = msg_send![&*config, setShowsCursor: false];
+        let _: () = msg_send![&*config, setCapturesAudio: false];
+        if hdr {
+            let _: () = msg_send![&*config, setPixelFormat: u32::from_be_bytes(*b"RGhA")];
+            let _: () = msg_send![&*config, setColorSpaceName: kCGColorSpaceExtendedLinearSRGB];
+        } else {
+            let _: () = msg_send![&*config, setPixelFormat: u32::from_be_bytes(*b"BGRA")];
+            let _: () = msg_send![&*config, setColorSpaceName: kCGColorSpaceSRGB];
+        }
         let completion =
             block2::RcBlock::new(move |image: *const c_void, error: *mut AnyObject| {
-                let result = if image.is_null() {
-                    Err(capture_error(error))
-                } else {
-                    copy_screenshot(image).map(Some)
-                };
-                let _ = sender.send(result);
+                autoreleasepool(|_| {
+                    let result = if image.is_null() {
+                        Err(capture_error(error, hdr))
+                    } else if hdr {
+                        copy_screenshot(image).map(Some)
+                    } else {
+                        copy_sdr_screenshot(image).map(Some)
+                    };
+                    let _ = sender.send(result);
+                });
             });
-        let _: () = msg_send![manager, captureImageWithFilter: &*filter, configuration: config,
+        let _: () = msg_send![manager, captureImageWithFilter: &*filter, configuration: &*config,
             completionHandler: &*completion];
     }
     Ok(())
@@ -318,41 +430,97 @@ fn copy_screenshot(image: *const c_void) -> Result<Image, String> {
     }
 }
 
-fn sdr_capture(bounds: [i32; 4], cancelled: &AtomicBool) -> CaptureResult {
-    use std::{
-        process::Command,
-        time::{SystemTime, UNIX_EPOCH},
-    };
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("overink-freeze-{}-{unique}", std::process::id()));
-    std::fs::create_dir(&dir).map_err(|e| e.to_string())?;
-    let file = dir.join("desktop.png");
-    let result = (|| {
-        let [x, y, w, h] = bounds;
-        let mut child = Command::new("/usr/sbin/screencapture")
-            .args(["-x", "-t", "png", &format!("-R{x},{y},{w},{h}")])
-            .arg(&file)
-            .spawn()
-            .map_err(|e| e.to_string())?;
-        loop {
-            if cancelled.load(Ordering::Relaxed) {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Ok(None);
-            }
-            if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
-                if !status.success() {
-                    return Err("Allow OverInk Screen Recording access in macOS System Settings, then retry the screenshot".into());
-                }
-                return Image::load(&file).map(Some);
-            }
-            thread::sleep(Duration::from_millis(20));
+fn copy_sdr_screenshot(image: *const c_void) -> Result<Image, String> {
+    unsafe {
+        let width = u32::try_from(CGImageGetWidth(image)).map_err(|_| "Capture is too large")?;
+        let height = u32::try_from(CGImageGetHeight(image)).map_err(|_| "Capture is too large")?;
+        let mut snapshot = Image::buffer(width, height)?;
+        let stride = usize::try_from(width)
+            .ok()
+            .and_then(|width| width.checked_mul(4))
+            .ok_or("Invalid SDR screenshot row width")?;
+        let space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+        if space.is_null() {
+            return Err("Cannot create an sRGB screenshot color space".into());
         }
-    })();
-    let _ = std::fs::remove_file(file);
-    let _ = std::fs::remove_dir(dir);
-    result
+        let space = Data(space);
+        // kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big is RGBA8.
+        let context = CGBitmapContextCreate(
+            snapshot.rgba.as_mut_ptr().cast(),
+            width as usize,
+            height as usize,
+            8,
+            stride,
+            space.0,
+            0x4001,
+        );
+        if context.is_null() {
+            return Err("Cannot create the SDR screenshot bitmap".into());
+        }
+        let context = Data(context);
+        // The bitmap context stores top-to-bottom RGBA rows. The Core
+        // Graphics user-space convention already maps the image into them.
+        // Flipping the CTM here would invert the output scanlines.
+        CGContextDrawImage(
+            context.0.cast_mut(),
+            CGRect {
+                origin: Point { x: 0., y: 0. },
+                size: Size {
+                    width: width as f64,
+                    height: height as f64,
+                },
+            },
+            image,
+        );
+        Ok(snapshot)
+    }
+}
+
+fn sdr_capture(bounds: [i32; 4], cancelled: &AtomicBool) -> CaptureResult {
+    if cancelled.load(Ordering::Relaxed) {
+        return Ok(None);
+    }
+    // macOS 11–13 fallback: capture directly in OverInk instead of spawning
+    // /usr/sbin/screencapture, which could trigger a different TCC identity.
+    let id = display_id(bounds)?;
+    let image = unsafe { CGDisplayCreateImage(id) };
+    if image.is_null() {
+        return Err(
+            "Core Graphics could not capture the display. Check Screen Recording permission."
+                .into(),
+        );
+    }
+    let image = Data(image);
+    if cancelled.load(Ordering::Relaxed) {
+        return Ok(None);
+    }
+    copy_sdr_screenshot(image.0).map(Some)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sdr_conversion_preserves_top_and_bottom_rows() {
+        // Two opaque rows in raw CGImage pixel order: red above blue.
+        let mut pixels = [255, 0, 0, 255, 0, 0, 255, 255_u8];
+        unsafe {
+            let color = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+            assert!(!color.is_null());
+            let color = Data(color);
+            let context =
+                CGBitmapContextCreate(pixels.as_mut_ptr().cast(), 1, 2, 8, 4, color.0, 0x4001);
+            assert!(!context.is_null());
+            let context = Data(context);
+            let source = CGBitmapContextCreateImage(context.0.cast_mut());
+            assert!(!source.is_null());
+            let source = Data(source);
+            let actual = copy_sdr_screenshot(source.0).unwrap();
+            assert_eq!(
+                actual.rgba, pixels,
+                "SDR screenshot must not flip vertically"
+            );
+        }
+    }
 }
