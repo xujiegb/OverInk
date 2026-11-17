@@ -1585,10 +1585,10 @@ pub fn run(options: Options) -> Result<(), String> {
             }
             if (SDL_EVENT_DISPLAY_FIRST..=SDL_EVENT_DISPLAY_LAST).contains(&ty) {
                 topology_dirty = !options.smoke;
-                if ty == SDL_EVENT_DISPLAY_REMOVED {
-                    if let Some(display) = removed_display_id(&event) {
-                        disconnected.insert(display);
-                    }
+                if ty == SDL_EVENT_DISPLAY_REMOVED
+                    && let Some(display) = removed_display_id(&event)
+                {
+                    disconnected.insert(display);
                 }
             }
             if (SDL_EVENT_WINDOW_FIRST..=SDL_EVENT_WINDOW_LAST).contains(&ty) {
