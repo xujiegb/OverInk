@@ -289,6 +289,78 @@ pub fn display_info() -> Result<Vec<DisplayInfo>, String> {
 
 /// SDL event union accessors: check the tag before reading the corresponding
 /// field. Do not use `then_some(unsafe { ... })`: it evaluates eagerly.
+/// Read the wheel payload only for a mouse-wheel event.
+pub fn mouse_wheel_event(event: &SDL_Event) -> Option<SDL_MouseWheelEvent> {
+    if event_type(event) == SDL_EVENT_MOUSE_WHEEL {
+        Some(unsafe { event.wheel })
+    } else {
+        None
+    }
+}
+
+/// Read keyboard modifiers without exposing the native SDL function.
+pub fn mod_state() -> SDL_Keymod {
+    unsafe { SDL_GetModState() }
+}
+
+/// Copy SDL-owned clipboard text and release its allocation.
+pub fn clipboard_text() -> Option<String> {
+    unsafe {
+        let p = SDL_GetClipboardText();
+        if p.is_null() {
+            return None;
+        }
+        let result = CStr::from_ptr(p).to_string_lossy().into_owned();
+        SDL_free(p.cast());
+        Some(result)
+    }
+}
+
+/// Return text input while the SDL event's native text pointer remains valid.
+pub fn text_input_data(event: &SDL_Event) -> Option<(String, u64)> {
+    if event_type(event) != SDL_EVENT_TEXT_INPUT {
+        return None;
+    }
+    unsafe {
+        let text = event.text;
+        if text.text.is_null() {
+            return None;
+        }
+        Some((
+            CStr::from_ptr(text.text).to_string_lossy().into_owned(),
+            text.timestamp,
+        ))
+    }
+}
+
+/// Owned IME composition update; event-owned pointers never escape this API.
+pub struct TextEditingData {
+    pub timestamp: u64,
+    pub text: String,
+    pub start: i32,
+    pub length: i32,
+}
+
+pub fn text_editing_data(event: &SDL_Event) -> Option<TextEditingData> {
+    if event_type(event) != SDL_EVENT_TEXT_EDITING {
+        return None;
+    }
+    unsafe {
+        let edit = event.edit;
+        let text = if edit.text.is_null() {
+            String::new()
+        } else {
+            CStr::from_ptr(edit.text).to_string_lossy().into_owned()
+        };
+        Some(TextEditingData {
+            timestamp: edit.timestamp,
+            text,
+            start: edit.start,
+            length: edit.length,
+        })
+    }
+}
+
 pub fn mouse_button_event(event: &SDL_Event) -> Option<SDL_MouseButtonEvent> {
     if matches!(
         event_type(event),
@@ -460,6 +532,22 @@ impl Window {
     /// Set a popup's size and origin, preserving SDL's native error reporting.
     pub fn text_input_active(&self) -> bool {
         unsafe { SDL_TextInputActive(self.raw) }
+    }
+
+    pub fn sync_text_input(&self, enabled: bool) {
+        unsafe {
+            if enabled != SDL_TextInputActive(self.raw) {
+                if enabled {
+                    SDL_StartTextInput(self.raw);
+                } else {
+                    SDL_StopTextInput(self.raw);
+                }
+            }
+        }
+    }
+
+    pub fn clear_composition(&self) {
+        unsafe { SDL_ClearComposition(self.raw) };
     }
 
     pub fn sync_and_pump_events(&self) {
