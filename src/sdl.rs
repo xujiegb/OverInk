@@ -1038,7 +1038,6 @@ impl InkTexture {
             ))
         }
     }
-
 }
 
 impl Drop for InkTexture {
@@ -1161,7 +1160,6 @@ impl SnapshotTexture {
         // Cancel only that multiplier without changing the caller's color scale.
         renderer.with_absolute_color_scale(1. / white, draw)
     }
-
 }
 
 impl Drop for SnapshotTexture {
