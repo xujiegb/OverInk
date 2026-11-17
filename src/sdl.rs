@@ -390,12 +390,77 @@ pub fn screenshot_file_stem() -> String {
     }
 }
 
+/// Take the next queued SDL event on the SDL-owning thread.
+pub fn poll_event(event: &mut SDL_Event) -> bool {
+    unsafe { SDL_PollEvent(event) }
+}
+
+/// Read an SDL display-removal event only after checking its union tag.
+pub fn removed_display_id(event: &SDL_Event) -> Option<u32> {
+    if event_type(event) == SDL_EVENT_DISPLAY_REMOVED {
+        Some(unsafe { event.display.displayID.0 })
+    } else {
+        None
+    }
+}
+
+/// Read a window event's owning ID only for a tagged window event.
+pub fn window_event_id(event: &SDL_Event) -> Option<SDL_WindowID> {
+    if (SDL_EVENT_WINDOW_FIRST..=SDL_EVENT_WINDOW_LAST).contains(&event_type(event)) {
+        Some(unsafe { event.window.windowID })
+    } else {
+        None
+    }
+}
+
+/// A reset may apply to an individual window, or all windows (ID zero).
+pub fn render_reset_window_id(event: &SDL_Event) -> Option<SDL_WindowID> {
+    if matches!(
+        event_type(event),
+        SDL_EVENT_RENDER_TARGETS_RESET | SDL_EVENT_RENDER_DEVICE_RESET
+    ) {
+        Some(unsafe { event.render.windowID })
+    } else {
+        None
+    }
+}
+
+/// Check physical buttons on macOS, and SDL's per-window state elsewhere.
+pub fn mouse_buttons_released() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        unsafe { SDL_GetGlobalMouseState(ptr::null_mut(), ptr::null_mut()).0 == 0 }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        unsafe { SDL_GetMouseState(ptr::null_mut(), ptr::null_mut()).0 == 0 }
+    }
+}
+
+/// Wait without dequeuing the SDL event, preserving the polling loop's order.
+pub fn wait_for_event(timeout_ms: i32) {
+    unsafe {
+        SDL_WaitEventTimeout(ptr::null_mut(), timeout_ms);
+    }
+}
+
 pub struct Window {
     pub raw: *mut SDL_Window,
     pub id: SDL_WindowID,
 }
 impl Window {
     /// Set a popup's size and origin, preserving SDL's native error reporting.
+    pub fn text_input_active(&self) -> bool {
+        unsafe { SDL_TextInputActive(self.raw) }
+    }
+
+    pub fn sync_and_pump_events(&self) {
+        unsafe {
+            SDL_SyncWindow(self.raw);
+            SDL_PumpEvents();
+        }
+    }
+
     pub fn sdr_white_level(&self) -> f32 {
         unsafe {
             SDL_GetFloatProperty(
