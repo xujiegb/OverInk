@@ -2330,10 +2330,7 @@ pub fn run(options: Options) -> Result<(), String> {
             cmd.redraw_canvas = true;
             toolbar_dirty = true;
         }
-        if cmd.screenshot
-            && !file_dialog.pending()
-            && !picker.active()
-            && !app.screenshot.saving()
+        if cmd.screenshot && !file_dialog.pending() && !picker.active() && !app.screenshot.saving()
         {
             let canvas = &mut canvases[active];
             canvas.finish_text_editor(&mut app, theme)?;
