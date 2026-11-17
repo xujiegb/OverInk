@@ -51,6 +51,62 @@ impl SystemJob<Image> {
         })
     }
 }
+impl SystemJob<Image> {
+    /// GNOME Shell's OverInk extension captures the rectangle the user drew
+    /// in OverInk. This never launches GNOME's screenshot chooser.
+    pub fn shell_area(region: egui::Rect, canvas: [f32; 2]) -> Result<Self, String> {
+        let request = (
+            region.left() as f64,
+            region.top() as f64,
+            region.right() as f64,
+            region.bottom() as f64,
+            canvas[0] as f64,
+            canvas[1] as f64,
+        );
+        Self::spawn("overink-gnome-shell-capture", move |cancelled| {
+            let path: String = zbus::block_on(async {
+                let connection = Connection::session().await?;
+                let bridge = Proxy::new(
+                    &connection,
+                    "org.overink.Overlay",
+                    "/org/overink/Overlay",
+                    "org.overink.Overlay",
+                )
+                .await?;
+                bridge.call("CaptureArea", &request).await
+            })
+            .map_err(|error| format!(
+                "GNOME capture failed: {error}. Update and enable OverInk Overlay (revision 2), then log out and back in."
+            ))?;
+            let file = PathBuf::from(path);
+            let expected = std::env::temp_dir()
+                .canonicalize()
+                .map_err(|error| error.to_string())?;
+            let parent = file
+                .parent()
+                .ok_or("GNOME capture returned an invalid file path")?
+                .canonicalize()
+                .map_err(|error| error.to_string())?;
+            if parent != expected
+                || !file
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("overink-capture-"))
+            {
+                return Err("GNOME capture returned an unexpected temporary file".into());
+            }
+            // The Shell extension creates a private 0600 file. Always clean it up
+            // after decoding, including on cancellation or image decoding errors.
+            let result = if cancelled.is_closed() {
+                Ok(None)
+            } else {
+                Image::load(&file).map(Some)
+            };
+            let _ = std::fs::remove_file(file);
+            result
+        })
+    }
+}
 impl<T: Send + 'static> SystemJob<T> {
     fn spawn(
         thread_name: &str,
