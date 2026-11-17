@@ -1383,6 +1383,19 @@ pub struct Renderer {
     pub name: String,
 }
 impl Renderer {
+    /// Release this renderer once, including when macOS recreates the Metal
+    /// output. Drop uses the same path to avoid accidental double-destruction.
+    fn destroy_native(&mut self) {
+        if self.raw.is_null() {
+            return;
+        }
+        // SAFETY: This handle uniquely belongs to Renderer, and SDL calls
+        // happen on the owning main thread. Nulling the handle prevents a
+        // later Drop from releasing the same renderer again.
+        unsafe { SDL_DestroyRenderer(self.raw) };
+        self.raw = ptr::null_mut();
+    }
+
     pub fn new(window: &Window, force_sdr: bool) -> Result<Self, String> {
         Self::create(window, force_sdr, None)
     }
@@ -1456,8 +1469,7 @@ impl Renderer {
     }
     #[cfg(target_os = "macos")]
     pub fn change_color_output(&mut self, window: &Window, extended: bool) -> Result<(), String> {
-        unsafe { SDL_DestroyRenderer(self.raw) };
-        self.raw = ptr::null_mut();
+        self.destroy_native();
         // SDL keeps its view attached for reuse. A fresh view gives SDR its
         // own BGRA8 drawable pool after previously presenting FP16.
         if self.name == "metal" {
@@ -1633,9 +1645,7 @@ impl Renderer {
 }
 impl Drop for Renderer {
     fn drop(&mut self) {
-        if !self.raw.is_null() {
-            unsafe { SDL_DestroyRenderer(self.raw) }
-        }
+        self.destroy_native();
     }
 }
 
