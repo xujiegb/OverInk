@@ -54,7 +54,18 @@ impl SystemJob<Image> {
 impl SystemJob<Image> {
     /// GNOME Shell's OverInk extension captures the rectangle the user drew
     /// in OverInk. This never launches GNOME's screenshot chooser.
-    pub fn shell_area(region: egui::Rect, canvas: [f32; 2]) -> Result<Self, String> {
+    #[cfg(target_os = "linux")]
+    pub fn shell_area(
+        window: &crate::sdl::Window,
+        region: egui::Rect,
+        canvas: [f32; 2],
+    ) -> Result<Self, String> {
+        let mut x = 0;
+        let mut y = 0;
+        let positioned = crate::sdl::driver() != "wayland"
+            && unsafe { crate::sdl::SDL_GetWindowPosition(window.raw, &mut x, &mut y) };
+        // The compositor may manage multiple OverInk canvases on XWayland.
+        // Include SDL's actual window origin to identify the selected canvas.
         let request = (
             region.left() as f64,
             region.top() as f64,
@@ -62,6 +73,9 @@ impl SystemJob<Image> {
             region.bottom() as f64,
             canvas[0] as f64,
             canvas[1] as f64,
+            positioned,
+            f64::from(x),
+            f64::from(y),
         );
         Self::spawn("overink-gnome-shell-capture", move |cancelled| {
             let path: String = zbus::block_on(async {
