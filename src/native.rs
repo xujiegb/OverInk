@@ -249,35 +249,27 @@ pub fn keep_controller_above(canvas: &Window, controller: &Window, _native: &Pas
         }
     }
     #[cfg(target_os = "macos")]
-    unsafe {
-        #[link(name = "objc")]
-        unsafe extern "C" {
-            fn sel_registerName(name: *const std::ffi::c_char) -> *mut c_void;
-            fn objc_msgSend();
-        }
-        let window = controller
-            .cocoa_window()
-            .map_or(std::ptr::null_mut(), |handle| handle.as_ptr());
-        let under = canvas
-            .cocoa_window()
-            .map_or(std::ptr::null_mut(), |handle| handle.as_ptr());
-        if !window.is_null() && !under.is_null() {
-            let get: unsafe extern "C" fn(*mut c_void, *mut c_void) -> isize =
-                std::mem::transmute(objc_msgSend as *const ());
-            let set: unsafe extern "C" fn(*mut c_void, *mut c_void, isize) =
-                std::mem::transmute(objc_msgSend as *const ());
-            let order: unsafe extern "C" fn(*mut c_void, *mut c_void, isize, isize) =
-                std::mem::transmute(objc_msgSend as *const ());
-            let level = get(under, sel_registerName(c"level".as_ptr())).saturating_add(1);
-            if get(window, sel_registerName(c"level".as_ptr())) != level {
-                set(window, sel_registerName(c"setLevel:".as_ptr()), level);
+    {
+        use objc2::{msg_send, runtime::AnyObject};
+
+        let window = controller.cocoa_window();
+        let under = canvas.cocoa_window();
+        if let (Some(window), Some(under)) = (window, under) {
+            // SAFETY: Both pointers are SDL-owned live Cocoa NSWindows. The
+            // selectors have these NSInteger/void signatures on macOS.
+            // objc2 performs typed sends, avoiding untyped objc_msgSend casts.
+            unsafe {
+                let window = window.as_ptr().cast::<AnyObject>();
+                let under = under.as_ptr().cast::<AnyObject>();
+                let canvas_level: isize = msg_send![under, level];
+                let level = canvas_level.saturating_add(1);
+                let current_level: isize = msg_send![window, level];
+                if current_level != level {
+                    let _: () = msg_send![window, setLevel: level];
+                }
+                let number: isize = msg_send![under, windowNumber];
+                let _: () = msg_send![window, orderWindow: 1isize, relativeTo: number];
             }
-            order(
-                window,
-                sel_registerName(c"orderWindow:relativeTo:".as_ptr()),
-                1,
-                get(under, sel_registerName(c"windowNumber".as_ptr())),
-            );
         }
     }
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
