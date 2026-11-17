@@ -1635,7 +1635,7 @@ pub fn run(options: Options) -> Result<(), String> {
                     }
                     if ty == SDL_EVENT_WINDOW_CLOSE_REQUESTED {
                         if app.screenshot.active() {
-                            app.screenshot.cancel();
+                            app.screenshot.abandon();
                             restore_toolbar_focus = true;
                         }
                         app.finish_all_contacts();
@@ -1863,6 +1863,14 @@ pub fn run(options: Options) -> Result<(), String> {
                 }
             }
         }
+        if app.screenshot.active()
+            && app.screenshot.recover_mouse_drag(mouse_released())
+            && let Some(canvas) = canvases
+                .iter_mut()
+                .find(|canvas| app.screenshot.targets(canvas.window.id))
+        {
+            canvas.dirty = true;
+        }
         if !running {
             let active = canvas::active_index(&canvases, app.pages.active);
             canvases[active].flush_text_events(&mut app, gui.ctx.theme())?;
@@ -2012,7 +2020,7 @@ pub fn run(options: Options) -> Result<(), String> {
                     picker.cancel();
                 }
                 if (layout || removed || topology_changed) && app.screenshot.active() {
-                    app.screenshot.cancel();
+                    app.screenshot.abandon();
                     restore_toolbar_focus = true;
                     mode_changed = true;
                 }
@@ -2112,6 +2120,12 @@ pub fn run(options: Options) -> Result<(), String> {
                     mode_changed = true;
                 }
                 Err(SaveError::Exists(path)) => app.screenshot.confirm_replace(path),
+                Err(SaveError::Cancelled) => {
+                    app.screenshot.cancel();
+                    toolbar_dirty = true;
+                    restore_toolbar_focus = true;
+                    mode_changed = true;
+                }
                 Err(SaveError::Failed(error)) if app.screenshot.ready() => {
                     app.screenshot.show_error(error);
                     open_save_as = direct;
@@ -2564,7 +2578,7 @@ pub fn run(options: Options) -> Result<(), String> {
         }
         if unsafe_layer {
             restore_toolbar_focus |= app.screenshot.active();
-            app.screenshot.cancel();
+            app.screenshot.abandon();
             app.hidden = true;
             toolbar_dirty = true;
             for canvas in &mut canvases {
