@@ -1,5 +1,6 @@
 //! Small egui/SDL3 integration. SDL_RenderGeometry makes the same UI usable on
 //! s390x, LoongArch and FreeBSD without assuming a Vulkan driver.
+#![forbid(unsafe_code)]
 use crate::{
     icc::ColorManager,
     sdl::*,
@@ -8,13 +9,12 @@ use crate::{
 use egui::{Context, Event, Key, Modifiers, RawInput, TextureId};
 use std::{
     collections::{BTreeMap, HashMap},
-    ptr,
     time::{Duration, Instant},
 };
 pub struct Gui {
     pub ctx: Context,
     pub raw: RawInput,
-    textures: HashMap<TextureId, *mut SDL_Texture>,
+    textures: HashMap<TextureId, GuiTexture>,
     started: Instant,
     pub units: f32,
     touch_primary: Option<TouchKey>,
@@ -60,7 +60,10 @@ impl Gui {
     // Discard their handles before dropping this Gui, then build a fresh
     // Context so the glyph atlas and custom textures are uploaded again.
     pub fn forget_renderer_textures(&mut self) {
-        self.textures.clear();
+        // SDL renderer reset invalidates native textures; never destroy them twice.
+        for (_, texture) in self.textures.drain() {
+            std::mem::forget(texture);
+        }
     }
 
     pub fn input(&mut self, w: &Window) -> RawInput {
@@ -445,162 +448,135 @@ impl Gui {
         color: &ColorManager,
         mut output: egui::FullOutput,
     ) -> Result<(), String> {
-        unsafe {
-            if let Some(ime) = output.platform_output.ime {
-                let cursor = ime.cursor_rect;
-                let area = SDL_Rect {
-                    x: (cursor.left() * self.units).round() as i32,
-                    y: (cursor.top() * self.units).round() as i32,
-                    w: 1,
-                    h: (cursor.height() * self.units).ceil() as i32,
-                };
-                SDL_SetTextInputArea(window.raw, &area, 0);
-                if ime.should_interrupt_composition {
-                    self.clear_composition(window);
-                }
+        if let Some(ime) = output.platform_output.ime {
+            let cursor = ime.cursor_rect;
+            let area = SDL_Rect {
+                x: (cursor.left() * self.units).round() as i32,
+                y: (cursor.top() * self.units).round() as i32,
+                w: 1,
+                h: (cursor.height() * self.units).ceil() as i32,
+            };
+            window.set_text_input_area(&area);
+            if ime.should_interrupt_composition {
+                self.clear_composition(window);
             }
-            for (id, deltas) in output.textures_delta.set.drain() {
-                for delta in deltas {
-                    let egui::ImageData::Color(image) = delta.image;
-                    let [w, h] = image.size;
-                    let mut bytes: Vec<u8> = image
-                        .pixels
-                        .iter()
-                        .flat_map(|p| p.to_srgba_unmultiplied())
-                        .collect();
-                    if id == TextureId::default() && !color.is_identity() {
-                        // The font atlas carries the color of emoji, while
-                        // monochrome glyphs are tinted with mapped vertices.
-                        for (rgba, pixel) in bytes
-                            .as_chunks_mut::<4>()
-                            .0
-                            .iter_mut()
-                            .zip(image.pixels.iter())
-                        {
-                            let [red, green, blue, _] = *rgba;
-                            if pixel.a() != 0 && [red, green, blue] != [255; 3] {
-                                let rgb = color.map(
-                                    [red, green, blue].map(|channel| f32::from(channel) / 255.),
-                                );
-                                rgba[..3].copy_from_slice(
-                                    &rgb.map(|channel| (channel * 255.).round() as u8),
-                                );
-                            }
+        }
+        for (id, deltas) in output.textures_delta.set.drain() {
+            for delta in deltas {
+                let egui::ImageData::Color(image) = delta.image;
+                let [w, h] = image.size;
+                let mut bytes: Vec<u8> = image
+                    .pixels
+                    .iter()
+                    .flat_map(|p| p.to_srgba_unmultiplied())
+                    .collect();
+                if id == TextureId::default() && !color.is_identity() {
+                    // The font atlas carries the color of emoji, while
+                    // monochrome glyphs are tinted with mapped vertices.
+                    for (rgba, pixel) in bytes
+                        .as_chunks_mut::<4>()
+                        .0
+                        .iter_mut()
+                        .zip(image.pixels.iter())
+                    {
+                        let [red, green, blue, _] = *rgba;
+                        if pixel.a() != 0 && [red, green, blue] != [255; 3] {
+                            let rgb = color.map(
+                                [red, green, blue].map(|channel| f32::from(channel) / 255.),
+                            );
+                            rgba[..3].copy_from_slice(
+                                &rgb.map(|channel| (channel * 255.).round() as u8),
+                            );
                         }
                     }
-                    let texture = if delta.pos.is_none() {
-                        if let Some(old) = self.textures.remove(&id) {
-                            SDL_DestroyTexture(old)
-                        }
-                        let p = SDL_CreateTexture(
-                            r.raw,
-                            SDL_PIXELFORMAT_RGBA32,
-                            SDL_TEXTUREACCESS_STATIC,
-                            w as i32,
-                            h as i32,
-                        );
-                        if p.is_null() {
-                            return Err(crate::sdl::error());
-                        }
-                        check(SDL_SetTextureBlendMode(p, SDL_BLENDMODE_BLEND))?;
-                        SDL_SetTextureScaleMode(p, SDL_SCALEMODE_LINEAR);
-                        self.textures.insert(id, p);
-                        p
-                    } else {
-                        *self
-                            .textures
-                            .get(&id)
-                            .ok_or("Missing partial egui texture")?
-                    };
-                    let rect = delta.pos.map(|pos| SDL_Rect {
-                        x: pos[0] as i32,
-                        y: pos[1] as i32,
-                        w: w as i32,
-                        h: h as i32,
-                    });
-                    check(SDL_UpdateTexture(
-                        texture,
-                        rect.as_ref().map_or(ptr::null(), |r| r),
-                        bytes.as_ptr().cast(),
-                        (w * 4) as i32,
-                    ))?;
                 }
-            }
-            let px = window.pixel_size();
-            let logical = window.size();
-            let scale = [px[0] as f32 / logical[0], px[1] as f32 / logical[1]];
-            for p in self.ctx.tessellate(output.shapes, output.pixels_per_point) {
-                let egui::epaint::Primitive::Mesh(mesh) = p.primitive else {
-                    continue;
-                };
-                let Some(&texture) = self.textures.get(&mesh.texture_id) else {
-                    continue;
-                };
-                let rect = p.clip_rect;
-                let x = (rect.min.x * self.units * scale[0])
-                    .floor()
-                    .clamp(0., px[0] as f32) as i32;
-                let y = (rect.min.y * self.units * scale[1])
-                    .floor()
-                    .clamp(0., px[1] as f32) as i32;
-                let x2 = (rect.max.x * self.units * scale[0])
-                    .ceil()
-                    .clamp(0., px[0] as f32) as i32;
-                let y2 = (rect.max.y * self.units * scale[1])
-                    .ceil()
-                    .clamp(0., px[1] as f32) as i32;
-                if x2 <= x || y2 <= y {
-                    continue;
+                if delta.pos.is_none() {
+                    self.textures.insert(id, GuiTexture::new(r, w, h)?);
                 }
-                // SDL clip rectangles are in renderer logical units, before RenderScale.
-                let clip = SDL_Rect {
-                    x: (x as f32 / scale[0]).floor() as i32,
-                    y: (y as f32 / scale[1]).floor() as i32,
-                    w: ((x2 - x) as f32 / scale[0]).ceil() as i32,
-                    h: ((y2 - y) as f32 / scale[1]).ceil() as i32,
-                };
-                SDL_SetRenderClipRect(r.raw, &clip);
-                let vertices: Vec<SDL_Vertex> = mesh
-                    .vertices
-                    .iter()
-                    .map(|v| {
-                        let [red, green, blue, alpha] = v.color.to_srgba_unmultiplied();
-                        let c =
-                            color.map([red as f32 / 255., green as f32 / 255., blue as f32 / 255.]);
-                        SDL_Vertex {
-                            position: SDL_FPoint {
-                                x: v.pos.x * self.units,
-                                y: v.pos.y * self.units,
-                            },
-                            color: SDL_FColor {
-                                r: c[0],
-                                g: c[1],
-                                b: c[2],
-                                a: alpha as f32 / 255.,
-                            },
-                            tex_coord: SDL_FPoint {
-                                x: v.uv.x,
-                                y: v.uv.y,
-                            },
-                        }
-                    })
-                    .collect();
-                r.geometry(texture, &vertices, &mesh.indices)?;
+                let texture = self
+                    .textures
+                    .get(&id)
+                    .ok_or("Missing partial egui texture")?;
+                let rect = delta.pos.map(|pos| SDL_Rect {
+                    x: pos[0] as i32,
+                    y: pos[1] as i32,
+                    w: w as i32,
+                    h: h as i32,
+                });
+                texture.update([w, h], &bytes, rect.as_ref())?;
             }
-            SDL_SetRenderClipRect(r.raw, ptr::null());
-            for id in output.textures_delta.free.drain() {
-                if let Some(p) = self.textures.remove(&id) {
-                    SDL_DestroyTexture(p)
-                }
-            }
-            for command in output.platform_output.commands {
-                if let egui::OutputCommand::CopyText(text) = command {
-                    let text = crate::sdl::cstring(&text);
-                    SDL_SetClipboardText(text.as_ptr());
-                }
-            }
-            Ok(())
         }
+        let px = window.pixel_size();
+        let logical = window.size();
+        let scale = [px[0] as f32 / logical[0], px[1] as f32 / logical[1]];
+        for p in self.ctx.tessellate(output.shapes, output.pixels_per_point) {
+            let egui::epaint::Primitive::Mesh(mesh) = p.primitive else {
+                continue;
+            };
+            let Some(texture) = self.textures.get(&mesh.texture_id) else {
+                continue;
+            };
+            let rect = p.clip_rect;
+            let x = (rect.min.x * self.units * scale[0])
+                .floor()
+                .clamp(0., px[0] as f32) as i32;
+            let y = (rect.min.y * self.units * scale[1])
+                .floor()
+                .clamp(0., px[1] as f32) as i32;
+            let x2 = (rect.max.x * self.units * scale[0])
+                .ceil()
+                .clamp(0., px[0] as f32) as i32;
+            let y2 = (rect.max.y * self.units * scale[1])
+                .ceil()
+                .clamp(0., px[1] as f32) as i32;
+            if x2 <= x || y2 <= y {
+                continue;
+            }
+            // SDL clip rectangles are in renderer logical units, before RenderScale.
+            let clip = SDL_Rect {
+                x: (x as f32 / scale[0]).floor() as i32,
+                y: (y as f32 / scale[1]).floor() as i32,
+                w: ((x2 - x) as f32 / scale[0]).ceil() as i32,
+                h: ((y2 - y) as f32 / scale[1]).ceil() as i32,
+            };
+            r.set_clip_rect(Some(&clip));
+            let vertices: Vec<SDL_Vertex> = mesh
+                .vertices
+                .iter()
+                .map(|v| {
+                    let [red, green, blue, alpha] = v.color.to_srgba_unmultiplied();
+                    let c =
+                        color.map([red as f32 / 255., green as f32 / 255., blue as f32 / 255.]);
+                    SDL_Vertex {
+                        position: SDL_FPoint {
+                            x: v.pos.x * self.units,
+                            y: v.pos.y * self.units,
+                        },
+                        color: SDL_FColor {
+                            r: c[0],
+                            g: c[1],
+                            b: c[2],
+                            a: alpha as f32 / 255.,
+                        },
+                        tex_coord: SDL_FPoint {
+                            x: v.uv.x,
+                            y: v.uv.y,
+                        },
+                    }
+                })
+                .collect();
+            texture.geometry(r, &vertices, &mesh.indices)?;
+        }
+        r.set_clip_rect(None);
+        for id in output.textures_delta.free.drain() {
+            self.textures.remove(&id);
+        }
+        for command in output.platform_output.commands {
+            if let egui::OutputCommand::CopyText(text) = command {
+                set_clipboard_text(&text);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -614,13 +590,6 @@ pub fn repaint_at(output: &egui::FullOutput) -> Option<Instant> {
         })
 }
 
-impl Drop for Gui {
-    fn drop(&mut self) {
-        for (_, texture) in self.textures.drain() {
-            unsafe { SDL_DestroyTexture(texture) };
-        }
-    }
-}
 pub fn modifiers(m: SDL_Keymod) -> Modifiers {
     let ctrl = m & SDL_KMOD_CTRL != 0;
     let mac_cmd = m & SDL_KMOD_GUI != 0;
