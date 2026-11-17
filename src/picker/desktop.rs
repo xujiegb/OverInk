@@ -1,3 +1,5 @@
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use crate::{color::InkColor, sdl::*};
 
 #[derive(Clone, Copy, Debug)]
@@ -141,6 +143,8 @@ mod x11 {
     use std::ffi::{c_char, c_int, c_ulong, c_void};
     fn library() -> Result<Library, String> {
         for name in ["libX11.so.6", "libX11.so"] {
+            // SAFETY: Only the system libX11 sonames are loaded here. Every
+            // dynamically loaded function pointer retains its Library owner.
             if let Ok(lib) = unsafe { Library::new(name) } {
                 return Ok(lib);
             }
@@ -159,6 +163,9 @@ mod x11 {
         {
             return true;
         }
+        // SAFETY: SDL owns the active X11 Display. The XQueryExtension symbol
+        // is borrowed from a Library that remains live for this call, and
+        // all of its output pointers refer to initialized local integers.
         unsafe {
             let Ok(lib) = library() else { return false };
             let Ok(display) = display(window) else {
@@ -184,6 +191,10 @@ mod x11 {
         }
     }
     pub fn position(window: &Window, local: [f32; 2]) -> Result<ScreenPoint, String> {
+        // SAFETY: SDL owns the live Display and drawable, and the Xlib
+        // geometry/translation symbol signatures match their C declarations.
+        // All writable output pointers refer to initialized local variables,
+        // and the dynamic Library outlives every borrowed Symbol.
         unsafe {
             let lib = library()?;
             let d = display(window)?;
@@ -300,6 +311,9 @@ mod x11 {
     }
 
     pub fn sample(window: &Window, point: ScreenPoint) -> Result<InkColor, String> {
+        // SAFETY: Xlib calls use the active SDL Display and compatible C
+        // symbol signatures. The root coordinates are bounds-checked before
+        // XGetImage, and OwnedImage releases the result while libX11 is live.
         unsafe {
             let lib = library()?;
             let d = display(window)?;
@@ -378,6 +392,10 @@ mod x11 {
         let origin = position(window, [0.; 2])?;
         let [w, h] = window.pixel_size();
         let mut out = crate::background::Image::buffer(w as u32, h as u32)?;
+        // SAFETY: Window and SDL keep the X11 Display/drawable alive. The
+        // requested rectangle is validated against XGetGeometry before
+        // XGetImage; the returned image is owned by OwnedImage, which also
+        // retains the library used for XDestroyImage and XGetPixel.
         unsafe {
             let lib = library()?;
             let d = display(window)?;
