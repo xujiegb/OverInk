@@ -22,7 +22,6 @@ use screenshot::{Destination, MenuAction, SaveError, Screenshot};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     path::{Path, PathBuf},
-    ptr,
     time::{Duration, Instant},
 };
 
@@ -916,22 +915,27 @@ impl App {
     }
     // Device proximity is independent of the current tool or modal picker.
     fn track_pen(&mut self, event: &SDL_Event) {
-        let id = unsafe {
-            match SDL_EventType(event.r#type) {
-                SDL_EVENT_PEN_PROXIMITY_IN => event.pproximity.which.0,
-                SDL_EVENT_PEN_PROXIMITY_OUT => {
-                    let id = event.pproximity.which.0;
-                    self.end(Source::Pen(id));
-                    self.input.pens.remove(&id);
-                    self.input.pen_proximity.remove(&id);
-                    return;
-                }
-                SDL_EVENT_PEN_AXIS => event.paxis.which.0,
-                SDL_EVENT_PEN_MOTION => event.pmotion.which.0,
-                SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP => event.ptouch.which.0,
-                _ => return,
+        let ty = event_type(event);
+        let id = match ty {
+            SDL_EVENT_PEN_PROXIMITY_IN | SDL_EVENT_PEN_PROXIMITY_OUT => {
+                pen_proximity_event(event).map(|pen| pen.which.0)
             }
+            SDL_EVENT_PEN_AXIS => pen_axis_event(event).map(|pen| pen.which.0),
+            SDL_EVENT_PEN_MOTION => pen_motion_event(event).map(|pen| pen.which.0),
+            SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP => {
+                pen_touch_event(event).map(|pen| pen.which.0)
+            }
+            _ => None,
         };
+        let Some(id) = id else {
+            return;
+        };
+        if ty == SDL_EVENT_PEN_PROXIMITY_OUT {
+            self.end(Source::Pen(id));
+            self.input.pens.remove(&id);
+            self.input.pen_proximity.remove(&id);
+            return;
+        }
         if self.input.pen_proximity.insert(id) {
             self.discard_touches();
         }
@@ -2729,16 +2733,7 @@ pub fn run(options: Options) -> Result<(), String> {
                 ("smoke.bmp", &canvases[active].render),
                 ("toolbar.bmp", &toolbar_render),
             ] {
-                unsafe {
-                    let surface = SDL_RenderReadPixels(render.raw, ptr::null());
-                    if surface.is_null() {
-                        return Err(crate::sdl::error());
-                    }
-                    let path = crate::sdl::cstring(&path.join(name).to_string_lossy());
-                    let ok = SDL_SaveBMP(surface, path.as_ptr());
-                    SDL_DestroySurface(surface);
-                    check(ok)?;
-                }
+                render.save_bmp(&path.join(name))?;
             }
             println!(
                 "OverInk smoke OK: {} strokes, native pressure and multi-touch events, egui textures, SDL geometry, SVG, BMP",
