@@ -60,9 +60,9 @@ struct Popup {
 #[derive(PartialEq)]
 struct Content {
     hint: Hint,
+    language: Language,
     units: f32,
     theme: Theme,
-    language: Language,
     color_revision: u64,
 }
 
@@ -82,10 +82,11 @@ impl Tooltips {
             return;
         };
         let content = Content {
+            // The toolbar supplies translated text. Both Gui contexts use the bundled font.
             hint,
+            language,
             units: gui.units,
             theme: gui.ctx.theme(),
-            language,
             color_revision: color.revision,
         };
         if self
@@ -123,7 +124,6 @@ impl Tooltips {
                 content,
             })
         };
-        popup.gui.set_language(popup.content.language);
         popup.gui.ctx.set_theme(popup.content.theme);
         popup.window.show(true)?;
         popup.paint(color)

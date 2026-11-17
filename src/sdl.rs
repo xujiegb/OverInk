@@ -1,4 +1,5 @@
 //! SDL is owned by the main thread. Window/renderer pointers never cross threads.
+pub mod dialog;
 pub use sdl3_sys::{
     blendmode::*, clipboard::*, error::*, events::*, hints::*, init::*, keyboard::*, keycode::*,
     locale::*, mouse::*, pen::*, pixels::*, properties::*, rect::*, render::*, stdinc::*,
@@ -111,28 +112,16 @@ pub struct Window {
     pub raw: *mut SDL_Window,
     pub id: SDL_WindowID,
 }
-unsafe extern "C" fn toolbar_hit_test(
-    window: *mut SDL_Window,
-    point: *const SDL_Point,
-    _: *mut c_void,
-) -> SDL_HitTestResult {
-    unsafe {
-        if let Some(point) = point.as_ref() {
-            let scale =
-                SDL_GetWindowDisplayScale(window) / SDL_GetWindowPixelDensity(window).max(0.1);
-            if point.x >= 0
-                && (point.x as f32) < crate::toolbar::WIDTH * scale
-                && point.y >= 0
-                && (point.y as f32) < crate::toolbar::GRIP_HEIGHT * scale
-            {
-                return SDL_HITTEST_DRAGGABLE;
+impl Window {
+    pub fn raise(&self) {
+        unsafe {
+            let window = SDL_GetWindowFromID(self.id);
+            if !window.is_null() && window == self.raw {
+                SDL_RaiseWindow(window);
             }
         }
     }
-    SDL_HITTEST_NORMAL
-}
 
-impl Window {
     pub fn input_focused(&self) -> bool {
         unsafe { (SDL_GetWindowFlags(self.raw) & SDL_WINDOW_INPUT_FOCUS).0 != 0 }
     }
@@ -193,6 +182,32 @@ impl Window {
         }
     }
     pub fn setup_toolbar(&self) {
+        extern "C" fn toolbar_hit_test(
+            window: *mut SDL_Window,
+            point: *const SDL_Point,
+            _: *mut c_void,
+        ) -> SDL_HitTestResult {
+            if window.is_null() {
+                return SDL_HITTEST_NORMAL;
+            }
+            // SDL supplies the live window and a point borrowed for this hit test.
+            let Some(point) = (unsafe { point.as_ref() }) else {
+                return SDL_HITTEST_NORMAL;
+            };
+            let scale = unsafe {
+                SDL_GetWindowDisplayScale(window) / SDL_GetWindowPixelDensity(window).max(0.1)
+            };
+            if point.x >= 0
+                && (point.x as f32) < crate::toolbar::WIDTH * scale
+                && point.y >= 0
+                && (point.y as f32) < crate::toolbar::GRIP_HEIGHT * scale
+            {
+                SDL_HITTEST_DRAGGABLE
+            } else {
+                SDL_HITTEST_NORMAL
+            }
+        }
+
         unsafe {
             SDL_SetWindowResizable(self.raw, false);
             if SDL_SetWindowHitTest(self.raw, Some(toolbar_hit_test), ptr::null_mut()) {

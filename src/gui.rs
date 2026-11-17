@@ -1,7 +1,6 @@
 //! Small egui/SDL3 integration. SDL_RenderGeometry makes the same UI usable on
 //! s390x, LoongArch and FreeBSD without assuming a Vulkan driver.
 use crate::{
-    appearance::Language,
     icc::ColorManager,
     sdl::*,
     touch::{self, TouchKey},
@@ -21,7 +20,6 @@ pub struct Gui {
     pub units: f32,
     touch_primary: Option<TouchKey>,
     touch_positions: BTreeMap<TouchKey, egui::Pos2>,
-    font_language: Option<Language>,
     composing: bool,
     composition_ended: Option<u64>,
 }
@@ -31,6 +29,7 @@ impl Gui {
         // Apply input actions once per native frame, including mode toggles.
         ctx.options_mut(|options| options.max_passes = std::num::NonZeroUsize::new(1).unwrap());
         ctx.set_theme(egui::Theme::Light);
+        ctx.set_fonts(crate::fonts::ui_definitions());
         ctx.all_styles_mut(|s| {
             let colors = crate::toolbar::colors(s.visuals.dark_mode);
             s.visuals.panel_fill = colors.rail;
@@ -43,7 +42,7 @@ impl Gui {
                 s.visuals.selection.bg_fill = egui::Color32::from_rgb(208, 236, 249);
                 s.visuals.widgets.active.bg_fill = s.visuals.selection.bg_fill;
             }
-            s.spacing.item_spacing = egui::vec2(8., 9.);
+            s.spacing.item_spacing = egui::vec2(6., 5.);
             s.spacing.button_padding = egui::vec2(10., 7.);
         });
         Self {
@@ -54,51 +53,9 @@ impl Gui {
             units: 1.,
             touch_primary: None,
             touch_positions: BTreeMap::new(),
-            font_language: None,
             composing: false,
             composition_ended: None,
         }
-    }
-    pub fn set_language(&mut self, language: Language) {
-        let font_language = if language == Language::Traditional {
-            Language::Traditional
-        } else {
-            Language::Simplified
-        };
-        if self.font_language == Some(font_language) {
-            return;
-        }
-        self.font_language = Some(font_language);
-        let mut fonts = egui::FontDefinitions::default();
-        let sc = "OverInk UI SC";
-        let tc = "OverInk UI TC";
-        for (name, data) in [
-            (
-                sc,
-                include_bytes!("../assets/fonts/OverInk-UI-SC.otf").as_slice(),
-            ),
-            (
-                tc,
-                include_bytes!("../assets/fonts/OverInk-UI-TC.otf").as_slice(),
-            ),
-        ] {
-            fonts
-                .font_data
-                .insert(name.into(), egui::FontData::from_static(data).into());
-        }
-        let order = if font_language == Language::Traditional {
-            [tc, sc]
-        } else {
-            [sc, tc]
-        };
-        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-            fonts
-                .families
-                .entry(family)
-                .or_default()
-                .extend(order.map(str::to_owned));
-        }
-        self.ctx.set_fonts(fonts);
     }
     pub fn input(&mut self, w: &Window) -> RawInput {
         self.input_with_units(w, w.ui_scale().max(0.5))
@@ -499,7 +456,7 @@ impl Gui {
                         .iter()
                         .flat_map(|p| p.to_srgba_unmultiplied())
                         .collect();
-                    if self.units == 1. && self.font_language.is_none() && !color.is_identity() {
+                    if id == TextureId::default() && !color.is_identity() {
                         // The font atlas carries the color of emoji, while
                         // monochrome glyphs are tinted with mapped vertices.
                         for (rgba, pixel) in bytes
@@ -720,19 +677,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn changing_ui_language_loads_chinese_glyphs() {
-        let mut gui = Gui::new();
-        for (language, sample) in [
-            (
-                Language::Simplified,
-                "简体中文 屏幕取色 退出 安装扩展 重新登录",
-            ),
-            (
-                Language::Traditional,
-                "繁體中文 螢幕取色 結束 安裝擴充套件 重新登入",
-            ),
+    fn included_ui_font_covers_both_chinese_scripts() {
+        let gui = Gui::new();
+        for sample in [
+            "简体中文 屏幕取色 退出 安装扩展 重新登录",
+            "繁體中文 螢幕取色 結束 安裝擴充套件 重新登入",
         ] {
-            gui.set_language(language);
             let mut output = gui.ctx.run_ui(RawInput::default(), |ui| {
                 ui.label(sample);
                 ui.ctx().fonts_mut(|fonts| {

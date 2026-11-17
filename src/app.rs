@@ -1,14 +1,16 @@
 mod canvas;
 mod ink;
 mod panel;
+mod screenshot;
 mod text;
 
+use crate::sdl::dialog::{DialogKind, FileDialog};
 use crate::{
     appearance::{Language, Preferences, Status, Text, ThemeMonitor, text},
     color::{InkColor, PRESETS},
     display::{Display, Pages},
     export,
-    fonts::{FontDialog, TextFonts},
+    fonts::TextFonts,
     frame_rate::{FramePacer, FrameRate},
     gui,
     icc::ColorManager,
@@ -16,6 +18,7 @@ use crate::{
     sdl::*,
     touch::{self, TouchKey},
 };
+use screenshot::{Destination, MenuAction, SaveError, Screenshot};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     path::{Path, PathBuf},
@@ -95,6 +98,8 @@ struct Commands {
     choose_font: bool,
     font_path: Option<PathBuf>,
     reset_font: bool,
+    screenshot: bool,
+    screenshot_folder: bool,
 }
 
 enum HistoryAction {
@@ -158,6 +163,12 @@ impl CanvasInput {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Board {
+    White,
+    Black,
+}
+
 struct App {
     input: CanvasInput,
     parked_input: BTreeMap<u32, CanvasInput>,
@@ -174,7 +185,7 @@ struct App {
     pass: bool,
     wait_for_mouse_up: bool,
     hidden: bool,
-    board: bool,
+    board: Option<Board>,
     display: usize,
     displays: Vec<Display>,
     pages: Pages,
@@ -182,6 +193,7 @@ struct App {
     preferences: Preferences,
     text_fonts: TextFonts,
     font_path_input: Option<String>,
+    screenshot: Screenshot,
     #[cfg(target_os = "linux")]
     gnome_guide: Option<crate::gnome::Guide>,
     language: Language,
@@ -240,17 +252,18 @@ impl App {
             pass: false,
             wait_for_mouse_up: false,
             hidden: false,
-            board,
+            board: board.then_some(Board::White),
             display,
             displays,
             pages,
             frame_rate: FrameRate::load(&base.join("frame-rate.json")),
+            language: preferences.language.unwrap_or_else(Language::system),
             preferences,
             text_fonts: TextFonts::load(&base.join("annotation-font")),
             font_path_input: None,
+            screenshot: Screenshot::default(),
             #[cfg(target_os = "linux")]
             gnome_guide: None,
-            language: preferences.language.unwrap_or_else(Language::system),
             suspended,
             frozen: false,
             panel: None,
@@ -1294,20 +1307,63 @@ fn capture_visibility(
     toolbar: &Window,
     tooltips: &mut crate::toolbar::Tooltips,
     toolbar_hidden: &mut bool,
-    hide: bool,
+    hide_all: bool,
+    screenshot_active: bool,
 ) -> Result<bool, String> {
-    if hide == *toolbar_hidden {
-        return Ok(false);
-    }
-    if hide {
-        tooltips.clear();
-        for canvas in canvases {
+    if hide_all {
+        for canvas in canvases.iter_mut().filter(|canvas| canvas.visible) {
             canvas.show(toolbar, false)?;
         }
     }
+    let hide = hide_all || screenshot_active;
+    if hide == *toolbar_hidden {
+        return Ok(false);
+    }
+    tooltips.clear();
     toolbar.show(!hide)?;
     *toolbar_hidden = hide;
+    for canvas in canvases {
+        canvas.guard_dirty = true;
+    }
     Ok(true)
+}
+
+fn handle_screenshot_event(
+    app: &mut App,
+    event: &SDL_Event,
+    ty: SDL_EventType,
+    canvases: &mut [canvas::Canvas],
+) -> bool {
+    let screenshot = &mut app.screenshot;
+    if !screenshot.active() {
+        return false;
+    }
+    if ty == SDL_EVENT_KEY_DOWN && unsafe { !event.key.repeat && event.key.key == SDLK_ESCAPE } {
+        screenshot.cancel();
+        for canvas in canvases {
+            canvas.dirty = true;
+            canvas.suspend_text_input();
+        }
+        return true;
+    }
+    if let Some(canvas) = canvases
+        .iter_mut()
+        .find(|canvas| screenshot.targets(canvas.window.id))
+    {
+        let on_canvas = canvas::event_window(event, ty) == Some(canvas.window.id);
+        let contact_cancelled =
+            matches!(ty, SDL_EVENT_FINGER_CANCELED | SDL_EVENT_PEN_PROXIMITY_OUT);
+        if on_canvas || contact_cancelled {
+            canvas.dirty |= screenshot.event(event, &canvas.window, app.touch_enabled);
+        }
+        if screenshot.ready()
+            && (on_canvas || ty == SDL_EVENT_FINGER_CANCELED)
+            && (app.touch_enabled || ty != SDL_EVENT_FINGER_DOWN)
+        {
+            canvas.dirty |= canvas.screenshot_event(event);
+        }
+    }
+    false
 }
 
 fn update_preferences(app: &mut App, previous: Preferences, multi_supported: bool) -> bool {
@@ -1356,7 +1412,7 @@ impl App {
     fn update_gnome_guide(
         &mut self,
         commands: &mut Commands,
-        previous: Preferences,
+        previous: &Preferences,
         smoke: bool,
     ) -> bool {
         use crate::gnome::{Decision, Guide};
@@ -1453,14 +1509,14 @@ pub fn run(options: Options) -> Result<(), String> {
     if !options.smoke && !wayland {
         let _ = toolbar.arrange_toolbar(false, app.pages.active);
     }
-    unsafe { SDL_RaiseWindow(toolbar.raw) };
+    toolbar.raise();
     if options.smoke {
         app.history = History::default();
         smoke_text_history(&mut app, &mut canvases[0])?;
         smoke_events(&mut app, canvases[0].window.id)?;
     }
     let mut picker = crate::picker::Picker::default();
-    let mut font_dialog = FontDialog::default();
+    let mut file_dialog = FileDialog::default();
     let annotation_font_path = base.join("annotation-font");
     let mut tooltips = crate::toolbar::Tooltips::default();
     let mut toolbar_hidden = false;
@@ -1490,6 +1546,8 @@ pub fn run(options: Options) -> Result<(), String> {
         let mut controller_moved = false;
         let mut controller_bounds_changed = false;
         let mut mode_changed = false;
+        // Keep the rest of this event batch modal even if Escape ends the screenshot.
+        let screenshot_owns_input = app.screenshot.active();
         let mut event = SDL_Event::default();
         while unsafe { SDL_PollEvent(&mut event) } {
             let ty = unsafe { SDL_EventType(event.r#type) };
@@ -1499,6 +1557,7 @@ pub fn run(options: Options) -> Result<(), String> {
             }
             if ty == SDL_EVENT_LOCALE_CHANGED && app.preferences.language.is_none() {
                 app.language = Language::system();
+                tooltips.clear();
                 toolbar_dirty = true;
             }
             if (SDL_EVENT_DISPLAY_FIRST..=SDL_EVENT_DISPLAY_LAST).contains(&ty) {
@@ -1570,6 +1629,10 @@ pub fn run(options: Options) -> Result<(), String> {
                         canvas.keep_toolbar_above(&toolbar);
                     }
                     if ty == SDL_EVENT_WINDOW_CLOSE_REQUESTED {
+                        if app.screenshot.active() {
+                            app.screenshot.cancel();
+                            restore_toolbar_focus = true;
+                        }
                         app.finish_all_contacts();
                         app.hidden = true;
                         mode_changed = true;
@@ -1593,10 +1656,24 @@ pub fn run(options: Options) -> Result<(), String> {
                 toolbar_dirty = true;
             }
 
+            if screenshot_owns_input {
+                if ty == SDL_EVENT_PEN_PROXIMITY_OUT {
+                    app.for_each_page(|page| page.track_pen(&event));
+                }
+                // SDL owns the native dialog's input and delivers its result through
+                // the callback. Keep OverInk's drawing and shortcuts modal.
+                if !file_dialog.pending() {
+                    let cancelled = handle_screenshot_event(&mut app, &event, ty, &mut canvases);
+                    mode_changed |= cancelled;
+                    restore_toolbar_focus |= cancelled;
+                }
+                continue;
+            }
+
+            let id = canvas::event_window(&event, ty);
             let active = canvas::active_index(&canvases, app.pages.active);
             let was_picking = picker.active();
             picker.event(&event, &canvases[active].window);
-            let id = canvas::event_window(&event, ty);
             let target = if ty == SDL_EVENT_FINGER_CANCELED {
                 let key = unsafe { TouchKey::from(event.tfinger) };
                 app.touch_page(key)
@@ -1610,8 +1687,10 @@ pub fn run(options: Options) -> Result<(), String> {
                 id.and_then(|id| canvases.iter().position(|c| c.window.id == id))
             };
             let drawing =
-                !was_picking && !toolbar_hidden && !app.suspended && !font_dialog.pending();
-            gui.event(&event, toolbar.id, toolbar.size());
+                !was_picking && !toolbar_hidden && !app.suspended && !file_dialog.pending();
+            if !file_dialog.pending() {
+                gui.event(&event, toolbar.id, toolbar.size());
+            }
             if id == Some(toolbar.id)
                 && ty == SDL_EVENT_WINDOW_FOCUS_LOST
                 && !toolbar.input_focused()
@@ -1764,27 +1843,67 @@ pub fn run(options: Options) -> Result<(), String> {
             break;
         }
 
-        if let Some(result) = font_dialog.poll() {
+        if let Some((kind, result)) = file_dialog.poll() {
             toolbar_dirty = true;
-            restore_toolbar_focus = true;
-            match result {
-                Ok(Some(path)) if app.install_annotation_font(&path, &annotation_font_path) => {
-                    for canvas in &mut canvases {
-                        canvas.dirty = true;
+            restore_toolbar_focus = !app.screenshot.active();
+            match kind {
+                DialogKind::Font => match result {
+                    Ok(Some(path)) if app.install_annotation_font(&path, &annotation_font_path) => {
+                        for canvas in &mut canvases {
+                            canvas.dirty = true;
+                        }
                     }
-                }
-                Ok(_) => (),
-                Err(error) => {
-                    app.panel = Some(crate::toolbar::Panel::Settings);
-                    app.font_path_input.get_or_insert_with(String::new);
-                    gui.ctx
-                        .memory_mut(|mem| mem.request_focus(egui::Id::unique(FONT_PATH_FIELD)));
-                    app.status = text(
-                        "Enter a font file path",
-                        "请输入字体文件路径",
-                        "請輸入字型檔案路徑",
-                    )
-                    .detail(error)
+                    Ok(_) => (),
+                    Err(error) => {
+                        app.panel = Some(crate::toolbar::Panel::Settings);
+                        app.font_path_input.get_or_insert_with(String::new);
+                        gui.ctx
+                            .memory_mut(|mem| mem.request_focus(egui::Id::unique(FONT_PATH_FIELD)));
+                        app.status = text(
+                            "Enter a font file path",
+                            "请输入字体文件路径",
+                            "請輸入字型檔案路徑",
+                        )
+                        .detail(error);
+                    }
+                },
+                DialogKind::ScreenshotFolder => match result {
+                    Ok(Some(path)) => {
+                        let previous = app.preferences.clone();
+                        app.preferences.screenshot_folder = Some(path);
+                        update_preferences(&mut app, previous, !wayland && !options.smoke);
+                    }
+                    Ok(None) => (),
+                    Err(error) => {
+                        app.status = text(
+                            "Could not choose a screenshot folder",
+                            "无法选择截图文件夹",
+                            "無法選擇螢幕擷取資料夾",
+                        )
+                        .detail(error);
+                    }
+                },
+                DialogKind::ScreenshotFile => {
+                    app.screenshot.close_save_as();
+                    if let Some(canvas) = canvases
+                        .iter_mut()
+                        .find(|canvas| app.screenshot.targets(canvas.window.id))
+                    {
+                        canvas.dirty = true;
+                        canvas.suspend_text_input();
+                        match result {
+                            Ok(Some(path)) => {
+                                if let Err(error) = app.screenshot.save(Destination::File(path)) {
+                                    app.screenshot.show_error(error);
+                                }
+                            }
+                            Ok(None) => (),
+                            Err(error) => app.screenshot.show_error(error),
+                        }
+                        if canvas.visible {
+                            canvas.window.raise();
+                        }
+                    }
                 }
             }
         }
@@ -1866,6 +1985,11 @@ pub fn run(options: Options) -> Result<(), String> {
                 if (layout || removed) && picker.active() {
                     picker.cancel();
                 }
+                if (layout || removed || topology_changed) && app.screenshot.active() {
+                    app.screenshot.cancel();
+                    restore_toolbar_focus = true;
+                    mode_changed = true;
+                }
                 if let Err(error) = canvas::reconcile(&mut canvases, &mut app, &toolbar, &options) {
                     app.status = canvas::failure(error);
                     toolbar_dirty = true;
@@ -1906,20 +2030,81 @@ pub fn run(options: Options) -> Result<(), String> {
                 &app.displays,
                 &connected,
                 mode,
-                !app.pass && !app.hidden && !picker.active(),
+                !app.pass && !app.hidden && !picker.active() && !app.screenshot.active(),
             ) {
                 app.status = reason.into();
                 canvas.dirty = true;
                 toolbar_dirty = true;
             }
         }
+        if let Some(index) = canvases
+            .iter()
+            .position(|canvas| app.screenshot.targets(canvas.window.id))
+        {
+            let canvas = &mut canvases[index];
+            if let Some(result) =
+                app.screenshot
+                    .poll_capture(&canvas.window, &app.displays, wayland || xwayland)
+            {
+                canvas.dirty = true;
+                match result {
+                    Ok(true) => canvas.window.raise(),
+                    Ok(false) => {
+                        toolbar_dirty = true;
+                        restore_toolbar_focus = true;
+                        mode_changed = true;
+                    }
+                    Err(error) => {
+                        app.panel = Some(crate::toolbar::Panel::Settings);
+                        app.status =
+                            text("Screenshot failed", "截图失败", "螢幕擷取失敗").detail(error);
+                        toolbar_dirty = true;
+                        restore_toolbar_focus = true;
+                        mode_changed = true;
+                    }
+                }
+            }
+        }
+        let mut open_save_as = false;
+        if let Some((direct, result)) = app.screenshot.poll_save() {
+            if let Some(canvas) = canvases
+                .iter_mut()
+                .find(|canvas| app.screenshot.targets(canvas.window.id))
+            {
+                canvas.dirty = true;
+                if result.is_ok() {
+                    canvas.suspend_text_input();
+                }
+            }
+            match result {
+                Ok(path) => {
+                    app.screenshot.cancel();
+                    app.status = text("Screenshot saved", "截图已保存", "螢幕擷取已儲存")
+                        .detail(path.display());
+                    toolbar_dirty = true;
+                    restore_toolbar_focus = true;
+                    mode_changed = true;
+                }
+                Err(SaveError::Exists(path)) => app.screenshot.confirm_replace(path),
+                Err(SaveError::Failed(error)) if app.screenshot.ready() => {
+                    app.screenshot.show_error(error);
+                    open_save_as = direct;
+                }
+                Err(SaveError::Failed(error)) => {
+                    app.status = text("Screenshot save failed", "保存截图失败", "儲存螢幕擷取失敗")
+                        .detail(error);
+                    toolbar_dirty = true;
+                }
+            }
+        }
         let hide = picker.hides_windows() || canvases.iter().any(|c| c.background.pending());
-        capture_visibility(
+        toolbar_dirty |= capture_visibility(
             &mut canvases,
             &toolbar,
             &mut tooltips,
             &mut toolbar_hidden,
             hide,
+            app.screenshot.active(),
         )?;
         if let Some(result) = picker.poll(&canvases[active].window) {
             app.picking = false;
@@ -1967,6 +2152,7 @@ pub fn run(options: Options) -> Result<(), String> {
             &mut tooltips,
             &mut toolbar_hidden,
             hide,
+            app.screenshot.active(),
         )?;
         if hide {
             wait_for_events(Duration::from_millis(8));
@@ -2000,14 +2186,15 @@ pub fn run(options: Options) -> Result<(), String> {
                 canvas.dirty = true;
             }
         }
-        let previous_preferences = app.preferences;
+        let previous_preferences = app.preferences.clone();
         let was_board = app.board;
         app.frozen = canvases[active].background.frozen;
         let mut cmd = Commands::default();
         let mut output = None;
-        if toolbar_dirty
-            || !gui.raw.events.is_empty()
-            || toolbar_repaint_at.is_some_and(|at| Instant::now() >= at)
+        if !toolbar_hidden
+            && (toolbar_dirty
+                || !gui.raw.events.is_empty()
+                || toolbar_repaint_at.is_some_and(|at| Instant::now() >= at))
         {
             toolbar_dirty = false;
             if app.input.text.editing()
@@ -2020,7 +2207,6 @@ pub fn run(options: Options) -> Result<(), String> {
             {
                 canvases[active].flush_text_events(&mut app, theme)?;
             }
-            gui.set_language(app.language);
             let mut input = gui.input(&toolbar);
             input.predicted_dt = pacer.period.as_secs_f32();
             let canvas = &canvases[active];
@@ -2033,7 +2219,7 @@ pub fn run(options: Options) -> Result<(), String> {
                         .snapshot_mode(&video, xwayland, options.sdr)
                         .unavailable(),
                     mark.id(),
-                    font_dialog.pending(),
+                    file_dialog.pending(),
                 )
             });
             toolbar_text_input = frame.platform_output.ime.is_some();
@@ -2044,16 +2230,39 @@ pub fn run(options: Options) -> Result<(), String> {
             break;
         }
         mode_changed |= cmd.mode;
-        if cmd.choose_font && !font_dialog.pending() {
+        if cmd.choose_font && !file_dialog.pending() {
             app.finish_all_contacts();
             tooltips.clear();
             for canvas in &mut canvases {
                 canvas.show(&toolbar, false)?;
             }
-            gui.sync_text_input(&toolbar, false);
-            font_dialog.open(&toolbar);
+            gui.suspend_input(&toolbar);
+            file_dialog.open(DialogKind::Font, &toolbar, None);
             cmd.redraw_canvas = true;
             toolbar_dirty = true;
+        }
+        if cmd.screenshot_folder && !file_dialog.pending() {
+            app.finish_all_contacts();
+            tooltips.clear();
+            for canvas in &mut canvases {
+                canvas.show(&toolbar, false)?;
+            }
+            gui.suspend_input(&toolbar);
+            let location = screenshot::default_folder(&app.preferences);
+            file_dialog.open(DialogKind::ScreenshotFolder, &toolbar, location.as_deref());
+            cmd.redraw_canvas = true;
+            toolbar_dirty = true;
+        }
+        if cmd.screenshot && !file_dialog.pending() && !picker.active() {
+            let canvas = &mut canvases[active];
+            canvas.finish_text_editor(&mut app, theme)?;
+            app.finish_all_contacts();
+            gui.suspend_input(&toolbar);
+            gui.clear_events();
+            app.screenshot
+                .start(&canvas.window, app.preferences.screenshot_hdr);
+            mode_changed = true;
+            cmd.redraw_canvas = true;
         }
         if let Some(source) = cmd.font_path.take() {
             app.finish_all_contacts();
@@ -2083,7 +2292,7 @@ pub fn run(options: Options) -> Result<(), String> {
             toolbar_dirty = true;
         }
         #[cfg(target_os = "linux")]
-        let relogin = app.update_gnome_guide(&mut cmd, previous_preferences, options.smoke);
+        let relogin = app.update_gnome_guide(&mut cmd, &previous_preferences, options.smoke);
         if cmd.preferences {
             toolbar_dirty = true;
             if app.preferences != previous_preferences {
@@ -2100,7 +2309,7 @@ pub fn run(options: Options) -> Result<(), String> {
                 picker.cancel();
             }
             app.finish_all_contacts();
-            if app.board {
+            if app.board.is_some() {
                 for canvas in &mut canvases {
                     canvas.background.live();
                 }
@@ -2116,7 +2325,7 @@ pub fn run(options: Options) -> Result<(), String> {
                 }
             }
         }
-        if cmd.pick {
+        if cmd.pick && !app.screenshot.active() && !file_dialog.pending() {
             if picker.active() {
                 picker.cancel();
             } else {
@@ -2154,18 +2363,22 @@ pub fn run(options: Options) -> Result<(), String> {
             canvas.guard_dirty |= controller_bounds_changed || mode_changed || cmd.pick;
         }
 
+        let screenshot_active = app.screenshot.active();
         let hide = picker.hides_windows() || canvases.iter().any(|c| c.background.pending());
-        capture_visibility(
+        toolbar_dirty |= capture_visibility(
             &mut canvases,
             &toolbar,
             &mut tooltips,
             &mut toolbar_hidden,
             hide,
+            screenshot_active,
         )?;
+        if toolbar_hidden && let Some(mut output) = output.take() {
+            output.shapes.clear();
+            output.platform_output.ime = None;
+            gui.paint(&toolbar_render, &toolbar, &toolbar_color, output)?;
+        }
         if hide {
-            if let Some(output) = output {
-                gui.paint(&toolbar_render, &toolbar, &toolbar_color, output)?;
-            }
             wait_for_events(Duration::from_millis(8));
             continue;
         }
@@ -2202,11 +2415,14 @@ pub fn run(options: Options) -> Result<(), String> {
             text_focus.deadline = None;
         }
         // Stop the canvas editor before enabling the toolbar's IME.
-        let toolbar_ime_active =
-            toolbar_text_input && toolbar.input_focused() && !font_dialog.pending();
+        let toolbar_ime_active = toolbar_text_input
+            && !toolbar_hidden
+            && toolbar.input_focused()
+            && !file_dialog.pending();
         gui.sync_text_input(&toolbar, toolbar_ime_active);
-        let mut presented = output.is_some();
+        let mut presented = false;
         if let Some(mut output) = output {
+            presented = true;
             if !toolbar_ime_active {
                 output.platform_output.ime = None;
             }
@@ -2232,14 +2448,24 @@ pub fn run(options: Options) -> Result<(), String> {
             .map(canvas::Canvas::extended_ink_bytes)
             .sum();
         for (index, canvas) in canvases.iter_mut().enumerate() {
-            let visible = (options.smoke
-                || !app.hidden
-                    && !app.suspended
-                    && canvas.output.is_some_and(|id| connected.contains(&id)))
-                && (app.multi || index == active)
-                && (!picker.choosing() || index == active)
-                && !font_dialog.pending();
+            let screenshot = app.screenshot.targets(canvas.window.id);
+            let mouse = mouse && !screenshot;
+            let visible = if file_dialog.pending() {
+                screenshot && dialog::USE_WINDOW_PARENT
+            } else {
+                screenshot
+                    || (options.smoke
+                        || !app.hidden
+                            && !app.suspended
+                            && canvas.output.is_some_and(|id| connected.contains(&id)))
+                        && (app.multi || index == active)
+                        && (!picker.choosing() || index == active)
+            };
+            let raise_for_screenshot = visible && screenshot && (cmd.screenshot || !canvas.visible);
             canvas.show(&toolbar, visible)?;
+            if raise_for_screenshot {
+                canvas.window.raise();
+            }
             if visible {
                 if let Err(error) = canvas.update_guard(&toolbar, mouse) {
                     app.status = canvas::failure(error);
@@ -2250,7 +2476,7 @@ pub fn run(options: Options) -> Result<(), String> {
                 let history_before = app.history_buttons();
                 let selection_before = app.input.text.selected;
                 extended_ink_bytes -= canvas.extended_ink_bytes();
-                presented |= canvas.paint(
+                let painted = canvas.paint(
                     &mut app,
                     &options,
                     picker.choosing(),
@@ -2258,6 +2484,10 @@ pub fn run(options: Options) -> Result<(), String> {
                     theme,
                     ink::MAX_EXTENDED_INK_TEXTURE_BYTES.saturating_sub(extended_ink_bytes),
                 )?;
+                presented |= painted;
+                if screenshot && painted {
+                    app.screenshot.presented();
+                }
                 extended_ink_bytes += canvas.extended_ink_bytes();
                 toolbar_dirty |= frozen != canvas.background.frozen;
                 toolbar_dirty |= history_before != app.history_buttons();
@@ -2272,6 +2502,8 @@ pub fn run(options: Options) -> Result<(), String> {
             }
         }
         if unsafe_layer {
+            restore_toolbar_focus |= app.screenshot.active();
+            app.screenshot.cancel();
             app.hidden = true;
             toolbar_dirty = true;
             for canvas in &mut canvases {
@@ -2286,8 +2518,68 @@ pub fn run(options: Options) -> Result<(), String> {
                 canvas.keep_toolbar_above(&toolbar);
             }
         }
-        if restore_toolbar_focus && !font_dialog.pending() {
-            unsafe { SDL_RaiseWindow(toolbar.raw) };
+        if let Some(action) = app.screenshot.action()
+            && let Some(canvas) = canvases
+                .iter_mut()
+                .find(|canvas| app.screenshot.targets(canvas.window.id))
+        {
+            canvas.dirty = true;
+            match action {
+                MenuAction::Cancel => {
+                    app.screenshot.cancel();
+                    canvas.suspend_text_input();
+                    toolbar_dirty = true;
+                    restore_toolbar_focus = true;
+                }
+                MenuAction::SaveAs => open_save_as = true,
+                MenuAction::Replace => {
+                    if let Err(error) = app.screenshot.replace_file() {
+                        app.screenshot.show_error(error);
+                    }
+                }
+                MenuAction::Save => {
+                    let directory = screenshot::default_folder(&app.preferences);
+                    if let Some(path) = directory {
+                        if let Err(error) = app.screenshot.save(Destination::Folder(path)) {
+                            app.screenshot.show_error(error);
+                            open_save_as = true;
+                        }
+                    } else {
+                        open_save_as = true;
+                    }
+                }
+            }
+        }
+        if open_save_as
+            && !file_dialog.pending()
+            && let Some(index) = canvases
+                .iter()
+                .position(|canvas| app.screenshot.targets(canvas.window.id))
+        {
+            if !dialog::USE_WINDOW_PARENT {
+                // Keep the always-on-top overlays out of the system dialog's way.
+                for canvas in &mut canvases {
+                    canvas.show(&toolbar, false)?;
+                }
+            }
+            app.screenshot.open_save_as(
+                &mut file_dialog,
+                &canvases[index].window,
+                &app.preferences,
+            );
+        }
+        if screenshot_active && !app.screenshot.active() {
+            toolbar_dirty |= capture_visibility(
+                &mut canvases,
+                &toolbar,
+                &mut tooltips,
+                &mut toolbar_hidden,
+                hide,
+                false,
+            )?;
+        }
+        if restore_toolbar_focus && !toolbar_hidden && !file_dialog.pending() {
+            toolbar.raise();
             restore_toolbar_focus = false;
         }
         if !options.smoke
@@ -2335,8 +2627,12 @@ pub fn run(options: Options) -> Result<(), String> {
         }
         if presented {
             pacer.wait();
-        } else if !toolbar_dirty && !topology_dirty {
-            let mut timeout = if app.wait_for_mouse_up || picker.active() || font_dialog.pending() {
+        } else if (!toolbar_dirty || toolbar_hidden) && !topology_dirty {
+            let mut timeout = if app.wait_for_mouse_up
+                || picker.active()
+                || file_dialog.pending()
+                || app.screenshot.waiting()
+            {
                 Duration::from_millis(8)
             } else if app.input.text.editing() && toolbar.input_focused() {
                 Duration::from_millis(24)
@@ -2346,7 +2642,7 @@ pub fn run(options: Options) -> Result<(), String> {
             if let Some(deadline) = text_focus.deadline {
                 timeout = timeout.min(deadline.saturating_duration_since(Instant::now()));
             }
-            if let Some(at) = toolbar_repaint_at {
+            if !toolbar_hidden && let Some(at) = toolbar_repaint_at {
                 timeout = timeout.min(at.saturating_duration_since(Instant::now()));
             }
             for at in canvases
@@ -2565,7 +2861,7 @@ mod touch_tests {
             pass: false,
             wait_for_mouse_up: false,
             hidden: false,
-            board: true,
+            board: Some(Board::White),
             display: 0,
             displays: vec![],
             pages: Pages::default(),
@@ -2573,6 +2869,7 @@ mod touch_tests {
             preferences: Preferences::default(),
             text_fonts: TextFonts::default(),
             font_path_input: None,
+            screenshot: Screenshot::default(),
             #[cfg(target_os = "linux")]
             gnome_guide: None,
             language: Language::English,

@@ -21,10 +21,18 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub fn start(bounds: [i32; 4], pixels: [i32; 2], mode: SnapshotMode) -> Result<Job, String> {
+pub fn start<T: Send + 'static>(
+    bounds: [i32; 4],
+    pixels: [i32; 2],
+    mode: SnapshotMode,
+    prepare: impl FnOnce(Image) -> Result<T, String> + Send + 'static,
+) -> Result<Job<T>, String> {
     match mode {
-        SnapshotMode::Sdr => Job::start(move |cancelled| sdr_capture(bounds, cancelled)),
-        SnapshotMode::Linear => Job::start(move |cancelled| hdr_capture(bounds, pixels, cancelled)),
+        SnapshotMode::Sdr => Job::start(move |cancelled| sdr_capture(bounds, cancelled), prepare),
+        SnapshotMode::Linear => Job::start(
+            move |cancelled| hdr_capture(bounds, pixels, cancelled),
+            prepare,
+        ),
         SnapshotMode::LiveOnly(reason) => {
             Err(reason.get(crate::appearance::Language::English).into())
         }
@@ -73,7 +81,7 @@ fn display_id([x, y, w, h]: [i32; 4]) -> Result<u32, String> {
     Ok(id)
 }
 
-fn hdr_capture(bounds: [i32; 4], pixels: [i32; 2], cancelled: &AtomicBool) -> CaptureResult {
+fn screen_capture_kit() -> Result<(), String> {
     // Load on demand so earlier macOS versions can still launch OverInk.
     static FRAMEWORK: OnceLock<Result<Library, String>> = OnceLock::new();
     FRAMEWORK
@@ -82,20 +90,73 @@ fn hdr_capture(bounds: [i32; 4], pixels: [i32; 2], cancelled: &AtomicBool) -> Ca
                 .map_err(|error| format!("ScreenCaptureKit is unavailable: {error}"))
         })
         .as_ref()
-        .map_err(Clone::clone)?;
+        .map(|_| ())
+        .map_err(Clone::clone)
+}
+
+pub fn hdr_supported() -> bool {
+    static SUPPORTED: OnceLock<bool> = OnceLock::new();
+    *SUPPORTED.get_or_init(|| {
+        if !apple_silicon() || screen_capture_kit().is_err() {
+            return false;
+        }
+        let Some(configuration) = AnyClass::get(c"SCStreamConfiguration") else {
+            return false;
+        };
+        let Some(manager) = AnyClass::get(c"SCScreenshotManager") else {
+            return false;
+        };
+        unsafe {
+            let preset: bool = msg_send![
+                configuration, respondsToSelector: sel!(streamConfigurationWithPreset:)
+            ];
+            let capture: bool = msg_send![
+                manager, respondsToSelector: sel!(captureImageWithFilter:configuration:completionHandler:)
+            ];
+            preset && capture
+        }
+    })
+}
+
+fn apple_silicon() -> bool {
+    #[cfg(target_arch = "aarch64")]
+    return true;
+    #[cfg(target_arch = "x86_64")]
+    {
+        // A translated x86_64 build can use the HDR API on Apple silicon.
+        unsafe extern "C" {
+            fn sysctlbyname(
+                name: *const c_char,
+                value: *mut i32,
+                len: *mut usize,
+                new_value: *const c_void,
+                new_len: usize,
+            ) -> i32;
+        }
+        let mut translated = 0;
+        let mut len = size_of::<i32>();
+        let result = unsafe {
+            sysctlbyname(
+                c"sysctl.proc_translated".as_ptr(),
+                &mut translated,
+                &mut len,
+                ptr::null(),
+                0,
+            )
+        };
+        result == 0 && len == size_of::<i32>() && translated == 1
+    }
+}
+
+fn hdr_capture(bounds: [i32; 4], pixels: [i32; 2], cancelled: &AtomicBool) -> CaptureResult {
+    if !hdr_supported() {
+        return Err("HDR screenshots require macOS 15 or later on Apple silicon".into());
+    }
     let id = display_id(bounds)?;
     let (sender, receiver) = mpsc::channel();
-    autoreleasepool(|_| {
+    autoreleasepool(|_| -> Result<(), String> {
         let shareable =
             AnyClass::get(c"SCShareableContent").ok_or("ScreenCaptureKit is unavailable")?;
-        let configuration =
-            AnyClass::get(c"SCStreamConfiguration").ok_or("ScreenCaptureKit is unavailable")?;
-        let supported: bool = unsafe {
-            msg_send![configuration, respondsToSelector: sel!(streamConfigurationWithPreset:)]
-        };
-        if !supported || AnyClass::get(c"SCScreenshotManager").is_none() {
-            return Err("HDR screenshots require macOS 15 or later".to_string());
-        }
         let completion =
             block2::RcBlock::new(move |content: *mut AnyObject, error: *mut AnyObject| {
                 autoreleasepool(|_| {
@@ -244,7 +305,15 @@ fn copy_screenshot(image: *const c_void) -> Result<Image, String> {
         let data = Data(data);
         let len =
             usize::try_from(CFDataGetLength(data.0)).map_err(|_| "Invalid screenshot data")?;
-        snapshot.copy_hdr_rows(CFDataGetBytePtr(data.0), len, CGImageGetBytesPerRow(image))?;
+        let bytes = CFDataGetBytePtr(data.0);
+        if bytes.is_null() {
+            return Err("The HDR screenshot has no pixel data".into());
+        }
+        // CFData owns the initialized byte buffer until the row copy completes.
+        let pixels = std::slice::from_raw_parts(bytes, len);
+        snapshot.copy_hdr_rows(len, CGImageGetBytesPerRow(image), |offset, row| {
+            row.copy_from_slice(&pixels[offset..offset + row.len()]);
+        })?;
         Ok(snapshot)
     }
 }
@@ -276,7 +345,7 @@ fn sdr_capture(bounds: [i32; 4], cancelled: &AtomicBool) -> CaptureResult {
             }
             if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
                 if !status.success() {
-                    return Err("Allow OverInk Screen Recording access in macOS System Settings, then retry freezing the desktop".into());
+                    return Err("Allow OverInk Screen Recording access in macOS System Settings, then retry the screenshot".into());
                 }
                 return Image::load(&file).map(Some);
             }

@@ -24,7 +24,7 @@ use ::windows::{
         System::WinRT::{
             Direct3D11::{CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess},
             Graphics::Capture::IGraphicsCaptureItemInterop,
-            RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize,
+            RO_INIT_MULTITHREADED, RO_INIT_SINGLETHREADED, RoInitialize, RoUninitialize,
         },
     },
     core::{IInspectable, Interface, factory},
@@ -33,13 +33,17 @@ use std::{
     error::Error,
     ptr,
     sync::{
+        OnceLock,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
     time::{Duration, Instant},
 };
 
-pub fn start(display: u32) -> Result<Job, String> {
+pub fn start<T: Send + 'static>(
+    display: u32,
+    prepare: impl FnOnce(Image) -> Result<T, String> + Send + 'static,
+) -> Result<Job<T>, String> {
     let monitor = unsafe {
         SDL_GetPointerProperty(
             SDL_GetDisplayProperties(SDL_DisplayID(display)),
@@ -51,10 +55,13 @@ pub fn start(display: u32) -> Result<Job, String> {
         return Err("The Windows display handle is unavailable".into());
     }
     let handle = monitor as usize;
-    Job::start(move |cancelled| {
-        capture(HMONITOR(handle as *mut _), cancelled)
-            .map_err(|error| format!("Windows floating-point desktop capture: {error}"))
-    })
+    Job::start(
+        move |cancelled| {
+            capture(HMONITOR(handle as *mut _), cancelled)
+                .map_err(|error| format!("Windows floating-point desktop capture: {error}"))
+        },
+        prepare,
+    )
 }
 
 struct Apartment;
@@ -62,6 +69,24 @@ impl Drop for Apartment {
     fn drop(&mut self) {
         unsafe { RoUninitialize() }
     }
+}
+
+pub fn hdr_supported() -> bool {
+    static SUPPORTED: OnceLock<bool> = OnceLock::new();
+    *SUPPORTED.get_or_init(|| {
+        // SDL may already have initialized the UI thread's COM apartment.
+        let initialized = unsafe {
+            RoInitialize(RO_INIT_SINGLETHREADED)
+                .or_else(|_| RoInitialize(RO_INIT_MULTITHREADED))
+                .is_ok()
+        };
+        if !initialized {
+            return false;
+        }
+        let _apartment = Apartment;
+        GraphicsCaptureSession::IsSupported().unwrap_or(false)
+            && factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>().is_ok()
+    })
 }
 
 fn capture(monitor: HMONITOR, cancelled: &AtomicBool) -> Result<Option<Image>, Box<dyn Error>> {
@@ -175,11 +200,17 @@ fn copy_frame(
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
         let stride = mapped.RowPitch as usize;
+        let pixels = mapped.pData.cast::<u8>();
         let result = stride
             .checked_mul(image.height as usize)
-            .filter(|size| *size <= isize::MAX as usize)
+            .filter(|size| !pixels.is_null() && *size <= isize::MAX as usize)
             .ok_or_else(|| "Invalid mapped desktop frame".to_string())
-            .and_then(|size| image.copy_hdr_rows(mapped.pData.cast(), size, stride));
+            .and_then(|size| {
+                image.copy_hdr_rows(size, stride, |offset, row| {
+                    // Only the pixel bytes of each mapped row are initialized.
+                    ptr::copy_nonoverlapping(pixels.add(offset), row.as_mut_ptr(), row.len());
+                })
+            });
         context.Unmap(&staging, 0);
         result.map_err(Into::into)
     }

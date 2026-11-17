@@ -1,7 +1,11 @@
 use crate::sdl::*;
 use egui::Theme;
 use serde::{Deserialize, Serialize};
-use std::{borrow::Cow, ffi::CStr, path::Path};
+use std::{
+    borrow::Cow,
+    ffi::CStr,
+    path::{Path, PathBuf},
+};
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod portal;
@@ -168,7 +172,7 @@ impl ThemeMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Preferences {
     pub language: Option<Language>,
@@ -176,6 +180,8 @@ pub struct Preferences {
     pub restore_session: bool,
     pub per_display_windows: bool,
     pub wayland: bool,
+    pub screenshot_hdr: bool,
+    pub screenshot_folder: Option<PathBuf>,
 }
 
 impl Default for Preferences {
@@ -186,13 +192,15 @@ impl Default for Preferences {
             restore_session: true,
             per_display_windows: false,
             wayland: false,
+            screenshot_hdr: false,
+            screenshot_folder: None,
         }
     }
 }
 
 impl Preferences {
     pub fn load(path: &Path) -> Self {
-        if std::fs::metadata(path).is_ok_and(|m| m.len() <= 4096) {
+        if std::fs::metadata(path).is_ok_and(|m| m.len() <= 256 * 1024) {
             std::fs::read(path)
                 .ok()
                 .and_then(|data| serde_json::from_slice(&data).ok())
@@ -202,12 +210,12 @@ impl Preferences {
         }
     }
 
-    pub fn save(self, path: &Path) -> Result<(), String> {
+    pub fn save(&self, path: &Path) -> Result<(), String> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
         let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
-        let data = serde_json::to_vec(&self).map_err(|e| e.to_string())?;
+        let data = serde_json::to_vec(self).map_err(|e| e.to_string())?;
         std::fs::write(&tmp, data)
             .and_then(|()| std::fs::rename(&tmp, path))
             .inspect_err(|_| {
@@ -286,6 +294,8 @@ mod tests {
             restore_session: false,
             per_display_windows: true,
             wayland: true,
+            screenshot_hdr: true,
+            screenshot_folder: Some(PathBuf::from("OverInk Captures")),
         };
         assert_eq!(
             serde_json::from_str::<Preferences>(&serde_json::to_string(&manual).unwrap()).unwrap(),

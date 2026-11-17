@@ -33,30 +33,35 @@ struct Globals {
     compositor: u32,
     version: u32,
 }
-unsafe extern "C" fn global(
-    data: *mut c_void,
-    _registry: *mut c_void,
-    name: u32,
-    interface: *const c_char,
-    version: u32,
-) {
-    unsafe {
-        if !interface.is_null() && CStr::from_ptr(interface).to_bytes() == b"wl_compositor" {
-            let s = &mut *data.cast::<Globals>();
-            s.compositor = name;
-            s.version = version.min(4);
-        }
-    }
-}
-unsafe extern "C" fn removed(_data: *mut c_void, _registry: *mut c_void, _name: u32) {}
-#[repr(C)]
-struct Listener {
-    global: unsafe extern "C" fn(*mut c_void, *mut c_void, u32, *const c_char, u32),
-    removed: unsafe extern "C" fn(*mut c_void, *mut c_void, u32),
-}
-static LISTENER: Listener = Listener { global, removed };
 impl Wayland {
     fn new(w: &Window) -> Result<Self, String> {
+        extern "C" fn global(
+            data: *mut c_void,
+            _registry: *mut c_void,
+            name: u32,
+            interface: *const c_char,
+            version: u32,
+        ) {
+            if data.is_null() || interface.is_null() {
+                return;
+            }
+            // The private queue dispatches this listener during the roundtrip
+            // below, while its Globals storage is alive.
+            let interface = unsafe { CStr::from_ptr(interface) };
+            if interface == c"wl_compositor" {
+                let globals = unsafe { &mut *data.cast::<Globals>() };
+                globals.compositor = name;
+                globals.version = version.min(4);
+            }
+        }
+        extern "C" fn removed(_data: *mut c_void, _registry: *mut c_void, _name: u32) {}
+        #[repr(C)]
+        struct Listener {
+            global: extern "C" fn(*mut c_void, *mut c_void, u32, *const c_char, u32),
+            removed: extern "C" fn(*mut c_void, *mut c_void, u32),
+        }
+        static LISTENER: Listener = Listener { global, removed };
+
         unsafe {
             let lib = library(&["libwayland-client.so.0", "libwayland-client.so"])?;
             let marshal: Marshal = *lib

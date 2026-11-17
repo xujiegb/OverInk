@@ -1,11 +1,9 @@
-use super::{App, Commands};
+use super::{App, Board, Commands, canvas::Canvas, screenshot};
 use crate::{
     appearance::{Language, Text, ThemeMode},
     color::{InkColor, PRESETS, Space},
     frame_rate::FrameRate,
-    icc::ColorManager,
     model::Tool,
-    sdl::Renderer,
     toolbar::{self, Icon, Panel},
 };
 use egui::{Align, Layout, RichText, Ui, vec2};
@@ -16,15 +14,13 @@ impl App {
     pub(super) fn ui(
         &mut self,
         ui: &mut Ui,
-        canvas: &super::canvas::Canvas,
+        canvas: &Canvas,
         video: &str,
         freeze_unavailable: Option<Text>,
         mark: egui::TextureId,
-        font_dialog_open: bool,
+        dialog_open: bool,
     ) -> Commands {
         let mut commands = Commands::default();
-        let render = &canvas.render;
-        let color = &canvas.color;
         let tr = self.language;
         let available = ui.available_size();
         let opened = self.panel.filter(|_| !self.picking);
@@ -46,7 +42,7 @@ impl App {
                                 .fill(ui.visuals().window_fill())
                                 .inner_margin(egui::Margin::same(13))
                                 .show(ui, |ui| {
-                                    ui.spacing_mut().item_spacing = vec2(8., 7.);
+                                    ui.spacing_mut().item_spacing = vec2(6., 4.);
                                     ui.set_width((width - 26.).max(0.));
                                     ui.set_min_height((available.y - 26.).max(0.));
                                     ui.horizontal(|ui| {
@@ -83,11 +79,10 @@ impl App {
                                             ),
                                             Panel::Settings => self.settings(
                                                 ui,
-                                                render,
-                                                color,
+                                                canvas,
                                                 video,
                                                 &mut commands,
-                                                font_dialog_open,
+                                                dialog_open,
                                             ),
                                         });
                                 });
@@ -101,8 +96,8 @@ impl App {
 
     fn rail(&mut self, ui: &mut Ui, mark: egui::TextureId, commands: &mut Commands) {
         let tr = self.language;
-        ui.spacing_mut().item_spacing = vec2(4., 2.);
-        ui.add_space(4.);
+        ui.spacing_mut().item_spacing = vec2(4., 1.);
+        ui.add_space(3.);
         toolbar::hint(
             ui.add(egui::Image::new((mark, vec2(29., 29.)))),
             tr.text(
@@ -111,7 +106,7 @@ impl App {
                 "OverInk · 拖曳切換顯示器",
             ),
         );
-        ui.add_space(4.);
+        ui.add_space(3.);
         if self.picking {
             if toolbar::button(
                 ui,
@@ -185,19 +180,23 @@ impl App {
                         self.use_mouse();
                         commands.mode = true;
                     }
-                    for tool in DIRECT_TOOLS.into_iter().chain([Tool::Text, Tool::Select]) {
-                        if toolbar::button(
-                            ui,
-                            Icon::Tool(tool),
-                            tool_label(tool, tr),
-                            !self.pass && self.tool == tool,
-                        )
+                    self.rail_tool(ui, Tool::Select, commands);
+                    if ui
+                        .add_enabled_ui(!self.suspended, |ui| {
+                            toolbar::button(
+                                ui,
+                                Icon::Screenshot,
+                                tr.text("Region screenshot", "区域截图", "區域螢幕擷取"),
+                                false,
+                            )
+                        })
+                        .inner
                         .clicked()
-                        {
-                            self.use_tool(tool);
-                            self.panel = None;
-                            commands.mode = true;
-                        }
+                    {
+                        commands.screenshot = true;
+                    }
+                    for tool in DIRECT_TOOLS.into_iter().chain([Tool::Text]) {
+                        self.rail_tool(ui, tool, commands);
                     }
                     let shape_selected =
                         !self.pass && (self.tool.is_shape() || self.tool == Tool::Laser);
@@ -267,32 +266,6 @@ impl App {
                             commands.redraw_canvas = true;
                         }
                     }
-                    if self.tool.is_text()
-                        && !self.pass
-                        && ui
-                            .add_enabled_ui(
-                                self.input
-                                    .text
-                                    .selected
-                                    .is_some_and(|index| index < self.history.text_boxes().len()),
-                                |ui| {
-                                    toolbar::button(
-                                        ui,
-                                        Icon::Close,
-                                        tr.text(
-                                            "Delete selected text box (Delete)",
-                                            "删除选中的文字框（Delete）",
-                                            "刪除選取的文字框（Delete）",
-                                        ),
-                                        false,
-                                    )
-                                },
-                            )
-                            .inner
-                            .clicked()
-                    {
-                        commands.redraw_canvas |= self.delete_text_box();
-                    }
                     self.panel_button(
                         ui,
                         Icon::Display,
@@ -352,6 +325,21 @@ impl App {
 
     fn toggle_panel(&mut self, panel: Panel) {
         self.panel = (self.panel != Some(panel)).then_some(panel);
+    }
+
+    fn rail_tool(&mut self, ui: &mut Ui, tool: Tool, commands: &mut Commands) {
+        if toolbar::button(
+            ui,
+            Icon::Tool(tool),
+            tool_label(tool, self.language),
+            !self.pass && self.tool == tool,
+        )
+        .clicked()
+        {
+            self.use_tool(tool);
+            self.panel = None;
+            commands.mode = true;
+        }
     }
 
     fn panel_button(&mut self, ui: &mut Ui, icon: Icon, panel: Panel, label: &str) {
@@ -512,14 +500,14 @@ impl App {
         let freeze_unavailable = freeze_unavailable.map(|reason| reason.get(tr));
         if ui
             .selectable_label(
-                !self.board && !self.frozen,
+                self.board.is_none() && !self.frozen,
                 tr.text("Live desktop", "实时桌面", "即時桌面"),
             )
             .clicked()
         {
-            commands.background = self.board || self.frozen;
+            commands.background = self.board.is_some() || self.frozen;
             self.frozen = false;
-            self.board = false;
+            self.board = None;
         }
         let freeze = ui
             .add_enabled_ui(freeze_unavailable.is_none(), |ui| {
@@ -537,7 +525,7 @@ impl App {
         if freeze.clicked() && !self.frozen {
             commands.background = true;
             self.frozen = true;
-            self.board = false;
+            self.board = None;
         }
         if let Some(reason) = freeze_unavailable {
             ui.small(reason);
@@ -549,12 +537,16 @@ impl App {
         {
             commands.background = true;
         }
-        if ui
-            .checkbox(&mut self.board, tr.text("Whiteboard", "白板", "白板"))
-            .changed()
-        {
-            commands.mode = true;
-            if self.board {
+        for (board, label) in [
+            (Board::White, tr.text("Whiteboard", "白板", "白板")),
+            (Board::Black, tr.text("Blackboard", "黑板", "黑板")),
+        ] {
+            if ui
+                .selectable_label(self.board == Some(board), label)
+                .clicked()
+                && self.board != Some(board)
+            {
+                self.board = Some(board);
                 self.frozen = false;
                 commands.background = true;
             }
@@ -564,12 +556,13 @@ impl App {
     fn settings(
         &mut self,
         ui: &mut Ui,
-        render: &Renderer,
-        color: &ColorManager,
+        canvas: &Canvas,
         video: &str,
         commands: &mut Commands,
-        font_dialog_open: bool,
+        dialog_open: bool,
     ) {
+        let render = &canvas.render;
+        let color = &canvas.color;
         let tr = self.language;
         ui.horizontal(|ui| {
             ui.label(tr.text("Language", "语言", "語言"));
@@ -601,14 +594,12 @@ impl App {
         });
         ui.separator();
         ui.label(RichText::new(tr.text("Annotation font", "标注字体", "標註字型")).strong());
-        ui.label(self.text_fonts.name().unwrap_or_else(|| {
-            tr.text(
-                "Included · Noto Sans SC",
-                "内置 · Noto Sans SC",
-                "內建 · Noto Sans SC",
-            )
-        }));
-        ui.add_enabled_ui(!font_dialog_open, |ui| {
+        ui.label(
+            self.text_fonts
+                .name()
+                .unwrap_or(crate::fonts::INCLUDED_FONT),
+        );
+        ui.add_enabled_ui(!dialog_open, |ui| {
             ui.horizontal_wrapped(|ui| {
                 if ui
                     .button(tr.text("Choose font file…", "选择字体文件…", "選擇字型檔案…"))
@@ -646,6 +637,44 @@ impl App {
                 commands.font_path = Some(std::path::PathBuf::from(path.trim()));
             }
         }
+        ui.separator();
+        ui.label(RichText::new(tr.text("Screenshots", "截图", "螢幕擷取")).strong());
+        let hdr_available = screenshot::hdr_available(&canvas.window);
+        let mut hdr = hdr_available && self.preferences.screenshot_hdr;
+        let checkbox = egui::Checkbox::new(
+            &mut hdr,
+            tr.text("Save HDR PNG", "保存 HDR PNG", "儲存 HDR PNG"),
+        );
+        if ui.add_enabled(hdr_available, checkbox).changed() {
+            self.preferences.screenshot_hdr = hdr;
+            commands.preferences = true;
+        }
+        if !hdr_available {
+            ui.small(screenshot::unsupported_hdr(tr));
+        }
+        ui.label(tr.text("Default save folder", "默认保存文件夹", "預設儲存資料夾"));
+        ui.label(self.preferences.screenshot_folder.as_ref().map_or_else(
+            || tr.text("Downloads", "下载", "下載").into(),
+            |path| path.to_string_lossy(),
+        ));
+        ui.add_enabled_ui(!dialog_open, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .button(tr.text("Choose folder…", "选择文件夹…", "選擇資料夾…"))
+                    .clicked()
+                {
+                    commands.screenshot_folder = true;
+                }
+                if self.preferences.screenshot_folder.is_some()
+                    && ui
+                        .button(tr.text("Use Downloads", "使用下载文件夹", "使用下載資料夾"))
+                        .clicked()
+                {
+                    self.preferences.screenshot_folder = None;
+                    commands.preferences = true;
+                }
+            });
+        });
         ui.separator();
         ui.label(RichText::new(tr.text("Display", "显示器", "顯示器")).strong());
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
