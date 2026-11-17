@@ -287,12 +287,104 @@ pub fn display_info() -> Result<Vec<DisplayInfo>, String> {
     }
 }
 
+/// SDL event union accessors: the type tag is checked before reading its payload.
+pub fn mouse_button_event(event: &SDL_Event) -> Option<SDL_MouseButtonEvent> {
+    matches!(
+        event_type(event),
+        SDL_EVENT_MOUSE_BUTTON_DOWN | SDL_EVENT_MOUSE_BUTTON_UP
+    )
+    .then(|| unsafe { event.button })
+}
+
+pub fn mouse_motion_event(event: &SDL_Event) -> Option<SDL_MouseMotionEvent> {
+    (event_type(event) == SDL_EVENT_MOUSE_MOTION).then(|| unsafe { event.motion })
+}
+
+pub fn pen_touch_event(event: &SDL_Event) -> Option<SDL_PenTouchEvent> {
+    matches!(event_type(event), SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP)
+        .then(|| unsafe { event.ptouch })
+}
+
+pub fn pen_motion_event(event: &SDL_Event) -> Option<SDL_PenMotionEvent> {
+    (event_type(event) == SDL_EVENT_PEN_MOTION).then(|| unsafe { event.pmotion })
+}
+
+pub fn pen_proximity_event(event: &SDL_Event) -> Option<SDL_PenProximityEvent> {
+    matches!(
+        event_type(event),
+        SDL_EVENT_PEN_PROXIMITY_IN | SDL_EVENT_PEN_PROXIMITY_OUT
+    )
+    .then(|| unsafe { event.pproximity })
+}
+
+pub fn key_event(event: &SDL_Event) -> Option<SDL_KeyboardEvent> {
+    matches!(event_type(event), SDL_EVENT_KEY_DOWN | SDL_EVENT_KEY_UP)
+        .then(|| unsafe { event.key })
+}
+
+pub fn capture_mouse(enable: bool) -> bool {
+    unsafe { SDL_CaptureMouse(enable) }
+}
+
+/// Keep the cursor allocation owned and restore the default on drop.
+pub struct SystemCursor(*mut SDL_Cursor);
+
+impl SystemCursor {
+    pub fn crosshair() -> Option<Self> {
+        unsafe {
+            if SDL_WasInit(SDL_INIT_VIDEO) == 0 {
+                return None;
+            }
+            let cursor = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_CROSSHAIR);
+            if cursor.is_null() {
+                return None;
+            }
+            SDL_SetCursor(cursor);
+            Some(Self(cursor))
+        }
+    }
+}
+
+impl Drop for SystemCursor {
+    fn drop(&mut self) {
+        unsafe {
+            SDL_SetCursor(SDL_GetDefaultCursor());
+            SDL_DestroyCursor(self.0);
+        }
+    }
+}
+
+/// Local timestamp for screenshot filenames, using SDL's platform clock.
+pub fn screenshot_file_stem() -> String {
+    use sdl3_sys::time::{SDL_DateTime, SDL_GetCurrentTime, SDL_TimeToDateTime};
+    let mut time = 0;
+    let mut date = SDL_DateTime::default();
+    if unsafe { SDL_GetCurrentTime(&mut time) && SDL_TimeToDateTime(time, &mut date, true) } {
+        format!(
+            "OverInk-{:04}-{:02}-{:02}_{:02}-{:02}-{:02}",
+            date.year, date.month, date.day, date.hour, date.minute, date.second
+        )
+    } else {
+        "OverInk".into()
+    }
+}
+
 pub struct Window {
     pub raw: *mut SDL_Window,
     pub id: SDL_WindowID,
 }
 impl Window {
     /// Set a popup's size and origin, preserving SDL's native error reporting.
+    pub fn sdr_white_level(&self) -> f32 {
+        unsafe {
+            SDL_GetFloatProperty(
+                SDL_GetWindowProperties(self.raw),
+                SDL_PROP_WINDOW_SDR_WHITE_LEVEL_FLOAT,
+                1.,
+            )
+        }
+    }
+
     pub fn set_geometry(&self, x: i32, y: i32, w: i32, h: i32) -> Result<(), String> {
         unsafe {
             check(SDL_SetWindowSize(self.raw, w, h))?;
