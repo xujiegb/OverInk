@@ -197,10 +197,13 @@ impl Crop {
             })
             .unwrap_or(monitor);
         let ratio = visible.size() / Vec2::from(self.size);
-        let mapped = Rect::from_min_max(
-            visible.min - monitor.min.to_vec2() + self.region.min.to_vec2() * ratio,
-            visible.min - monitor.min.to_vec2() + self.region.max.to_vec2() * ratio,
-        );
+        let map = |point: egui::Pos2| {
+            egui::pos2(
+                visible.min.x - monitor.min.x + point.x * ratio.x,
+                visible.min.y - monitor.min.y + point.y * ratio.y,
+            )
+        };
+        let mapped = Rect::from_min_max(map(self.region.min), map(self.region.max));
         let mut desktop = monitor;
         if desktop_density.is_some() {
             for (index, output) in displays.iter().enumerate() {
