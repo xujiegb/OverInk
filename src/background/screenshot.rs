@@ -1,6 +1,6 @@
 use super::Image;
 use crate::{display::Display, sdl::*};
-use egui::Rect;
+use egui::{Rect, Vec2};
 
 pub fn hdr_supported() -> bool {
     #[cfg(target_os = "windows")]
