@@ -1561,22 +1561,13 @@ impl Renderer {
         }
     }
 
-    /// Temporarily apply the SDL color scale, restoring it even if drawing fails.
-    /// Temporarily replace the color scale with an absolute value, preserving
-    /// the previous value even when the submitted drawing command fails.
+    /// Temporarily replace SDL's color scale and restore it after drawing.
     pub fn with_absolute_color_scale(
         &self,
         scale: f32,
         draw: impl FnOnce() -> Result<(), String>,
     ) -> Result<(), String> {
-        unsafe {
-            let mut previous = 1.;
-            check(SDL_GetRenderColorScale(self.raw, &mut previous))?;
-            check(SDL_SetRenderColorScale(self.raw, scale))?;
-            let result = draw();
-            let restore = check(SDL_SetRenderColorScale(self.raw, previous));
-            result.and(restore)
-        }
+        self.with_temporary_color_scale(scale, false, draw)
     }
 
     pub fn with_color_scale(
@@ -1587,10 +1578,25 @@ impl Renderer {
         if scale == 1. {
             return draw();
         }
+        self.with_temporary_color_scale(scale, true, draw)
+    }
+
+    /// Single SDL FFI boundary for both relative and absolute color scaling;
+    /// use the same read/set/restore sequence for either path.
+    fn with_temporary_color_scale(
+        &self,
+        scale: f32,
+        relative: bool,
+        draw: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        // SAFETY: This renderer is live, and the SDL-owned scale output is
+        // copied into initialized Rust storage. Both variants restore the
+        // previous value after the drawing callback returns.
         unsafe {
             let mut previous = 1.;
             check(SDL_GetRenderColorScale(self.raw, &mut previous))?;
-            check(SDL_SetRenderColorScale(self.raw, previous * scale))?;
+            let target = if relative { previous * scale } else { scale };
+            check(SDL_SetRenderColorScale(self.raw, target))?;
             let result = draw();
             let restore = check(SDL_SetRenderColorScale(self.raw, previous));
             result.and(restore)
