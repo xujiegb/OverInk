@@ -2,7 +2,7 @@ use crate::sdl::*;
 use libloading::{Library, Symbol};
 use std::{
     ffi::{c_int, c_ulong, c_void},
-    ptr,
+    ptr::NonNull,
     sync::OnceLock,
 };
 #[repr(C)]
@@ -21,6 +21,39 @@ struct Crtc {
     height: u32,
     mode: c_ulong,
 }
+/// An XRandR-owned allocation, paired with the exact native destructor.
+/// `Randr` keeps the libraries providing these functions loaded.
+struct OwnedRandr<T> {
+    raw: NonNull<T>,
+    free: unsafe extern "C" fn(*mut T),
+}
+
+impl<T> OwnedRandr<T> {
+    /// # Safety
+    /// `raw` must be either null or an owned pointer produced by the XRandR
+    /// function corresponding to `free`; the library must outlive this guard.
+    unsafe fn from_native(raw: *mut T, free: unsafe extern "C" fn(*mut T)) -> Option<Self> {
+        NonNull::new(raw).map(|raw| Self { raw, free })
+    }
+
+    fn data(&self) -> &T {
+        // SAFETY: from_native establishes an owned, non-null allocation.
+        unsafe { self.raw.as_ref() }
+    }
+
+    fn as_ptr(&self) -> *mut T {
+        self.raw.as_ptr()
+    }
+}
+
+impl<T> Drop for OwnedRandr<T> {
+    fn drop(&mut self) {
+        // SAFETY: This is the allocation's matching native destructor and
+        // `Randr` retains the backing library for the duration of the query.
+        unsafe { (self.free)(self.raw.as_ptr()) };
+    }
+}
+
 // Some XRandR backends retain an SDL display while its output is disabled.
 // Check active CRTCs as well, so that disabled outputs cannot retain a page.
 pub struct Randr {
@@ -60,43 +93,39 @@ impl Randr {
             > = self.randr.get(b"XRRGetCrtcInfo\0").ok()?;
             let free_crtc: Symbol<unsafe extern "C" fn(*mut Crtc)> =
                 self.randr.get(b"XRRFreeCrtcInfo\0").ok()?;
-            let display = SDL_GetPointerProperty(
-                SDL_GetWindowProperties(window.raw),
-                SDL_PROP_WINDOW_X11_DISPLAY_POINTER,
-                ptr::null_mut(),
-            );
-            if display.is_null() {
-                return None;
-            }
+            let display = window.x11_display()?.as_ptr();
             let mut areas = Vec::new();
             let mut queried = false;
             let mut failed = false;
             for screen in 0..count(display) {
-                let list = resources(display, root(display, screen));
-                if list.is_null() {
+                let Some(list) =
+                    OwnedRandr::from_native(resources(display, root(display, screen)), *free_resources)
+                else {
                     failed = true;
                     continue;
-                }
-                if (*list).count > 0 && !(*list).crtcs.is_null() {
+                };
+                if list.data().count > 0 && !list.data().crtcs.is_null() {
                     queried = true;
-                    for i in 0..(*list).count as usize {
-                        let info = crtc(display, list, *(*list).crtcs.add(i));
-                        if info.is_null() {
+                    for i in 0..list.data().count as usize {
+                        let id = *list.data().crtcs.add(i);
+                        let Some(info) =
+                            OwnedRandr::from_native(crtc(display, list.as_ptr(), id), *free_crtc)
+                        else {
                             failed = true;
                             continue;
+                        };
+                        if info.data().mode != 0 && info.data().width > 0 && info.data().height > 0 {
+                            if let (Ok(width), Ok(height)) = (
+                                i32::try_from(info.data().width),
+                                i32::try_from(info.data().height),
+                            ) {
+                                areas.push([info.data().x, info.data().y, width, height]);
+                            } else {
+                                failed = true;
+                            }
                         }
-                        if (*info).mode != 0 && (*info).width > 0 && (*info).height > 0 {
-                            areas.push([
-                                (*info).x,
-                                (*info).y,
-                                (*info).width as i32,
-                                (*info).height as i32,
-                            ]);
-                        }
-                        free_crtc(info);
                     }
                 }
-                free_resources(list);
             }
             (queried && !failed).then_some(areas)
         }
