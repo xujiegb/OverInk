@@ -167,7 +167,9 @@ impl Content {
             return [x, y, w, h];
         }
         if let (Some([bx, _, bw, _]), Ok([parent_x, _])) = (
-            parent.display_id().and_then(crate::sdl::usable_display_bounds),
+            parent
+                .display_id()
+                .and_then(crate::sdl::usable_display_bounds),
             parent.position(),
         ) {
             if parent_x + x + w > bx + bw && parent_x + left >= bx {
