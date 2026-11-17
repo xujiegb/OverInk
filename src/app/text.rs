@@ -19,10 +19,10 @@ use std::time::{Duration, Instant};
 mod color_wheel;
 use color_wheel::ColorWheel;
 
-const MENU_BUTTON: Vec2 = vec2(34., 34.);
-const MENU_GAP: f32 = 5.;
-const MENU_PADDING: f32 = 6.;
-const PALETTE_SIZE: Vec2 = vec2(266., 312.);
+const MENU_BUTTON: Vec2 = toolbar::RAIL_BUTTON_SIZE;
+const MENU_GAP: f32 = 4.;
+const MENU_PADDING: f32 = 5.;
+const PALETTE_SIZE: Vec2 = vec2(240., 272.);
 const MENU_SIZE: Vec2 = vec2(
     8. * MENU_BUTTON.x + 7. * MENU_GAP + 2. * MENU_PADDING,
     MENU_BUTTON.y + 2. * MENU_PADDING,
@@ -587,7 +587,7 @@ impl App {
             .add_sized(button, toolbar::menu_button("×", scale))
             .on_hover_text(
                 egui::RichText::new(tr.text("Delete text box", "删除文本框", "刪除文字框"))
-                    .size(14. * scale),
+                    .size(toolbar::MENU_FONT_SIZE * scale),
             )
             .clicked()
         {
@@ -612,7 +612,7 @@ impl App {
                     ui.add_sized(button, toolbar::menu_button(label, scale))
                 })
                 .inner
-                .on_hover_text(egui::RichText::new(hint).size(14. * scale))
+                .on_hover_text(egui::RichText::new(hint).size(toolbar::MENU_FONT_SIZE * scale))
                 .clicked()
             {
                 self.resize_text_font(step);
@@ -627,7 +627,7 @@ impl App {
                 preset.hex()
             );
             if toolbar::swatch(&mut menu, button, rgb, &label, color.srgb8() == rgb)
-                .on_hover_text(egui::RichText::new(label).size(14. * scale))
+                .on_hover_text(egui::RichText::new(label).size(toolbar::MENU_FONT_SIZE * scale))
                 .clicked()
             {
                 acted |= self.recolor_text(preset.converted(color.space));
@@ -646,7 +646,7 @@ impl App {
         }
         color_wheel::paint_disc(menu.painter(), icon.center(), 12. * scale, 1.);
         if response
-            .on_hover_text(egui::RichText::new(label).size(14. * scale))
+            .on_hover_text(egui::RichText::new(label).size(toolbar::MENU_FONT_SIZE * scale))
             .clicked()
             && self.text_menu_item().is_some()
         {
@@ -677,9 +677,9 @@ impl App {
         );
         palette.spacing_mut().item_spacing = vec2(6., 7.) * scale;
         palette.spacing_mut().button_padding = vec2(6., 4.) * scale;
-        palette.vertical_centered(|ui| wheel.show(ui, 200. * scale, scale));
+        palette.vertical_centered(|ui| wheel.show(ui, 164. * scale, scale));
         palette.horizontal(|ui| {
-            ui.label(egui::RichText::new(tr.text("Brightness", "亮度", "亮度")).size(14. * scale));
+            ui.label(egui::RichText::new(tr.text("Brightness", "亮度", "亮度")).size(toolbar::MENU_FONT_SIZE * scale));
             ui.spacing_mut().slider_width = 135. * scale;
             ui.spacing_mut().interact_size.y = 28. * scale;
             ui.add(egui::Slider::new(&mut wheel.value.v, 0. ..=1.).show_value(false));
@@ -688,13 +688,13 @@ impl App {
             .horizontal(|ui| {
                 let apply = ui
                     .add_sized(
-                        vec2(100., 44.) * scale,
+                        vec2(88., toolbar::RAIL_BUTTON_SIZE.y) * scale,
                         toolbar::menu_button(tr.text("Apply", "应用", "套用"), scale),
                     )
                     .clicked();
                 let pick = ui
                     .add_sized(
-                        vec2(126., 44.) * scale,
+                        vec2(114., toolbar::RAIL_BUTTON_SIZE.y) * scale,
                         toolbar::menu_button(tr.text("Pick screen", "屏幕取色", "螢幕取色"), scale),
                     )
                     .clicked();
