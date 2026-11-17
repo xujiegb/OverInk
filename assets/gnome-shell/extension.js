@@ -61,6 +61,11 @@ class CaptureBridge {
                 new GLib.Variant('(s)', [invocation.get_sender()]),
                 new GLib.VariantType('(u)'), Gio.DBusCallFlags.NONE, 2000, null);
             const [pid] = reply.deepUnpack();
+            // Window title/class alone can be forged by another application.
+            // The D-Bus caller must also be a local process running OverInk.
+            const executable = GLib.file_read_link(`/proc/${pid}/exe`);
+            if (GLib.path_get_basename(executable) !== 'overink')
+                throw new Error('The screenshot caller is not OverInk');
             const actors = global.get_window_actors();
             const mine = actors.filter(actor => {
                 const window = actor.meta_window;
