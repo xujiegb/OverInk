@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use serde::{Deserialize, Serialize};
 use std::{
     path::Path,
@@ -95,9 +97,7 @@ impl FramePacer {
     pub fn wait(&mut self) {
         let delay = self.delay(Instant::now());
         if !delay.is_zero() {
-            unsafe {
-                crate::sdl::SDL_DelayPrecise(delay.as_nanos() as u64);
-            }
+            crate::sdl::delay_precise(delay.as_nanos() as u64);
         }
     }
 }
