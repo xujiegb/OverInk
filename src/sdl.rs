@@ -318,8 +318,7 @@ pub fn pen_proximity_event(event: &SDL_Event) -> Option<SDL_PenProximityEvent> {
 }
 
 pub fn key_event(event: &SDL_Event) -> Option<SDL_KeyboardEvent> {
-    matches!(event_type(event), SDL_EVENT_KEY_DOWN | SDL_EVENT_KEY_UP)
-        .then(|| unsafe { event.key })
+    matches!(event_type(event), SDL_EVENT_KEY_DOWN | SDL_EVENT_KEY_UP).then(|| unsafe { event.key })
 }
 
 pub fn capture_mouse(enable: bool) -> bool {
