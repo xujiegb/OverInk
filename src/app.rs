@@ -1366,7 +1366,8 @@ fn handle_screenshot_event(
         }
         if screenshot.ready()
             && (on_canvas || ty == SDL_EVENT_FINGER_CANCELED)
-            && (app.touch_enabled || ty != SDL_EVENT_FINGER_DOWN)
+            && (ty != SDL_EVENT_FINGER_DOWN
+                || (app.touch_enabled && app.input.pen_proximity.is_empty()))
         {
             canvas.dirty |= canvas.screenshot_event(event);
         }
@@ -1505,7 +1506,7 @@ pub fn run(options: Options) -> Result<(), String> {
     let toolbar_render = Renderer::new(&toolbar, true)
         .map_err(|error| format!("Creating the toolbar renderer on {video} failed ({error})"))?;
     let mut gui = gui::Gui::new();
-    let mark = crate::toolbar::brand(&gui.ctx);
+    let mut mark = crate::toolbar::brand(&gui.ctx);
     let mut toolbar_color = ColorManager::default();
     toolbar_color.refresh(&toolbar, toolbar_render.extended);
     for canvas in &mut canvases {
@@ -1658,11 +1659,25 @@ pub fn run(options: Options) -> Result<(), String> {
                 ty,
                 SDL_EVENT_RENDER_TARGETS_RESET | SDL_EVENT_RENDER_DEVICE_RESET
             ) {
-                for canvas in &mut canvases {
+                let id = unsafe { event.render.windowID };
+                for canvas in canvases
+                    .iter_mut()
+                    .filter(|canvas| id == 0 || canvas.window.id == id)
+                {
                     canvas.renderer_reset();
                 }
+                if id == 0 || id == toolbar.id {
+                    // Canvas and toolbar own different SDL renderers. The
+                    // toolbar egui atlas/brand/tooltip textures must be rebuilt.
+                    gui.forget_renderer_textures();
+                    gui = gui::Gui::new();
+                    mark = crate::toolbar::brand(&gui.ctx);
+                    tooltips.renderer_reset();
+                    toolbar_text_input = false;
+                    toolbar_repaint_at = None;
+                    toolbar_dirty = true;
+                }
                 app.for_each_page(|page| page.input.text.refocus());
-                toolbar_dirty = true;
             }
 
             if screenshot_owns_input {
