@@ -1094,83 +1094,83 @@ impl App {
     }
     fn keyboard(&mut self, e: &SDL_Event, toolbar_keyboard: bool) -> Commands {
         let mut c = Commands::default();
-        unsafe {
-            if SDL_EventType(e.r#type) != SDL_EVENT_KEY_DOWN {
-                return c;
+        if event_type(e) != SDL_EVENT_KEY_DOWN {
+            return c;
+        }
+        let Some(k) = key_event(e) else {
+            return c;
+        };
+        if k.repeat {
+            return c;
+        }
+        let m = gui::modifiers(k.r#mod);
+        if toolbar_keyboard || self.input.text.editing() {
+            return c;
+        }
+        if self.tool.is_text()
+            && !self.pass
+            && !self.hidden
+            && !m.command
+            && self.text_key(k.key)
+        {
+            c.redraw_canvas = true;
+            return c;
+        }
+        if k.key == SDLK_ESCAPE {
+            if self.input.contact.is_some() || !self.input.touches.is_empty() {
+                self.reset_contacts();
+            } else {
+                self.use_mouse();
+                c.mode = true
             }
-            let k = e.key;
-            if k.repeat {
-                return c;
-            }
-            let m = gui::modifiers(k.r#mod);
-            if toolbar_keyboard || self.input.text.editing() {
-                return c;
-            }
-            if self.tool.is_text()
-                && !self.pass
-                && !self.hidden
-                && !m.command
-                && self.text_key(k.key)
-            {
-                c.redraw_canvas = true;
-                return c;
-            }
-            if k.key == SDLK_ESCAPE {
-                if self.input.contact.is_some() || !self.input.touches.is_empty() {
-                    self.reset_contacts();
-                } else {
-                    self.use_mouse();
-                    c.mode = true
-                }
-                return c;
-            }
-            if m.command {
-                match k.key {
-                    SDLK_Z if m.shift => self.change_history(HistoryAction::Redo),
-                    SDLK_Z => self.change_history(HistoryAction::Undo),
-                    SDLK_Y => self.change_history(HistoryAction::Redo),
-                    SDLK_S if m.shift => self.export(),
-                    SDLK_S => self.save(),
-                    SDLK_O => self.load(),
-                    SDLK_Q => c.quit = true,
-                    _ => {}
-                }
-                return c;
-            }
+            return c;
+        }
+        if m.command {
             match k.key {
-                SDLK_SPACE => {
-                    self.toggle_mouse();
-                    c.mode = true
-                }
-                SDLK_H => {
-                    self.finish_all_contacts();
-                    self.hidden = !self.hidden;
-                    c.mode = true
-                }
-                SDLK_P | SDLK_B | SDLK_M | SDLK_L | SDLK_A | SDLK_R | SDLK_O | SDLK_E | SDLK_K
-                | SDLK_T | SDLK_V => {
-                    let tool = match k.key {
-                        SDLK_B => Tool::Pencil,
-                        SDLK_M => Tool::Marker,
-                        SDLK_L => Tool::Line,
-                        SDLK_A => Tool::Arrow,
-                        SDLK_R => Tool::Rectangle,
-                        SDLK_O => Tool::Ellipse,
-                        SDLK_E => Tool::Eraser,
-                        SDLK_K => Tool::Laser,
-                        SDLK_T => Tool::Text,
-                        SDLK_V => Tool::Select,
-                        _ => Tool::Pen,
-                    };
-                    self.use_tool(tool);
-                    c.mode = true;
-                }
-                SDLK_1 => c.redraw_canvas = self.select_preset(PRESETS[0]),
-                SDLK_2 => c.redraw_canvas = self.select_preset(PRESETS[1]),
-                SDLK_3 => c.redraw_canvas = self.select_preset(PRESETS[2]),
-                SDLK_4 => c.redraw_canvas = self.select_preset(PRESETS[3]),
+                SDLK_Z if m.shift => self.change_history(HistoryAction::Redo),
+                SDLK_Z => self.change_history(HistoryAction::Undo),
+                SDLK_Y => self.change_history(HistoryAction::Redo),
+                SDLK_S if m.shift => self.export(),
+                SDLK_S => self.save(),
+                SDLK_O => self.load(),
+                SDLK_Q => c.quit = true,
                 _ => {}
             }
+            return c;
+        }
+        match k.key {
+            SDLK_SPACE => {
+                self.toggle_mouse();
+                c.mode = true
+            }
+            SDLK_H => {
+                self.finish_all_contacts();
+                self.hidden = !self.hidden;
+                c.mode = true
+            }
+            SDLK_P | SDLK_B | SDLK_M | SDLK_L | SDLK_A | SDLK_R | SDLK_O | SDLK_E | SDLK_K
+            | SDLK_T | SDLK_V => {
+                let tool = match k.key {
+                    SDLK_B => Tool::Pencil,
+                    SDLK_M => Tool::Marker,
+                    SDLK_L => Tool::Line,
+                    SDLK_A => Tool::Arrow,
+                    SDLK_R => Tool::Rectangle,
+                    SDLK_O => Tool::Ellipse,
+                    SDLK_E => Tool::Eraser,
+                    SDLK_K => Tool::Laser,
+                    SDLK_T => Tool::Text,
+                    SDLK_V => Tool::Select,
+                    _ => Tool::Pen,
+                };
+                self.use_tool(tool);
+                c.mode = true;
+            }
+            SDLK_1 => c.redraw_canvas = self.select_preset(PRESETS[0]),
+            SDLK_2 => c.redraw_canvas = self.select_preset(PRESETS[1]),
+            SDLK_3 => c.redraw_canvas = self.select_preset(PRESETS[2]),
+            SDLK_4 => c.redraw_canvas = self.select_preset(PRESETS[3]),
+            _ => {}
         }
         c
     }
