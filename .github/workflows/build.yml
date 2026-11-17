@@ -280,15 +280,64 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cert="$RUNNER_TEMP/overink-signing-cert.pem"
-          keychain="$RUNNER_TEMP/overink-signing.keychain-db"
-          if [[ -s "$cert" ]]; then
-            sudo security remove-trusted-cert -d "$cert" || true
-          fi
-          if [[ -e "$keychain" ]]; then
-            security delete-keychain "$keychain" || true
-          fi
-          rm -f "$RUNNER_TEMP/overink-signing.p12" "$cert"
+          # Do not leave this step indefinitely stuck in securityd/SecurityAgent.
+          # Both macOS matrix runners are disposable GitHub-hosted machines.
+          rm -f "$RUNNER_TEMP/overink-signing.p12"
+          python3 - <<'PY'
+          import os
+          import signal
+          import subprocess
+          from pathlib import Path
+
+          temp = Path(os.environ["RUNNER_TEMP"])
+          cert = temp / "overink-signing-cert.pem"
+          keychain = temp / "overink-signing.keychain-db"
+          login = Path.home() / "Library/Keychains/login.keychain-db"
+
+          def cleanup(label, argv):
+              print(f"Cleaning macOS signing identity: {label}", flush=True)
+              try:
+                  process = subprocess.Popen(
+                      argv, stdin=subprocess.DEVNULL,
+                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                      start_new_session=True,
+                  )
+              except OSError:
+                  print(f"::warning::{label} could not be started", flush=True)
+                  return
+              try:
+                  code = process.wait(timeout=10)
+              except subprocess.TimeoutExpired:
+                  # Kill the entire process group (including sudo/security).
+                  try:
+                      os.killpg(process.pid, signal.SIGKILL)
+                  except ProcessLookupError:
+                      pass  # The command exited just as the timeout fired.
+                  try:
+                      process.wait(timeout=3)
+                  except subprocess.TimeoutExpired:
+                      pass
+                  print(f"::warning::{label} timed out; the hosted runner will be destroyed", flush=True)
+                  return
+              if code != 0:
+                  print(f"::warning::{label} exited with code {code}", flush=True)
+
+          if keychain.exists():
+              if login.exists():
+                  cleanup("restore default keychain",
+                          ["security", "default-keychain", "-d", "user", "-s", str(login)])
+                  cleanup("restore keychain search list",
+                          ["security", "list-keychains", "-d", "user", "-s", str(login)])
+          if cert.is_file() and cert.stat().st_size:
+              # GitHub runner-images #12116 documents remove-trusted-cert -d hangs.
+              # Limit the call rather than allowing it to block artifact upload.
+              cleanup("remove admin code-signing trust",
+                      ["sudo", "-n", "security", "remove-trusted-cert", "-d", str(cert)])
+          if keychain.exists():
+              cleanup("delete temporary signing keychain",
+                      ["security", "delete-keychain", str(keychain)])
+          cert.unlink(missing_ok=True)
+          PY
       - uses: actions/upload-artifact@v7
         with:
           name: OverInk-dmg-macos-${{ matrix.arch }}
