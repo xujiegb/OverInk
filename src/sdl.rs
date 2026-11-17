@@ -1683,15 +1683,23 @@ impl TestSurface {
         }
     }
 
-    pub fn pixel(renderer: &Renderer, x: i32, y: i32) -> Result<[u8; 4], String> {
-        let image = Self::readback(renderer)?;
+    /// Read a pixel from an owned test surface; share this one native read
+    /// boundary with both single-pixel and full-frame test assertions.
+    fn read_pixel(&self, x: i32, y: i32) -> Result<[u8; 4], String> {
+        let [mut r, mut g, mut b, mut a] = [0; 4];
+        // SAFETY: TestSurface holds the live SDL_Surface allocation, and the
+        // four initialized output bytes are valid writable memory. SDL checks
+        // whether the requested pixel lies inside the surface.
         unsafe {
-            let [mut r, mut g, mut b, mut a] = [0; 4];
             check(SDL_ReadSurfacePixel(
-                image.0, x, y, &mut r, &mut g, &mut b, &mut a,
+                self.0, x, y, &mut r, &mut g, &mut b, &mut a,
             ))?;
-            Ok([r, g, b, a])
         }
+        Ok([r, g, b, a])
+    }
+
+    pub fn pixel(renderer: &Renderer, x: i32, y: i32) -> Result<[u8; 4], String> {
+        Self::readback(renderer)?.read_pixel(x, y)
     }
 
     pub fn pixels(renderer: &Renderer) -> Result<Vec<[u8; 4]>, String> {
@@ -1700,13 +1708,7 @@ impl TestSurface {
         let mut pixels = Vec::with_capacity(width as usize * height as usize);
         for y in 0..height {
             for x in 0..width {
-                unsafe {
-                    let [mut r, mut g, mut b, mut a] = [0; 4];
-                    check(SDL_ReadSurfacePixel(
-                        image.0, x, y, &mut r, &mut g, &mut b, &mut a,
-                    ))?;
-                    pixels.push([r, g, b, a]);
-                }
+                pixels.push(image.read_pixel(x, y)?);
             }
         }
         Ok(pixels)
