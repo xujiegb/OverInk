@@ -3,6 +3,9 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import Shell from 'gi://Shell';
 import Meta from 'gi://Meta';
+import Clutter from 'gi://Clutter';
+import * as Dialog from 'resource:///org/gnome/shell/ui/dialog.js';
+import * as ModalDialog from 'resource:///org/gnome/shell/ui/modalDialog.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
 const APP_ID = 'org.overink.OverInk';
@@ -33,6 +36,67 @@ class CaptureBridge {
     constructor(extension) {
         this._extension = extension;
         this._busy = false;
+        this._active = true;
+        // Approval is ephemeral: one explicit Shell confirmation per live PID
+        // and /proc start time, never a persistent "trusted app name".
+        this._approved = new Set();
+        this._cancelDialog = null;
+    }
+
+    stop() {
+        this._active = false;
+        this._approved.clear();
+        this._cancelDialog?.();
+    }
+
+    _processIdentity(pid, executable) {
+        // PID reuse must not inherit an earlier process's approval.
+        // /proc/[pid]/stat field 22 is starttime, after the parenthesized comm.
+        const [, bytes] = GLib.file_get_contents(`/proc/${pid}/stat`);
+        const stat = new TextDecoder().decode(bytes);
+        const close = stat.lastIndexOf(')');
+        if (close < 0)
+            throw new Error('Cannot identify screenshot process');
+        const fields = stat.slice(close + 1).trim().split(/\s+/);
+        if (!/^\d+$/.test(fields[19] ?? ''))
+            throw new Error('Cannot determine screenshot process start time');
+        return `${pid}:${fields[19]}:${executable}`;
+    }
+
+    _requestPermission(executable) {
+        return new Promise(resolve => {
+            // GNOME Shell owns this dialog: the caller cannot grant its own
+            // permission by sending a different D-Bus method or a forged title.
+            const dialog = new ModalDialog.ModalDialog({destroyOnClose: false});
+            dialog.contentLayout.add_child(new Dialog.MessageDialogContent({
+                title: 'Allow OverInk screen capture?',
+                description: `A process at ${executable} requests access to screen pixels. Allow screenshots for this running process only? Your OverInk rectangle selection stays unchanged.`,
+            }));
+            let allowed = false;
+            const deny = () => {
+                allowed = false;
+                dialog.close(global.get_current_time());
+            };
+            this._cancelDialog = deny;
+            dialog.connect('closed', () => {
+                if (this._cancelDialog === deny)
+                    this._cancelDialog = null;
+                dialog.destroy();
+                resolve(allowed && this._active);
+            });
+            dialog.setButtons([
+                {label: 'Deny', key: Clutter.KEY_Escape, isDefault: true, action: deny},
+                {label: 'Allow for this run', action: () => {
+                    allowed = true;
+                    dialog.close(global.get_current_time());
+                }},
+            ]);
+            if (!dialog.open(global.get_current_time())) {
+                this._cancelDialog = null;
+                dialog.destroy();
+                resolve(false);
+            }
+        });
     }
 
     CaptureAreaAsync(parameters, invocation) {
@@ -52,7 +116,7 @@ class CaptureBridge {
         let completed = false;
         const hiddenActors = [];
         try {
-            if (!this._extension._windows)
+            if (!this._active || !this._extension._windows)
                 throw new Error('OverInk Overlay is disabled');
             const values = [left, top, right, bottom, width, height];
             if (!values.every(Number.isFinite) || width <= 0 || height <= 0 ||
@@ -70,6 +134,7 @@ class CaptureBridge {
             const executable = GLib.file_read_link(`/proc/${pid}/exe`);
             if (GLib.path_get_basename(executable) !== 'overink')
                 throw new Error('The screenshot caller is not OverInk');
+            const processIdentity = this._processIdentity(pid, executable);
             const actors = global.get_window_actors();
             const mine = actors.filter(actor => {
                 const window = actor.meta_window;
@@ -87,6 +152,22 @@ class CaptureBridge {
                 }) : null);
             if (!canvas)
                 throw new Error('Cannot identify the selected OverInk canvas');
+            const focused = global.display.focus_window;
+            if (!focused || !mine.some(actor => actor.meta_window === focused))
+                throw new Error('Screen capture requires a focused OverInk window');
+
+            if (!this._approved.has(processIdentity)) {
+                if (!await this._requestPermission(executable))
+                    throw new Error('Screen capture was not authorized');
+                // Do not grant a replacement process (or an unmapped window)
+                // an approval that belonged to the process that requested it.
+                if (this._processIdentity(pid, executable) !== processIdentity ||
+                    !global.get_window_actors().includes(canvas))
+                    throw new Error('OverInk changed while authorizing screen capture');
+                this._approved.add(processIdentity);
+            }
+            if (!this._active)
+                throw new Error('OverInk Overlay was disabled during capture');
             const frame = canvas.meta_window.get_frame_rect();
             if (frame.width <= 0 || frame.height <= 0)
                 throw new Error('The screenshot canvas has no visible frame');
@@ -111,6 +192,8 @@ class CaptureBridge {
                 });
                 global.stage.queue_redraw();
             });
+            if (!this._active)
+                throw new Error('OverInk Overlay was disabled during capture');
             // g_file_new_tmp creates a private temporary file (mode 0600).
             [file, io] = Gio.File.new_tmp('overink-capture-XXXXXX');
             const screenshot = new Shell.Screenshot();
@@ -180,10 +263,12 @@ export default class OverInkOverlay extends Extension {
     }
 
     disable() {
+        this._bridge?.stop();
         this._dbus?.unexport();
         this._dbus = null;
         Gio.bus_unown_name(this._busOwner);
         this._busOwner = 0;
+        this._bridge = null;
         global.window_manager.disconnect(this._map);
         global.display.disconnect(this._workareas);
         global.display.disconnect(this._monitor);
