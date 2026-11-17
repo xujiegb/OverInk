@@ -70,9 +70,7 @@ impl Job {
                     if driver() == "x11" && _displays.len() == 1 {
                         let mut x = 0;
                         let mut y = 0;
-                        let position = unsafe {
-                            SDL_GetWindowPosition(window.raw, &mut x, &mut y)
-                        };
+                        let position = unsafe { SDL_GetWindowPosition(window.raw, &mut x, &mut y) };
                         let mapping = position.then(|| {
                             let location = Rect::from_min_size(
                                 egui::pos2(x as f32, y as f32),
@@ -96,7 +94,8 @@ impl Job {
                                     );
                                 }
                                 mapped.apply(image)
-                            }) as Box<dyn FnOnce(Image) -> Result<Image, String> + Send>
+                            })
+                                as Box<dyn FnOnce(Image) -> Result<Image, String> + Send>
                         })
                     } else {
                         None
