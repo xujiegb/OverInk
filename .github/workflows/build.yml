@@ -212,16 +212,83 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: macos-dmg-${{ matrix.arch }}
+      # PRs never receive the private key. Only approved branch/tag builds use it.
+      - name: Import macOS ECC signing identity
+        id: signing
+        if: >-
+          github.event_name != 'pull_request' &&
+          (github.ref == 'refs/heads/main' ||
+           github.ref == 'refs/heads/master' ||
+           startsWith(github.ref, 'refs/tags/v'))
+        shell: bash
+        env:
+          OVERINK_MACOS_P12_BASE64: ${{ secrets.OVERINK_MACOS_P12_BASE64 }}
+          OVERINK_MACOS_P12_PASSWORD: ${{ secrets.OVERINK_MACOS_P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+          umask 077
+          if [[ -z "$OVERINK_MACOS_P12_BASE64" || -z "$OVERINK_MACOS_P12_PASSWORD" ]]; then
+            echo "::error::Set OVERINK_MACOS_P12_BASE64 and OVERINK_MACOS_P12_PASSWORD in Actions Secrets."
+            exit 1
+          fi
+
+          p12="$RUNNER_TEMP/overink-signing.p12"
+          cert="$RUNNER_TEMP/overink-signing-cert.pem"
+          keychain="$RUNNER_TEMP/overink-signing.keychain-db"
+          keychain_password=$(openssl rand -hex 32)
+
+          printf '%s' "$OVERINK_MACOS_P12_BASE64" | base64 -D > "$p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security list-keychains -d user -s "$keychain" "$HOME/Library/Keychains/login.keychain-db"
+          security default-keychain -d user -s "$keychain"
+
+          security import "$p12" -k "$keychain" -P "$OVERINK_MACOS_P12_PASSWORD" -T /usr/bin/codesign
+          rm -f "$p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain"
+
+          # The P12's certificate is self-signed; trust only the code-signing policy
+          # on this disposable GitHub-hosted runner, never globally on user machines.
+          security find-certificate -p "$keychain" > "$cert"
+          [[ -s "$cert" ]] || { echo "::error::No signing certificate found in P12."; exit 1; }
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign \
+            -k /Library/Keychains/System.keychain "$cert"
+
+          identity=$(security find-identity -v -p codesigning "$keychain" |
+            awk '/^[[:space:]]*[0-9]+\)/ {print $2}')
+          if [[ ! "$identity" =~ ^[[:xdigit:]]{40}$ ]]; then
+            echo "::error::The imported P12 does not provide exactly one trusted code-signing identity."
+            exit 1
+          fi
+          printf 'identity=%s\n' "$identity" >> "$GITHUB_OUTPUT"
+
       - name: Build and package DMG
         shell: bash
         env:
           OVERINK_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
-          CODESIGN_IDENTITY: '-'
+          CODESIGN_IDENTITY: ${{ steps.signing.outputs.identity || '-' }}
+          CODESIGN_TIMESTAMP: none
         run: |
           set -euo pipefail
           bash package-macos.sh --arch '${{ matrix.arch }}' --version "$OVERINK_RELEASE_VERSION"
           mapfile_check=(dist/OverInk-*-macos-${{ matrix.arch }}.dmg)
           [[ ${#mapfile_check[@]} -eq 1 && -s ${mapfile_check[0]} ]] || exit 1
+
+      - name: Remove temporary macOS signing identity
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cert="$RUNNER_TEMP/overink-signing-cert.pem"
+          keychain="$RUNNER_TEMP/overink-signing.keychain-db"
+          if [[ -s "$cert" ]]; then
+            sudo security remove-trusted-cert -d "$cert" || true
+          fi
+          if [[ -e "$keychain" ]]; then
+            security delete-keychain "$keychain" || true
+          fi
+          rm -f "$RUNNER_TEMP/overink-signing.p12" "$cert"
       - uses: actions/upload-artifact@v7
         with:
           name: OverInk-dmg-macos-${{ matrix.arch }}
