@@ -467,7 +467,10 @@ fn sdr_capture(bounds: [i32; 4], cancelled: &AtomicBool) -> CaptureResult {
     let id = display_id(bounds)?;
     let image = unsafe { CGDisplayCreateImage(id) };
     if image.is_null() {
-        return Err("Core Graphics could not capture the display. Check Screen Recording permission.".into());
+        return Err(
+            "Core Graphics could not capture the display. Check Screen Recording permission."
+                .into(),
+        );
     }
     let image = Data(image);
     if cancelled.load(Ordering::Relaxed) {
