@@ -481,9 +481,8 @@ impl Gui {
                     {
                         let [red, green, blue, _] = *rgba;
                         if pixel.a() != 0 && [red, green, blue] != [255; 3] {
-                            let rgb = color.map(
-                                [red, green, blue].map(|channel| f32::from(channel) / 255.),
-                            );
+                            let rgb = color
+                                .map([red, green, blue].map(|channel| f32::from(channel) / 255.));
                             rgba[..3].copy_from_slice(
                                 &rgb.map(|channel| (channel * 255.).round() as u8),
                             );
@@ -545,8 +544,7 @@ impl Gui {
                 .iter()
                 .map(|v| {
                     let [red, green, blue, alpha] = v.color.to_srgba_unmultiplied();
-                    let c =
-                        color.map([red as f32 / 255., green as f32 / 255., blue as f32 / 255.]);
+                    let c = color.map([red as f32 / 255., green as f32 / 255., blue as f32 / 255.]);
                     SDL_Vertex {
                         position: SDL_FPoint {
                             x: v.pos.x * self.units,
