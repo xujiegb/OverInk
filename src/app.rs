@@ -1662,11 +1662,11 @@ pub fn run(options: Options) -> Result<(), String> {
                 let id = unsafe { event.render.windowID };
                 for canvas in canvases
                     .iter_mut()
-                    .filter(|canvas| id == 0 || canvas.window.id == id)
+                    .filter(|canvas| id.0 == 0 || canvas.window.id == id)
                 {
                     canvas.renderer_reset();
                 }
-                if id == 0 || id == toolbar.id {
+                if id.0 == 0 || id == toolbar.id {
                     // Canvas and toolbar own different SDL renderers. The
                     // toolbar egui atlas/brand/tooltip textures must be rebuilt.
                     gui.forget_renderer_textures();
