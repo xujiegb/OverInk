@@ -112,6 +112,31 @@ pub fn driver() -> String {
         }
     }
 }
+/// Return the SDL Wayland display scaling hint without raw FFI at call sites.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+pub fn wayland_scale_to_display_forced() -> bool {
+    unsafe { SDL_GetHintBoolean(SDL_HINT_VIDEO_WAYLAND_SCALE_TO_DISPLAY, false) }
+}
+
+/// Return usable display bounds only when SDL provides them.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+pub fn usable_display_bounds(id: u32) -> Option<[i32; 4]> {
+    unsafe {
+        let mut bounds = SDL_Rect::default();
+        SDL_GetDisplayUsableBounds(SDL_DisplayID(id), &mut bounds)
+            .then_some([bounds.x, bounds.y, bounds.w, bounds.h])
+    }
+}
+
+/// Read the native mode's logical dimensions and pixel density.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+pub fn desktop_display_mode(id: u32) -> Option<([i32; 2], f32)> {
+    unsafe {
+        let mode = SDL_GetDesktopDisplayMode(SDL_DisplayID(id)).as_ref()?;
+        Some(([mode.w, mode.h], mode.pixel_density))
+    }
+}
+
 pub struct Window {
     pub raw: *mut SDL_Window,
     pub id: SDL_WindowID,
@@ -286,6 +311,14 @@ impl Window {
                 }
             }
             Ok(())
+        }
+    }
+    /// Query the current X11/desktop position without exposing an unsafe FFI call.
+    pub fn position(&self) -> Result<[i32; 2], String> {
+        unsafe {
+            let (mut x, mut y) = (0, 0);
+            check(SDL_GetWindowPosition(self.raw, &mut x, &mut y))?;
+            Ok([x, y])
         }
     }
     pub fn pixel_size(&self) -> [i32; 2] {
