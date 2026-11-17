@@ -647,21 +647,19 @@ impl Window {
             let Some(regions) = opaque_regions else {
                 return check(SDL_SetWindowShape(self.raw, ptr::null_mut()));
             };
-            let surface = SDL_CreateSurface(size[0], size[1], SDL_PIXELFORMAT_RGBA32);
-            if surface.is_null() {
-                return Err(error());
+            let surface = OwnedSurface::from_native(SDL_CreateSurface(
+                size[0],
+                size[1],
+                SDL_PIXELFORMAT_RGBA32,
+            ))
+            .ok_or_else(error)?;
+            let opaque = SDL_MapSurfaceRGBA(surface.as_ptr(), 255, 255, 255, 255);
+            let transparent = SDL_MapSurfaceRGBA(surface.as_ptr(), 0, 0, 0, 0);
+            check(SDL_FillSurfaceRect(surface.as_ptr(), ptr::null(), transparent))?;
+            for region in regions {
+                check(SDL_FillSurfaceRect(surface.as_ptr(), region, opaque))?;
             }
-            let result = (|| {
-                let opaque = SDL_MapSurfaceRGBA(surface, 255, 255, 255, 255);
-                let transparent = SDL_MapSurfaceRGBA(surface, 0, 0, 0, 0);
-                check(SDL_FillSurfaceRect(surface, ptr::null(), transparent))?;
-                for region in regions {
-                    check(SDL_FillSurfaceRect(surface, region, opaque))?;
-                }
-                check(SDL_SetWindowShape(self.raw, surface))
-            })();
-            SDL_DestroySurface(surface);
-            result
+            check(SDL_SetWindowShape(self.raw, surface.as_ptr()))
         }
     }
 
@@ -766,9 +764,8 @@ impl Window {
                 pixels.as_mut_ptr().cast(),
                 w * 4,
             );
-            if !surface.is_null() {
-                SDL_SetWindowIcon(self.raw, surface);
-                SDL_DestroySurface(surface);
+            if let Some(surface) = OwnedSurface::from_native(surface) {
+                SDL_SetWindowIcon(self.raw, surface.as_ptr());
             }
         }
     }
@@ -1068,6 +1065,36 @@ impl Drop for Window {
         }
     }
 }
+/// Release an SDL-owned surface at one native FFI boundary.
+fn destroy_owned_surface(raw: *mut SDL_Surface) {
+    if raw.is_null() {
+        return;
+    }
+    // SAFETY: Each caller owns the SDL_Surface from a create/readback API,
+    // and transfers it exactly once while SDL is active on the main thread.
+    unsafe { SDL_DestroySurface(raw) };
+}
+
+/// Temporary SDL surface whose native allocation is released even when an
+/// operation returns early or unwinds.
+struct OwnedSurface(*mut SDL_Surface);
+
+impl OwnedSurface {
+    fn from_native(raw: *mut SDL_Surface) -> Option<Self> {
+        (!raw.is_null()).then(|| Self(raw))
+    }
+
+    fn as_ptr(&self) -> *mut SDL_Surface {
+        self.0
+    }
+}
+
+impl Drop for OwnedSurface {
+    fn drop(&mut self) {
+        destroy_owned_surface(self.0);
+    }
+}
+
 /// Consume one uniquely owned SDL texture on the SDL-owning thread.
 /// Ink, snapshot and UI textures share this native destruction boundary.
 fn destroy_owned_texture(raw: *mut SDL_Texture) {
@@ -1492,14 +1519,11 @@ impl Renderer {
     /// The returned surface is always destroyed, including on write failures.
     pub fn save_bmp(&self, path: &std::path::Path) -> Result<(), String> {
         unsafe {
-            let surface = SDL_RenderReadPixels(self.raw, ptr::null());
-            if surface.is_null() {
-                return Err(error());
-            }
+            let surface =
+                OwnedSurface::from_native(SDL_RenderReadPixels(self.raw, ptr::null()))
+                    .ok_or_else(error)?;
             let name = cstring(&path.to_string_lossy());
-            let saved = SDL_SaveBMP(surface, name.as_ptr());
-            SDL_DestroySurface(surface);
-            check(saved)
+            check(SDL_SaveBMP(surface.as_ptr(), name.as_ptr()))
         }
     }
 
@@ -1744,7 +1768,7 @@ impl TestSurface {
 #[cfg(test)]
 impl Drop for TestSurface {
     fn drop(&mut self) {
-        unsafe { SDL_DestroySurface(self.0) };
+        destroy_owned_surface(self.0);
     }
 }
 
