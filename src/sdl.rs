@@ -1068,6 +1068,18 @@ impl Drop for Window {
         }
     }
 }
+/// Consume one uniquely owned SDL texture on the SDL-owning thread.
+/// Ink, snapshot and UI textures share this native destruction boundary.
+fn destroy_owned_texture(raw: *mut SDL_Texture) {
+    if raw.is_null() {
+        return;
+    }
+    // SAFETY: Every caller transfers the sole SDL_CreateTexture handle from
+    // an owned texture's Drop. The renderer is still live and SDL is confined
+    // to the main thread; no caller may use the pointer after this call.
+    unsafe { SDL_DestroyTexture(raw) };
+}
+
 /// Owned SDL texture used by the ink renderer. Native calls and its
 /// destructor stay in this adapter; live textures are dropped normally
 /// before their renderer is recreated.
@@ -1167,7 +1179,7 @@ impl InkTexture {
 
 impl Drop for InkTexture {
     fn drop(&mut self) {
-        unsafe { SDL_DestroyTexture(self.raw) };
+        destroy_owned_texture(self.raw);
     }
 }
 
@@ -1289,7 +1301,7 @@ impl SnapshotTexture {
 
 impl Drop for SnapshotTexture {
     fn drop(&mut self) {
-        unsafe { SDL_DestroyTexture(self.0) }
+        destroy_owned_texture(self.0);
     }
 }
 
@@ -1361,7 +1373,7 @@ impl GuiTexture {
 
 impl Drop for GuiTexture {
     fn drop(&mut self) {
-        unsafe { SDL_DestroyTexture(self.0) }
+        destroy_owned_texture(self.0);
     }
 }
 
