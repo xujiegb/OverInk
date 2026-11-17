@@ -361,8 +361,7 @@ impl Screenshot {
                 let start = clamp(point);
                 // SDL capture is not available on every backend. Still allow
                 // in-window dragging; losing focus cancels an unfinished drag.
-                self.error = (!capture_mouse(pointer, true))
-                    .then(|| format!("Mouse capture unavailable: {}", crate::sdl::error()));
+                let _ = capture_mouse(pointer, true);
                 *drag = Some(Drag {
                     pointer,
                     start,
@@ -458,15 +457,6 @@ impl Screenshot {
             Stage::Selecting(drag) => {
                 let region = drag.map(|drag| Rect::from_two_pos(drag.start, drag.end));
                 shade(ui, screen, region, units);
-                if let Some(error) = &self.error {
-                    ui.painter().text(
-                        screen.center(),
-                        egui::Align2::CENTER_CENTER,
-                        error,
-                        egui::FontId::proportional(14. * units),
-                        Color32::WHITE,
-                    );
-                }
                 return;
             }
             Stage::Ready(region, _) => region,
