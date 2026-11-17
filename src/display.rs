@@ -12,8 +12,9 @@ use std::{
     path::Path,
     sync::atomic::{AtomicU64, Ordering},
 };
+// Native XRandR FFI is a crate-level sibling, outside this safe module's lint scope.
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-mod x11;
+use crate::display_x11 as x11;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Display {
