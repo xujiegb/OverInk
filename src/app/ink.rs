@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use super::{App, LASER_LIFETIME};
 use crate::{
     appearance::text,
@@ -800,74 +802,36 @@ mod tests {
     use super::*;
     use crate::app::touch_tests::app;
 
-    struct Surface(*mut SDL_Surface);
-    impl Drop for Surface {
-        fn drop(&mut self) {
-            unsafe { SDL_DestroySurface(self.0) };
-        }
-    }
-
     struct TestCanvas {
         renderer: Renderer,
-        _surface: Surface,
+        _surface: TestSurface,
         color: ColorManager,
     }
     impl TestCanvas {
         fn new([width, height]: [i32; 2]) -> Self {
-            unsafe {
-                let surface = Surface(SDL_CreateSurface(width, height, SDL_PIXELFORMAT_RGBA32));
-                assert!(!surface.0.is_null());
-                let raw = SDL_CreateSoftwareRenderer(surface.0);
-                assert!(!raw.is_null(), "{}", error());
-                assert!(SDL_SetRenderDrawBlendMode(raw, SDL_BLENDMODE_BLEND));
-                Self {
-                    renderer: Renderer {
-                        raw,
-                        extended: false,
-                        name: "software".into(),
-                    },
-                    _surface: surface,
-                    color: ColorManager::default(),
-                }
+            let surface = TestSurface::new([width, height]).unwrap();
+            let renderer = surface.software_renderer().unwrap();
+            Self {
+                renderer,
+                _surface: surface,
+                color: ColorManager::default(),
             }
         }
         fn frame(&self) -> Frame<'_> {
             Frame {
                 renderer: &self.renderer,
                 color: &self.color,
-                pixels: unsafe { [(*self._surface.0).w, (*self._surface.0).h] },
+                pixels: self._surface.size(),
                 scale: [1.; 2],
                 aa: 0.8,
                 extended_budget: MAX_EXTENDED_INK_TEXTURE_BYTES,
             }
         }
         fn pixel(&self, x: i32, y: i32) -> [u8; 4] {
-            unsafe {
-                let image = Surface(SDL_RenderReadPixels(self.renderer.raw, ptr::null()));
-                assert!(!image.0.is_null(), "{}", error());
-                let [mut r, mut g, mut b, mut a] = [0; 4];
-                assert!(SDL_ReadSurfacePixel(
-                    image.0, x, y, &mut r, &mut g, &mut b, &mut a
-                ));
-                [r, g, b, a]
-            }
+            TestSurface::pixel(&self.renderer, x, y).unwrap()
         }
         fn pixels(&self) -> Vec<[u8; 4]> {
-            unsafe {
-                let image = Surface(SDL_RenderReadPixels(self.renderer.raw, ptr::null()));
-                assert!(!image.0.is_null(), "{}", error());
-                let mut pixels = Vec::new();
-                for y in 0..(*image.0).h {
-                    for x in 0..(*image.0).w {
-                        let [mut r, mut g, mut b, mut a] = [0; 4];
-                        assert!(SDL_ReadSurfacePixel(
-                            image.0, x, y, &mut r, &mut g, &mut b, &mut a
-                        ));
-                        pixels.push([r, g, b, a]);
-                    }
-                }
-                pixels
-            }
+            TestSurface::pixels(&self.renderer).unwrap()
         }
         fn history(&self, ink: &mut Ink, app: &mut App) {
             self.renderer.clear([0.; 4]).unwrap();
