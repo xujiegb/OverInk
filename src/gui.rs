@@ -8,7 +8,6 @@ use crate::{
 use egui::{Context, Event, Key, Modifiers, RawInput, TextureId};
 use std::{
     collections::{BTreeMap, HashMap},
-    ffi::CStr,
     ptr,
     time::{Duration, Instant},
 };
@@ -96,15 +95,7 @@ impl Gui {
     }
 
     pub fn sync_text_input(&mut self, window: &Window, enabled: bool) {
-        unsafe {
-            if enabled != SDL_TextInputActive(window.raw) {
-                if enabled {
-                    SDL_StartTextInput(window.raw);
-                } else {
-                    SDL_StopTextInput(window.raw);
-                }
-            }
-        }
+        window.sync_text_input(enabled);
         if !enabled {
             self.composing = false;
             self.composition_ended = None;
@@ -120,7 +111,7 @@ impl Gui {
             egui::vec2(logical[0] / self.units, logical[1] / self.units),
         ));
         self.raw.time = Some(self.started.elapsed().as_secs_f64());
-        let current = modifiers(unsafe { SDL_GetModState() });
+        let current = modifiers(mod_state());
         // A synthetic input event would ask egui for another frame.
         if current != self.ctx.input(|input| input.modifiers) {
             self.raw.events.push(Event::ModifiersChanged(current));
@@ -143,7 +134,7 @@ impl Gui {
     }
 
     pub fn clear_composition(&mut self, window: &Window) {
-        unsafe { SDL_ClearComposition(window.raw) };
+        window.clear_composition();
         self.cancel_composition(0);
     }
 
@@ -162,28 +153,29 @@ impl Gui {
         }
         was_composing
     }
-    /// SDL_Event is a tagged C union. Only the field selected by `type` is read.
+    /// Decode tagged SDL events through the checked, owning SDL API.
     pub fn event(&mut self, e: &SDL_Event, id: SDL_WindowID, size: [f32; 2]) {
-        unsafe {
-            let ty = event_type(e);
-            let scale = self.units;
-            match ty {
-                SDL_EVENT_MOUSE_MOTION
-                    if e.motion.windowID == id
-                        && e.motion.which != SDL_TOUCH_MOUSEID
-                        && e.motion.which != SDL_PEN_MOUSEID =>
+        let ty = event_type(e);
+        let scale = self.units;
+        match ty {
+            SDL_EVENT_MOUSE_MOTION => {
+                if let Some(m) = mouse_motion_event(e)
+                    && m.windowID == id
+                    && m.which != SDL_TOUCH_MOUSEID
+                    && m.which != SDL_PEN_MOUSEID
                 {
                     self.raw.events.push(Event::PointerMoved(egui::pos2(
-                        e.motion.x / scale,
-                        e.motion.y / scale,
-                    )))
+                        m.x / scale,
+                        m.y / scale,
+                    )));
                 }
-                SDL_EVENT_MOUSE_BUTTON_DOWN | SDL_EVENT_MOUSE_BUTTON_UP
-                    if e.button.windowID == id
-                        && e.button.which != SDL_TOUCH_MOUSEID
-                        && e.button.which != SDL_PEN_MOUSEID =>
+            }
+            SDL_EVENT_MOUSE_BUTTON_DOWN | SDL_EVENT_MOUSE_BUTTON_UP => {
+                if let Some(b) = mouse_button_event(e)
+                    && b.windowID == id
+                    && b.which != SDL_TOUCH_MOUSEID
+                    && b.which != SDL_PEN_MOUSEID
                 {
-                    let b = e.button;
                     let button = match b.button {
                         1 => egui::PointerButton::Primary,
                         2 => egui::PointerButton::Middle,
@@ -194,33 +186,51 @@ impl Gui {
                         pos: egui::pos2(b.x / scale, b.y / scale),
                         button,
                         pressed: b.down,
-                        modifiers: modifiers(SDL_GetModState()),
+                        modifiers: modifiers(mod_state()),
                     });
                 }
-                SDL_EVENT_FINGER_DOWN | SDL_EVENT_FINGER_MOTION | SDL_EVENT_FINGER_UP
-                    if e.tfinger.windowID == id =>
+            }
+            SDL_EVENT_FINGER_DOWN | SDL_EVENT_FINGER_MOTION | SDL_EVENT_FINGER_UP => {
+                if let Some(finger) = finger_event(e)
+                    && finger.windowID == id
                 {
-                    self.touch_event(e.tfinger, size);
+                    self.touch_event(finger, size);
                 }
-                SDL_EVENT_FINGER_CANCELED if self.has_touch(TouchKey::from(e.tfinger)) => {
-                    self.touch_event(e.tfinger, size);
-                }
-                SDL_EVENT_PEN_MOTION if e.pmotion.windowID == id => self.raw.events.push(
-                    Event::PointerMoved(egui::pos2(e.pmotion.x / scale, e.pmotion.y / scale)),
-                ),
-                SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP
-                    if e.ptouch.windowID == id && !e.ptouch.eraser =>
+            }
+            SDL_EVENT_FINGER_CANCELED => {
+                if let Some(finger) = finger_event(e)
+                    && self.has_touch(TouchKey::from(finger))
                 {
-                    let p = e.ptouch;
+                    self.touch_event(finger, size);
+                }
+            }
+            SDL_EVENT_PEN_MOTION => {
+                if let Some(pen) = pen_motion_event(e)
+                    && pen.windowID == id
+                {
+                    self.raw.events.push(Event::PointerMoved(egui::pos2(
+                        pen.x / scale,
+                        pen.y / scale,
+                    )));
+                }
+            }
+            SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP => {
+                if let Some(p) = pen_touch_event(e)
+                    && p.windowID == id
+                    && !p.eraser
+                {
                     self.raw.events.push(Event::PointerButton {
                         pos: egui::pos2(p.x / scale, p.y / scale),
                         button: egui::PointerButton::Primary,
                         pressed: p.down,
-                        modifiers: modifiers(SDL_GetModState()),
+                        modifiers: modifiers(mod_state()),
                     });
                 }
-                SDL_EVENT_MOUSE_WHEEL if e.wheel.windowID == id => {
-                    let w = e.wheel;
+            }
+            SDL_EVENT_MOUSE_WHEEL => {
+                if let Some(w) = mouse_wheel_event(e)
+                    && w.windowID == id
+                {
                     let sign = if w.direction == SDL_MOUSEWHEEL_FLIPPED {
                         -1.
                     } else {
@@ -231,109 +241,104 @@ impl Gui {
                         delta: egui::vec2(w.x * sign, w.y * sign),
                         phase: egui::TouchPhase::Move,
                         source: egui::MouseWheelSource::Unknown,
-                        modifiers: modifiers(SDL_GetModState()),
+                        modifiers: modifiers(mod_state()),
                     });
                 }
-                SDL_EVENT_WINDOW_FOCUS_LOST if e.window.windowID == id => {
-                    self.cancel_touches();
-                    self.cancel_composition(0);
-                    self.composition_ended = None;
-                    self.raw.focused = false;
-                    self.raw.events.push(Event::WindowFocused(false));
-                }
-                SDL_EVENT_WINDOW_FOCUS_GAINED if e.window.windowID == id => {
-                    self.raw.focused = true;
-                    self.raw.events.push(Event::WindowFocused(true));
-                }
-                SDL_EVENT_WINDOW_MOUSE_LEAVE if e.window.windowID == id => {
-                    self.raw.events.push(Event::PointerGone)
-                }
-                SDL_EVENT_KEY_DOWN | SDL_EVENT_KEY_UP if e.key.windowID == id => {
-                    let k = e.key;
-                    let m = modifiers(k.r#mod);
-                    let same_ime_key = k.down
-                        && self.composition_ended.take().is_some_and(|at| {
-                            k.timestamp != 0 && k.timestamp.abs_diff(at) < 2_000_000
-                        });
-                    // Some backends deliver the composition and its initiating key together.
-                    if self.composing
-                        || (same_ime_key
-                            && !m.command
-                            && !m.alt
-                            && matches!(
-                                k.key,
-                                SDLK_BACKSPACE | SDLK_ESCAPE | SDLK_RETURN | SDLK_KP_ENTER
-                            ))
-                    {
-                        return;
-                    }
-                    if k.down && m.command && k.key == SDLK_V {
-                        let p = SDL_GetClipboardText();
-                        if !p.is_null() {
-                            let text = CStr::from_ptr(p).to_string_lossy().into_owned();
-                            SDL_free(p.cast());
-                            self.raw.events.push(Event::Paste(text));
-                        }
-                        return;
-                    }
-                    if k.down && m.command && k.key == SDLK_C {
-                        self.raw.events.push(Event::Copy);
-                        return;
-                    }
-                    if k.down && m.command && k.key == SDLK_X {
-                        self.raw.events.push(Event::Cut);
-                        return;
-                    }
-                    if let Some(key) = key(k.key) {
-                        self.raw.events.push(Event::Key {
-                            key,
-                            physical_key: None,
-                            pressed: k.down,
-                            repeat: k.repeat,
-                            modifiers: m,
-                        });
-                    }
-                }
-                SDL_EVENT_TEXT_INPUT if e.text.windowID == id => {
-                    let p = e.text.text;
-                    if !p.is_null() {
-                        let text = CStr::from_ptr(p).to_string_lossy().into_owned();
-                        let event = if self.end_composition(e.text.timestamp) {
-                            Event::Ime(egui::ImeEvent::Commit(text))
-                        } else {
-                            Event::Text(text)
-                        };
-                        self.raw.events.push(event);
-                    }
-                }
-                SDL_EVENT_TEXT_EDITING if e.edit.windowID == id => {
-                    let edit = e.edit;
-                    let text = if edit.text.is_null() {
-                        String::new()
-                    } else {
-                        CStr::from_ptr(edit.text).to_string_lossy().into_owned()
-                    };
-                    if text.is_empty() {
-                        self.cancel_composition(edit.timestamp);
-                        return;
-                    }
-                    self.composing = true;
-                    self.composition_ended = None;
-                    let active_range_chars = if edit.start >= 0 && edit.length >= 0 {
-                        let count = text.chars().count();
-                        let start = (edit.start as usize).min(count);
-                        let end = (start + edit.length as usize).min(count);
-                        Some(start..end)
-                    } else {
-                        None
-                    };
-                    self.raw.events.push(Event::Ime(egui::ImeEvent::Preedit {
-                        text,
-                        active_range_chars,
-                    }));
-                }
-                _ => {}
             }
+            SDL_EVENT_WINDOW_FOCUS_LOST if window_event_id(e) == Some(id) => {
+                self.cancel_touches();
+                self.cancel_composition(0);
+                self.composition_ended = None;
+                self.raw.focused = false;
+                self.raw.events.push(Event::WindowFocused(false));
+            }
+            SDL_EVENT_WINDOW_FOCUS_GAINED if window_event_id(e) == Some(id) => {
+                self.raw.focused = true;
+                self.raw.events.push(Event::WindowFocused(true));
+            }
+            SDL_EVENT_WINDOW_MOUSE_LEAVE if window_event_id(e) == Some(id) => {
+                self.raw.events.push(Event::PointerGone);
+            }
+            SDL_EVENT_KEY_DOWN | SDL_EVENT_KEY_UP => {
+                let Some(k) = key_event(e).filter(|key| key.windowID == id) else {
+                    return;
+                };
+                let m = modifiers(k.r#mod);
+                let same_ime_key = k.down
+                    && self.composition_ended.take().is_some_and(|at| {
+                        k.timestamp != 0 && k.timestamp.abs_diff(at) < 2_000_000
+                    });
+                // Some backends deliver the composition and its initiating key together.
+                if self.composing
+                    || (same_ime_key
+                        && !m.command
+                        && !m.alt
+                        && matches!(
+                            k.key,
+                            SDLK_BACKSPACE | SDLK_ESCAPE | SDLK_RETURN | SDLK_KP_ENTER
+                        ))
+                {
+                    return;
+                }
+                if k.down && m.command && k.key == SDLK_V {
+                    if let Some(text) = clipboard_text() {
+                        self.raw.events.push(Event::Paste(text));
+                    }
+                    return;
+                }
+                if k.down && m.command && k.key == SDLK_C {
+                    self.raw.events.push(Event::Copy);
+                    return;
+                }
+                if k.down && m.command && k.key == SDLK_X {
+                    self.raw.events.push(Event::Cut);
+                    return;
+                }
+                if let Some(key) = key(k.key) {
+                    self.raw.events.push(Event::Key {
+                        key,
+                        physical_key: None,
+                        pressed: k.down,
+                        repeat: k.repeat,
+                        modifiers: m,
+                    });
+                }
+            }
+            SDL_EVENT_TEXT_INPUT => {
+                if let Some((text, timestamp)) = text_input_data(e, id) {
+                    let event = if self.end_composition(timestamp) {
+                        Event::Ime(egui::ImeEvent::Commit(text))
+                    } else {
+                        Event::Text(text)
+                    };
+                    self.raw.events.push(event);
+                }
+            }
+            SDL_EVENT_TEXT_EDITING => {
+                let Some(edit) = text_editing_data(e, id) else {
+                    return;
+                };
+                let text = edit.text;
+                if text.is_empty() {
+                    self.cancel_composition(edit.timestamp);
+                    return;
+                }
+                self.composing = true;
+                self.composition_ended = None;
+                let active_range_chars = if edit.start >= 0 && edit.length >= 0 {
+                    let count = text.chars().count();
+                    let start = (edit.start as usize).min(count);
+                    let end = (start + edit.length as usize).min(count);
+                    Some(start..end)
+                } else {
+                    None
+                };
+                self.raw.events.push(Event::Ime(egui::ImeEvent::Preedit {
+                    text,
+                    active_range_chars,
+                }));
+            }
+            _ => {}
         }
     }
     fn touch_event(&mut self, event: SDL_TouchFingerEvent, size: [f32; 2]) {
