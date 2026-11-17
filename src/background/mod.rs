@@ -11,7 +11,6 @@ use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     io::Read,
-    ptr,
     time::{Duration, Instant},
 };
 
@@ -150,38 +149,7 @@ impl Image {
     }
     #[cfg(any(target_os = "linux", target_os = "freebsd", test))]
     pub fn convert_to_srgb(&mut self, profile: &[u8]) {
-        use lcms2_sys as cms;
-        if profile.is_empty() || profile.len() > 16 * 1024 * 1024 {
-            return;
-        }
-        unsafe {
-            let input = cms::cmsOpenProfileFromMem(profile.as_ptr().cast(), profile.len() as u32);
-            if input.is_null() {
-                return;
-            }
-            let srgb = cms::cmsCreate_sRGBProfile();
-            let transform = cms::cmsCreateTransform(
-                input,
-                cms::PixelFormat::RGBA_8,
-                srgb,
-                cms::PixelFormat::RGBA_8,
-                cms::Intent::RelativeColorimetric,
-                cms::FLAGS_COPY_ALPHA | cms::FLAGS_BLACKPOINTCOMPENSATION,
-            );
-            cms::cmsCloseProfile(input);
-            cms::cmsCloseProfile(srgb);
-            if !transform.is_null() {
-                // Both FFI pointers describe the same in-place pixel buffer.
-                let pixels = self.rgba.as_mut_ptr();
-                cms::cmsDoTransform(
-                    transform,
-                    pixels.cast_const().cast(),
-                    pixels.cast(),
-                    self.width * self.height,
-                );
-                cms::cmsDeleteTransform(transform);
-            }
-        }
+        crate::icc::convert_rgba8_to_srgb(&mut self.rgba, profile);
     }
 }
 
@@ -305,78 +273,6 @@ pub fn snapshot_mode(
     }
 }
 
-struct Texture(*mut SDL_Texture);
-impl Texture {
-    fn new(render: &Renderer, image: &Snapshot, color: &ColorManager) -> Result<Self, String> {
-        unsafe {
-            let linear = image.encoding == Encoding::LinearRgba16;
-            let raw = if linear {
-                if !render.extended {
-                    return Err("The renderer cannot display the captured HDR range".into());
-                }
-                let props = SDL_CreateProperties();
-                SDL_SetNumberProperty(
-                    props,
-                    SDL_PROP_TEXTURE_CREATE_FORMAT_NUMBER,
-                    SDL_PIXELFORMAT_RGBA64_FLOAT.0 as i64,
-                );
-                SDL_SetNumberProperty(
-                    props,
-                    SDL_PROP_TEXTURE_CREATE_COLORSPACE_NUMBER,
-                    SDL_COLORSPACE_SRGB_LINEAR.0 as i64,
-                );
-                SDL_SetNumberProperty(
-                    props,
-                    SDL_PROP_TEXTURE_CREATE_WIDTH_NUMBER,
-                    image.width as i64,
-                );
-                SDL_SetNumberProperty(
-                    props,
-                    SDL_PROP_TEXTURE_CREATE_HEIGHT_NUMBER,
-                    image.height as i64,
-                );
-                // A local-display capture is already mapped to this display.
-                // A positive content headroom could ask SDL to tone map it again.
-                SDL_SetFloatProperty(props, SDL_PROP_TEXTURE_CREATE_HDR_HEADROOM_FLOAT, 0.);
-                let texture = SDL_CreateTextureWithProperties(render.raw, props);
-                SDL_DestroyProperties(props);
-                texture
-            } else {
-                SDL_CreateTexture(
-                    render.raw,
-                    SDL_PIXELFORMAT_RGBA32,
-                    SDL_TEXTUREACCESS_STATIC,
-                    image.width as i32,
-                    image.height as i32,
-                )
-            };
-            if raw.is_null() {
-                return Err(crate::sdl::error());
-            }
-            let texture = Self(raw);
-            let mut pixels = image.pixels()?;
-            if !linear && !color.is_identity() {
-                color.map_rgba8(pixels.to_mut());
-            }
-            check(SDL_UpdateTexture(
-                texture.0,
-                ptr::null(),
-                pixels.as_ptr().cast(),
-                (image.width as usize * image.encoding.bytes_per_pixel()) as i32,
-            ))?;
-            check(SDL_SetTextureBlendMode(texture.0, SDL_BLENDMODE_NONE))?;
-            check(SDL_SetTextureScaleMode(texture.0, SDL_SCALEMODE_LINEAR))?;
-            Ok(texture)
-        }
-    }
-}
-impl Drop for Texture {
-    fn drop(&mut self) {
-        unsafe {
-            SDL_DestroyTexture(self.0);
-        }
-    }
-}
 enum Capture {
     Idle,
     Wait(Instant),
@@ -388,7 +284,7 @@ pub struct Background {
     display: Option<u32>,
     bounds: [i32; 4],
     images: BTreeMap<u32, Snapshot>,
-    texture: Option<Texture>,
+    texture: Option<SnapshotTexture>,
     capture: Capture,
     started: Instant,
     mode: SnapshotMode,
@@ -478,6 +374,14 @@ impl Background {
     }
     pub fn invalidate_texture(&mut self) {
         self.texture = None;
+    }
+
+    /// SDL renderer resets invalidate native textures before notification.
+    /// Abandon the old handle without asking SDL to destroy it a second time.
+    pub fn renderer_reset(&mut self) {
+        if let Some(texture) = self.texture.take() {
+            texture.abandon();
+        }
     }
     pub fn poll(&mut self, window: &Window) -> Option<Result<(), String>> {
         if self.pending() && self.started.elapsed() > Duration::from_secs(120) {
@@ -578,33 +482,23 @@ impl Background {
         let Some(image) = self.display.and_then(|id| self.images.get(&id)) else {
             return Ok(());
         };
+        let linear = image.encoding == Encoding::LinearRgba16;
         if self.texture.is_none() {
-            self.texture = Some(Texture::new(render, image, color)?);
+            let mut pixels = image.pixels()?;
+            if !linear && !color.is_identity() {
+                color.map_rgba8(pixels.to_mut());
+            }
+            self.texture = Some(SnapshotTexture::new(
+                render,
+                [image.width, image.height],
+                linear,
+                pixels.as_ref(),
+            )?);
         }
-        let texture = self.texture.as_ref().unwrap().0;
+        let texture = self.texture.as_ref().unwrap();
         let [w, h] = window.size();
         let dst = SDL_FRect { x: 0., y: 0., w, h };
-        unsafe {
-            if image.encoding == Encoding::Srgb8 {
-                return check(SDL_RenderTexture(render.raw, texture, ptr::null(), &dst));
-            }
-            let mut previous = 1.;
-            check(SDL_GetRenderColorScale(render.raw, &mut previous))?;
-            let white = SDL_GetFloatProperty(
-                SDL_GetRendererProperties(render.raw),
-                SDL_PROP_RENDERER_SDR_WHITE_POINT_FLOAT,
-                1.,
-            );
-            if !white.is_finite() || white <= 0. {
-                return Err("Invalid SDR reference white level".into());
-            }
-            // SDL multiplies all draw calls by its current SDR white level.
-            // Cancel that multiplier just for the captured linear pixels.
-            check(SDL_SetRenderColorScale(render.raw, 1. / white))?;
-            let draw = check(SDL_RenderTexture(render.raw, texture, ptr::null(), &dst));
-            let restore = check(SDL_SetRenderColorScale(render.raw, previous));
-            draw.and(restore)
-        }
+        texture.draw(render, &dst, linear)
     }
 }
 
