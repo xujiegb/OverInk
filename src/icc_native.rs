@@ -2,6 +2,7 @@
 //!
 //! All raw profile and transform handles stay here. Public callers receive
 //! owned resources and work only with Rust slices or fixed-size RGB values.
+#![deny(clippy::undocumented_unsafe_blocks)]
 use lcms2_sys as cms;
 
 const MAX_PROFILE_BYTES: usize = 16 * 1024 * 1024;
