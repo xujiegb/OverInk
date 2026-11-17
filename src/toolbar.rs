@@ -7,6 +7,8 @@ pub use tooltip::{Tooltips, hint};
 pub const WIDTH: f32 = 56.;
 pub const HEIGHT: f32 = 580.;
 pub const PANEL_WIDTH: f32 = 312.;
+pub const RAIL_BUTTON_SIZE: Vec2 = vec2(32., 28.);
+pub const MENU_FONT_SIZE: f32 = 14.;
 pub const GRIP_HEIGHT: f32 = 39.;
 pub const ACTIVE: Color32 = Color32::from_rgb(0, 122, 157);
 
@@ -97,7 +99,7 @@ pub fn button(ui: &mut Ui, icon: Icon, label: &str, selected: bool) -> Response 
 }
 
 pub fn rail_button(ui: &mut Ui, icon: Icon, label: &str, selected: bool) -> Response {
-    button_sized(ui, icon, label, selected, vec2(32., 28.))
+    button_sized(ui, icon, label, selected, RAIL_BUTTON_SIZE)
 }
 
 fn button_sized(ui: &mut Ui, icon: Icon, label: &str, selected: bool, size: Vec2) -> Response {
@@ -156,7 +158,7 @@ pub fn menu_scale(screen: Rect, size: Vec2, units: f32) -> f32 {
 }
 
 pub fn menu_button(text: &str, scale: f32) -> egui::Button<'_> {
-    egui::Button::new(egui::RichText::new(text).size(16. * scale))
+    egui::Button::new(egui::RichText::new(text).size(MENU_FONT_SIZE * scale))
 }
 
 pub fn context_menu_rect(
