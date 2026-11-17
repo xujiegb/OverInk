@@ -108,7 +108,7 @@ impl App {
         );
         ui.add_space(3.);
         if self.picking {
-            if toolbar::button(
+            if toolbar::rail_button(
                 ui,
                 Icon::Close,
                 tr.text(
@@ -126,7 +126,7 @@ impl App {
             self.rail_tools(ui, commands);
         }
         ui.add_space(1.);
-        if toolbar::button(
+        if toolbar::rail_button(
             ui,
             Icon::Quit,
             tr.text("Quit OverInk", "退出 OverInk", "結束 OverInk"),
@@ -160,12 +160,12 @@ impl App {
                             "隱藏書寫圖層 (H)",
                         )
                     };
-                    if toolbar::button(ui, eye, label, self.hidden).clicked() {
+                    if toolbar::rail_button(ui, eye, label, self.hidden).clicked() {
                         self.finish_all_contacts();
                         self.hidden = !self.hidden;
                         commands.mode = true;
                     }
-                    if toolbar::button(
+                    if toolbar::rail_button(
                         ui,
                         Icon::Pointer,
                         tr.text(
@@ -183,7 +183,7 @@ impl App {
                     self.rail_tool(ui, Tool::Select, commands);
                     if ui
                         .add_enabled_ui(!self.suspended && !self.screenshot.saving(), |ui| {
-                            toolbar::button(
+                            toolbar::rail_button(
                                 ui,
                                 Icon::Screenshot,
                                 tr.text("Region screenshot", "区域截图", "區域螢幕擷取"),
@@ -205,7 +205,7 @@ impl App {
                     } else {
                         Icon::Shapes
                     };
-                    if toolbar::button(
+                    if toolbar::rail_button(
                         ui,
                         shapes,
                         tr.text(
@@ -258,7 +258,7 @@ impl App {
                     for (index, (icon, label, action)) in actions.into_iter().enumerate() {
                         let enabled = self.history_buttons()[index];
                         if ui
-                            .add_enabled_ui(enabled, |ui| toolbar::button(ui, icon, label, false))
+                            .add_enabled_ui(enabled, |ui| toolbar::rail_button(ui, icon, label, false))
                             .inner
                             .clicked()
                         {
@@ -328,7 +328,7 @@ impl App {
     }
 
     fn rail_tool(&mut self, ui: &mut Ui, tool: Tool, commands: &mut Commands) {
-        if toolbar::button(
+        if toolbar::rail_button(
             ui,
             Icon::Tool(tool),
             tool_label(tool, self.language),
@@ -343,7 +343,7 @@ impl App {
     }
 
     fn panel_button(&mut self, ui: &mut Ui, icon: Icon, panel: Panel, label: &str) {
-        if toolbar::button(ui, icon, label, self.panel == Some(panel)).clicked() {
+        if toolbar::rail_button(ui, icon, label, self.panel == Some(panel)).clicked() {
             self.toggle_panel(panel);
         }
     }

@@ -93,7 +93,15 @@ pub fn brand(ctx: &egui::Context) -> egui::TextureHandle {
 }
 
 pub fn button(ui: &mut Ui, icon: Icon, label: &str, selected: bool) -> Response {
-    let (rect, response) = ui.allocate_exact_size(vec2(38., 30.), Sense::click());
+    button_sized(ui, icon, label, selected, vec2(38., 30.))
+}
+
+pub fn rail_button(ui: &mut Ui, icon: Icon, label: &str, selected: bool) -> Response {
+    button_sized(ui, icon, label, selected, vec2(32., 28.))
+}
+
+fn button_sized(ui: &mut Ui, icon: Icon, label: &str, selected: bool, size: Vec2) -> Response {
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     response.widget_info(|| {
         egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), selected, label)
     });
