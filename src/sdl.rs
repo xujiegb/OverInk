@@ -943,17 +943,9 @@ impl Drop for Window {
         }
     }
 }
-/// SDL texture owned by the egui atlas renderer.
-///
-/// The renderer must remain alive while a texture is active. On SDL renderer
-/// reset, callers must explicitly abandon invalidated handles rather than
-/// trying to destroy already-invalid textures.
-/// Owned background snapshot texture; native handles remain within SDL.
-///
-/// The caller must retain its renderer while the texture is live and abandon a
-/// handle after an SDL renderer reset, when SDL has already invalidated it.
-/// Owned SDL texture used by the ink renderer. Native calls and the texture
-/// destructor stay in the SDL adapter rather than in the drawing state machine.
+/// Owned SDL texture used by the ink renderer. Native calls and its
+/// destructor stay in this adapter; live textures are dropped normally
+/// before their renderer is recreated.
 pub struct InkTexture {
     raw: *mut SDL_Texture,
     dimensions: [i32; 2],
@@ -1047,10 +1039,6 @@ impl InkTexture {
         }
     }
 
-    /// SDL renderer reset may already have invalidated this native handle.
-    pub fn abandon(self) {
-        std::mem::forget(self);
-    }
 }
 
 impl Drop for InkTexture {
@@ -1059,6 +1047,7 @@ impl Drop for InkTexture {
     }
 }
 
+/// Owned background snapshot texture, including HDR linear-sRGB textures.
 pub struct SnapshotTexture(*mut SDL_Texture);
 
 impl SnapshotTexture {
@@ -1173,11 +1162,6 @@ impl SnapshotTexture {
         renderer.with_absolute_color_scale(1. / white, draw)
     }
 
-    /// Renderer reset already invalidated the SDL texture; no native destructor
-    /// must touch the dangling handle.
-    pub fn abandon(self) {
-        std::mem::forget(self);
-    }
 }
 
 impl Drop for SnapshotTexture {
@@ -1186,6 +1170,7 @@ impl Drop for SnapshotTexture {
     }
 }
 
+/// Owned SDL texture backing egui's font atlas and custom UI images.
 pub struct GuiTexture(*mut SDL_Texture);
 
 impl GuiTexture {
