@@ -131,9 +131,7 @@ mod win32_capture {
 #[cfg(target_os = "windows")]
 pub fn sample(_window: &Window, point: ScreenPoint) -> Result<InkColor, String> {
     let _ = point.root;
-    Ok(InkColor::from_rgb8(win32_capture::sample([
-        point.x, point.y,
-    ])?))
+    Ok(InkColor::from_rgb8(win32_capture::sample([point.x, point.y])?))
 }
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
