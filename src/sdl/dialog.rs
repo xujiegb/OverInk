@@ -85,7 +85,7 @@ impl Drop for FileDialog {
     }
 }
 
-fn complete(id: usize, value: impl FnOnce() -> ResultPath) {
+pub(super) fn complete(id: usize, value: impl FnOnce() -> ResultPath) {
     let mut callbacks = callbacks();
     let Some(result) = callbacks.results.get_mut(&id) else {
         return;
