@@ -256,7 +256,7 @@ jobs:
             -k /Library/Keychains/System.keychain "$cert"
 
           identity=$(security find-identity -v -p codesigning "$keychain" |
-            awk '/^[[:space:]]*[0-9]+\\)/ {print $2}')
+            awk '/^[[:space:]]*[0-9]+\)/ {print $2}')
           if [[ ! "$identity" =~ ^[[:xdigit:]]{40}$ ]]; then
             echo "::error::The imported P12 does not provide exactly one trusted code-signing identity."
             exit 1
