@@ -229,10 +229,17 @@ impl Crop {
         }
         let offset = monitor.min - desktop.min;
         let size: [f32; 2] = desktop.size().into();
-        let display_pixels = size.map(|n| (n * display.scale).round() as u32);
-        let native_pixels =
-            desktop_density.map_or(display_pixels, |density| size.map(|n| (n * density).round() as u32));
-        let fullscreen_pixels = if (visible.size() - monitor.size()).length() <= 2. {
+        let scale = if display.scale.is_finite() && display.scale > 0. {
+            display.scale
+        } else {
+            1.
+        };
+        let display_pixels = size.map(|n| (n * scale).round() as u32);
+        let native_pixels = desktop_density
+            .map_or(display_pixels, |density| size.map(|n| (n * density).round() as u32));
+        let fullscreen_pixels = if displays.len() == 1
+            && (visible.size() - monitor.size()).length() <= 2.
+        {
             pixels
         } else {
             [0, 0]
@@ -281,9 +288,9 @@ mod tests {
             size: [800., 600.],
         };
         let (crop, sizes) = selection
-            .for_portal(&right, &[left, right.clone()], [1200, 900], Some(1.5), None)
+            .for_portal(&right, &[left, right.clone()], [1200, 900], Some(1.5), None, None)
             .unwrap();
-        assert_eq!(sizes, [[1600, 800], [2400, 1200]]);
+        assert_eq!(sizes, [[1600, 800], [2400, 1200], [0, 0]]);
         assert_eq!(crop.region, local.translate(egui::vec2(800., 200.)));
         assert!(!sizes.contains(&[1200, 900]));
         assert!(!sizes.contains(&[3200, 1600]));
@@ -294,6 +301,7 @@ mod tests {
                     &[right.clone(), right.clone()],
                     [1200, 900],
                     Some(1.5),
+                    None,
                     None,
                 )
                 .is_err()
@@ -323,18 +331,18 @@ mod tests {
                 [1440, 866],
                 None,
                 Some(usable),
+                None,
             )
             .unwrap();
         assert_eq!(crop.size, [1440., 900.]);
         assert_eq!(crop.region.min, egui::pos2(100., 84.));
         assert_eq!(crop.region.max, egui::pos2(300., 234.));
-        assert!(crop.matches_desktop_aspect([2880, 1800]));
-        assert!(!crop.matches_desktop_aspect([1920, 1080]));
+        assert_eq!(crop.size, [1440., 900.]);
     }
 
     #[test]
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    fn portal_crop_normalizes_an_unreported_work_area() {
+    fn portal_crop_rejects_unknown_position_instead_of_guessing() {
         let display = Display {
             id: 7,
             name: "GNOME".into(),
@@ -346,6 +354,18 @@ mod tests {
             region: Rect::from_min_size(egui::pos2(100., 100.), egui::vec2(200., 100.)),
             size: [600., 450.],
         };
+        assert!(selection
+            .for_portal(
+                &display,
+                std::slice::from_ref(&display),
+                [1200, 900],
+                None,
+                None,
+                None,
+            )
+            .is_err());
+        // XWayland can supply the actual global window rectangle.
+        let location = Rect::from_min_size(egui::pos2(300., 200.), egui::vec2(600., 450.));
         let (crop, _) = selection
             .for_portal(
                 &display,
@@ -353,9 +373,10 @@ mod tests {
                 [1200, 900],
                 None,
                 None,
+                Some(location),
             )
             .unwrap();
-        assert_eq!(crop.region.min, egui::pos2(200., 200.));
+        assert_eq!(crop.region.min, egui::pos2(400., 300.));
         assert_eq!(crop.region.max, egui::pos2(600., 400.));
     }
 
