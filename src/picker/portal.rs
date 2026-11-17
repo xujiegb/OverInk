@@ -102,13 +102,10 @@ impl SystemJob<Image> {
 
                 let mut capture =
                     std::pin::pin!(bridge.call::<_, _, String>("CaptureArea", &request));
-                let first = future::or(
-                    async { Some(capture.as_mut().await) },
-                    async {
-                        let _ = cancelled.recv().await;
-                        None
-                    },
-                )
+                let first = future::or(async { Some(capture.as_mut().await) }, async {
+                    let _ = cancelled.recv().await;
+                    None
+                })
                 .await;
                 match first {
                     Some(response) => response.map(Some),
@@ -126,15 +123,21 @@ impl SystemJob<Image> {
             });
             let path = match shell_result {
                 Ok(path) => path,
-                Err(error) if portal_fallback.is_some()
-                    && (error.to_string().contains("ServiceUnknown")
-                        || error.to_string().contains("NameHasNoOwner")) =>
+                Err(error)
+                    if portal_fallback.is_some()
+                        && (error.to_string().contains("ServiceUnknown")
+                            || error.to_string().contains("NameHasNoOwner")) =>
                 {
                     // XWayland needs a composited desktop image, never an X11
                     // framebuffer (which silently omits native Wayland apps).
                     // Only the known-safe screen-target portal path is used.
-                    let values = zbus::block_on(request("Screenshot", true, cancelled))
-                        .map_err(|error| format!("GNOME Overlay is unavailable; screenshot portal failed: {error}"))?;
+                    let values = zbus::block_on(request("Screenshot", true, cancelled)).map_err(
+                        |error| {
+                            format!(
+                                "GNOME Overlay is unavailable; screenshot portal failed: {error}"
+                            )
+                        },
+                    )?;
                     let Some(mut values) = values else {
                         return Ok(None);
                     };
