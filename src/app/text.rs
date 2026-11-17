@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use super::App;
 use crate::{
     appearance::text,
@@ -283,7 +285,7 @@ impl App {
         let first = gui.raw.events.len();
         let mut changed = false;
         if ty == SDL_EVENT_FINGER_CANCELED
-            && gui.primary_touch() == Some(unsafe { crate::touch::TouchKey::from(event.tfinger) })
+            && gui.primary_touch() == crate::touch::key_from_event(event)
         {
             self.input.text.cancel_press();
             changed = true;
