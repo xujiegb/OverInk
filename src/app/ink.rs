@@ -67,18 +67,11 @@ impl Ink {
     }
 
     pub fn reset_textures(&mut self) {
-        // SDL owns texture invalidation during renderer reset. Drop only the
-        // Rust handles here; native destruction would use stale pointers.
-        if let Some(layer) = self.layer.take() {
-            layer.texture.abandon();
-        }
-        if let Some(paper) = self.painter.paper.take() {
-            paper.abandon();
-        }
-        if let Some(mask) = self.painter.marker_mask.take() {
-            mask.abandon();
-        }
-        self.unavailable_at = None;
+        // A render-target reset loses contents, not ownership of SDL_Texture.
+        // Destroy each live object before rebuilding its contents.
+        self.invalidate_layer();
+        self.painter.paper = None;
+        self.painter.marker_mask = None;
         self.painter.paper_unavailable = false;
         self.painter.marker_unavailable = false;
     }
