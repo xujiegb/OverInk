@@ -1,6 +1,6 @@
 use super::Image;
 use crate::{display::Display, sdl::*};
-use egui::{Rect, Vec2};
+use egui::Rect;
 
 pub fn hdr_supported() -> bool {
     #[cfg(target_os = "windows")]
@@ -196,11 +196,12 @@ impl Crop {
                     && (area.height() - self.size[1]).abs() <= 2.
             })
             .unwrap_or(monitor);
-        let ratio = visible.size() / Vec2::from(self.size);
+        let scale_x = visible.width() / self.size[0];
+        let scale_y = visible.height() / self.size[1];
         let map = |point: egui::Pos2| {
             egui::pos2(
-                visible.min.x - monitor.min.x + point.x * ratio.x,
-                visible.min.y - monitor.min.y + point.y * ratio.y,
+                visible.min.x - monitor.min.x + point.x * scale_x,
+                visible.min.y - monitor.min.y + point.y * scale_y,
             )
         };
         let mapped = Rect::from_min_max(map(self.region.min), map(self.region.max));
