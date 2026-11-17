@@ -1354,7 +1354,11 @@ fn handle_screenshot_event(
         let contact_cancelled =
             matches!(ty, SDL_EVENT_FINGER_CANCELED | SDL_EVENT_PEN_PROXIMITY_OUT);
         if on_canvas || contact_cancelled {
-            canvas.dirty |= screenshot.event(event, &canvas.window, app.touch_enabled);
+            canvas.dirty |= screenshot.event(
+                event,
+                &canvas.window,
+                app.touch_enabled && app.input.pen_proximity.is_empty(),
+            );
         }
         if screenshot.ready()
             && (on_canvas || ty == SDL_EVENT_FINGER_CANCELED)
@@ -1658,8 +1662,28 @@ pub fn run(options: Options) -> Result<(), String> {
             }
 
             if screenshot_owns_input {
-                if ty == SDL_EVENT_PEN_PROXIMITY_OUT {
+                // Keep pen proximity and palm rejection current even while
+                // screenshot selection owns the event batch.
+                if matches!(
+                    ty,
+                    SDL_EVENT_PEN_PROXIMITY_IN
+                        | SDL_EVENT_PEN_PROXIMITY_OUT
+                        | SDL_EVENT_PEN_DOWN
+                        | SDL_EVENT_PEN_UP
+                        | SDL_EVENT_PEN_MOTION
+                        | SDL_EVENT_PEN_AXIS
+                ) {
                     app.for_each_page(|page| page.track_pen(&event));
+                    if !app.input.pen_proximity.is_empty()
+                        && app.screenshot.reject_touch_drag()
+                    {
+                        if let Some(canvas) = canvases
+                            .iter_mut()
+                            .find(|canvas| app.screenshot.targets(canvas.window.id))
+                        {
+                            canvas.dirty = true;
+                        }
+                    }
                 }
                 // SDL owns the native dialog's input and delivers its result through
                 // the callback. Keep OverInk's drawing and shortcuts modal.
