@@ -1536,6 +1536,7 @@ pub fn run(options: Options) -> Result<(), String> {
     let mut toolbar_text_input = false;
     let mut restore_toolbar_focus = false;
     let mut text_focus = text::ToolbarTextFocus::default();
+    let mut text_pick = None;
     #[cfg(target_os = "macos")]
     drop(startup_pool);
     while running {
@@ -1550,7 +1551,7 @@ pub fn run(options: Options) -> Result<(), String> {
         let screenshot_owns_input = app.screenshot.active();
         let mut event = SDL_Event::default();
         while unsafe { SDL_PollEvent(&mut event) } {
-            let ty = unsafe { SDL_EventType(event.r#type) };
+            let ty = event_type(&event);
             if ty == SDL_EVENT_QUIT {
                 running = false;
                 break;
@@ -1686,8 +1687,11 @@ pub fn run(options: Options) -> Result<(), String> {
             } else {
                 id.and_then(|id| canvases.iter().position(|c| c.window.id == id))
             };
-            let drawing =
-                !was_picking && !toolbar_hidden && !app.suspended && !file_dialog.pending();
+            let drawing = !app.picking
+                && !was_picking
+                && !toolbar_hidden
+                && !app.suspended
+                && !file_dialog.pending();
             if !file_dialog.pending() {
                 gui.event(&event, toolbar.id, toolbar.size());
             }
@@ -2106,8 +2110,21 @@ pub fn run(options: Options) -> Result<(), String> {
             hide,
             app.screenshot.active(),
         )?;
+        let mut restore_text_focus = false;
         if let Some(result) = picker.poll(&canvases[active].window) {
             app.picking = false;
+            let origin = text_pick.take();
+            let canvas = &canvases[active];
+            let on_text = origin == Some((canvas.window.id, canvas.output));
+            if on_text {
+                app.input.text.refocus();
+                restore_text_focus = app.input.text.editing();
+            }
+            let result = if origin.is_some() && !on_text {
+                Ok(None)
+            } else {
+                result
+            };
             toolbar_dirty = true;
             for canvas in &mut canvases {
                 canvas.dirty = true;
@@ -2115,8 +2132,13 @@ pub fn run(options: Options) -> Result<(), String> {
             }
             app.status = match result {
                 Ok(Some(color)) => {
-                    let color = color.converted(app.color.space);
-                    app.select_color(color);
+                    let color = if on_text {
+                        app.pick_text_color(color)
+                    } else {
+                        let color = color.converted(app.color.space);
+                        app.select_color(color);
+                        color
+                    };
                     text("Picked", "已取色", "已取色").detail(color.hex())
                 }
                 Ok(None) => text("Color selection cancelled", "已取消取色", "已取消取色").into(),
@@ -2382,7 +2404,7 @@ pub fn run(options: Options) -> Result<(), String> {
             wait_for_events(Duration::from_millis(8));
             continue;
         }
-        if app.input.text.editing() {
+        if app.input.text.editing() && !app.picking && !restore_text_focus {
             let toolbar_focused = toolbar.input_focused();
             if toolbar_focused {
                 app.input.text.saw_input_focus();
@@ -2440,7 +2462,8 @@ pub fn run(options: Options) -> Result<(), String> {
             controller_display = toolbar.display_id();
             follow_controller = true;
         }
-        let keep_editor_open = toolbar.input_focused() || text_focus.deadline.is_some();
+        let keep_editor_open =
+            restore_text_focus || toolbar.input_focused() || text_focus.deadline.is_some();
         let mouse = !picker.choosing() && app.mouse_ready();
         let mut unsafe_layer = false;
         let mut extended_ink_bytes: usize = canvases
@@ -2467,6 +2490,12 @@ pub fn run(options: Options) -> Result<(), String> {
                 canvas.window.raise();
             }
             if visible {
+                if index == active && restore_text_focus && app.input.text.editing() {
+                    gui.sync_text_input(&toolbar, false);
+                    canvas.focus_text_editor();
+                    canvas.keep_toolbar_above(&toolbar);
+                    text_focus.deadline = Some(Instant::now() + Duration::from_millis(150));
+                }
                 if let Err(error) = canvas.update_guard(&toolbar, mouse) {
                     app.status = canvas::failure(error);
                     unsafe_layer = true;
@@ -2516,6 +2545,26 @@ pub fn run(options: Options) -> Result<(), String> {
                 .find(|canvas| canvas.visible && (wayland || canvas.output == toolbar_display))
             {
                 canvas.keep_toolbar_above(&toolbar);
+            }
+        }
+        if app.input.text.take_screen_pick()
+            && !app.picking
+            && !app.screenshot.active()
+            && !file_dialog.pending()
+            && app.tool.is_text()
+            && !app.pass
+            && !app.hidden
+        {
+            let canvas = &mut canvases[active];
+            app.input.text.refocus();
+            canvas.suspend_text_input();
+            text_pick = Some((canvas.window.id, canvas.output));
+            app.picking = true;
+            picker.start(wayland || xwayland);
+            toolbar_dirty = true;
+            for canvas in &mut canvases {
+                canvas.dirty = true;
+                canvas.guard_dirty = true;
             }
         }
         if let Some(action) = app.screenshot.action()

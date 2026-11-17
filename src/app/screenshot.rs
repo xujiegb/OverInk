@@ -18,7 +18,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-const MENU_SIZE: Vec2 = vec2(286., 42.);
+const MENU_BUTTON: Vec2 = vec2(108., 44.);
+const MENU_PADDING: f32 = 6.;
+const MENU_GAP: f32 = 5.;
+const MENU_SIZE: Vec2 = vec2(
+    3. * MENU_BUTTON.x + 2. * (MENU_GAP + MENU_PADDING),
+    MENU_BUTTON.y + 2. * MENU_PADDING,
+);
 const CAPTURE_DELAY: Duration = Duration::from_millis(120);
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -67,7 +73,7 @@ impl SelectionEvent {
         let mouse = |id| id != SDL_TOUCH_MOUSEID && id != SDL_PEN_MOUSEID;
         // Read only the union member selected by SDL's event type.
         unsafe {
-            match SDL_EventType(event.r#type) {
+            match event_type(event) {
                 ty @ (SDL_EVENT_MOUSE_BUTTON_DOWN | SDL_EVENT_MOUSE_BUTTON_UP) => {
                     let b = event.button;
                     if b.button != SDL_BUTTON_LEFT as u8 || !mouse(b.which) {
@@ -338,18 +344,18 @@ impl Screenshot {
         Some(result.map(|_| false))
     }
 
-    pub fn ui(&mut self, ui: &mut Ui, tr: Language) {
+    pub fn ui(&mut self, ui: &mut Ui, tr: Language, units: f32) {
         let screen = ui.clip_rect();
         let region = match self.stage {
             Stage::Selecting(drag) => {
                 let region = drag.map(|drag| Rect::from_two_pos(drag.start, drag.end));
-                shade(ui, screen, region);
+                shade(ui, screen, region, units);
                 return;
             }
             Stage::Ready(region, _) => region,
             _ => return,
         };
-        shade(ui, screen, Some(region));
+        shade(ui, screen, Some(region), units);
         let replace = self.replace.as_ref().map(|path| {
             format!(
                 "{} {}",
@@ -362,11 +368,12 @@ impl Screenshot {
             )
         });
         let detail = self.error.as_deref().or(replace.as_deref());
-        let size = MENU_SIZE + vec2(0., if detail.is_some() { 42. } else { 0. });
-        let rect = toolbar::context_menu_rect(region, screen, size, None);
+        let size = MENU_SIZE + vec2(0., if detail.is_some() { 26. } else { 0. });
+        let scale = toolbar::menu_scale(screen, size, units);
+        let rect = toolbar::context_menu_rect(region, screen, size * scale, None, scale);
         ui.painter().rect(
             rect,
-            6.,
+            8. * scale,
             ui.visuals().window_fill(),
             ui.visuals().window_stroke(),
             StrokeKind::Inside,
@@ -374,9 +381,10 @@ impl Screenshot {
         let mut menu = ui.new_child(
             UiBuilder::new()
                 .id_salt("screenshot-actions")
-                .max_rect(rect.shrink(5.)),
+                .max_rect(rect.shrink(MENU_PADDING * scale)),
         );
-        menu.spacing_mut().item_spacing.x = 4.;
+        menu.spacing_mut().item_spacing = Vec2::splat(MENU_GAP * scale);
+        menu.spacing_mut().button_padding = vec2(6., 4.) * scale;
         let primary = if self.replace.is_some() {
             (MenuAction::Replace, tr.text("Replace", "替换", "取代"))
         } else {
@@ -395,7 +403,10 @@ impl Screenshot {
                 let enabled =
                     !self.save_dialog && (!saving || matches!(action, MenuAction::Cancel));
                 if ui
-                    .add_enabled(enabled, egui::Button::new(label).min_size(vec2(89., 32.)))
+                    .add_enabled(
+                        enabled,
+                        toolbar::menu_button(label, scale).min_size(MENU_BUTTON * scale),
+                    )
                     .clicked()
                 {
                     self.action = Some(action);
@@ -403,7 +414,8 @@ impl Screenshot {
             }
         });
         if let Some(detail) = detail {
-            menu.add(egui::Label::new(detail).truncate())
+            let detail = egui::RichText::new(detail).size(14. * scale);
+            menu.add(egui::Label::new(detail.clone()).truncate())
                 .on_hover_text(detail);
         }
     }
@@ -504,7 +516,7 @@ impl Screenshot {
     }
 }
 
-fn shade(ui: &Ui, screen: Rect, region: Option<Rect>) {
+fn shade(ui: &Ui, screen: Rect, region: Option<Rect>, units: f32) {
     let shade = Color32::from_black_alpha(76);
     let painter = ui.painter();
     if let Some(region) = region {
@@ -519,7 +531,7 @@ fn shade(ui: &Ui, screen: Rect, region: Option<Rect>) {
         painter.rect_stroke(
             region,
             0.,
-            Stroke::new(1.5, toolbar::ACTIVE),
+            Stroke::new(1.5 * units, toolbar::ACTIVE),
             StrokeKind::Inside,
         );
     } else {
@@ -705,6 +717,47 @@ fn write_screenshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn screenshot_actions_accept_clicks_in_the_scaled_button_area() {
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(1440., 900.));
+        let region = Rect::from_min_size(pos2(400., 200.), vec2(320., 240.));
+        let units = 2.;
+        let rect = toolbar::context_menu_rect(region, screen, MENU_SIZE * units, None, units);
+        let pos = rect.min
+            + vec2(
+                MENU_PADDING + MENU_BUTTON.x + MENU_GAP + MENU_BUTTON.x * 0.5,
+                MENU_PADDING + MENU_BUTTON.y * 0.5,
+            ) * units;
+        let mut screenshot = Screenshot {
+            stage: Stage::Ready(region, Arc::new(Image::buffer(1, 1).unwrap())),
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        let mut render = |events| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    screenshot.ui(ui, Language::English, units);
+                },
+            )
+            .drop_without_applying_deltas();
+        };
+        render(vec![egui::Event::PointerMoved(pos)]);
+        for pressed in [true, false] {
+            render(vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            }]);
+        }
+        assert!(matches!(screenshot.action(), Some(MenuAction::SaveAs)));
+    }
 
     #[test]
     fn saving_png_never_recreates_a_missing_default_folder_or_overwrites_an_automatic_name() {

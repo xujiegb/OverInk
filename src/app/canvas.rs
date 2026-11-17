@@ -157,12 +157,11 @@ impl Canvas {
 
     pub fn set_page_geometry(&self, app: &mut App) {
         app.input.protected = self.protected;
-        app.input.canvas_units =
-            self.window.scale() / unsafe { SDL_GetWindowPixelDensity(self.window.raw) }.max(0.1);
+        app.input.canvas_units = self.window.ui_scale().max(0.5);
     }
 
     pub fn keep_toolbar_above(&self, toolbar: &Window) {
-        if unsafe { SDL_GetWindowFlags(toolbar.raw) } & SDL_WINDOW_HIDDEN != 0 {
+        if toolbar.hidden() {
             return;
         }
         if self.output == toolbar.display_id() || driver() == "wayland" {
@@ -204,7 +203,7 @@ impl Canvas {
     }
 
     pub fn text_event(&mut self, app: &mut App, event: &SDL_Event) -> bool {
-        let ty = unsafe { SDL_EventType(event.r#type) };
+        let ty = event_type(event);
         let editing = app.input.text.editing();
         if !editing
             && matches!(
@@ -425,7 +424,8 @@ impl Canvas {
         keep_editor_open: bool,
     ) -> Option<egui::FullOutput> {
         let screenshot = app.screenshot.targets(self.window.id);
-        let interactive = !app.screenshot.active() && app.tool.is_text() && !app.pass;
+        let interactive =
+            !app.screenshot.active() && !app.picking && app.tool.is_text() && !app.pass;
         let editing = interactive && app.input.text.editing();
         if !app.touch_enabled {
             self.cancel_text_touches(app);
@@ -465,7 +465,7 @@ impl Canvas {
                 app.text_ui(ui, interactive, composing, keep_editor_open);
             }
             if screenshot {
-                app.screenshot.ui(ui, app.language);
+                app.screenshot.ui(ui, app.language, app.input.canvas_units);
             }
         });
         self.text_repaint_at = gui::repaint_at(&output);

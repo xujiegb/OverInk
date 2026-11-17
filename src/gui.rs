@@ -122,7 +122,7 @@ impl Gui {
             .viewports
             .entry(egui::ViewportId::ROOT)
             .or_default()
-            .native_pixels_per_point = Some(w.scale() / w.ui_scale() * units);
+            .native_pixels_per_point = Some(w.pixel_density() * units);
         self.raw.take()
     }
 
@@ -158,7 +158,7 @@ impl Gui {
     /// SDL_Event is a tagged C union. Only the field selected by `type` is read.
     pub fn event(&mut self, e: &SDL_Event, id: SDL_WindowID, size: [f32; 2]) {
         unsafe {
-            let ty = SDL_EventType(e.r#type);
+            let ty = event_type(e);
             let scale = self.units;
             match ty {
                 SDL_EVENT_MOUSE_MOTION
