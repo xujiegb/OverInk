@@ -2557,11 +2557,13 @@ pub fn run(options: Options) -> Result<(), String> {
                 canvas.keep_toolbar_above(&toolbar);
             }
         }
-        if !app.picking
+        // Consume requests even when the picker cannot start, so an old
+        // click does not unexpectedly launch a picker after switching modes.
+        if app.input.text.take_screen_pick()
+            && !app.picking
             && !app.screenshot.active()
             && !file_dialog.pending()
             && app.text_pick_target().is_some()
-            && app.input.text.take_screen_pick()
         {
             app.input.text.refocus();
             if let Some(target) = app.text_pick_target() {
