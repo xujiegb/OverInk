@@ -125,7 +125,7 @@ impl App {
         } else {
             self.rail_tools(ui, commands);
         }
-        ui.add_space(2.);
+        ui.add_space(1.);
         if toolbar::button(
             ui,
             Icon::Quit,
@@ -143,7 +143,7 @@ impl App {
         egui::ScrollArea::vertical()
             .id_salt("tool-rail")
             .max_height((ui.available_height() - 34.).max(0.))
-            .auto_shrink([false, false])
+            .auto_shrink([false, true])
             .show(ui, |ui| {
                 ui.vertical_centered(|ui| {
                     let eye = if self.hidden { Icon::EyeOff } else { Icon::Eye };
@@ -219,7 +219,7 @@ impl App {
                     {
                         self.toggle_panel(Panel::Shapes);
                     }
-                    ui.separator();
+                    ui.add(egui::Separator::default().spacing(3.));
                     self.panel_button(
                         ui,
                         Icon::Brush,
@@ -278,7 +278,7 @@ impl App {
                         Panel::Settings,
                         tr.text("Settings and files", "设置与文件", "設定與檔案"),
                     );
-                    ui.separator();
+                    ui.add(egui::Separator::default().spacing(3.));
                     for row in PRESETS.as_chunks::<2>().0 {
                         ui.horizontal(|ui| {
                             ui.add_space(((ui.available_width() - 40.) * 0.5).max(0.));
@@ -318,7 +318,7 @@ impl App {
                     {
                         self.toggle_panel(Panel::Colors);
                     }
-                    ui.add_space(6.);
+                    ui.add_space(3.);
                 });
             });
     }
