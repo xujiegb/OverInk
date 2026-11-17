@@ -1,7 +1,5 @@
 //! Minimal native input-region adapters. These change only input routing, never
 //! the overlay alpha, so existing ink stays visible while clicks pass through.
-#![deny(clippy::undocumented_unsafe_blocks)]
-
 use crate::sdl::*;
 use std::ffi::c_void;
 #[cfg(target_os = "macos")]
@@ -27,6 +25,7 @@ impl Passthrough {
 }
 
 #[cfg(target_os = "windows")]
+#[deny(clippy::undocumented_unsafe_blocks)]
 pub fn set_controller_region(
     window: &Window,
     size: [i32; 2],
@@ -77,6 +76,7 @@ pub fn set_controller_region(
 }
 
 #[cfg(target_os = "windows")]
+#[deny(clippy::undocumented_unsafe_blocks)]
 impl Passthrough {
     pub fn set(&mut self, window: &Window, pass: bool) -> Result<(), String> {
         // SAFETY: The Win32 HWND is borrowed from a live SDL window. The
@@ -170,6 +170,7 @@ impl Passthrough {
     }
 }
 #[cfg(target_os = "macos")]
+#[deny(clippy::undocumented_unsafe_blocks)]
 impl Passthrough {
     pub fn set(&mut self, window: &Window, pass: bool) -> Result<(), String> {
         use objc2::{
@@ -225,6 +226,7 @@ impl Passthrough {
     }
 }
 
+#[deny(clippy::undocumented_unsafe_blocks)]
 pub fn keep_controller_above(canvas: &Window, controller: &Window, _native: &Passthrough) {
     let _ = canvas;
     #[cfg(target_os = "windows")]
@@ -297,6 +299,7 @@ pub fn show_canvas(canvas: &Window, controller: &Window, shown: bool) -> Result<
     canvas.show(shown)
 }
 
+#[deny(clippy::undocumented_unsafe_blocks)]
 pub fn controller_bounds(canvas: &Window, controller: &Window) -> Option<[f32; 4]> {
     #[cfg(target_os = "windows")]
     // SAFETY: Both HWNDs are validated before invoking User32. The output
