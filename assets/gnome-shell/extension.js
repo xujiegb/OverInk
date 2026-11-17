@@ -345,17 +345,18 @@ export default class OverInkOverlay extends Extension {
     enable() {
         this._windows = new Map();
         this._bridge = new CaptureBridge(this);
+        const bridge = this._bridge;
         this._busOwner = Gio.bus_own_name(
             Gio.BusType.SESSION,
             BUS_NAME,
             Gio.BusNameOwnerFlags.NONE,
             connection => {
-                // bus_own_name may complete after disable() has already
-                // invalidated the bridge during a fast extension reload.
-                if (!this._bridge || !this._windows)
+                // A previous bus-owner callback can arrive after disable and
+                // even after a new enable has installed a different bridge.
+                if (this._bridge !== bridge || !this._windows)
                     return;
                 this._dbus = Gio.DBusExportedObject.wrapJSObject(
-                    CAPTURE_INTERFACE, this._bridge);
+                    CAPTURE_INTERFACE, bridge);
                 this._dbus.export(connection, BUS_PATH);
             },
             () => {},
