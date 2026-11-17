@@ -2119,7 +2119,18 @@ pub fn run(options: Options) -> Result<(), String> {
                     restore_toolbar_focus = true;
                     mode_changed = true;
                 }
-                Err(SaveError::Exists(path)) => app.screenshot.confirm_replace(path),
+                Err(SaveError::Exists(path)) if app.screenshot.ready() => {
+                    app.screenshot.confirm_replace(path);
+                }
+                Err(SaveError::Exists(path)) => {
+                    app.status = text(
+                        "Screenshot not saved; file already exists",
+                        "截图未保存：文件已存在",
+                        "螢幕擷取未儲存：檔案已存在",
+                    )
+                    .detail(path.display());
+                    toolbar_dirty = true;
+                }
                 Err(SaveError::Cancelled) => {
                     app.screenshot.cancel();
                     toolbar_dirty = true;
@@ -2319,7 +2330,11 @@ pub fn run(options: Options) -> Result<(), String> {
             cmd.redraw_canvas = true;
             toolbar_dirty = true;
         }
-        if cmd.screenshot && !file_dialog.pending() && !picker.active() {
+        if cmd.screenshot
+            && !file_dialog.pending()
+            && !picker.active()
+            && !app.screenshot.saving()
+        {
             let canvas = &mut canvases[active];
             canvas.finish_text_editor(&mut app, theme)?;
             app.finish_all_contacts();
