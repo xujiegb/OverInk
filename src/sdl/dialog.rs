@@ -147,6 +147,17 @@ mod tests {
     }
 
     #[test]
+    fn native_callback_copies_selected_path() {
+        let mut dialog = FileDialog::default();
+        let id = dialog.begin(DialogKind::ScreenshotFile).unwrap();
+        let files = [c"sample.png".as_ptr(), ptr::null()];
+        native::chosen(ptr::without_provenance_mut(id), files.as_ptr(), -1);
+        let (kind, result) = dialog.poll().unwrap();
+        assert!(matches!(kind, DialogKind::ScreenshotFile));
+        assert_eq!(result, Ok(Some(PathBuf::from("sample.png"))));
+    }
+
+    #[test]
     fn native_callback_cancellation_is_owned_and_consumed_once() {
         let mut dialog = FileDialog::default();
         let id = dialog.begin(DialogKind::Font).unwrap();
