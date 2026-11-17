@@ -35,14 +35,12 @@ pub fn set_controller_region(
         Graphics::Gdi::{CombineRgn, CreateRectRgn, DeleteObject, HGDIOBJ, RGN_DIFF, SetWindowRgn},
     };
     unsafe {
-        let hwnd = HWND(SDL_GetPointerProperty(
-            SDL_GetWindowProperties(window.raw),
-            SDL_PROP_WINDOW_WIN32_HWND_POINTER,
-            std::ptr::null_mut(),
-        ));
-        if hwnd.is_invalid() {
-            return Err("No Win32 window handle".into());
-        }
+        let hwnd = HWND(
+            window
+                .win32_hwnd()
+                .ok_or("No Win32 window handle")?
+                .as_ptr(),
+        );
         let region = if let Some(hole) = hole {
             let full = CreateRectRgn(0, 0, size[0], size[1]);
             let cut = CreateRectRgn(hole.x, hole.y, hole.x + hole.w, hole.y + hole.h);
@@ -106,14 +104,10 @@ impl Passthrough {
                 fn SetLastError(e: u32);
                 fn GetLastError() -> u32;
             }
-            let hwnd = SDL_GetPointerProperty(
-                SDL_GetWindowProperties(window.raw),
-                SDL_PROP_WINDOW_WIN32_HWND_POINTER,
-                std::ptr::null_mut(),
-            );
-            if hwnd.is_null() {
-                return Err("No Win32 window handle".into());
-            }
+            let hwnd = window
+                .win32_hwnd()
+                .ok_or("No Win32 window handle")?
+                .as_ptr();
             if self.applied == Some((hwnd, pass)) {
                 return Ok(());
             }
@@ -176,14 +170,10 @@ impl Passthrough {
         };
 
         unsafe {
-            let ns = SDL_GetPointerProperty(
-                SDL_GetWindowProperties(window.raw),
-                SDL_PROP_WINDOW_COCOA_WINDOW_POINTER,
-                std::ptr::null_mut(),
-            );
-            if ns.is_null() {
-                return Err("No Cocoa window handle".into());
-            }
+            let ns = window
+                .cocoa_window()
+                .ok_or("No Cocoa window handle")?
+                .as_ptr();
             let cocoa = ns.cast::<AnyObject>();
             if self.applied != Some((ns, pass)) {
                 // SDL's Cocoa listener can reset ignoresMouseEvents when it
@@ -241,11 +231,9 @@ pub fn keep_controller_above(canvas: &Window, controller: &Window, _native: &Pas
                 flags: u32,
             ) -> i32;
         }
-        let hwnd = SDL_GetPointerProperty(
-            SDL_GetWindowProperties(controller.raw),
-            SDL_PROP_WINDOW_WIN32_HWND_POINTER,
-            std::ptr::null_mut(),
-        );
+        let hwnd = controller
+            .win32_hwnd()
+            .map_or(std::ptr::null_mut(), |handle| handle.as_ptr());
         if !hwnd.is_null() {
             // Keep drawing focus on the canvas; raising the controller must not
             // interrupt a pen stroke or activate the window beneath it.
@@ -267,16 +255,12 @@ pub fn keep_controller_above(canvas: &Window, controller: &Window, _native: &Pas
             fn sel_registerName(name: *const std::ffi::c_char) -> *mut c_void;
             fn objc_msgSend();
         }
-        let window = SDL_GetPointerProperty(
-            SDL_GetWindowProperties(controller.raw),
-            SDL_PROP_WINDOW_COCOA_WINDOW_POINTER,
-            std::ptr::null_mut(),
-        );
-        let under = SDL_GetPointerProperty(
-            SDL_GetWindowProperties(canvas.raw),
-            SDL_PROP_WINDOW_COCOA_WINDOW_POINTER,
-            std::ptr::null_mut(),
-        );
+        let window = controller
+            .cocoa_window()
+            .map_or(std::ptr::null_mut(), |handle| handle.as_ptr());
+        let under = canvas
+            .cocoa_window()
+            .map_or(std::ptr::null_mut(), |handle| handle.as_ptr());
         if !window.is_null() && !under.is_null() {
             let get: unsafe extern "C" fn(*mut c_void, *mut c_void) -> isize =
                 std::mem::transmute(objc_msgSend as *const ());
@@ -329,19 +313,8 @@ pub fn controller_bounds(canvas: &Window, controller: &Window) -> Option<[f32; 4
             fn GetWindowRect(w: *mut c_void, rect: *mut Rect) -> i32;
             fn ScreenToClient(w: *mut c_void, point: *mut Point) -> i32;
         }
-        let window = SDL_GetPointerProperty(
-            SDL_GetWindowProperties(controller.raw),
-            SDL_PROP_WINDOW_WIN32_HWND_POINTER,
-            std::ptr::null_mut(),
-        );
-        let surface = SDL_GetPointerProperty(
-            SDL_GetWindowProperties(canvas.raw),
-            SDL_PROP_WINDOW_WIN32_HWND_POINTER,
-            std::ptr::null_mut(),
-        );
-        if window.is_null() || surface.is_null() {
-            return None;
-        }
+        let window = controller.win32_hwnd()?.as_ptr();
+        let surface = canvas.win32_hwnd()?.as_ptr();
         let mut rect = Rect {
             left: 0,
             top: 0,
