@@ -95,8 +95,7 @@ impl Job {
                         )
                     })
                 };
-                let (crop, sizes) =
-                    crop.for_portal(display, _displays, pixels, density, usable)?;
+                let (crop, sizes) = crop.for_portal(display, _displays, pixels, density, usable)?;
                 return crate::picker::portal::SystemJob::screenshot(multi, move |image| {
                     if multi && !sizes.contains(&[image.width, image.height]) {
                         return Err(
@@ -180,7 +179,10 @@ impl Crop {
         };
         let monitor = bounds(display.bounds);
         if !monitor.is_positive()
-            || self.size.iter().any(|size| !size.is_finite() || *size <= 0.)
+            || self
+                .size
+                .iter()
+                .any(|size| !size.is_finite() || *size <= 0.)
         {
             return Err("Invalid screenshot canvas size".into());
         }
@@ -305,7 +307,13 @@ mod tests {
         };
         let usable = Rect::from_min_size(egui::pos2(0., 34.), egui::vec2(1440., 866.));
         let (crop, _) = selected
-            .for_portal(&display, &[display.clone()], [1440, 866], None, Some(usable))
+            .for_portal(
+                &display,
+                &[display.clone()],
+                [1440, 866],
+                None,
+                Some(usable),
+            )
             .unwrap();
         assert_eq!(crop.size, [1440., 900.]);
         assert_eq!(crop.region.min, egui::pos2(100., 84.));
