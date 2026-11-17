@@ -136,9 +136,11 @@ impl SelectionEvent {
     }
 }
 
-fn capture_mouse(pointer: Pointer, captured: bool) {
+fn capture_mouse(pointer: Pointer, captured: bool) -> bool {
     if matches!(pointer, Pointer::Mouse(_)) {
-        unsafe { SDL_CaptureMouse(captured) };
+        unsafe { SDL_CaptureMouse(captured) }
+    } else {
+        true
     }
 }
 
@@ -272,6 +274,20 @@ impl Screenshot {
             .is_some_and(|event| self.select(event, size))
     }
 
+    pub fn reject_touch_drag(&mut self) -> bool {
+        if matches!(
+            self.stage,
+            Stage::Selecting(Some(Drag {
+                pointer: Pointer::Touch(_),
+                ..
+            }))
+        ) {
+            self.stage = Stage::Selecting(None);
+            return true;
+        }
+        false
+    }
+
     fn select(&mut self, event: SelectionEvent, size: [f32; 2]) -> bool {
         let Stage::Selecting(drag) = &mut self.stage else {
             return false;
@@ -281,12 +297,16 @@ impl Screenshot {
         match event {
             SelectionEvent::Down(pointer, point) if drag.is_none() && point.is_finite() => {
                 let start = clamp(point);
+                if !capture_mouse(pointer, true) {
+                    self.error = Some(format!("Cannot capture the mouse: {}", crate::sdl::error()));
+                    return true;
+                }
+                self.error = None;
                 *drag = Some(Drag {
                     pointer,
                     start,
                     end: start,
                 });
-                capture_mouse(pointer, true);
                 true
             }
             SelectionEvent::Move(pointer, point)
@@ -376,6 +396,15 @@ impl Screenshot {
             Stage::Selecting(drag) => {
                 let region = drag.map(|drag| Rect::from_two_pos(drag.start, drag.end));
                 shade(ui, screen, region, units);
+                if let Some(error) = &self.error {
+                    ui.painter().text(
+                        screen.center(),
+                        egui::Align2::CENTER_CENTER,
+                        error,
+                        egui::FontId::proportional(14. * units),
+                        Color32::WHITE,
+                    );
+                }
                 return;
             }
             Stage::Ready(region, _) => region,
@@ -927,8 +956,29 @@ mod tests {
         let state = AtomicU8::new(SAVE_PENDING);
         state.store(SAVE_CANCELLED, Ordering::Release);
         let image = Image::buffer(1, 1).unwrap();
-        assert!(write_screenshot(&image, Destination::Replace(path.clone()), false, 1., &state).is_err());
+        assert!(
+            write_screenshot(&image, Destination::Replace(path.clone()), false, 1., &state)
+                .is_err()
+        );
         assert_eq!(std::fs::read(path).unwrap(), b"original");
+    }
+
+    #[test]
+    fn pen_proximity_cancels_a_touch_selection_without_cancelling_pen_selection() {
+        let mut screenshot = Screenshot {
+            stage: Stage::Selecting(Some(Drag {
+                pointer: Pointer::Touch(TouchKey {
+                    device: 3,
+                    finger: 5,
+                }),
+                start: pos2(10., 10.),
+                end: pos2(20., 30.),
+            })),
+            ..Default::default()
+        };
+        assert!(screenshot.reject_touch_drag());
+        assert!(matches!(screenshot.stage, Stage::Selecting(None)));
+        assert!(!screenshot.reject_touch_drag());
     }
 
     #[test]
