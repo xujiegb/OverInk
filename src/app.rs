@@ -2115,7 +2115,11 @@ pub fn run(options: Options) -> Result<(), String> {
             app.picking = false;
             let origin = text_pick.take();
             let canvas = &canvases[active];
-            let on_text = origin == Some((canvas.window.id, canvas.output));
+            let on_text = origin.as_ref().is_some_and(|(window, output, target)| {
+                *window == canvas.window.id
+                    && *output == canvas.output
+                    && app.text_pick_target().as_ref() == Some(target)
+            });
             if on_text {
                 app.input.text.refocus();
                 restore_text_focus = app.input.text.editing();
@@ -2132,14 +2136,18 @@ pub fn run(options: Options) -> Result<(), String> {
             }
             app.status = match result {
                 Ok(Some(color)) => {
-                    let color = if on_text {
+                    let applied = if on_text {
                         app.pick_text_color(color)
                     } else {
                         let color = color.converted(app.color.space);
                         app.select_color(color);
-                        color
+                        Some(color)
                     };
-                    text("Picked", "已取色", "已取色").detail(color.hex())
+                    if let Some(color) = applied {
+                        text("Picked", "已取色", "已取色").detail(color.hex())
+                    } else {
+                        text("Color selection cancelled", "已取消取色", "已取消取色").into()
+                    }
                 }
                 Ok(None) => text("Color selection cancelled", "已取消取色", "已取消取色").into(),
                 Err(error) => {
@@ -2348,6 +2356,8 @@ pub fn run(options: Options) -> Result<(), String> {
             }
         }
         if cmd.pick && !app.screenshot.active() && !file_dialog.pending() {
+            // Toolbar picks are brush picks, not delayed text-target results.
+            text_pick = None;
             if picker.active() {
                 picker.cancel();
             } else {
@@ -2547,24 +2557,24 @@ pub fn run(options: Options) -> Result<(), String> {
                 canvas.keep_toolbar_above(&toolbar);
             }
         }
-        if app.input.text.take_screen_pick()
-            && !app.picking
+        if !app.picking
             && !app.screenshot.active()
             && !file_dialog.pending()
-            && app.tool.is_text()
-            && !app.pass
-            && !app.hidden
+            && app.text_pick_target().is_some()
+            && app.input.text.take_screen_pick()
         {
-            let canvas = &mut canvases[active];
             app.input.text.refocus();
-            canvas.suspend_text_input();
-            text_pick = Some((canvas.window.id, canvas.output));
-            app.picking = true;
-            picker.start(wayland || xwayland);
-            toolbar_dirty = true;
-            for canvas in &mut canvases {
-                canvas.dirty = true;
-                canvas.guard_dirty = true;
+            if let Some(target) = app.text_pick_target() {
+                let canvas = &mut canvases[active];
+                canvas.suspend_text_input();
+                text_pick = Some((canvas.window.id, canvas.output, target));
+                app.picking = true;
+                picker.start(wayland || xwayland);
+                toolbar_dirty = true;
+                for canvas in &mut canvases {
+                    canvas.dirty = true;
+                    canvas.guard_dirty = true;
+                }
             }
         }
         if let Some(action) = app.screenshot.action()
