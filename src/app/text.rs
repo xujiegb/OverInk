@@ -691,13 +691,13 @@ impl App {
             .horizontal(|ui| {
                 let apply = ui
                     .add_sized(
-                        vec2(88., toolbar::RAIL_BUTTON_SIZE.y) * scale,
+                        vec2(88., MENU_BUTTON.y) * scale,
                         toolbar::menu_button(tr.text("Apply", "应用", "套用"), scale),
                     )
                     .clicked();
                 let pick = ui
                     .add_sized(
-                        vec2(114., toolbar::RAIL_BUTTON_SIZE.y) * scale,
+                        vec2(114., MENU_BUTTON.y) * scale,
                         toolbar::menu_button(tr.text("Pick screen", "屏幕取色", "螢幕取色"), scale),
                     )
                     .clicked();
