@@ -56,14 +56,11 @@ impl Gui {
             composition_ended: None,
         }
     }
-    // A renderer reset invalidates SDL textures without notifying egui.
-    // Discard their handles before dropping this Gui, then build a fresh
-    // Context so the glyph atlas and custom textures are uploaded again.
-    pub fn forget_renderer_textures(&mut self) {
-        // SDL renderer reset invalidates native textures; never destroy them twice.
-        for (_, texture) in self.textures.drain() {
-            std::mem::forget(texture);
-        }
+    // A render-target reset invalidates contents, not SDL texture ownership.
+    // Release the old textures while the renderer is still alive, then rebuild
+    // egui's atlas from a new Context.
+    pub fn reset_renderer_textures(&mut self) {
+        self.textures.clear();
     }
 
     pub fn input(&mut self, w: &Window) -> RawInput {
