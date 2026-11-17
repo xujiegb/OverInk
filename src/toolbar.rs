@@ -7,8 +7,8 @@ pub use tooltip::{Tooltips, hint};
 pub const WIDTH: f32 = 56.;
 pub const HEIGHT: f32 = 580.;
 pub const PANEL_WIDTH: f32 = 312.;
-pub const RAIL_BUTTON_SIZE: Vec2 = vec2(32., 28.);
-pub const MENU_FONT_SIZE: f32 = 14.;
+pub const RAIL_BUTTON_SIZE: Vec2 = vec2(35., 28.);
+pub const MENU_FONT_SIZE: f32 = 16.;
 pub const GRIP_HEIGHT: f32 = 39.;
 pub const ACTIVE: Color32 = Color32::from_rgb(0, 122, 157);
 
