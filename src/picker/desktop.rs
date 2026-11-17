@@ -31,8 +31,7 @@ fn scaled_pixels(
         }
         let coordinate = (local[i] * physical[i] as f32 / logical[i]).floor();
         if !coordinate.is_finite()
-            || coordinate < i32::MIN as f32
-            || coordinate >= 2_147_483_648.
+            || !(i32::MIN as f32..2_147_483_648.).contains(&coordinate)
         {
             return Err("Screen coordinate is out of range".into());
         }
