@@ -1,5 +1,7 @@
 //! Minimal native input-region adapters. These change only input routing, never
 //! the overlay alpha, so existing ink stays visible while clicks pass through.
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use crate::sdl::*;
 use std::ffi::c_void;
 #[cfg(target_os = "macos")]
@@ -34,6 +36,9 @@ pub fn set_controller_region(
         Foundation::HWND,
         Graphics::Gdi::{CombineRgn, CreateRectRgn, DeleteObject, HGDIOBJ, RGN_DIFF, SetWindowRgn},
     };
+    // SAFETY: The window remains live, and GDI region handles are checked
+    // before use. This function destroys regions on failure and transfers
+    // ownership to Windows only after SetWindowRgn succeeds.
     unsafe {
         let hwnd = HWND(
             window
@@ -74,6 +79,9 @@ pub fn set_controller_region(
 #[cfg(target_os = "windows")]
 impl Passthrough {
     pub fn set(&mut self, window: &Window, pass: bool) -> Result<(), String> {
+        // SAFETY: The Win32 HWND is borrowed from a live SDL window. The
+        // imported User32 functions use their system calling conventions,
+        // and all style changes are checked via GetLastError.
         unsafe {
             #[link(name = "user32")]
             unsafe extern "system" {
@@ -169,6 +177,8 @@ impl Passthrough {
             runtime::{AnyObject, Bool},
         };
 
+        // SAFETY: SDL owns the live NSWindow. The Cocoa selectors and Bool
+        // return/argument types match the NSWindow methods being called.
         unsafe {
             let ns = window
                 .cocoa_window()
@@ -218,6 +228,8 @@ impl Passthrough {
 pub fn keep_controller_above(canvas: &Window, controller: &Window, _native: &Passthrough) {
     let _ = canvas;
     #[cfg(target_os = "windows")]
+    // SAFETY: The HWND is borrowed from a live SDL window, and SetWindowPos
+    // is called with the documented HWND_TOPMOST pseudo-handle and flags.
     unsafe {
         #[link(name = "user32")]
         unsafe extern "system" {
@@ -287,6 +299,8 @@ pub fn show_canvas(canvas: &Window, controller: &Window, shown: bool) -> Result<
 
 pub fn controller_bounds(canvas: &Window, controller: &Window) -> Option<[f32; 4]> {
     #[cfg(target_os = "windows")]
+    // SAFETY: Both HWNDs are validated before invoking User32. The output
+    // structs have the C layout of RECT and POINT and remain valid for calls.
     unsafe {
         #[repr(C)]
         struct Rect {
