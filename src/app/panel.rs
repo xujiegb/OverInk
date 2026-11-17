@@ -318,7 +318,7 @@ impl App {
                     {
                         self.toggle_panel(Panel::Colors);
                     }
-                    ui.add_space(2.);
+                    ui.add_space(3.);
                 });
             });
     }
