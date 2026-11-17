@@ -13,6 +13,9 @@ const CANVAS = 'OverInk - canvas';
 const TOOLBAR = 'OverInk';
 const BUS_NAME = 'org.overink.Overlay';
 const BUS_PATH = '/org/overink/Overlay';
+const TRUST_PATH = GLib.build_filenamev([
+    GLib.get_user_config_dir(), 'overink', 'capture-trust.json',
+]);
 const CAPTURE_INTERFACE = `<node>
     <interface name="org.overink.Overlay">
         <method name="CaptureArea">
@@ -41,9 +44,11 @@ class CaptureBridge {
         this._extension = extension;
         this._busy = false;
         this._active = true;
-        // Approval is ephemeral: one explicit Shell confirmation per live PID
-        // and /proc start time, never a persistent "trusted app name".
+        // Per-run grants are bound to the PID/start time, not a forgeable name.
         this._approved = new Set();
+        // Persistent grants are opt-in and pinned to a root-owned, non-writable
+        // executable and its metadata; replacing/upgrading it requires consent.
+        this._trusted = this._loadTrusted();
         this._deniedUntil = new Map();
         this._pending = null;
     }
@@ -90,7 +95,76 @@ class CaptureBridge {
         return `${pid}:${fields[19]}:${executable}`;
     }
 
-    _requestPermission(executable, state) {
+    _loadTrusted() {
+        try {
+            const [, data] = Gio.File.new_for_path(TRUST_PATH).load_contents(null);
+            const entries = JSON.parse(new TextDecoder().decode(data));
+            if (!Array.isArray(entries))
+                return new Set();
+            return new Set(entries.filter(entry =>
+                typeof entry === 'string' && entry.length <= 1024).slice(-32));
+        } catch (error) {
+            // Missing or corrupt permission state must fail closed: re-prompt.
+            return new Set();
+        }
+    }
+
+    _rememberTrusted(key) {
+        const folder = GLib.path_get_dirname(TRUST_PATH);
+        if (GLib.mkdir_with_parents(folder, 0o700) !== 0)
+            throw new Error('Cannot create OverInk permission directory');
+        const next = new Set(this._trusted);
+        next.delete(key);
+        next.add(key);
+        while (next.size > 32)
+            next.delete(next.values().next().value);
+        const data = new TextEncoder().encode(JSON.stringify([...next]));
+        // Atomic replace; PRIVATE creates files with mode 0600.
+        Gio.File.new_for_path(TRUST_PATH).replace_contents(
+            data, null, false, Gio.FileCreateFlags.PRIVATE, null);
+        this._trusted = next;
+    }
+
+    _persistentIdentity(executable) {
+        // Do not persist approval based on the process basename, window title,
+        // or a user-writable binary. Each ancestor must be root-owned and not
+        // group/world writable, including the executable itself.
+        if (!GLib.path_is_absolute(executable) || executable.endsWith(' (deleted)'))
+            return null;
+        try {
+            let path = executable;
+            let binary = null;
+            while (true) {
+                const info = Gio.File.new_for_path(path).query_info(
+                    'unix::uid,unix::mode,unix::device,unix::inode,standard::size,time::modified',
+                    Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS, null);
+                const mode = info.get_attribute_uint32('unix::mode');
+                if (info.get_attribute_uint32('unix::uid') !== 0 ||
+                    (mode & 0o022) !== 0)
+                    return null;
+                if (path === executable) {
+                    if ((mode & 0o170000) !== 0o100000)
+                        return null;
+                    binary = [
+                        info.get_attribute_uint64('unix::device'),
+                        info.get_attribute_uint64('unix::inode'),
+                        info.get_size(),
+                        info.get_attribute_uint64('time::modified'),
+                    ].map(String).join(':');
+                } else if ((mode & 0o170000) !== 0o040000) {
+                    return null;
+                }
+                if (path === '/')
+                    break;
+                path = GLib.path_get_dirname(path);
+            }
+            return `${executable}:${binary}`;
+        } catch (error) {
+            return null;
+        }
+    }
+
+    _requestPermission(executable, state, canRemember) {
         return new Promise(resolve => {
             // Only GNOME Shell can present this modal. A successful capture
             // must wait for the modal to finish closing, or the first PNG
@@ -102,45 +176,50 @@ class CaptureBridge {
             }));
             let settled = false;
             let closing = false;
-            let approved = false;
-            const settle = allowed => {
+            let decision = null;
+            const settle = () => {
                 if (settled)
                     return;
                 settled = true;
                 state.dismissDialog = null;
-                resolve(allowed && this._active && !state.cancelled);
+                resolve(this._active && !state.cancelled ? decision : null);
             };
-            const close = allowed => {
-                approved = allowed && !state.cancelled;
+            const close = choice => {
+                decision = !state.cancelled ? choice : null;
                 if (closing) {
                     if (state.cancelled)
-                        settle(false);
+                        settle();
                     return;
                 }
                 closing = true;
                 if (state.cancelled)
-                    settle(false);
+                    settle();
                 if (dialog.state === ModalDialog.State.OPENED ||
                     dialog.state === ModalDialog.State.OPENING) {
                     dialog.close(global.get_current_time());
                 } else {
-                    settle(false);
+                    settle();
                     dialog.destroy();
                 }
             };
             state.dismissDialog = () => close(false);
             dialog.connect('closed', () => {
-                settle(approved);
+                settle();
                 dialog.destroy();
             });
-            dialog.connect('destroy', () => settle(false));
-            dialog.setButtons([
+            dialog.connect('destroy', () => settle());
+            const buttons = [
                 {label: 'Deny', key: Clutter.KEY_Escape, isDefault: true,
-                    action: () => close(false)},
-                {label: 'Allow for this run', action: () => close(true)},
-            ]);
+                    action: () => close(null)},
+                {label: 'Allow for this run', action: () => close('run')},
+            ];
+            if (canRemember) {
+                buttons.push({label: 'Always allow this installation',
+                    action: () => close('always')});
+            }
+            dialog.setButtons(buttons);
             if (!dialog.open(global.get_current_time()))
-                close(false);
+                close(null);
         });
     }
 
@@ -215,8 +294,11 @@ class CaptureBridge {
             const now = GLib.get_monotonic_time();
             if ((this._deniedUntil.get(processIdentity) ?? 0) > now)
                 throw new Error('Screen capture denied recently; retry in 30 seconds');
-            if (!this._approved.has(processIdentity)) {
-                if (!await this._requestPermission(executable, state)) {
+            const trusted = this._persistentIdentity(executable);
+            if (!this._approved.has(processIdentity) &&
+                !(trusted && this._trusted.has(trusted))) {
+                const choice = await this._requestPermission(executable, state, !!trusted);
+                if (!choice) {
                     this._checkActive(state);
                     // Rate-limit repeated permission prompts from an impostor.
                     if (this._deniedUntil.size > 32) {
@@ -235,8 +317,18 @@ class CaptureBridge {
                 if (this._processIdentity(pid, executable) !== processIdentity ||
                     !global.get_window_actors().includes(canvas))
                     throw new Error('OverInk changed while authorizing screen capture');
-                this._approved.add(processIdentity);
+                if (choice === 'always' && trusted) {
+                    // A changed binary during the modal cannot inherit consent.
+                    if (this._persistentIdentity(executable) !== trusted)
+                        throw new Error('OverInk executable changed during approval');
+                    try {
+                        this._rememberTrusted(trusted);
+                    } catch (error) {
+                        throw new Error(`Could not remember screenshot permission: ${error}`);
+                    }
+                }
             }
+            this._approved.add(processIdentity);
             this._checkActive(state);
             const frame = canvas.meta_window.get_frame_rect();
             if (frame.width <= 0 || frame.height <= 0)
