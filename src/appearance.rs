@@ -1,9 +1,10 @@
+#![forbid(unsafe_code)]
+
 use crate::sdl::*;
 use egui::Theme;
 use serde::{Deserialize, Serialize};
 use std::{
     borrow::Cow,
-    ffi::CStr,
     path::{Path, PathBuf},
 };
 
@@ -82,26 +83,10 @@ impl Language {
         {
             return language;
         }
-        unsafe {
-            let mut count = 0;
-            let locales = SDL_GetPreferredLocales(&mut count);
-            if locales.is_null() {
-                return Self::English;
-            }
-            let name = |ptr: *const std::ffi::c_char| {
-                if ptr.is_null() {
-                    ""
-                } else {
-                    CStr::from_ptr(ptr).to_str().unwrap_or_default()
-                }
-            };
-            let language = (0..count as usize).find_map(|i| {
-                let locale = (*locales.add(i)).as_ref()?;
-                Self::from_locale(name(locale.language), name(locale.country))
-            });
-            SDL_free(locales.cast());
-            language.unwrap_or_default()
-        }
+        preferred_locales()
+            .into_iter()
+            .find_map(|(language, country)| Self::from_locale(&language, &country))
+            .unwrap_or_default()
     }
 }
 
@@ -236,7 +221,7 @@ impl ThemeMonitor {
         let theme = match mode {
             ThemeMode::Light => Some(Theme::Light),
             ThemeMode::Dark => Some(Theme::Dark),
-            ThemeMode::System => match unsafe { SDL_GetSystemTheme() } {
+            ThemeMode::System => match system_theme() {
                 SDL_SYSTEM_THEME_DARK => Some(Theme::Dark),
                 SDL_SYSTEM_THEME_LIGHT => Some(Theme::Light),
                 _ => None,
