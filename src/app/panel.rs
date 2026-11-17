@@ -1,11 +1,9 @@
-use super::{App, Board, Commands, screenshot};
+use super::{App, Board, Commands, canvas::Canvas, screenshot};
 use crate::{
     appearance::{Language, Text, ThemeMode},
     color::{InkColor, PRESETS, Space},
     frame_rate::FrameRate,
-    icc::ColorManager,
     model::Tool,
-    sdl::Renderer,
     toolbar::{self, Icon, Panel},
 };
 use egui::{Align, Layout, RichText, Ui, vec2};
@@ -16,15 +14,13 @@ impl App {
     pub(super) fn ui(
         &mut self,
         ui: &mut Ui,
-        canvas: &super::canvas::Canvas,
+        canvas: &Canvas,
         video: &str,
         freeze_unavailable: Option<Text>,
         mark: egui::TextureId,
         dialog_open: bool,
     ) -> Commands {
         let mut commands = Commands::default();
-        let render = &canvas.render;
-        let color = &canvas.color;
         let tr = self.language;
         let available = ui.available_size();
         let opened = self.panel.filter(|_| !self.picking);
@@ -83,8 +79,7 @@ impl App {
                                             ),
                                             Panel::Settings => self.settings(
                                                 ui,
-                                                render,
-                                                color,
+                                                canvas,
                                                 video,
                                                 &mut commands,
                                                 dialog_open,
@@ -561,12 +556,13 @@ impl App {
     fn settings(
         &mut self,
         ui: &mut Ui,
-        render: &Renderer,
-        color: &ColorManager,
+        canvas: &Canvas,
         video: &str,
         commands: &mut Commands,
         dialog_open: bool,
     ) {
+        let render = &canvas.render;
+        let color = &canvas.color;
         let tr = self.language;
         ui.horizontal(|ui| {
             ui.label(tr.text("Language", "语言", "語言"));
@@ -643,13 +639,17 @@ impl App {
         }
         ui.separator();
         ui.label(RichText::new(tr.text("Screenshots", "截图", "螢幕擷取")).strong());
-        commands.preferences |= ui
-            .checkbox(
-                &mut self.preferences.screenshot_hdr,
-                tr.text("Save HDR PNG", "保存 HDR PNG", "儲存 HDR PNG"),
-            )
-            .changed();
-        if !cfg!(any(target_os = "windows", target_os = "macos")) {
+        let hdr_available = screenshot::hdr_available(&canvas.window);
+        let mut hdr = hdr_available && self.preferences.screenshot_hdr;
+        let checkbox = egui::Checkbox::new(
+            &mut hdr,
+            tr.text("Save HDR PNG", "保存 HDR PNG", "儲存 HDR PNG"),
+        );
+        if ui.add_enabled(hdr_available, checkbox).changed() {
+            self.preferences.screenshot_hdr = hdr;
+            commands.preferences = true;
+        }
+        if !hdr_available {
             ui.small(screenshot::unsupported_hdr(tr));
         }
         ui.label(tr.text("Default save folder", "默认保存文件夹", "預設儲存資料夾"));

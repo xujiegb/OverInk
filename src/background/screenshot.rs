@@ -2,6 +2,15 @@ use super::Image;
 use crate::{display::Display, sdl::*};
 use egui::Rect;
 
+pub fn hdr_supported() -> bool {
+    #[cfg(target_os = "windows")]
+    return super::windows::hdr_supported();
+    #[cfg(target_os = "macos")]
+    return super::macos::hdr_supported();
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    false
+}
+
 pub enum Job {
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     Native(super::system::Job<Image>),
@@ -47,11 +56,38 @@ impl Job {
                 return Err("HDR capture is unavailable on this display backend".into());
             }
             if _portal {
-                let crop = crop.on_portal_desktop(display, _displays);
-                return crate::picker::portal::SystemJob::screenshot(move |image| {
-                    if !crop.matches_desktop(&image) {
+                let multi = _displays.len() > 1;
+                let pixels = window.pixel_size().map(|n| n.max(0) as u32);
+                let density = if multi {
+                    if driver() != "wayland" {
                         return Err(
-                            "The portal screenshot does not match the display layout".into()
+                            "Cannot map a multi-display portal screenshot in XWayland".into()
+                        );
+                    }
+                    if unsafe { SDL_GetHintBoolean(SDL_HINT_VIDEO_WAYLAND_SCALE_TO_DISPLAY, false) }
+                    {
+                        return Err(
+                            "Cannot map a multi-display portal screenshot with SDL scaling forced"
+                                .into(),
+                        );
+                    }
+                    let density = display_density(display).ok_or("No Wayland pixel density")?;
+                    if _displays.iter().any(|output| {
+                        display_density(output).is_none_or(|other| (other - density).abs() > 0.0001)
+                    }) {
+                        return Err(
+                            "The portal does not provide a layout for mixed display scaling".into(),
+                        );
+                    }
+                    Some(density)
+                } else {
+                    None
+                };
+                let (crop, sizes) = crop.for_portal(display, _displays, pixels, density)?;
+                return crate::picker::portal::SystemJob::screenshot(multi, move |image| {
+                    if !sizes.contains(&[image.width, image.height]) {
+                        return Err(
+                            "The portal screenshot dimensions do not match the desktop".into()
                         );
                     }
                     crop.apply(image)
@@ -99,7 +135,13 @@ impl Crop {
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    fn on_portal_desktop(self, display: &Display, displays: &[Display]) -> Self {
+    fn for_portal(
+        self,
+        display: &Display,
+        displays: &[Display],
+        pixels: [u32; 2],
+        desktop_density: Option<f32>,
+    ) -> Result<(Self, [[u32; 2]; 2]), String> {
         let bounds = |[x, y, w, h]: [i32; 4]| {
             Rect::from_min_size(
                 egui::pos2(x as f32, y as f32),
@@ -107,29 +149,90 @@ impl Crop {
             )
         };
         let monitor = bounds(display.bounds);
-        let desktop = displays.iter().fold(monitor, |desktop, output| {
-            desktop.union(bounds(output.bounds))
-        });
-        let scale = monitor.size() / egui::Vec2::from(self.size);
-        let offset = monitor.min - desktop.min;
-        let map = |point: egui::Pos2| egui::Pos2::ZERO + offset + point.to_vec2() * scale;
-        Self {
-            region: Rect::from_min_max(map(self.region.min), map(self.region.max)),
-            size: desktop.size().into(),
+        if self.size != <[f32; 2]>::from(monitor.size()) {
+            return Err("The screenshot canvas does not cover the selected display".into());
         }
+        let mut desktop = monitor;
+        if desktop_density.is_some() {
+            for (index, output) in displays.iter().enumerate() {
+                let area = bounds(output.bounds);
+                if !area.is_positive()
+                    || displays[..index]
+                        .iter()
+                        .any(|other| area.intersect(bounds(other.bounds)).is_positive())
+                {
+                    return Err(
+                        "The portal screenshot layout is ambiguous for overlapping displays".into(),
+                    );
+                }
+                desktop = desktop.union(area);
+            }
+        }
+        let offset = monitor.min - desktop.min;
+        let size: [f32; 2] = desktop.size().into();
+        let pixels =
+            desktop_density.map_or(pixels, |density| size.map(|n| (n * density).round() as u32));
+        Ok((
+            Self {
+                region: self.region.translate(offset),
+                size,
+            },
+            [size.map(|n| n as u32), pixels],
+        ))
     }
+}
 
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    fn matches_desktop(self, image: &Image) -> bool {
-        // The portal returns the whole desktop as a single image.
-        let height = f64::from(image.width) / f64::from(self.size[0]) * f64::from(self.size[1]);
-        (height - f64::from(image.height)).abs() <= 2.
-    }
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+fn display_density(display: &Display) -> Option<f32> {
+    // SDL's Wayland desktop mode expresses the native pixels per logical point.
+    let mode = unsafe { SDL_GetDesktopDisplayMode(SDL_DisplayID(display.id)).as_ref()? };
+    let density = mode.pixel_density;
+    (mode.w == display.bounds[2]
+        && mode.h == display.bounds[3]
+        && density.is_finite()
+        && density > 0.)
+        .then_some(density)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    fn portal_crop_uses_the_monitor_origin_and_expected_desktop_sizes() {
+        let display = |id, bounds| Display {
+            id,
+            name: id.to_string(),
+            bounds,
+            refresh: 60.,
+            scale: 1.5,
+        };
+        let left = display(1, [-800, -200, 800, 600]);
+        let right = display(2, [0, 0, 800, 600]);
+        let local = Rect::from_min_size(egui::pos2(30., 20.), egui::vec2(10., 12.));
+        let selection = Crop {
+            region: local,
+            size: [800., 600.],
+        };
+        let (crop, sizes) = selection
+            .for_portal(&right, &[left, right.clone()], [1200, 900], Some(1.5))
+            .unwrap();
+        assert_eq!(sizes, [[1600, 800], [2400, 1200]]);
+        assert_eq!(crop.region, local.translate(egui::vec2(800., 200.)));
+        assert!(!sizes.contains(&[1200, 900]));
+        assert!(!sizes.contains(&[3200, 1600]));
+        assert!(
+            selection
+                .for_portal(
+                    &right,
+                    &[right.clone(), right.clone()],
+                    [1200, 900],
+                    Some(1.5)
+                )
+                .is_err()
+        );
+    }
 
     #[test]
     fn logical_selection_crops_fractional_scale_to_pixel_edges() {

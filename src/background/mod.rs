@@ -88,22 +88,30 @@ impl Image {
     }
 
     #[cfg(any(target_os = "windows", target_os = "macos", test))]
-    /// The source must contain initialized pixels in each row. Padding is never read.
-    unsafe fn copy_hdr_rows(
+    fn copy_hdr_rows(
         &mut self,
-        bytes: *const u8,
         len: usize,
         stride: usize,
+        mut copy: impl FnMut(usize, &mut [u8]),
     ) -> Result<(), String> {
-        let row_bytes = self.width as usize * 8;
-        let needed = stride
-            .checked_mul(self.height as usize - 1)
+        let row_bytes = (self.width as usize)
+            .checked_mul(8)
+            .ok_or("Invalid HDR capture row width")?;
+        let height = self.height as usize;
+        let needed = height
+            .checked_sub(1)
+            .and_then(|last| last.checked_mul(stride))
             .and_then(|offset| offset.checked_add(row_bytes));
-        if bytes.is_null() || stride < row_bytes || needed.is_none_or(|size| size > len) {
+        if row_bytes == 0
+            || self.encoding != Encoding::LinearRgba16
+            || row_bytes.checked_mul(height) != Some(self.rgba.len())
+            || stride < row_bytes
+            || needed.is_none_or(|size| size > len)
+        {
             return Err("Invalid HDR capture row pitch".into());
         }
         for (y, row) in self.rgba.chunks_exact_mut(row_bytes).enumerate() {
-            unsafe { ptr::copy_nonoverlapping(bytes.add(y * stride), row.as_mut_ptr(), row_bytes) };
+            copy(y * stride, row);
             for pixel in row.as_chunks_mut::<8>().0 {
                 // A display snapshot is opaque. Leave the three FP16 color
                 // channels intact, including negative values and values above 1.
@@ -721,7 +729,11 @@ mod tests {
         padded[..2].copy_from_slice(&0x4800_u16.to_ne_bytes()); // 8.0
         padded[2..4].copy_from_slice(&0xb800_u16.to_ne_bytes()); // -0.5
         padded[12..14].copy_from_slice(&0x4000_u16.to_ne_bytes()); // 2.0
-        unsafe { image.copy_hdr_rows(padded.as_ptr(), padded.len(), 12) }.unwrap();
+        image
+            .copy_hdr_rows(padded.len(), 12, |offset, row| {
+                row.copy_from_slice(&padded[offset..offset + row.len()]);
+            })
+            .unwrap();
         assert_eq!(&image.rgba[..6], &padded[..6]);
         assert_eq!(&image.rgba[8..14], &padded[12..18]);
         assert_eq!(&image.rgba[6..8], &0x3c00_u16.to_ne_bytes());

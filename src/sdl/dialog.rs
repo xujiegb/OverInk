@@ -66,6 +66,22 @@ impl FileDialog {
     }
 
     pub fn open(&mut self, kind: DialogKind, window: &Window, location: Option<&Path>) -> bool {
+        // This callback is only passed to SDL. Its result list and strings
+        // are borrowed from SDL for the duration of the call.
+        extern "C" fn chosen(user: *mut c_void, files: *const *const c_char, _filter: c_int) {
+            complete(user.addr(), || {
+                if files.is_null() {
+                    return Err(error());
+                }
+                // SDL's file list has at least its null terminator.
+                let file = unsafe { *files };
+                if file.is_null() {
+                    return Ok(None);
+                }
+                path_from_c(unsafe { CStr::from_ptr(file) }).map(Some)
+            });
+        }
+
         let Some(id) = self.begin(kind) else {
             return false;
         };
@@ -121,27 +137,14 @@ impl Drop for FileDialog {
     }
 }
 
-unsafe extern "C" fn chosen(user: *mut c_void, files: *const *const c_char, _filter: c_int) {
-    if user.is_null() {
-        return;
-    }
+fn complete(id: usize, value: impl FnOnce() -> ResultPath) {
     let mut callbacks = callbacks();
-    let Some(result) = callbacks.results.get_mut(&user.addr()) else {
+    let Some(result) = callbacks.results.get_mut(&id) else {
         return;
     };
-    if result.is_some() {
-        return;
+    if result.is_none() {
+        *result = Some(value());
     }
-    // Copy the selected path while SDL still owns the result list.
-    *result = Some(unsafe {
-        if files.is_null() {
-            Err(error())
-        } else if (*files).is_null() {
-            Ok(None)
-        } else {
-            path_from_c(CStr::from_ptr(*files)).map(Some)
-        }
-    });
 }
 
 pub fn downloads() -> Option<PathBuf> {
@@ -189,13 +192,8 @@ mod tests {
         assert!(dialog.poll().is_none());
 
         std::thread::spawn(move || {
-            let path = CString::new("截图.png").unwrap();
-            let files = [path.as_ptr(), ptr::null()];
-            let user = ptr::without_provenance_mut(id);
-            unsafe {
-                chosen(user, files.as_ptr(), -1);
-                chosen(user, [ptr::null()].as_ptr(), -1);
-            }
+            complete(id, || path_from_c(c"截图.png").map(Some));
+            complete(id, || panic!("A duplicate callback must be ignored"));
         })
         .join()
         .unwrap();
@@ -218,15 +216,10 @@ mod tests {
         let mut next = FileDialog::default();
         let next_id = next.begin(DialogKind::ScreenshotFolder).unwrap();
         assert_ne!(id, next_id);
-        let files = [ptr::null()];
-        unsafe {
-            chosen(ptr::null_mut(), files.as_ptr(), -1);
-            chosen(ptr::without_provenance_mut(id), files.as_ptr(), -1);
-        }
+        complete(0, || panic!("Request ID zero is reserved"));
+        complete(id, || panic!("A dropped request must be ignored"));
         assert!(next.poll().is_none());
-        unsafe {
-            chosen(ptr::without_provenance_mut(next_id), files.as_ptr(), -1);
-        }
+        complete(next_id, || Ok(None));
         assert!(matches!(
             next.poll(),
             Some((DialogKind::ScreenshotFolder, Ok(None)))

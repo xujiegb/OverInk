@@ -33,12 +33,12 @@ impl SystemJob<InkColor> {
 }
 impl SystemJob<Image> {
     pub fn screenshot(
+        require_screen_target: bool,
         prepare: impl FnOnce(Image) -> Result<Image, String> + Send + 'static,
     ) -> Result<Self, String> {
-        Self::spawn("overink-screenshot-portal", |cancelled| {
-            let values = zbus::block_on(request("Screenshot", cancelled)).map_err(|error| {
-                format!("Screen capture: {error}. A Screenshot portal backend is required.")
-            })?;
+        Self::spawn("overink-screenshot-portal", move |cancelled| {
+            let values = zbus::block_on(request("Screenshot", require_screen_target, cancelled))
+                .map_err(|error| format!("Screen capture: {error}"))?;
             let Some(mut values) = values else {
                 return Ok(None);
             };
@@ -120,7 +120,7 @@ fn local_file(uri: &str) -> Result<PathBuf, String> {
 async fn pick(
     cancelled: &async_channel::Receiver<()>,
 ) -> Result<Option<InkColor>, Box<dyn std::error::Error + Send + Sync>> {
-    let Some(mut values) = request("PickColor", cancelled).await? else {
+    let Some(mut values) = request("PickColor", false, cancelled).await? else {
         return Ok(None);
     };
     let value = values.remove("color").ok_or("Portal returned no color")?;
@@ -144,6 +144,7 @@ async fn pick(
 }
 async fn request(
     method: &str,
+    require_screen_target: bool,
     cancelled: &async_channel::Receiver<()>,
 ) -> Result<Option<HashMap<String, OwnedVariant>>, Box<dyn std::error::Error + Send + Sync>> {
     let connection = Connection::session().await?;
@@ -193,6 +194,8 @@ async fn request(
             && targets & 1 != 0
         {
             options.insert("target", Variant::from(1_u32));
+        } else if require_screen_target {
+            return Err("The portal cannot request the entire desktop explicitly".into());
         }
     }
     let handle: OwnedObjectPath = screenshot.call(method, &("", options)).await?;
@@ -317,6 +320,15 @@ mod tests {
             .unwrap();
         assert_eq!(color.srgb8(), [0x12, 0xab, 0xef]);
         assert_eq!(color.space, Space::Srgb);
+
+        let screenshot = SystemJob::screenshot(true, Ok).unwrap();
+        let error = screenshot
+            .receiver
+            .recv_timeout(timeout)
+            .unwrap()
+            .err()
+            .unwrap();
+        assert!(error.contains("cannot request the entire desktop explicitly"));
 
         let job = SystemJob::start().unwrap();
         requested.recv_timeout(timeout).unwrap();

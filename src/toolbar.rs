@@ -165,6 +165,7 @@ pub fn context_menu_rect(anchor: Rect, screen: Rect, size: Vec2, protected: Opti
         } else if hole.top() - gap - size.y >= inner.top() {
             rect = rect.translate(vec2(0., hole.top() - gap - size.y - y));
         }
+        // If no side fits, keep the screen-clamped anchor, allowing the overlap.
     }
     rect
 }

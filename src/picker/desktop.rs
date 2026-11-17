@@ -102,7 +102,7 @@ mod x11 {
         }
         Err("X11 screen capture is unavailable".into())
     }
-    unsafe fn display(window: &Window) -> Result<*mut c_void, String> {
+    fn display(window: &Window) -> Result<*mut c_void, String> {
         let display = unsafe {
             SDL_GetPointerProperty(
                 SDL_GetWindowProperties(window.raw),

@@ -62,6 +62,7 @@ fn binary16(bits: u16) -> f32 {
     let mantissa = f32::from(bits & 1023);
     match exponent {
         0 => sign * mantissa * (1. / 16_777_216.),
+        31 if bits == 0x7c00 => 65_504.,
         31 => 0.,
         _ => {
             let scale = f32::from_bits(((exponent + 112) as u32) << 23);
@@ -97,6 +98,12 @@ fn pq(relative: f32) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn positive_fp16_infinity_encodes_as_a_highlight() {
+        assert_eq!(pq(binary16(0x7c00)), u16::MAX);
+        assert_eq!(binary16(0x7e00), 0.);
+    }
 
     #[test]
     fn hdr_png_tags_pq_and_preserves_values_above_diffuse_white() {

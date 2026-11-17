@@ -4,12 +4,17 @@ use crate::{
     display::Display,
     sdl::*,
     toolbar,
+    touch::{self, TouchKey},
 };
 use egui::{Color32, Pos2, Rect, Stroke, StrokeKind, Ui, UiBuilder, Vec2, pos2, vec2};
 use std::{
-    io::{BufWriter, Write},
+    io::{self, BufWriter, Write},
     path::{Path, PathBuf},
-    sync::{Arc, mpsc},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     time::{Duration, Instant},
 };
 
@@ -21,6 +26,7 @@ const CAPTURE_TIMEOUT: Duration = Duration::from_secs(120);
 pub enum MenuAction {
     Save,
     SaveAs,
+    Replace,
     Cancel,
 }
 
@@ -28,13 +34,133 @@ pub enum MenuAction {
 enum Stage {
     #[default]
     Idle,
-    Selecting(Option<(Pos2, Pos2)>),
+    Selecting(Option<Drag>),
     Preparing(Rect),
     Waiting(Rect, Instant),
     Capturing(Rect, Job, Instant),
     Ready(Rect, Arc<Image>),
 }
-type SaveResult = Result<PathBuf, String>;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pointer {
+    Mouse(SDL_MouseID),
+    Pen(SDL_PenID),
+    Touch(TouchKey),
+}
+
+#[derive(Clone, Copy)]
+struct Drag {
+    pointer: Pointer,
+    start: Pos2,
+    end: Pos2,
+}
+
+enum SelectionEvent {
+    Down(Pointer, Pos2),
+    Move(Pointer, Pos2),
+    Up(Pointer, Pos2),
+    Cancel(Option<Pointer>),
+}
+
+impl SelectionEvent {
+    fn from_sdl(event: &SDL_Event, size: [f32; 2], touch_enabled: bool) -> Option<Self> {
+        let mouse = |id| id != SDL_TOUCH_MOUSEID && id != SDL_PEN_MOUSEID;
+        // Read only the union member selected by SDL's event type.
+        unsafe {
+            match SDL_EventType(event.r#type) {
+                ty @ (SDL_EVENT_MOUSE_BUTTON_DOWN | SDL_EVENT_MOUSE_BUTTON_UP) => {
+                    let b = event.button;
+                    if b.button != SDL_BUTTON_LEFT as u8 || !mouse(b.which) {
+                        return None;
+                    }
+                    let press = if ty == SDL_EVENT_MOUSE_BUTTON_DOWN {
+                        Self::Down
+                    } else {
+                        Self::Up
+                    };
+                    Some(press(Pointer::Mouse(b.which), pos2(b.x, b.y)))
+                }
+                SDL_EVENT_MOUSE_MOTION if mouse(event.motion.which) => {
+                    let m = event.motion;
+                    Some(Self::Move(Pointer::Mouse(m.which), pos2(m.x, m.y)))
+                }
+                ty @ (SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP) if !event.ptouch.eraser => {
+                    let p = event.ptouch;
+                    let press = if ty == SDL_EVENT_PEN_DOWN {
+                        Self::Down
+                    } else {
+                        Self::Up
+                    };
+                    Some(press(Pointer::Pen(p.which), pos2(p.x, p.y)))
+                }
+                SDL_EVENT_PEN_MOTION => {
+                    let p = event.pmotion;
+                    Some(Self::Move(Pointer::Pen(p.which), pos2(p.x, p.y)))
+                }
+                SDL_EVENT_PEN_PROXIMITY_OUT => {
+                    Some(Self::Cancel(Some(Pointer::Pen(event.pproximity.which))))
+                }
+                ty @ (SDL_EVENT_FINGER_DOWN | SDL_EVENT_FINGER_MOTION | SDL_EVENT_FINGER_UP)
+                    if touch_enabled =>
+                {
+                    let finger = event.tfinger;
+                    let pointer = Pointer::Touch(finger.into());
+                    match ty {
+                        SDL_EVENT_FINGER_DOWN if !touch::is_indirect(finger.touchID) => {
+                            touch::point(finger, size).map(|p| Self::Down(pointer, pos2(p.x, p.y)))
+                        }
+                        SDL_EVENT_FINGER_MOTION => {
+                            touch::point(finger, size).map(|p| Self::Move(pointer, pos2(p.x, p.y)))
+                        }
+                        SDL_EVENT_FINGER_UP => Some(
+                            touch::point(finger, size).map_or(Self::Cancel(Some(pointer)), |p| {
+                                Self::Up(pointer, pos2(p.x, p.y))
+                            }),
+                        ),
+                        _ => None,
+                    }
+                }
+                SDL_EVENT_FINGER_CANCELED => {
+                    Some(Self::Cancel(Some(Pointer::Touch(event.tfinger.into()))))
+                }
+                SDL_EVENT_WINDOW_FOCUS_LOST => Some(Self::Cancel(None)),
+                _ => None,
+            }
+        }
+    }
+}
+
+fn capture_mouse(pointer: Pointer, captured: bool) {
+    if matches!(pointer, Pointer::Mouse(_)) {
+        unsafe { SDL_CaptureMouse(captured) };
+    }
+}
+
+#[derive(Debug)]
+pub enum SaveError {
+    Failed(String),
+    Exists(PathBuf),
+}
+
+impl From<String> for SaveError {
+    fn from(error: String) -> Self {
+        Self::Failed(error)
+    }
+}
+
+type SaveResult = Result<PathBuf, SaveError>;
+
+struct SaveJob {
+    direct: bool,
+    receiver: mpsc::Receiver<SaveResult>,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl Drop for SaveJob {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
+}
 
 #[derive(Default)]
 pub struct Screenshot {
@@ -44,15 +170,16 @@ pub struct Screenshot {
     sdr_white: f32,
     cursor: Option<Crosshair>,
     action: Option<MenuAction>,
-    save_job: Option<(bool, mpsc::Receiver<SaveResult>)>,
+    save_job: Option<SaveJob>,
     error: Option<String>,
+    replace: Option<PathBuf>,
     save_dialog: bool,
 }
 
 impl Screenshot {
     pub fn start(&mut self, window: &Window, hdr: bool) {
         self.target = window.id;
-        self.hdr = hdr;
+        self.hdr = hdr && hdr_available(window);
         let white = unsafe {
             SDL_GetFloatProperty(
                 SDL_GetWindowProperties(window.raw),
@@ -68,6 +195,7 @@ impl Screenshot {
         self.stage = Stage::Selecting(None);
         self.cursor = Crosshair::new();
         self.error = None;
+        self.replace = None;
     }
 
     pub fn active(&self) -> bool {
@@ -91,59 +219,76 @@ impl Screenshot {
     }
 
     pub fn cancel(&mut self) {
-        if matches!(self.stage, Stage::Selecting(Some(_))) {
-            unsafe { SDL_CaptureMouse(false) };
+        if let Stage::Selecting(Some(drag)) = self.stage {
+            capture_mouse(drag.pointer, false);
         }
         self.stage = Stage::Idle;
         self.cursor = None;
         self.action = None;
         self.error = None;
+        self.replace = None;
         self.save_dialog = false;
+        self.save_job = None;
     }
 
-    pub fn event(&mut self, event: &SDL_Event, window: &Window) -> bool {
+    pub fn event(&mut self, event: &SDL_Event, window: &Window, touch_enabled: bool) -> bool {
+        if !matches!(self.stage, Stage::Selecting(_)) {
+            return false;
+        }
+        let size = window.size();
+        SelectionEvent::from_sdl(event, size, touch_enabled)
+            .is_some_and(|event| self.select(event, size))
+    }
+
+    fn select(&mut self, event: SelectionEvent, size: [f32; 2]) -> bool {
         let Stage::Selecting(drag) = &mut self.stage else {
             return false;
         };
-        let bounds = Rect::from_min_size(Pos2::ZERO, Vec2::from(window.size()));
-        unsafe {
-            match SDL_EventType(event.r#type) {
-                SDL_EVENT_MOUSE_BUTTON_DOWN | SDL_EVENT_MOUSE_BUTTON_UP => {
-                    let button = event.button;
-                    if button.button != SDL_BUTTON_LEFT as u8
-                        || button.which == SDL_TOUCH_MOUSEID
-                        || button.which == SDL_PEN_MOUSEID
-                    {
-                        return false;
-                    }
-                    let point = pos2(button.x, button.y).clamp(bounds.min, bounds.max);
-                    if button.down {
-                        *drag = Some((point, point));
-                        SDL_CaptureMouse(true);
-                    } else if let Some((start, _)) = drag.take() {
-                        SDL_CaptureMouse(false);
-                        let region = Rect::from_two_pos(start, point);
-                        if region.width() >= 2. && region.height() >= 2. {
-                            self.stage = Stage::Preparing(region);
-                            self.cursor = None;
-                        }
-                    }
-                    true
-                }
-                SDL_EVENT_MOUSE_MOTION
-                    if let Some((_, end)) = drag
-                        && event.motion.which != SDL_TOUCH_MOUSEID
-                        && event.motion.which != SDL_PEN_MOUSEID =>
-                {
-                    *end = pos2(event.motion.x, event.motion.y).clamp(bounds.min, bounds.max);
-                    true
-                }
-                SDL_EVENT_WINDOW_FOCUS_LOST if drag.take().is_some() => {
-                    SDL_CaptureMouse(false);
-                    true
-                }
-                _ => false,
+        let bounds = Rect::from_min_size(Pos2::ZERO, Vec2::from(size));
+        let clamp = |p: Pos2| p.clamp(bounds.min, bounds.max);
+        match event {
+            SelectionEvent::Down(pointer, point) if drag.is_none() && point.is_finite() => {
+                let start = clamp(point);
+                *drag = Some(Drag {
+                    pointer,
+                    start,
+                    end: start,
+                });
+                capture_mouse(pointer, true);
+                true
             }
+            SelectionEvent::Move(pointer, point)
+                if let Some(drag) = drag
+                    && drag.pointer == pointer
+                    && point.is_finite() =>
+            {
+                let end = clamp(point);
+                std::mem::replace(&mut drag.end, end) != end
+            }
+            SelectionEvent::Up(pointer, point)
+                if let Some(current) = *drag
+                    && current.pointer == pointer =>
+            {
+                *drag = None;
+                capture_mouse(pointer, false);
+                if point.is_finite() {
+                    let region = Rect::from_two_pos(current.start, clamp(point));
+                    if region.width() >= 2. && region.height() >= 2. {
+                        self.stage = Stage::Preparing(region);
+                        self.cursor = None;
+                    }
+                }
+                true
+            }
+            SelectionEvent::Cancel(pointer)
+                if let Some(current) = *drag
+                    && pointer.is_none_or(|p| p == current.pointer) =>
+            {
+                *drag = None;
+                capture_mouse(current.pointer, false);
+                true
+            }
+            _ => false,
         }
     }
 
@@ -197,7 +342,7 @@ impl Screenshot {
         let screen = ui.clip_rect();
         let region = match self.stage {
             Stage::Selecting(drag) => {
-                let region = drag.map(|(start, end)| Rect::from_two_pos(start, end));
+                let region = drag.map(|drag| Rect::from_two_pos(drag.start, drag.end));
                 shade(ui, screen, region);
                 return;
             }
@@ -205,7 +350,19 @@ impl Screenshot {
             _ => return,
         };
         shade(ui, screen, Some(region));
-        let size = MENU_SIZE + vec2(0., if self.error.is_some() { 42. } else { 0. });
+        let replace = self.replace.as_ref().map(|path| {
+            format!(
+                "{} {}",
+                path.display(),
+                tr.text(
+                    "already exists. Replace it?",
+                    "已存在。要替换吗？",
+                    "已存在。要取代嗎？"
+                )
+            )
+        });
+        let detail = self.error.as_deref().or(replace.as_deref());
+        let size = MENU_SIZE + vec2(0., if detail.is_some() { 42. } else { 0. });
         let rect = toolbar::context_menu_rect(region, screen, size, None);
         ui.painter().rect(
             rect,
@@ -220,25 +377,34 @@ impl Screenshot {
                 .max_rect(rect.shrink(5.)),
         );
         menu.spacing_mut().item_spacing.x = 4.;
-        menu.add_enabled_ui(!self.save_dialog && !self.saving(), |ui| {
-            ui.horizontal(|ui| {
-                for (action, label) in [
-                    (MenuAction::Save, tr.text("Save", "保存", "儲存")),
-                    (
-                        MenuAction::SaveAs,
-                        tr.text("Save As…", "另存为…", "另存為…"),
-                    ),
-                    (MenuAction::Cancel, tr.text("Cancel", "取消", "取消")),
-                ] {
-                    if ui.add_sized([89., 32.], egui::Button::new(label)).clicked() {
-                        self.action = Some(action);
-                    }
+        let primary = if self.replace.is_some() {
+            (MenuAction::Replace, tr.text("Replace", "替换", "取代"))
+        } else {
+            (MenuAction::Save, tr.text("Save", "保存", "儲存"))
+        };
+        let saving = self.saving();
+        menu.horizontal(|ui| {
+            for (action, label) in [
+                primary,
+                (
+                    MenuAction::SaveAs,
+                    tr.text("Save As…", "另存为…", "另存為…"),
+                ),
+                (MenuAction::Cancel, tr.text("Cancel", "取消", "取消")),
+            ] {
+                let enabled =
+                    !self.save_dialog && (!saving || matches!(action, MenuAction::Cancel));
+                if ui
+                    .add_enabled(enabled, egui::Button::new(label).min_size(vec2(89., 32.)))
+                    .clicked()
+                {
+                    self.action = Some(action);
                 }
-            });
+            }
         });
-        if let Some(error) = &self.error {
-            menu.add(egui::Label::new(error).truncate())
-                .on_hover_text(error);
+        if let Some(detail) = detail {
+            menu.add(egui::Label::new(detail).truncate())
+                .on_hover_text(detail);
         }
     }
 
@@ -250,16 +416,33 @@ impl Screenshot {
         self.error = Some(message);
     }
 
+    pub fn confirm_replace(&mut self, path: PathBuf) {
+        self.replace = Some(path);
+    }
+
+    pub fn replace_file(&mut self) -> Result<(), String> {
+        let path = self
+            .replace
+            .clone()
+            .ok_or("No screenshot file to replace")?;
+        self.save(Destination::Replace(path))
+    }
+
     pub fn open_save_as(
         &mut self,
         dialog: &mut dialog::FileDialog,
         window: &Window,
         preferences: &Preferences,
     ) {
-        let folder = default_folder(preferences)
-            .filter(|folder| folder.is_dir())
-            .or_else(|| downloads_folder().filter(|folder| folder.is_dir()));
-        let location = folder.map(|folder| folder.join(format!("{}.png", file_stem())));
+        let folder = if self.error.is_some() {
+            downloads_folder()
+        } else {
+            default_folder(preferences)
+        };
+        let location = self
+            .replace
+            .clone()
+            .or_else(|| folder.map(|folder| folder.join(format!("{}.png", file_stem()))));
         self.save_dialog |= dialog.open(
             dialog::DialogKind::ScreenshotFile,
             window,
@@ -275,31 +458,47 @@ impl Screenshot {
         let Stage::Ready(_, image) = &self.stage else {
             return Err("No screenshot to save".into());
         };
+        if self.saving() {
+            return Err("A screenshot save is already in progress".into());
+        }
         let direct = matches!(destination, Destination::Folder(_));
         let image = Arc::clone(image);
         let (hdr, sdr_white) = (self.hdr, self.sdr_white);
         let (sender, receiver) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = Arc::clone(&cancelled);
         std::thread::Builder::new()
             .name("overink-save-screenshot".into())
             .spawn(move || {
-                let _ = sender.send(write_screenshot(&image, destination, hdr, sdr_white));
+                let _ = sender.send(write_screenshot(
+                    &image,
+                    destination,
+                    hdr,
+                    sdr_white,
+                    &worker_cancelled,
+                ));
             })
             .map_err(|error| error.to_string())?;
         self.error = None;
-        self.save_job = Some((direct, receiver));
+        self.replace = None;
+        self.save_job = Some(SaveJob {
+            direct,
+            receiver,
+            cancelled,
+        });
         Ok(())
     }
 
     pub fn poll_save(&mut self) -> Option<(bool, SaveResult)> {
-        let (direct, receiver) = self.save_job.as_ref()?;
-        let result = match receiver.try_recv() {
+        let job = self.save_job.as_ref()?;
+        let result = match job.receiver.try_recv() {
             Ok(result) => result,
             Err(mpsc::TryRecvError::Empty) => return None,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                Err("Saving the screenshot was interrupted".into())
-            }
+            Err(mpsc::TryRecvError::Disconnected) => Err(SaveError::Failed(
+                "Saving the screenshot was interrupted".into(),
+            )),
         };
-        let direct = *direct;
+        let direct = job.direct;
         self.save_job = None;
         Some((direct, result))
     }
@@ -364,17 +563,22 @@ fn downloads_folder() -> Option<PathBuf> {
     })
 }
 
+pub fn hdr_available(window: &Window) -> bool {
+    window.hdr_enabled() && crate::background::screenshot::hdr_supported()
+}
+
 pub fn unsupported_hdr(tr: Language) -> &'static str {
     tr.text(
-        "HDR screenshots require Windows or macOS 15 or later.",
-        "HDR 截图需要 Windows 或 macOS 15 及以上版本。",
-        "HDR 螢幕擷取需要 Windows 或 macOS 15 以上版本。",
+        "HDR capture is unavailable for this display. Screenshots are saved in SDR.",
+        "当前显示器无法进行 HDR 截图，将保存为 SDR。",
+        "目前的顯示器無法進行 HDR 螢幕擷取，將儲存為 SDR。",
     )
 }
 
 pub enum Destination {
     Folder(PathBuf),
     File(PathBuf),
+    Replace(PathBuf),
 }
 
 fn file_stem() -> String {
@@ -391,19 +595,71 @@ fn file_stem() -> String {
     }
 }
 
-fn write_screenshot(image: &Image, destination: Destination, hdr: bool, white: f32) -> SaveResult {
+struct CancellableWriter<'a, W> {
+    writer: W,
+    cancelled: &'a AtomicBool,
+}
+
+impl<W: Write> Write for CancellableWriter<'_, W> {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        check_cancelled(self.cancelled)?;
+        self.writer.write(data)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        check_cancelled(self.cancelled)?;
+        self.writer.flush()
+    }
+}
+
+fn check_cancelled(cancelled: &AtomicBool) -> io::Result<()> {
+    if cancelled.load(Ordering::Relaxed) {
+        return Err(io::Error::other("Screenshot save cancelled"));
+    }
+    Ok(())
+}
+
+fn png_path(path: PathBuf) -> PathBuf {
+    if path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("png"))
+    {
+        return path;
+    }
+    let mut name = path.into_os_string();
+    name.push(".png");
+    name.into()
+}
+
+fn write_screenshot(
+    image: &Image,
+    destination: Destination,
+    hdr: bool,
+    white: f32,
+    cancelled: &AtomicBool,
+) -> SaveResult {
+    check_cancelled(cancelled).map_err(|error| error.to_string())?;
+    let destination = match destination {
+        Destination::File(path) => Destination::File(png_path(path)),
+        folder => folder,
+    };
     let folder = match &destination {
         Destination::Folder(folder) => folder.as_path(),
-        Destination::File(file) => file
+        Destination::File(file) | Destination::Replace(file) => file
             .parent()
             .filter(|path| !path.as_os_str().is_empty())
             .unwrap_or(Path::new(".")),
     };
     let mut output = tempfile::NamedTempFile::new_in(folder).map_err(|error| error.to_string())?;
-    let mut writer = BufWriter::new(output.as_file_mut());
+    let mut writer = BufWriter::new(CancellableWriter {
+        writer: output.as_file_mut(),
+        cancelled,
+    });
     image.write_png(&mut writer, hdr, white)?;
     writer.flush().map_err(|error| error.to_string())?;
     drop(writer);
+    // Cancellation releases the UI immediately. Check before publishing a
+    // file, including each retry. An in-flight filesystem call may still finish.
     match destination {
         Destination::Folder(folder) => {
             let stem = file_stem();
@@ -414,34 +670,34 @@ fn write_screenshot(image: &Image, destination: Destination, hdr: bool, white: f
                     format!("{stem}-{suffix}.png")
                 };
                 let path = folder.join(name);
+                check_cancelled(cancelled).map_err(|error| error.to_string())?;
                 match output.persist_noclobber(&path) {
                     Ok(_) => return Ok(path),
                     Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
                         output = error.file
                     }
-                    Err(error) => return Err(error.error.to_string()),
+                    Err(error) => return Err(error.error.to_string().into()),
                 }
             }
             unreachable!()
         }
         Destination::File(path) => {
-            let has_png = path
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("png"));
-            if has_png {
-                output
-                    .persist(&path)
-                    .map_err(|error| error.error.to_string())?;
-                Ok(path)
-            } else {
-                let mut name = path.into_os_string();
-                name.push(".png");
-                let path = PathBuf::from(name);
-                output
-                    .persist_noclobber(&path)
-                    .map_err(|error| error.error.to_string())?;
-                Ok(path)
-            }
+            check_cancelled(cancelled).map_err(|error| error.to_string())?;
+            output.persist_noclobber(&path).map_err(|error| {
+                if error.error.kind() == io::ErrorKind::AlreadyExists {
+                    SaveError::Exists(path.clone())
+                } else {
+                    SaveError::Failed(error.error.to_string())
+                }
+            })?;
+            Ok(path)
+        }
+        Destination::Replace(path) => {
+            check_cancelled(cancelled).map_err(|error| error.to_string())?;
+            output
+                .persist(&path)
+                .map_err(|error| error.error.to_string())?;
+            Ok(path)
         }
     }
 }
@@ -459,10 +715,27 @@ mod tests {
             .rgba
             .copy_from_slice(&[255, 0, 0, 255, 0, 255, 0, 255]);
 
-        assert!(write_screenshot(&image, Destination::Folder(missing.clone()), false, 1.).is_err());
+        let cancelled = AtomicBool::new(false);
+        assert!(
+            write_screenshot(
+                &image,
+                Destination::Folder(missing.clone()),
+                false,
+                1.,
+                &cancelled
+            )
+            .is_err()
+        );
         assert!(!missing.exists());
         let save = || {
-            write_screenshot(&image, Destination::Folder(folder.path().into()), false, 1.).unwrap()
+            write_screenshot(
+                &image,
+                Destination::Folder(folder.path().into()),
+                false,
+                1.,
+                &cancelled,
+            )
+            .unwrap()
         };
         let (first, second) = (save(), save());
         assert_ne!(first, second);
@@ -471,5 +744,133 @@ mod tests {
             [255, 0, 0, 0, 255, 0]
         );
         assert!(second.is_file());
+    }
+
+    #[test]
+    fn save_as_confirms_the_final_png_path_before_replacing_it() {
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("capture.png");
+        std::fs::write(&path, b"existing file").unwrap();
+        let image = Image::buffer(1, 1).unwrap();
+        let cancelled = AtomicBool::new(false);
+        for chosen in [path.clone(), path.with_extension("")] {
+            let result = write_screenshot(&image, Destination::File(chosen), false, 1., &cancelled);
+            assert!(matches!(result, Err(SaveError::Exists(existing)) if existing == path));
+            assert_eq!(std::fs::read(&path).unwrap(), b"existing file");
+        }
+        let saved = write_screenshot(
+            &image,
+            Destination::Replace(path.clone()),
+            false,
+            1.,
+            &cancelled,
+        );
+        assert_eq!(saved.unwrap(), path);
+        assert!(image::open(path).is_ok());
+        assert_eq!(std::fs::read_dir(folder.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn cancelling_save_disconnects_its_result_and_prevents_file_creation() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (sender, receiver) = mpsc::channel();
+        let mut screenshot = Screenshot {
+            save_job: Some(SaveJob {
+                direct: true,
+                receiver,
+                cancelled: Arc::clone(&cancelled),
+            }),
+            ..Default::default()
+        };
+        screenshot.cancel();
+        let folder = tempfile::tempdir().unwrap();
+        let image = Image::buffer(1, 1).unwrap();
+        let result = write_screenshot(
+            &image,
+            Destination::Folder(folder.path().into()),
+            false,
+            1.,
+            &cancelled,
+        );
+        assert!(result.is_err());
+        assert!(sender.send(result).is_err());
+        assert!(screenshot.poll_save().is_none());
+        assert_eq!(std::fs::read_dir(folder.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn pen_and_touch_drags_ignore_synthetic_mouse_events_and_other_contacts() {
+        let size = [200., 100.];
+        let mut screenshot = Screenshot {
+            stage: Stage::Selecting(None),
+            ..Default::default()
+        };
+        let pen = |ty, x, y| SDL_Event {
+            ptouch: SDL_PenTouchEvent {
+                r#type: ty,
+                which: SDL_PenID(7),
+                x,
+                y,
+                ..Default::default()
+            },
+        };
+        let touch = |ty, finger, x, y| SDL_Event {
+            tfinger: SDL_TouchFingerEvent {
+                r#type: ty,
+                touchID: SDL_TouchID(3),
+                fingerID: SDL_FingerID(finger),
+                x,
+                y,
+                ..Default::default()
+            },
+        };
+        let send = |shot: &mut Screenshot, event: SDL_Event| {
+            SelectionEvent::from_sdl(&event, size, true)
+                .is_some_and(|event| shot.select(event, size))
+        };
+        assert!(send(&mut screenshot, pen(SDL_EVENT_PEN_DOWN, 10., 20.)));
+        assert!(!send(
+            &mut screenshot,
+            touch(SDL_EVENT_FINGER_DOWN, 1, 0.25, 0.5)
+        ));
+        assert!(!send(
+            &mut screenshot,
+            SDL_Event {
+                button: SDL_MouseButtonEvent {
+                    r#type: SDL_EVENT_MOUSE_BUTTON_UP,
+                    which: SDL_PEN_MOUSEID,
+                    button: SDL_BUTTON_LEFT as u8,
+                    ..Default::default()
+                }
+            }
+        ));
+        assert!(send(&mut screenshot, pen(SDL_EVENT_PEN_UP, 220., 60.)));
+        assert!(matches!(screenshot.stage, Stage::Preparing(rect)
+            if rect.min == pos2(10., 20.) && rect.max == pos2(200., 60.)));
+
+        screenshot.stage = Stage::Selecting(None);
+        assert!(send(
+            &mut screenshot,
+            touch(SDL_EVENT_FINGER_DOWN, 1, 0.25, 0.5)
+        ));
+        assert!(!send(
+            &mut screenshot,
+            touch(SDL_EVENT_FINGER_CANCELED, 2, 0., 0.)
+        ));
+        assert!(send(
+            &mut screenshot,
+            touch(SDL_EVENT_FINGER_CANCELED, 1, 0., 0.)
+        ));
+        assert!(matches!(screenshot.stage, Stage::Selecting(None)));
+        assert!(send(
+            &mut screenshot,
+            touch(SDL_EVENT_FINGER_DOWN, 2, 0.25, 0.5)
+        ));
+        assert!(send(
+            &mut screenshot,
+            touch(SDL_EVENT_FINGER_UP, 2, 0.75, 0.9)
+        ));
+        assert!(matches!(screenshot.stage, Stage::Preparing(rect)
+            if rect.min == pos2(50., 50.) && rect.max == pos2(150., 90.)));
     }
 }

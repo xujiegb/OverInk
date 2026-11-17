@@ -78,6 +78,47 @@ pub(super) struct TextInput {
     draft: Option<Draft>,
     press: Option<Press>,
     click: Option<(usize, Pos2, Instant)>,
+    menu_pointer: MenuPointer,
+}
+
+#[derive(Default)]
+struct MenuPointer {
+    hovered: bool,
+    pressed: bool,
+}
+
+impl MenuPointer {
+    fn wants_event(&mut self, event: &Event, menu: Option<Rect>) -> bool {
+        let contains = |pos| menu.is_some_and(|rect| rect.contains(pos));
+        match *event {
+            Event::PointerMoved(pos) => {
+                let hovered = contains(pos);
+                let was_hovered = std::mem::replace(&mut self.hovered, hovered);
+                self.pressed || was_hovered || hovered
+            }
+            Event::PointerButton {
+                pos,
+                button: PointerButton::Primary,
+                pressed,
+                ..
+            } => {
+                let was_pressed = self.pressed;
+                let hovered = contains(pos);
+                if !was_pressed && !hovered {
+                    return false;
+                }
+                self.hovered = hovered;
+                self.pressed = pressed;
+                true
+            }
+            Event::PointerGone => std::mem::take(&mut self.hovered) || self.pressed,
+            Event::WindowFocused(false) => {
+                let previous = std::mem::take(self);
+                previous.hovered || previous.pressed
+            }
+            _ => false,
+        }
+    }
 }
 
 struct Draft {
@@ -167,6 +208,7 @@ impl TextInput {
 
     fn edit(&mut self, index: Option<usize>, item: TextBox) {
         self.cancel_press();
+        self.menu_pointer = MenuPointer::default();
         self.selected = index;
         self.draft = Some(Draft {
             committed: item.text.clone(),
@@ -218,15 +260,19 @@ impl App {
         if editing {
             return changed || gui.raw.events.len() != first;
         }
-        let events: Vec<_> = gui.raw.events.drain(first..).collect();
-        for event in events {
-            let had_selection = self.input.text.selected.is_some();
-            changed |= self.text_pointer(&event, size);
-            if had_selection || self.input.text.selected.is_some() {
-                gui.raw.events.push(event);
-                changed = true;
+        let mut queued = first;
+        let canvas = Rect::from_min_size(Pos2::ZERO, Vec2::from(size));
+        gui.raw.events.retain(|event| {
+            if queued > 0 {
+                queued -= 1;
+                return true;
             }
-        }
+            changed |= self.text_pointer(event, size);
+            let menu = self.text_menu_rect(canvas);
+            let forward = self.input.text.menu_pointer.wants_event(event, menu);
+            changed |= forward;
+            forward
+        });
         changed
     }
 
@@ -347,12 +393,11 @@ impl App {
     }
 
     pub(super) fn delete_text_box(&mut self) -> bool {
-        let state = &mut self.input.text;
-        let Some(index) = state.selected else {
-            return false;
-        };
-        *state = TextInput::default();
-        self.history.remove_text_box(index)
+        let state = std::mem::take(&mut self.input.text);
+        match state.selected {
+            Some(index) => self.history.remove_text_box(index),
+            None => state.editing(),
+        }
     }
 
     pub(super) fn recolor_text(&mut self, color: InkColor) -> bool {
@@ -387,14 +432,22 @@ impl App {
         true
     }
 
-    fn text_menu_rect(&self, canvas: Rect) -> Option<Rect> {
+    fn text_menu_item(&self) -> Option<&TextBox> {
         let state = &self.input.text;
-        let item = self.history.text_boxes().get(state.selected?)?;
-        let item = state
-            .press
-            .as_ref()
-            .and_then(|press| press.preview.as_ref())
-            .unwrap_or(item);
+        state.draft.as_ref().map(|draft| &draft.item).or_else(|| {
+            let item = self.history.text_boxes().get(state.selected?)?;
+            Some(
+                state
+                    .press
+                    .as_ref()
+                    .and_then(|press| press.preview.as_ref())
+                    .unwrap_or(item),
+            )
+        })
+    }
+
+    fn text_menu_rect(&self, canvas: Rect) -> Option<Rect> {
+        let item = self.text_menu_item()?;
         let protected = self.input.protected.map(|hole| {
             Rect::from_min_size(
                 pos2(hole.x as f32, hole.y as f32),
@@ -426,20 +479,7 @@ impl App {
     }
 
     fn text_menu(&mut self, ui: &mut Ui, rect: Rect) {
-        let Some(item) = self
-            .input
-            .text
-            .draft
-            .as_ref()
-            .map(|draft| &draft.item)
-            .or_else(|| {
-                self.input
-                    .text
-                    .selected
-                    .and_then(|index| self.history.text_boxes().get(index))
-                    .map(|item| &**item)
-            })
-        else {
+        let Some(item) = self.text_menu_item() else {
             return;
         };
         let color = item.color;
@@ -511,18 +551,6 @@ impl App {
         if acted {
             ui.ctx().request_repaint();
         }
-        if self.input.text.editing()
-            && ui.input(|input| {
-                input
-                    .pointer
-                    .interact_pos()
-                    .is_some_and(|p| rect.contains(p))
-                    && input.pointer.primary_clicked()
-            })
-        {
-            let id = ui.make_persistent_id("annotation-editor");
-            ui.memory_mut(|mem| mem.request_focus(id));
-        }
     }
 
     pub(super) fn text_key(&mut self, key: crate::sdl::SDL_Keycode) -> bool {
@@ -589,7 +617,34 @@ impl App {
                 painter.circle_filled(font.center(), (font.width() / 2. - 2.).max(1.), color);
             }
             if let Some(rect) = menu {
-                self.text_menu(ui, rect);
+                if !self.input.text.editing() {
+                    self.text_menu(ui, rect);
+                    return;
+                }
+                let clip = ui.clip_rect();
+                egui::Area::new(ui.make_persistent_id("annotation-menu"))
+                    .order(egui::Order::Foreground)
+                    .fixed_pos(rect.min)
+                    .default_size(rect.size())
+                    .constrain(false)
+                    .fade_in(false)
+                    .show(ui.ctx(), |ui| {
+                        ui.set_clip_rect(clip);
+                        ui.set_min_size(rect.size());
+                        self.text_menu(ui, rect);
+                    });
+                if self.input.text.editing()
+                    && ui.input(|input| {
+                        input.pointer.primary_clicked()
+                            && input
+                                .pointer
+                                .interact_pos()
+                                .is_some_and(|p| rect.contains(p))
+                    })
+                {
+                    let id = ui.make_persistent_id("annotation-editor");
+                    ui.memory_mut(|mem| mem.request_focus(id));
+                }
             }
         }
     }
@@ -1354,6 +1409,74 @@ mod tests {
         assert!(item.rect().contains_rect(menu));
         click(&mut app, pos2(50., 50.));
         assert!(app.text_menu_rect(screen).is_none());
+    }
+
+    #[test]
+    fn a_new_draft_menu_works_over_the_editor_at_the_bottom_edge() {
+        let mut app = app();
+        app.use_tool(Tool::Text);
+        click(&mut app, pos2(520., 555.));
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::from(SIZE));
+        let rect = app.text_menu_rect(screen).unwrap();
+        let draft = app.input.text.draft.as_ref().unwrap();
+        assert!(draft.item.rect().intersects(rect));
+        let font = draft.item.font_size;
+        let mut gui = Gui::new();
+        gui.ctx.set_fonts(app.text_fonts.definitions());
+        render(&mut app, &mut gui);
+        render(&mut app, &mut gui);
+        let mut menu_click = |app: &mut App, column: f32| {
+            let pos = rect.min
+                + vec2(
+                    MENU_PADDING + MENU_BUTTON.x * 0.5 + column * (MENU_BUTTON.x + MENU_GAP),
+                    MENU_SIZE.y * 0.5,
+                );
+            gui.raw.events.push(Event::PointerMoved(pos));
+            for pressed in [true, false] {
+                gui.raw.events.push(Event::PointerButton {
+                    pos,
+                    button: PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                });
+                render(app, &mut gui);
+            }
+        };
+        menu_click(&mut app, 1.);
+        assert_eq!(
+            app.input.text.draft.as_ref().unwrap().item.font_size,
+            font + 2.
+        );
+        menu_click(&mut app, 0.);
+        assert!(!app.input.text.editing());
+        assert!(app.history.text_boxes().is_empty());
+    }
+
+    #[test]
+    fn selection_motion_only_repaints_when_it_interacts_with_the_menu() {
+        let mut app = app();
+        let mut gui = Gui::new();
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::from(SIZE));
+        let mut item = TextBox::new(pos2(350., 100.), screen, InkColor::default());
+        item.text = "Annotation".into();
+        app.input.text.selected = app.history.set_text_box(None, item);
+        let menu = app.text_menu_rect(screen).unwrap();
+        let window = SDL_WindowID(1);
+        let motion = |p: Pos2| SDL_Event {
+            motion: SDL_MouseMotionEvent {
+                r#type: SDL_EVENT_MOUSE_MOTION,
+                windowID: window,
+                x: p.x,
+                y: p.y,
+                ..Default::default()
+            },
+        };
+        assert!(!app.text_event(&mut gui, &motion(Pos2::ZERO), window, SIZE));
+        assert!(gui.raw.events.is_empty());
+        assert!(app.text_event(&mut gui, &motion(menu.center()), window, SIZE));
+        assert!(app.text_event(&mut gui, &motion(Pos2::ZERO), window, SIZE));
+        assert!(!app.text_event(&mut gui, &motion(pos2(1., 1.)), window, SIZE));
+        assert_eq!(gui.raw.events.len(), 2);
     }
 
     #[test]

@@ -18,7 +18,7 @@ use crate::{
     sdl::*,
     touch::{self, TouchKey},
 };
-use screenshot::{Destination, MenuAction, Screenshot};
+use screenshot::{Destination, MenuAction, SaveError, Screenshot};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     path::{Path, PathBuf},
@@ -1311,7 +1311,7 @@ fn capture_visibility(
     screenshot_active: bool,
 ) -> Result<bool, String> {
     if hide_all {
-        for canvas in &mut *canvases {
+        for canvas in canvases.iter_mut().filter(|canvas| canvas.visible) {
             canvas.show(toolbar, false)?;
         }
     }
@@ -1329,16 +1329,16 @@ fn capture_visibility(
 }
 
 fn handle_screenshot_event(
-    screenshot: &mut Screenshot,
+    app: &mut App,
     event: &SDL_Event,
     ty: SDL_EventType,
     canvases: &mut [canvas::Canvas],
-    dialog_open: bool,
 ) -> bool {
-    if !screenshot.active() || dialog_open {
+    let screenshot = &mut app.screenshot;
+    if !screenshot.active() {
         return false;
     }
-    if ty == SDL_EVENT_KEY_DOWN && !screenshot.saving() && unsafe { event.key.key == SDLK_ESCAPE } {
+    if ty == SDL_EVENT_KEY_DOWN && unsafe { !event.key.repeat && event.key.key == SDLK_ESCAPE } {
         screenshot.cancel();
         for canvas in canvases {
             canvas.dirty = true;
@@ -1346,12 +1346,20 @@ fn handle_screenshot_event(
         }
         return true;
     }
-    if let Some(id) = canvas::event_window(event, ty)
-        && screenshot.targets(id)
-        && let Some(canvas) = canvases.iter_mut().find(|canvas| canvas.window.id == id)
+    if let Some(canvas) = canvases
+        .iter_mut()
+        .find(|canvas| screenshot.targets(canvas.window.id))
     {
-        canvas.dirty |= screenshot.event(event, &canvas.window);
-        if screenshot.ready() {
+        let on_canvas = canvas::event_window(event, ty) == Some(canvas.window.id);
+        let contact_cancelled =
+            matches!(ty, SDL_EVENT_FINGER_CANCELED | SDL_EVENT_PEN_PROXIMITY_OUT);
+        if on_canvas || contact_cancelled {
+            canvas.dirty |= screenshot.event(event, &canvas.window, app.touch_enabled);
+        }
+        if screenshot.ready()
+            && (on_canvas || ty == SDL_EVENT_FINGER_CANCELED)
+            && (app.touch_enabled || ty != SDL_EVENT_FINGER_DOWN)
+        {
             canvas.dirty |= canvas.screenshot_event(event);
         }
     }
@@ -1549,6 +1557,7 @@ pub fn run(options: Options) -> Result<(), String> {
             }
             if ty == SDL_EVENT_LOCALE_CHANGED && app.preferences.language.is_none() {
                 app.language = Language::system();
+                tooltips.clear();
                 toolbar_dirty = true;
             }
             if (SDL_EVENT_DISPLAY_FIRST..=SDL_EVENT_DISPLAY_LAST).contains(&ty) {
@@ -1651,15 +1660,13 @@ pub fn run(options: Options) -> Result<(), String> {
                 if ty == SDL_EVENT_PEN_PROXIMITY_OUT {
                     app.for_each_page(|page| page.track_pen(&event));
                 }
-                let cancelled = handle_screenshot_event(
-                    &mut app.screenshot,
-                    &event,
-                    ty,
-                    &mut canvases,
-                    file_dialog.pending(),
-                );
-                mode_changed |= cancelled;
-                restore_toolbar_focus |= cancelled;
+                // SDL owns the native dialog's input and delivers its result through
+                // the callback. Keep OverInk's drawing and shortcuts modal.
+                if !file_dialog.pending() {
+                    let cancelled = handle_screenshot_event(&mut app, &event, ty, &mut canvases);
+                    mode_changed |= cancelled;
+                    restore_toolbar_focus |= cancelled;
+                }
                 continue;
             }
 
@@ -1861,15 +1868,10 @@ pub fn run(options: Options) -> Result<(), String> {
                     }
                 },
                 DialogKind::ScreenshotFolder => match result {
-                    Ok(Some(path)) if path.is_dir() => {
+                    Ok(Some(path)) => {
                         let previous = app.preferences.clone();
                         app.preferences.screenshot_folder = Some(path);
                         update_preferences(&mut app, previous, !wayland && !options.smoke);
-                    }
-                    Ok(Some(path)) => {
-                        app.status =
-                            text("Folder is unavailable", "文件夹不可用", "資料夾無法使用")
-                                .detail(path.display());
                     }
                     Ok(None) => (),
                     Err(error) => {
@@ -2070,6 +2072,9 @@ pub fn run(options: Options) -> Result<(), String> {
                 .find(|canvas| app.screenshot.targets(canvas.window.id))
             {
                 canvas.dirty = true;
+                if result.is_ok() {
+                    canvas.suspend_text_input();
+                }
             }
             match result {
                 Ok(path) => {
@@ -2080,11 +2085,12 @@ pub fn run(options: Options) -> Result<(), String> {
                     restore_toolbar_focus = true;
                     mode_changed = true;
                 }
-                Err(error) if app.screenshot.ready() => {
+                Err(SaveError::Exists(path)) => app.screenshot.confirm_replace(path),
+                Err(SaveError::Failed(error)) if app.screenshot.ready() => {
                     app.screenshot.show_error(error);
                     open_save_as = direct;
                 }
-                Err(error) => {
+                Err(SaveError::Failed(error)) => {
                     app.status = text("Screenshot save failed", "保存截图失败", "儲存螢幕擷取失敗")
                         .detail(error);
                     toolbar_dirty = true;
@@ -2242,31 +2248,21 @@ pub fn run(options: Options) -> Result<(), String> {
                 canvas.show(&toolbar, false)?;
             }
             gui.suspend_input(&toolbar);
-            let location =
-                screenshot::default_folder(&app.preferences).filter(|path| path.is_dir());
+            let location = screenshot::default_folder(&app.preferences);
             file_dialog.open(DialogKind::ScreenshotFolder, &toolbar, location.as_deref());
             cmd.redraw_canvas = true;
+            toolbar_dirty = true;
         }
-        if cmd.screenshot && !file_dialog.pending() && !picker.active() && !app.screenshot.saving()
-        {
-            if app.preferences.screenshot_hdr
-                && !cfg!(any(target_os = "windows", target_os = "macos"))
-            {
-                app.panel = Some(crate::toolbar::Panel::Settings);
-                app.status = text("Screenshot failed", "截图失败", "螢幕擷取失敗")
-                    .detail(screenshot::unsupported_hdr(app.language));
-                toolbar_dirty = true;
-            } else {
-                app.finish_all_contacts();
-                gui.suspend_input(&toolbar);
-                gui.clear_events();
-                let canvas = &mut canvases[active];
-                canvas.suspend_text_input();
-                app.screenshot
-                    .start(&canvas.window, app.preferences.screenshot_hdr);
-                mode_changed = true;
-                cmd.redraw_canvas = true;
-            }
+        if cmd.screenshot && !file_dialog.pending() && !picker.active() {
+            let canvas = &mut canvases[active];
+            canvas.finish_text_editor(&mut app, theme)?;
+            app.finish_all_contacts();
+            gui.suspend_input(&toolbar);
+            gui.clear_events();
+            app.screenshot
+                .start(&canvas.window, app.preferences.screenshot_hdr);
+            mode_changed = true;
+            cmd.redraw_canvas = true;
         }
         if let Some(source) = cmd.font_path.take() {
             app.finish_all_contacts();
@@ -2434,7 +2430,7 @@ pub fn run(options: Options) -> Result<(), String> {
             toolbar_render.begin(&toolbar, rail.to_array().map(|c| f32::from(c) / 255.))?;
             gui.paint(&toolbar_render, &toolbar, &toolbar_color, output)?;
             toolbar_render.present()?;
-            tooltips.update(&toolbar, &gui, &toolbar_color);
+            tooltips.update(&toolbar, &gui, app.language, &toolbar_color);
         }
         if !follow_controller {
             unsafe {
@@ -2536,9 +2532,13 @@ pub fn run(options: Options) -> Result<(), String> {
                     restore_toolbar_focus = true;
                 }
                 MenuAction::SaveAs => open_save_as = true,
+                MenuAction::Replace => {
+                    if let Err(error) = app.screenshot.replace_file() {
+                        app.screenshot.show_error(error);
+                    }
+                }
                 MenuAction::Save => {
-                    let directory =
-                        screenshot::default_folder(&app.preferences).filter(|path| path.is_dir());
+                    let directory = screenshot::default_folder(&app.preferences);
                     if let Some(path) = directory {
                         if let Err(error) = app.screenshot.save(Destination::Folder(path)) {
                             app.screenshot.show_error(error);
