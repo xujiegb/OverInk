@@ -317,13 +317,13 @@ pub fn clipboard_text() -> Option<String> {
 }
 
 /// Return text input while the SDL event's native text pointer remains valid.
-pub fn text_input_data(event: &SDL_Event) -> Option<(String, u64)> {
+pub fn text_input_data(event: &SDL_Event, window: SDL_WindowID) -> Option<(String, u64)> {
     if event_type(event) != SDL_EVENT_TEXT_INPUT {
         return None;
     }
     unsafe {
         let text = event.text;
-        if text.text.is_null() {
+        if text.windowID != window || text.text.is_null() {
             return None;
         }
         Some((
@@ -341,12 +341,15 @@ pub struct TextEditingData {
     pub length: i32,
 }
 
-pub fn text_editing_data(event: &SDL_Event) -> Option<TextEditingData> {
+pub fn text_editing_data(event: &SDL_Event, window: SDL_WindowID) -> Option<TextEditingData> {
     if event_type(event) != SDL_EVENT_TEXT_EDITING {
         return None;
     }
     unsafe {
         let edit = event.edit;
+        if edit.windowID != window {
+            return None;
+        }
         let text = if edit.text.is_null() {
             String::new()
         } else {
