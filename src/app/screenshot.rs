@@ -18,9 +18,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-const MENU_BUTTON: Vec2 = vec2(90., 34.);
-const MENU_PADDING: f32 = 6.;
-const MENU_GAP: f32 = 5.;
+const MENU_BUTTON: Vec2 = vec2(80., toolbar::RAIL_BUTTON_SIZE.y);
+const MENU_PADDING: f32 = 5.;
+const MENU_GAP: f32 = 4.;
 const MENU_SIZE: Vec2 = vec2(
     3. * MENU_BUTTON.x + 2. * (MENU_GAP + MENU_PADDING),
     MENU_BUTTON.y + 2. * MENU_PADDING,
@@ -531,7 +531,7 @@ impl Screenshot {
             }
         });
         if let Some(detail) = detail {
-            let detail = egui::RichText::new(detail).size(14. * scale);
+            let detail = egui::RichText::new(detail).size(toolbar::MENU_FONT_SIZE * scale);
             menu.add(egui::Label::new(detail.clone()).truncate())
                 .on_hover_text(detail);
         }
