@@ -92,42 +92,55 @@ class CaptureBridge {
 
     _requestPermission(executable, state) {
         return new Promise(resolve => {
-            // The user approves via a GNOME Shell modal; the caller cannot
-            // forge approval by setting a window title or invoking D-Bus.
+            // Only GNOME Shell can present this modal. A successful capture
+            // must wait for the modal to finish closing, or the first PNG
+            // can contain a fading permission prompt.
             const dialog = new ModalDialog.ModalDialog({destroyOnClose: false});
             dialog.contentLayout.add_child(new Dialog.MessageDialogContent({
                 title: 'Allow OverInk screen capture?',
                 description: `A process at ${executable} requests access to screen pixels. Allow screenshots for this running process only? Your OverInk rectangle selection stays unchanged.`,
             }));
             let settled = false;
-            const finish = allowed => {
+            let closing = false;
+            let approved = false;
+            const settle = allowed => {
                 if (settled)
                     return;
                 settled = true;
                 state.dismissDialog = null;
                 resolve(allowed && this._active && !state.cancelled);
-                if (dialog.state === ModalDialog.State.OPENED ||
-                    dialog.state === ModalDialog.State.OPENING)
-                    dialog.close(global.get_current_time());
-                else
-                    dialog.destroy();
             };
-            state.dismissDialog = () => finish(false);
-            dialog.connect('closed', () => {
-                if (!settled) {
-                    settled = true;
-                    state.dismissDialog = null;
-                    resolve(false);
+            const close = allowed => {
+                approved = allowed && !state.cancelled;
+                if (closing) {
+                    if (state.cancelled)
+                        settle(false);
+                    return;
                 }
+                closing = true;
+                if (state.cancelled)
+                    settle(false);
+                if (dialog.state === ModalDialog.State.OPENED ||
+                    dialog.state === ModalDialog.State.OPENING) {
+                    dialog.close(global.get_current_time());
+                } else {
+                    settle(false);
+                    dialog.destroy();
+                }
+            };
+            state.dismissDialog = () => close(false);
+            dialog.connect('closed', () => {
+                settle(approved);
                 dialog.destroy();
             });
+            dialog.connect('destroy', () => settle(false));
             dialog.setButtons([
                 {label: 'Deny', key: Clutter.KEY_Escape, isDefault: true,
-                    action: () => finish(false)},
-                {label: 'Allow for this run', action: () => finish(true)},
+                    action: () => close(false)},
+                {label: 'Allow for this run', action: () => close(true)},
             ]);
             if (!dialog.open(global.get_current_time()))
-                finish(false);
+                close(false);
         });
     }
 
