@@ -58,20 +58,22 @@ pub fn configure_metal(raw: *mut SDL_Renderer, extended: bool) {
 }
 
 pub fn remove_metal_view(window: &Window) {
+    let Some(tag) = window.cocoa_metal_view_tag() else {
+        return;
+    };
+    let Some(ns) = window.cocoa_window() else {
+        return;
+    };
+    // SAFETY: The NSWindow is borrowed from the live SDL window and the
+    // selectors use their Cocoa object-pointer and NSInteger signatures.
+    // Check the intermediate contentView before messaging it.
     unsafe {
-        let props = SDL_GetWindowProperties(window.raw);
-        let tag = SDL_GetNumberProperty(props, SDL_PROP_WINDOW_COCOA_METAL_VIEW_TAG_NUMBER, 0);
-        let ns = SDL_GetPointerProperty(
-            props,
-            SDL_PROP_WINDOW_COCOA_WINDOW_POINTER,
-            std::ptr::null_mut(),
-        )
-        .cast::<AnyObject>();
-        if tag == 0 || ns.is_null() {
+        let ns = ns.as_ptr().cast::<AnyObject>();
+        let content: *mut AnyObject = msg_send![ns, contentView];
+        if content.is_null() {
             return;
         }
-        let content: *mut AnyObject = msg_send![ns, contentView];
-        let metal: *mut AnyObject = msg_send![content, viewWithTag: tag as isize];
+        let metal: *mut AnyObject = msg_send![content, viewWithTag: tag];
         if !metal.is_null() {
             let _: () = msg_send![metal, removeFromSuperview];
         }
