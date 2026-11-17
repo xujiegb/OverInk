@@ -441,3 +441,25 @@ fn paint(icon: Icon, p: &egui::Painter, center: Pos2, color: Color32) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn palette_avoids_individual_regions_without_treating_gap_as_obstacle() {
+        let screen = Rect::from_min_size(egui::pos2(0., 0.), vec2(800., 600.));
+        let anchor = Rect::from_min_size(egui::pos2(340., 390.), vec2(120., 40.));
+        let distant = Rect::from_min_size(egui::pos2(20., 15.), vec2(70., 65.));
+        let rect = context_menu_rect_avoiding(
+            anchor,
+            screen,
+            vec2(210., 160.),
+            &[anchor, distant],
+            1.,
+        );
+        assert!(!rect.intersects(anchor));
+        assert!(!rect.intersects(distant));
+        assert!(screen.contains_rect(rect));
+    }
+}
