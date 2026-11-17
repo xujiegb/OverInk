@@ -1405,11 +1405,18 @@ impl Renderer {
     fn create(window: &Window, force_sdr: bool, driver: Option<&CStr>) -> Result<Self, String> {
         unsafe {
             let props = SDL_CreateProperties();
-            SDL_SetPointerProperty(
+            if props.0 == 0 {
+                return Err(error());
+            }
+            if !SDL_SetPointerProperty(
                 props,
                 SDL_PROP_RENDERER_CREATE_WINDOW_POINTER,
                 window.raw.cast(),
-            );
+            ) {
+                let message = error();
+                SDL_DestroyProperties(props);
+                return Err(message);
+            }
             if let Some(driver) = driver {
                 SDL_SetStringProperty(props, SDL_PROP_RENDERER_CREATE_NAME_STRING, driver.as_ptr());
             }
@@ -1449,9 +1456,12 @@ impl Renderer {
             let p = SDL_GetRendererProperties(raw);
             let extended = SDL_GetNumberProperty(p, SDL_PROP_RENDERER_OUTPUT_COLORSPACE_NUMBER, 0)
                 == SDL_COLORSPACE_SRGB_LINEAR.0 as i64;
-            let name = CStr::from_ptr(SDL_GetRendererName(raw))
-                .to_string_lossy()
-                .into_owned();
+            let name = SDL_GetRendererName(raw);
+            let name = if name.is_null() {
+                "unknown".into()
+            } else {
+                CStr::from_ptr(name).to_string_lossy().into_owned()
+            };
             #[cfg(target_os = "macos")]
             if name == "metal" {
                 crate::native::macos::configure_metal(raw, extended);
