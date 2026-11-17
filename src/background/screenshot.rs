@@ -238,15 +238,15 @@ impl Crop {
             1.
         };
         let display_pixels = size.map(|n| (n * scale).round() as u32);
-        let native_pixels = desktop_density
-            .map_or(display_pixels, |density| size.map(|n| (n * density).round() as u32));
-        let fullscreen_pixels = if displays.len() == 1
-            && (visible.size() - monitor.size()).length() <= 2.
-        {
-            pixels
-        } else {
-            [0, 0]
-        };
+        let native_pixels = desktop_density.map_or(display_pixels, |density| {
+            size.map(|n| (n * density).round() as u32)
+        });
+        let fullscreen_pixels =
+            if displays.len() == 1 && (visible.size() - monitor.size()).length() <= 2. {
+                pixels
+            } else {
+                [0, 0]
+            };
         Ok((
             Self {
                 region: mapped.translate(offset),
@@ -291,7 +291,14 @@ mod tests {
             size: [800., 600.],
         };
         let (crop, sizes) = selection
-            .for_portal(&right, &[left, right.clone()], [1200, 900], Some(1.5), None, None)
+            .for_portal(
+                &right,
+                &[left, right.clone()],
+                [1200, 900],
+                Some(1.5),
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(sizes, [[1600, 800], [2400, 1200], [0, 0]]);
         assert_eq!(crop.region, local.translate(egui::vec2(800., 200.)));
@@ -357,16 +364,18 @@ mod tests {
             region: Rect::from_min_size(egui::pos2(100., 100.), egui::vec2(200., 100.)),
             size: [600., 450.],
         };
-        assert!(selection
-            .for_portal(
-                &display,
-                std::slice::from_ref(&display),
-                [1200, 900],
-                None,
-                None,
-                None,
-            )
-            .is_err());
+        assert!(
+            selection
+                .for_portal(
+                    &display,
+                    std::slice::from_ref(&display),
+                    [1200, 900],
+                    None,
+                    None,
+                    None,
+                )
+                .is_err()
+        );
         // XWayland can supply the actual global window rectangle.
         let location = Rect::from_min_size(egui::pos2(300., 200.), egui::vec2(600., 450.));
         let (crop, _) = selection
