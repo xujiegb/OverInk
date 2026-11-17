@@ -679,7 +679,10 @@ impl App {
         palette.spacing_mut().button_padding = vec2(6., 4.) * scale;
         palette.vertical_centered(|ui| wheel.show(ui, 164. * scale, scale));
         palette.horizontal(|ui| {
-            ui.label(egui::RichText::new(tr.text("Brightness", "亮度", "亮度")).size(toolbar::MENU_FONT_SIZE * scale));
+            ui.label(
+                egui::RichText::new(tr.text("Brightness", "亮度", "亮度"))
+                    .size(toolbar::MENU_FONT_SIZE * scale),
+            );
             ui.spacing_mut().slider_width = 135. * scale;
             ui.spacing_mut().interact_size.y = 28. * scale;
             ui.add(egui::Slider::new(&mut wheel.value.v, 0. ..=1.).show_value(false));
@@ -1749,13 +1752,13 @@ mod tests {
         assert!(app.input.text.editing());
         tap(&mut app, palette.min + vec2(210., 110.) * scale);
         let color = app.input.text.color_wheel.unwrap().chosen_color().unwrap();
-        tap(&mut app, palette.min + vec2(60., 274.) * scale);
+        tap(&mut app, palette.min + vec2(60., 230.) * scale);
         assert_eq!(app.input.text.draft.as_ref().unwrap().item.color, color);
         assert_eq!(app.color, original_brush);
         assert!(app.input.text.color_wheel.is_none());
 
         tap(&mut app, wheel_button);
-        tap(&mut app, palette.min + vec2(175., 274.) * scale);
+        tap(&mut app, palette.min + vec2(175., 230.) * scale);
         assert!(app.input.text.take_screen_pick());
         assert!(!app.input.text.take_screen_pick());
         assert!(app.input.text.color_wheel.is_none());
