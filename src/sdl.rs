@@ -316,6 +316,14 @@ pub fn pen_touch_event(event: &SDL_Event) -> Option<SDL_PenTouchEvent> {
     }
 }
 
+pub fn pen_axis_event(event: &SDL_Event) -> Option<SDL_PenAxisEvent> {
+    if event_type(event) == SDL_EVENT_PEN_AXIS {
+        Some(unsafe { event.paxis })
+    } else {
+        None
+    }
+}
+
 pub fn pen_motion_event(event: &SDL_Event) -> Option<SDL_PenMotionEvent> {
     if event_type(event) == SDL_EVENT_PEN_MOTION {
         Some(unsafe { event.pmotion })
@@ -863,6 +871,21 @@ impl Renderer {
         *self = Self::new(window, !extended)?;
         Ok(())
     }
+    /// Write a renderer snapshot to BMP for headless smoke tests.
+    /// The returned surface is always destroyed, including on write failures.
+    pub fn save_bmp(&self, path: &std::path::Path) -> Result<(), String> {
+        unsafe {
+            let surface = SDL_RenderReadPixels(self.raw, ptr::null());
+            if surface.is_null() {
+                return Err(error());
+            }
+            let name = cstring(&path.to_string_lossy());
+            let saved = SDL_SaveBMP(surface, name.as_ptr());
+            SDL_DestroySurface(surface);
+            check(saved)
+        }
+    }
+
     pub fn hdr(&self) -> (bool, f32) {
         unsafe {
             let p = SDL_GetRendererProperties(self.raw);
