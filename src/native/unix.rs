@@ -181,14 +181,10 @@ impl Wayland {
     }
     fn set(&mut self, w: &Window, pass: bool, hole: Option<Rect>) -> Result<(), String> {
         unsafe {
-            let surface = SDL_GetPointerProperty(
-                SDL_GetWindowProperties(w.raw),
-                SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER,
-                ptr::null_mut(),
-            );
-            if surface.is_null() {
-                return Err("No Wayland surface".into());
-            }
+            let surface = w
+                .wayland_surface()
+                .ok_or("No Wayland surface")?
+                .as_ptr();
             // wl_region coordinates are surface-local logical units, not
             // physical pixels like XShape rectangles.
             let size = w.size().map(|v| v.ceil() as i32);
@@ -300,16 +296,12 @@ struct X11 {
 }
 
 fn x11_window(w: &Window) -> Result<(*mut c_void, c_ulong), String> {
-    unsafe {
-        let props = SDL_GetWindowProperties(w.raw);
-        let display =
-            SDL_GetPointerProperty(props, SDL_PROP_WINDOW_X11_DISPLAY_POINTER, ptr::null_mut());
-        let window = SDL_GetNumberProperty(props, SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0) as c_ulong;
-        if display.is_null() || window == 0 {
-            return Err("No X11 window".into());
-        }
-        Ok((display, window))
+    let display = w.x11_display().ok_or("No X11 window")?.as_ptr();
+    let window = w.x11_window_number();
+    if window == 0 {
+        return Err("No X11 window".into());
     }
+    Ok((display, window))
 }
 
 impl X11 {
