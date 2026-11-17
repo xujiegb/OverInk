@@ -12,7 +12,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicU8, Ordering},
         mpsc,
     },
     time::{Duration, Instant},
@@ -156,15 +156,33 @@ impl From<String> for SaveError {
 
 type SaveResult = Result<PathBuf, SaveError>;
 
+// Serialize cancellation against the first irreversible filesystem operation.
+const SAVE_PENDING: u8 = 0;
+const SAVE_CANCELLED: u8 = 1;
+const SAVE_PUBLISHING: u8 = 2;
+
 struct SaveJob {
     direct: bool,
     receiver: mpsc::Receiver<SaveResult>,
-    cancelled: Arc<AtomicBool>,
+    cancelled: Arc<AtomicU8>,
+}
+
+impl SaveJob {
+    fn try_cancel(&self) -> bool {
+        self.cancelled
+            .compare_exchange(
+                SAVE_PENDING,
+                SAVE_CANCELLED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
 }
 
 impl Drop for SaveJob {
     fn drop(&mut self) {
-        self.cancelled.store(true, Ordering::Relaxed);
+        let _ = self.try_cancel();
     }
 }
 
@@ -225,6 +243,14 @@ impl Screenshot {
     }
 
     pub fn cancel(&mut self) {
+        // Keep the screenshot alive if its final file operation already began.
+        // The caller will report the actual result when poll_save completes.
+        if self.save_job.as_ref().is_some_and(|job| !job.try_cancel()) {
+            self.error = Some(
+                "The screenshot is being saved and can no longer be cancelled".into(),
+            );
+            return;
+        }
         if let Stage::Selecting(Some(drag)) = self.stage {
             capture_mouse(drag.pointer, false);
         }
@@ -477,7 +503,7 @@ impl Screenshot {
         let image = Arc::clone(image);
         let (hdr, sdr_white) = (self.hdr, self.sdr_white);
         let (sender, receiver) = mpsc::channel();
-        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancelled = Arc::new(AtomicU8::new(SAVE_PENDING));
         let worker_cancelled = Arc::clone(&cancelled);
         std::thread::Builder::new()
             .name("overink-save-screenshot".into())
@@ -609,7 +635,7 @@ fn file_stem() -> String {
 
 struct CancellableWriter<'a, W> {
     writer: W,
-    cancelled: &'a AtomicBool,
+    cancelled: &'a AtomicU8,
 }
 
 impl<W: Write> Write for CancellableWriter<'_, W> {
@@ -624,11 +650,23 @@ impl<W: Write> Write for CancellableWriter<'_, W> {
     }
 }
 
-fn check_cancelled(cancelled: &AtomicBool) -> io::Result<()> {
-    if cancelled.load(Ordering::Relaxed) {
+fn check_cancelled(cancelled: &AtomicU8) -> io::Result<()> {
+    if cancelled.load(Ordering::Acquire) == SAVE_CANCELLED {
         return Err(io::Error::other("Screenshot save cancelled"));
     }
     Ok(())
+}
+
+fn begin_publish(cancelled: &AtomicU8) -> io::Result<()> {
+    cancelled
+        .compare_exchange(
+            SAVE_PENDING,
+            SAVE_PUBLISHING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .map(|_| ())
+        .map_err(|_| io::Error::other("Screenshot save cancelled"))
 }
 
 fn png_path(path: PathBuf) -> PathBuf {
@@ -648,7 +686,7 @@ fn write_screenshot(
     destination: Destination,
     hdr: bool,
     white: f32,
-    cancelled: &AtomicBool,
+    cancelled: &AtomicU8,
 ) -> SaveResult {
     check_cancelled(cancelled).map_err(|error| error.to_string())?;
     let destination = match destination {
@@ -682,11 +720,12 @@ fn write_screenshot(
                     format!("{stem}-{suffix}.png")
                 };
                 let path = folder.join(name);
-                check_cancelled(cancelled).map_err(|error| error.to_string())?;
+                begin_publish(cancelled).map_err(|error| error.to_string())?;
                 match output.persist_noclobber(&path) {
                     Ok(_) => return Ok(path),
                     Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
-                        output = error.file
+                        output = error.file;
+                        cancelled.store(SAVE_PENDING, Ordering::Release);
                     }
                     Err(error) => return Err(error.error.to_string().into()),
                 }
@@ -694,7 +733,7 @@ fn write_screenshot(
             unreachable!()
         }
         Destination::File(path) => {
-            check_cancelled(cancelled).map_err(|error| error.to_string())?;
+            begin_publish(cancelled).map_err(|error| error.to_string())?;
             output.persist_noclobber(&path).map_err(|error| {
                 if error.error.kind() == io::ErrorKind::AlreadyExists {
                     SaveError::Exists(path.clone())
@@ -705,7 +744,7 @@ fn write_screenshot(
             Ok(path)
         }
         Destination::Replace(path) => {
-            check_cancelled(cancelled).map_err(|error| error.to_string())?;
+            begin_publish(cancelled).map_err(|error| error.to_string())?;
             output
                 .persist(&path)
                 .map_err(|error| error.error.to_string())?;
@@ -768,7 +807,7 @@ mod tests {
             .rgba
             .copy_from_slice(&[255, 0, 0, 255, 0, 255, 0, 255]);
 
-        let cancelled = AtomicBool::new(false);
+        let cancelled = AtomicU8::new(SAVE_PENDING);
         assert!(
             write_screenshot(
                 &image,
@@ -786,7 +825,7 @@ mod tests {
                 Destination::Folder(folder.path().into()),
                 false,
                 1.,
-                &cancelled,
+                &AtomicU8::new(SAVE_PENDING),
             )
             .unwrap()
         };
@@ -805,9 +844,14 @@ mod tests {
         let path = folder.path().join("capture.png");
         std::fs::write(&path, b"existing file").unwrap();
         let image = Image::buffer(1, 1).unwrap();
-        let cancelled = AtomicBool::new(false);
         for chosen in [path.clone(), path.with_extension("")] {
-            let result = write_screenshot(&image, Destination::File(chosen), false, 1., &cancelled);
+            let result = write_screenshot(
+                &image,
+                Destination::File(chosen),
+                false,
+                1.,
+                &AtomicU8::new(SAVE_PENDING),
+            );
             assert!(matches!(result, Err(SaveError::Exists(existing)) if existing == path));
             assert_eq!(std::fs::read(&path).unwrap(), b"existing file");
         }
@@ -816,7 +860,7 @@ mod tests {
             Destination::Replace(path.clone()),
             false,
             1.,
-            &cancelled,
+            &AtomicU8::new(SAVE_PENDING),
         );
         assert_eq!(saved.unwrap(), path);
         assert!(image::open(path).is_ok());
@@ -825,7 +869,7 @@ mod tests {
 
     #[test]
     fn cancelling_save_disconnects_its_result_and_prevents_file_creation() {
-        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancelled = Arc::new(AtomicU8::new(SAVE_PENDING));
         let (sender, receiver) = mpsc::channel();
         let mut screenshot = Screenshot {
             save_job: Some(SaveJob {
@@ -836,6 +880,7 @@ mod tests {
             ..Default::default()
         };
         screenshot.cancel();
+        assert_eq!(cancelled.load(Ordering::Acquire), SAVE_CANCELLED);
         let folder = tempfile::tempdir().unwrap();
         let image = Image::buffer(1, 1).unwrap();
         let result = write_screenshot(
@@ -849,6 +894,41 @@ mod tests {
         assert!(sender.send(result).is_err());
         assert!(screenshot.poll_save().is_none());
         assert_eq!(std::fs::read_dir(folder.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn cancellation_cannot_hide_an_already_publishing_save() {
+        let (sender, receiver) = mpsc::channel();
+        let cancelled = Arc::new(AtomicU8::new(SAVE_PUBLISHING));
+        let mut screenshot = Screenshot {
+            stage: Stage::Ready(Rect::NOTHING, Arc::new(Image::buffer(1, 1).unwrap())),
+            save_job: Some(SaveJob {
+                direct: true,
+                receiver,
+                cancelled: Arc::clone(&cancelled),
+            }),
+            ..Default::default()
+        };
+        screenshot.cancel();
+        assert!(screenshot.ready());
+        assert!(screenshot.saving());
+        assert_eq!(cancelled.load(Ordering::Acquire), SAVE_PUBLISHING);
+        sender.send(Ok(PathBuf::from("saved.png"))).unwrap();
+        assert!(matches!(screenshot.poll_save(), Some((true, Ok(_)))));
+        screenshot.cancel();
+        assert!(!screenshot.active());
+    }
+
+    #[test]
+    fn cancelling_before_publication_does_not_replace_existing_file() {
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("existing.png");
+        std::fs::write(&path, b"original").unwrap();
+        let state = AtomicU8::new(SAVE_PENDING);
+        state.store(SAVE_CANCELLED, Ordering::Release);
+        let image = Image::buffer(1, 1).unwrap();
+        assert!(write_screenshot(&image, Destination::Replace(path.clone()), false, 1., &state).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), b"original");
     }
 
     #[test]
