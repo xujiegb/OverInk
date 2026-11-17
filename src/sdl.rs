@@ -915,14 +915,14 @@ impl Window {
 
     /// Return the X11 drawable ID associated with this window.
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    pub fn x11_window_number(&self) -> u64 {
+    pub fn x11_window_number(&self) -> std::ffi::c_ulong {
         // SAFETY: Reading a number property does not transfer ownership.
         unsafe {
             SDL_GetNumberProperty(
                 SDL_GetWindowProperties(self.raw),
                 SDL_PROP_WINDOW_X11_WINDOW_NUMBER,
                 0,
-            ) as u64
+            ) as std::ffi::c_ulong
         }
     }
 
