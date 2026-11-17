@@ -59,7 +59,7 @@ impl Job {
                 // The Shell extension knows the compositor's true canvas
                 // location and captures only the OverInk-drawn selection.
                 // Never start GNOME's interactive screenshot picker.
-                return crate::picker::portal::SystemJob::shell_area(region, size).map(Self::Shell);
+                return crate::picker::portal::SystemJob::shell_area(window, region, size).map(Self::Shell);
             }
             if _hdr {
                 return Err("HDR capture is unavailable on this display backend".into());
