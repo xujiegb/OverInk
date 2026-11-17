@@ -125,7 +125,8 @@ impl Picker {
         if let Some(local) = local {
             match desktop::position(window, local) {
                 Ok(point) => {
-                    self.stage = Stage::SampleAfter(point, Instant::now() + Duration::from_millis(100));
+                    self.stage =
+                        Stage::SampleAfter(point, Instant::now() + Duration::from_millis(100));
                 }
                 Err(error) => self.finish(Err(error)),
             }
