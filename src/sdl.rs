@@ -486,6 +486,11 @@ pub fn poll_event(event: &mut SDL_Event) -> bool {
     unsafe { SDL_PollEvent(event) }
 }
 
+/// Remove the leftover SDL quit event when dismissing a temporary guide.
+pub fn flush_quit_event() {
+    unsafe { SDL_FlushEvent(SDL_EVENT_QUIT.0) };
+}
+
 /// Read an SDL display-removal event only after checking its union tag.
 pub fn removed_display_id(event: &SDL_Event) -> Option<u32> {
     if event_type(event) == SDL_EVENT_DISPLAY_REMOVED {
@@ -582,6 +587,10 @@ impl Window {
                 1.,
             )
         }
+    }
+
+    pub fn set_size(&self, width: i32, height: i32) -> Result<(), String> {
+        unsafe { check(SDL_SetWindowSize(self.raw, width, height)) }
     }
 
     pub fn set_geometry(&self, x: i32, y: i32, w: i32, h: i32) -> Result<(), String> {
