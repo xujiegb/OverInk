@@ -248,9 +248,8 @@ impl Screenshot {
         // Keep the screenshot alive if its final file operation already began.
         // The caller will report the actual result when poll_save completes.
         if self.save_job.as_ref().is_some_and(|job| !job.try_cancel()) {
-            self.error = Some(
-                "The screenshot is being saved and can no longer be cancelled".into(),
-            );
+            self.error =
+                Some("The screenshot is being saved and can no longer be cancelled".into());
             return;
         }
         if let Stage::Selecting(Some(drag)) = self.stage {
@@ -299,9 +298,8 @@ impl Screenshot {
                 let start = clamp(point);
                 // SDL capture is not available on every backend. Still allow
                 // in-window dragging; losing focus cancels an unfinished drag.
-                self.error = (!capture_mouse(pointer, true)).then(|| {
-                    format!("Mouse capture unavailable: {}", crate::sdl::error())
-                });
+                self.error = (!capture_mouse(pointer, true))
+                    .then(|| format!("Mouse capture unavailable: {}", crate::sdl::error()));
                 *drag = Some(Drag {
                     pointer,
                     start,
@@ -958,8 +956,14 @@ mod tests {
         state.store(SAVE_CANCELLED, Ordering::Release);
         let image = Image::buffer(1, 1).unwrap();
         assert!(
-            write_screenshot(&image, Destination::Replace(path.clone()), false, 1., &state)
-                .is_err()
+            write_screenshot(
+                &image,
+                Destination::Replace(path.clone()),
+                false,
+                1.,
+                &state
+            )
+            .is_err()
         );
         assert_eq!(std::fs::read(path).unwrap(), b"original");
     }
