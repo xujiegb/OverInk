@@ -192,9 +192,7 @@ impl Popup {
     fn paint(&mut self, color: &ColorManager) -> Result<(), String> {
         // A popup's reported DPI can differ from its parent on some backends.
         // Render in the same units used to measure and size the tooltip.
-        let input = self
-            .gui
-            .input_with_units(&self.window, self.content.units);
+        let input = self.gui.input_with_units(&self.window, self.content.units);
         let frame = self.gui.ctx.run_ui(input, |ui| {
             let painter = ui.painter();
             let galley = painter.layout(
