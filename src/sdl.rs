@@ -954,7 +954,10 @@ impl Drop for Window {
 /// handle after an SDL renderer reset, when SDL has already invalidated it.
 /// Owned SDL texture used by the ink renderer. Native calls and the texture
 /// destructor stay in the SDL adapter rather than in the drawing state machine.
-pub struct InkTexture(pub *mut SDL_Texture);
+pub struct InkTexture {
+    raw: *mut SDL_Texture,
+    dimensions: [i32; 2],
+}
 
 impl InkTexture {
     pub fn new(
@@ -981,19 +984,22 @@ impl InkTexture {
             if raw.is_null() {
                 return Err(error());
             }
-            let texture = Self(raw);
+            let texture = Self {
+                raw,
+                dimensions: [width, height],
+            };
             check(SDL_SetTextureBlendMode(raw, blend))?;
             check(SDL_SetTextureScaleMode(raw, SDL_SCALEMODE_NEAREST))?;
             Ok(texture)
         }
     }
 
-    pub fn update_rgba8(
-        &self,
-        dimensions: [i32; 2],
-        pixels: &[u8],
-    ) -> Result<(), String> {
-        let [width, height] = dimensions;
+    pub fn raw(&self) -> *mut SDL_Texture {
+        self.raw
+    }
+
+    pub fn update_rgba8(&self, pixels: &[u8]) -> Result<(), String> {
+        let [width, height] = self.dimensions;
         let pitch = usize::try_from(width)
             .ok()
             .and_then(|w| w.checked_mul(4))
@@ -1003,12 +1009,12 @@ impl InkTexture {
             .ok()
             .and_then(|h| h.checked_mul(pitch as usize))
             .ok_or("Invalid ink texture upload dimensions")?;
-        if width <= 0 || height <= 0 || pixels.len() != expected {
+        if pixels.len() != expected {
             return Err("Ink texture pixel buffer size mismatch".into());
         }
         unsafe {
             check(SDL_UpdateTexture(
-                self.0,
+                self.raw,
                 ptr::null(),
                 pixels.as_ptr().cast(),
                 pitch,
@@ -1018,8 +1024,24 @@ impl InkTexture {
 
     pub fn set_modulation(&self, rgb: [f32; 3], alpha: f32) -> Result<(), String> {
         unsafe {
-            check(SDL_SetTextureColorModFloat(self.0, rgb[0], rgb[1], rgb[2]))?;
-            check(SDL_SetTextureAlphaModFloat(self.0, alpha))
+            check(SDL_SetTextureColorModFloat(self.raw, rgb[0], rgb[1], rgb[2]))?;
+            check(SDL_SetTextureAlphaModFloat(self.raw, alpha))
+        }
+    }
+
+    pub fn draw(
+        &self,
+        renderer: &Renderer,
+        source: Option<&SDL_FRect>,
+        destination: Option<&SDL_FRect>,
+    ) -> Result<(), String> {
+        unsafe {
+            check(SDL_RenderTexture(
+                renderer.raw,
+                self.raw,
+                source.map_or(ptr::null(), |rect| rect),
+                destination.map_or(ptr::null(), |rect| rect),
+            ))
         }
     }
 
@@ -1031,7 +1053,7 @@ impl InkTexture {
 
 impl Drop for InkTexture {
     fn drop(&mut self) {
-        unsafe { SDL_DestroyTexture(self.0) };
+        unsafe { SDL_DestroyTexture(self.raw) };
     }
 }
 
@@ -1388,22 +1410,6 @@ impl Renderer {
                 SDL_PROP_RENDERER_SDR_WHITE_POINT_FLOAT,
                 1.,
             )
-        }
-    }
-
-    pub fn render_texture(
-        &self,
-        texture: *mut SDL_Texture,
-        source: Option<&SDL_FRect>,
-        destination: Option<&SDL_FRect>,
-    ) -> Result<(), String> {
-        unsafe {
-            check(SDL_RenderTexture(
-                self.raw,
-                texture,
-                source.map_or(ptr::null(), |rect| rect),
-                destination.map_or(ptr::null(), |rect| rect),
-            ))
         }
     }
 
