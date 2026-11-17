@@ -8,7 +8,8 @@ Usage: ./package-macos.sh [--arch x64|arm64|all] [--version X.Y.Z] [--output DIR
 Environment:
   RUST_VERSION               Rust toolchain version (default: 1.100.0)
   MACOSX_DEPLOYMENT_TARGET   Minimum macOS version (default: 11.0)
-  CODESIGN_IDENTITY          Developer ID Application identity (default: -)
+  CODESIGN_IDENTITY          Signing identity (default: - for ad-hoc)
+  CODESIGN_TIMESTAMP         auto (default) or none (for self-signed identities)
   NOTARYTOOL_PROFILE         Optional notarytool keychain profile
 
 Builds native OverInk.app and a branded drag-to-Applications DMG, with a
@@ -56,9 +57,15 @@ rust_version=${RUST_VERSION:-1.100.0}
 export RUSTUP_TOOLCHAIN="$rust_version"
 export MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-11.0}
 identity=${CODESIGN_IDENTITY:--}
+timestamp_mode=${CODESIGN_TIMESTAMP:-auto}
+case "$timestamp_mode" in
+  auto) timestamp_flag=--timestamp ;;
+  none) timestamp_flag=--timestamp=none ;;
+  *) echo 'CODESIGN_TIMESTAMP must be auto or none.' >&2; exit 2 ;;
+esac
 notary_profile=${NOTARYTOOL_PROFILE:-}
-[[ -z $notary_profile || $identity != - ]] || {
-  echo 'Notarization requires a Developer ID Application certificate.' >&2; exit 1;
+[[ -z $notary_profile || ( $identity != - && $timestamp_mode == auto ) ]] || {
+  echo 'Notarization requires a Developer ID Application identity with secure timestamps.' >&2; exit 1;
 }
 
 sdk=$(xcrun --sdk macosx --show-sdk-path)
@@ -304,7 +311,7 @@ PLIST
   if [[ $identity == - ]]; then
     codesign --force --sign - "$app"
   else
-    codesign --force --options runtime --timestamp --sign "$identity" "$app"
+    codesign --force --options runtime "$timestamp_flag" --sign "$identity" "$app"
   fi
   codesign --verify --strict --verbose=2 "$app"
 
@@ -321,7 +328,7 @@ PLIST
   unset OVERINK_DMG_APP OVERINK_DMG_BACKGROUND OVERINK_DMG_ICON
 
   if [[ $identity != - ]]; then
-    codesign --force --timestamp --sign "$identity" "$dmg"
+    codesign --force "$timestamp_flag" --sign "$identity" "$dmg"
   fi
   if [[ -n $notary_profile ]]; then
     xcrun notarytool submit "$dmg" --keychain-profile "$notary_profile" --wait
