@@ -39,7 +39,7 @@ pub struct Image {
     encoding: Encoding,
 }
 impl Image {
-    #[cfg(any(target_os = "linux", target_os = "freebsd", test))]
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos", test))]
     pub fn buffer(width: u32, height: u32) -> Result<Self, String> {
         Self::allocate(width, height, Encoding::Srgb8)
     }
