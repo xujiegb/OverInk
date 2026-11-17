@@ -104,7 +104,7 @@ impl Gui {
         }
     }
 
-    fn input_with_units(&mut self, w: &Window, units: f32) -> RawInput {
+    pub(crate) fn input_with_units(&mut self, w: &Window, units: f32) -> RawInput {
         let logical = w.size();
         self.units = units;
         self.raw.focused = w.input_focused();
