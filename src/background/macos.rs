@@ -343,16 +343,16 @@ fn begin_screenshot(
             Retained::from_raw(config)
         }
         .ok_or("Cannot configure the macOS screenshot")?;
-        let _: () = msg_send![config, setWidth: width as usize];
-        let _: () = msg_send![config, setHeight: height as usize];
-        let _: () = msg_send![config, setShowsCursor: false];
-        let _: () = msg_send![config, setCapturesAudio: false];
+        let _: () = msg_send![&*config, setWidth: width as usize];
+        let _: () = msg_send![&*config, setHeight: height as usize];
+        let _: () = msg_send![&*config, setShowsCursor: false];
+        let _: () = msg_send![&*config, setCapturesAudio: false];
         if hdr {
-            let _: () = msg_send![config, setPixelFormat: u32::from_be_bytes(*b"RGhA")];
-            let _: () = msg_send![config, setColorSpaceName: kCGColorSpaceExtendedLinearSRGB];
+            let _: () = msg_send![&*config, setPixelFormat: u32::from_be_bytes(*b"RGhA")];
+            let _: () = msg_send![&*config, setColorSpaceName: kCGColorSpaceExtendedLinearSRGB];
         } else {
-            let _: () = msg_send![config, setPixelFormat: u32::from_be_bytes(*b"BGRA")];
-            let _: () = msg_send![config, setColorSpaceName: kCGColorSpaceSRGB];
+            let _: () = msg_send![&*config, setPixelFormat: u32::from_be_bytes(*b"BGRA")];
+            let _: () = msg_send![&*config, setColorSpaceName: kCGColorSpaceSRGB];
         }
         let completion =
             block2::RcBlock::new(move |image: *const c_void, error: *mut AnyObject| {
