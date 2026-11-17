@@ -97,7 +97,7 @@ pub fn button(ui: &mut Ui, icon: Icon, label: &str, selected: bool) -> Response 
 }
 
 pub fn rail_button(ui: &mut Ui, icon: Icon, label: &str, selected: bool) -> Response {
-    button_sized(ui, icon, label, selected, vec2(34., 28.))
+    button_sized(ui, icon, label, selected, vec2(32., 28.))
 }
 
 fn button_sized(ui: &mut Ui, icon: Icon, label: &str, selected: bool, size: Vec2) -> Response {
