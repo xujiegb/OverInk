@@ -10,6 +10,9 @@ mod background;
 mod color;
 mod controller;
 mod display;
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[path = "display/x11.rs"]
+mod display_x11;
 mod export;
 mod fonts;
 mod frame_rate;
