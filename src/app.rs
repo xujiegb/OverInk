@@ -1674,13 +1674,13 @@ pub fn run(options: Options) -> Result<(), String> {
                         | SDL_EVENT_PEN_AXIS
                 ) {
                     app.for_each_page(|page| page.track_pen(&event));
-                    if !app.input.pen_proximity.is_empty() && app.screenshot.reject_touch_drag() {
-                        if let Some(canvas) = canvases
+                    if !app.input.pen_proximity.is_empty()
+                        && app.screenshot.reject_touch_drag()
+                        && let Some(canvas) = canvases
                             .iter_mut()
                             .find(|canvas| app.screenshot.targets(canvas.window.id))
-                        {
-                            canvas.dirty = true;
-                        }
+                    {
+                        canvas.dirty = true;
                     }
                 }
                 // SDL owns the native dialog's input and delivers its result through
