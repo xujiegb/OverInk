@@ -504,9 +504,17 @@ impl App {
             toolbar::context_menu_rect(item.rect(), canvas, MENU_SIZE * scale, protected, scale);
         let palette = self.input.text.color_wheel.map(|_| {
             let scale = toolbar::menu_scale(canvas, PALETTE_SIZE, units);
-            let protected = Some(protected.map_or(actions, |hole| hole.union(actions)));
-            let rect =
-                toolbar::context_menu_rect(actions, canvas, PALETTE_SIZE * scale, protected, scale);
+            let mut obstacles = vec![actions];
+            if let Some(hole) = protected {
+                obstacles.push(hole);
+            }
+            let rect = toolbar::context_menu_rect_avoiding(
+                actions,
+                canvas,
+                PALETTE_SIZE * scale,
+                &obstacles,
+                scale,
+            );
             (rect, scale)
         });
         Some(TextMenus {
@@ -626,7 +634,7 @@ impl App {
                 tr.text("Text color", "文字颜色", "文字顏色"),
                 preset.hex()
             );
-            if toolbar::swatch(&mut menu, button, rgb, &label, color.srgb8() == rgb)
+            if toolbar::swatch_button(&mut menu, button, rgb, &label, color.srgb8() == rgb)
                 .on_hover_text(egui::RichText::new(label).size(toolbar::MENU_FONT_SIZE * scale))
                 .clicked()
             {
