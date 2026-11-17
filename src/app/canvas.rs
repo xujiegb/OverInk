@@ -172,11 +172,15 @@ impl Canvas {
 
     pub fn renderer_reset(&mut self) {
         self.ink.reset_textures();
-        // A new context recreates the glyph atlas for the new SDL renderer.
+        // SDL already invalidated native texture handles. Do not destroy them
+        // again when discarding the old egui context.
         self.suspend_text_input();
+        if let Some(gui) = &mut self.text {
+            gui.forget_renderer_textures();
+        }
         self.text = None;
         self.text_style = None;
-        self.background.invalidate_texture();
+        self.background.renderer_reset();
         self.dirty = true;
     }
 
