@@ -1750,7 +1750,7 @@ mod tests {
         let (palette, scale) = app.text_menus(screen).unwrap().palette.unwrap();
         assert!(screen.contains_rect(palette));
         assert!(app.input.text.editing());
-        tap(&mut app, palette.min + vec2(210., 110.) * scale);
+        tap(&mut app, palette.min + vec2(180., 110.) * scale);
         let color = app.input.text.color_wheel.unwrap().chosen_color().unwrap();
         tap(&mut app, palette.min + vec2(60., 230.) * scale);
         assert_eq!(app.input.text.draft.as_ref().unwrap().item.color, color);
