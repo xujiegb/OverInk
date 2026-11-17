@@ -93,12 +93,7 @@ impl Transform {
         // SAFETY: Both arrays hold exactly one RGB_FLT pixel. Little CMS
         // writes only the three output channels of this one pixel.
         unsafe {
-            cms::cmsDoTransform(
-                self.0,
-                input.as_ptr().cast(),
-                output.as_mut_ptr().cast(),
-                1,
-            );
+            cms::cmsDoTransform(self.0, input.as_ptr().cast(), output.as_mut_ptr().cast(), 1);
         }
         output
     }
