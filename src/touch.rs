@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use crate::{model::Point, sdl::*};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -37,13 +39,11 @@ pub fn point(event: SDL_TouchFingerEvent, size: [f32; 2]) -> Option<Point> {
 }
 
 pub fn is_indirect(device: SDL_TouchID) -> bool {
-    if unsafe { SDL_WasInit(SDL_INIT_VIDEO) } == 0 {
-        return false;
-    }
-    matches!(
-        unsafe { SDL_GetTouchDeviceType(device) },
-        SDL_TOUCH_DEVICE_INDIRECT_ABSOLUTE | SDL_TOUCH_DEVICE_INDIRECT_RELATIVE
-    )
+    crate::sdl::indirect_touch_device(device)
+}
+
+pub fn key_from_event(event: &SDL_Event) -> Option<TouchKey> {
+    crate::sdl::finger_event(event).map(TouchKey::from)
 }
 
 #[cfg(test)]
