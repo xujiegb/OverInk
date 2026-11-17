@@ -1648,8 +1648,8 @@ mod tests {
     fn event_window_rejects_a_mismatched_union_tag() {
         let mut event = SDL_Event::default();
         event.r#type = SDL_EVENT_MOUSE_MOTION.0;
-        assert_eq!(event_window(&event, SDL_EVENT_KEY_DOWN), None);
-        assert_eq!(event_window(&event, SDL_EVENT_TEXT_EDITING), None);
+        assert!(event_window(&event, SDL_EVENT_KEY_DOWN).is_none());
+        assert!(event_window(&event, SDL_EVENT_TEXT_EDITING).is_none());
     }
 
     #[test]
