@@ -162,6 +162,21 @@ mod tests {
     }
 
     #[test]
+    fn owned_srgb_profile_and_transform_round_trip() {
+        let input = Profile::srgb().expect("Little CMS sRGB profile");
+        let output = Profile::srgb().expect("Little CMS sRGB profile");
+        let transform = Transform::rgb(&input, &output).expect("sRGB transform");
+        let rgb = [0.2, 0.5, 0.8];
+        let mapped = transform.map_rgb(rgb);
+        for (actual, expected) in mapped.into_iter().zip(rgb) {
+            assert!(
+                (actual - expected).abs() < 0.02,
+                "sRGB identity transform changed a channel: {actual} != {expected}"
+            );
+        }
+    }
+
+    #[test]
     fn rejects_incomplete_rgba8_pixels() {
         let mut pixels = vec![11, 22, 33];
         convert_rgba8_to_srgb(&mut pixels, b"");
