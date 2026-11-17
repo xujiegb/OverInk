@@ -86,10 +86,7 @@ pub fn sample(_window: &Window, point: ScreenPoint) -> Result<InkColor, String> 
 mod x11 {
     use super::*;
     use libloading::{Library, Symbol};
-    use std::{
-        ffi::{c_char, c_int, c_ulong, c_void},
-        ptr,
-    };
+    use std::ffi::{c_char, c_int, c_ulong, c_void};
     fn library() -> Result<Library, String> {
         for name in ["libX11.so.6", "libX11.so"] {
             if let Ok(lib) = unsafe { Library::new(name) } {
