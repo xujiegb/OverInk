@@ -12,6 +12,8 @@ pub fn hdr_supported() -> bool {
 }
 
 pub enum Job {
+    #[cfg(target_os = "linux")]
+    Shell(crate::picker::portal::SystemJob<Image>),
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     Native(super::system::Job<Image>),
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -52,6 +54,14 @@ impl Job {
         }
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         {
+            #[cfg(target_os = "linux")]
+            if crate::gnome::in_wayland_session() {
+                // The Shell extension knows the compositor's true canvas
+                // location and captures only the OverInk-drawn selection.
+                // Never start GNOME's interactive screenshot picker.
+                return crate::picker::portal::SystemJob::shell_area(window, region, size)
+                    .map(Self::Shell);
+            }
             if _hdr {
                 return Err("HDR capture is unavailable on this display backend".into());
             }
@@ -129,6 +139,8 @@ impl Job {
 
     pub fn poll(&mut self) -> Option<Result<Option<Image>, String>> {
         match self {
+            #[cfg(target_os = "linux")]
+            Self::Shell(job) => job.poll(),
             #[cfg(any(target_os = "windows", target_os = "macos"))]
             Self::Native(job) => job.poll(),
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
