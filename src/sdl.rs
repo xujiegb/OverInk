@@ -1024,7 +1024,9 @@ impl InkTexture {
 
     pub fn set_modulation(&self, rgb: [f32; 3], alpha: f32) -> Result<(), String> {
         unsafe {
-            check(SDL_SetTextureColorModFloat(self.raw, rgb[0], rgb[1], rgb[2]))?;
+            check(SDL_SetTextureColorModFloat(
+                self.raw, rgb[0], rgb[1], rgb[2],
+            ))?;
             check(SDL_SetTextureAlphaModFloat(self.raw, alpha))
         }
     }
