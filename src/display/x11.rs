@@ -1,3 +1,5 @@
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use crate::sdl::*;
 use libloading::{Library, Symbol};
 use std::{
@@ -67,6 +69,8 @@ impl Randr {
         API.get_or_init(Self::new).as_ref()
     }
     fn new() -> Option<Self> {
+        // SAFETY: These are the standard X11/XRandR shared-library sonames.
+        // Both libraries remain owned by Randr for the duration of queries.
         unsafe {
             Some(Self {
                 x11: Library::new("libX11.so.6")
@@ -79,6 +83,9 @@ impl Randr {
         }
     }
     pub fn active_areas(&self, window: &Window) -> Option<Vec<[i32; 4]>> {
+        // SAFETY: Xlib/XRandR symbols retain their loaded libraries through
+        // self, and SDL keeps the display live for the borrowed Window.
+        // OwnedRandr guards ensure every native allocation is released.
         unsafe {
             let count: Symbol<unsafe extern "C" fn(*mut c_void) -> c_int> =
                 self.x11.get(b"XScreenCount\0").ok()?;
@@ -129,5 +136,45 @@ impl Randr {
             }
             (queried && !failed).then_some(areas)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OwnedRandr;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    struct CountDrop(Arc<AtomicUsize>);
+
+    impl Drop for CountDrop {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    unsafe extern "C" fn free_test_resource(raw: *mut CountDrop) {
+        // SAFETY: The test transfers its unique Box allocation to the guard.
+        unsafe { drop(Box::from_raw(raw)) };
+    }
+
+    #[test]
+    fn owned_resource_drops_exactly_once_and_ignores_null() {
+        let freed = Arc::new(AtomicUsize::new(0));
+        let raw = Box::into_raw(Box::new(CountDrop(freed.clone())));
+        // SAFETY: raw is from Box::into_raw and its matching destructor
+        // reconstructs that same Box exactly once.
+        let owned = unsafe { OwnedRandr::from_native(raw, free_test_resource) }.unwrap();
+        drop(owned);
+        assert_eq!(freed.load(Ordering::SeqCst), 1);
+
+        // SAFETY: No native allocation is transferred for a null pointer.
+        let empty = unsafe {
+            OwnedRandr::<CountDrop>::from_native(std::ptr::null_mut(), free_test_resource)
+        };
+        assert!(empty.is_none());
+        assert_eq!(freed.load(Ordering::SeqCst), 1);
     }
 }
