@@ -19,6 +19,9 @@ const CAPTURE_INTERFACE = `<node>
             <arg type="d" direction="in" name="bottom"/>
             <arg type="d" direction="in" name="canvasWidth"/>
             <arg type="d" direction="in" name="canvasHeight"/>
+            <arg type="b" direction="in" name="hasPosition"/>
+            <arg type="d" direction="in" name="canvasX"/>
+            <arg type="d" direction="in" name="canvasY"/>
             <arg type="s" direction="out" name="pngPath"/>
         </method>
     </interface>
@@ -39,7 +42,8 @@ class CaptureBridge {
         });
     }
 
-    async _capture([left, top, right, bottom, width, height], invocation) {
+    async _capture([left, top, right, bottom, width, height,
+        hasPosition, canvasX, canvasY], invocation) {
         if (this._busy)
             throw new Error('Another screenshot is still running');
         this._busy = true;
@@ -73,9 +77,16 @@ class CaptureBridge {
                 return window?.get_pid() === pid &&
                     (name === APP_ID.toLowerCase() || name === 'overink');
             });
-            const canvas = mine.find(actor => actor.meta_window.get_title() === CANVAS);
+            const canvases = mine.filter(actor =>
+                actor.meta_window.get_title() === CANVAS);
+            const canvas = canvases.length === 1 ? canvases[0] :
+                (hasPosition ? canvases.find(actor => {
+                    const bounds = actor.meta_window.get_frame_rect();
+                    return Math.abs(bounds.x - canvasX) <= 4 &&
+                        Math.abs(bounds.y - canvasY) <= 4;
+                }) : null);
             if (!canvas)
-                throw new Error('No OverInk canvas belongs to the requesting process');
+                throw new Error('Cannot identify the selected OverInk canvas');
             const frame = canvas.meta_window.get_frame_rect();
             if (frame.width <= 0 || frame.height <= 0)
                 throw new Error('The screenshot canvas has no visible frame');
