@@ -117,8 +117,7 @@ impl Job {
                             "Cannot map a multi-display portal screenshot in XWayland".into()
                         );
                     }
-                    if wayland_scale_to_display_forced()
-                    {
+                    if wayland_scale_to_display_forced() {
                         return Err(
                             "Cannot map a multi-display portal screenshot with SDL scaling forced"
                                 .into(),
@@ -310,9 +309,7 @@ impl Crop {
 fn display_density(display: &Display) -> Option<f32> {
     // SDL's Wayland desktop mode expresses the native pixels per logical point.
     let (size, density) = desktop_display_mode(display.id)?;
-    (size == [display.bounds[2], display.bounds[3]]
-        && density.is_finite()
-        && density > 0.)
+    (size == [display.bounds[2], display.bounds[3]] && density.is_finite() && density > 0.)
         .then_some(density)
 }
 
