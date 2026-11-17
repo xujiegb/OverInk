@@ -146,11 +146,14 @@ fn capture_permission() -> Result<(), String> {
     }
     // TCC may cache a denial until the application is restarted. Request once
     // per process rather than showing another OS alert for every screenshot.
-    static REQUESTED: OnceLock<()> = OnceLock::new();
-    REQUESTED.get_or_init(|| {
-        let _ = unsafe { CGRequestScreenCaptureAccess() };
-    });
-    Err("Allow OverInk in macOS System Settings > Privacy & Security > Screen & System Audio Recording, then quit and reopen OverInk".into())
+    static REQUESTED: OnceLock<bool> = OnceLock::new();
+    if *REQUESTED.get_or_init(|| unsafe { CGRequestScreenCaptureAccess() }) {
+        // A newly granted permission may be usable immediately even if TCC's
+        // preflight result remains cached until the next process launch.
+        Ok(())
+    } else {
+        Err("Allow OverInk in macOS System Settings > Privacy & Security > Screen & System Audio Recording, then quit and reopen OverInk".into())
+    }
 }
 
 fn sdr_supported() -> bool {
@@ -227,6 +230,9 @@ fn screen_capture(
     if hdr && !hdr_supported() {
         return Err("HDR screenshots require macOS 15 or later on Apple silicon".into());
     }
+    if pixels.iter().any(|&dimension| dimension <= 0) {
+        return Err("Invalid macOS screenshot dimensions".into());
+    }
     let id = display_id(bounds)?;
     let (sender, receiver) = mpsc::channel();
     autoreleasepool(|_| -> Result<(), String> {
@@ -267,8 +273,14 @@ fn screen_capture(
 }
 
 fn capture_error(error: *mut AnyObject, hdr: bool) -> String {
+    if error.is_null() {
+        return "macOS screenshot returned no image or error".into();
+    }
     let description = unsafe {
         let message: *mut AnyObject = msg_send![error, localizedDescription];
+        if message.is_null() {
+            return "macOS screenshot returned an error without a description".into();
+        }
         let text: *const c_char = msg_send![message, UTF8String];
         if text.is_null() {
             "No image returned".into()
@@ -293,6 +305,9 @@ fn begin_screenshot(
         AnyClass::get(c"SCStreamConfiguration").ok_or("ScreenCaptureKit is unavailable")?;
     let manager = AnyClass::get(c"SCScreenshotManager").ok_or("ScreenCaptureKit is unavailable")?;
     let array = AnyClass::get(c"NSArray").ok_or("NSArray is unavailable")?;
+    if width <= 0 || height <= 0 {
+        return Err("Invalid macOS screenshot dimensions".into());
+    }
     unsafe {
         let displays: *mut AnyObject = msg_send![content, displays];
         let count: usize = msg_send![displays, count];
@@ -315,14 +330,19 @@ fn begin_screenshot(
         let filter = Retained::from_raw(filter).ok_or("Cannot configure the selected display")?;
         // The HDR preset is available on supported Apple silicon systems.
         // Ordinary SDR captures use the standard configuration on macOS 14+.
+        // The HDR preset is autoreleased (+0); +new returns an owned (+1)
+        // object. Retained balances both cases, including early returns.
         let config: *mut AnyObject = if hdr {
             msg_send![configuration, streamConfigurationWithPreset: 2_isize]
         } else {
             msg_send![configuration, new]
         };
-        if config.is_null() {
-            return Err("Cannot configure the macOS screenshot".into());
+        let config = if hdr {
+            Retained::retain(config)
+        } else {
+            Retained::from_raw(config)
         }
+        .ok_or("Cannot configure the macOS screenshot")?;
         let _: () = msg_send![config, setWidth: width as usize];
         let _: () = msg_send![config, setHeight: height as usize];
         let _: () = msg_send![config, setShowsCursor: false];
@@ -336,21 +356,19 @@ fn begin_screenshot(
         }
         let completion =
             block2::RcBlock::new(move |image: *const c_void, error: *mut AnyObject| {
-                let result = if image.is_null() {
-                    Err(capture_error(error, hdr))
-                } else if hdr {
-                    copy_screenshot(image).map(Some)
-                } else {
-                    copy_sdr_screenshot(image).map(Some)
-                };
-                let _ = sender.send(result);
+                autoreleasepool(|_| {
+                    let result = if image.is_null() {
+                        Err(capture_error(error, hdr))
+                    } else if hdr {
+                        copy_screenshot(image).map(Some)
+                    } else {
+                        copy_sdr_screenshot(image).map(Some)
+                    };
+                    let _ = sender.send(result);
+                });
             });
-        let _: () = msg_send![manager, captureImageWithFilter: &*filter, configuration: config,
+        let _: () = msg_send![manager, captureImageWithFilter: &*filter, configuration: &*config,
             completionHandler: &*completion];
-        if !hdr {
-            // +new returns an owned object, unlike the autoreleased HDR preset.
-            let _: () = msg_send![config, release];
-        }
     }
     Ok(())
 }
