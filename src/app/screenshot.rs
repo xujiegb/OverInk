@@ -233,7 +233,7 @@ pub struct Screenshot {
 }
 
 impl Screenshot {
-    pub fn start(&mut self, window: &Window, hdr: bool) {
+    pub fn start(&mut self, window: &Window, hdr: bool) -> Result<(), String> {
         self.target = window.id;
         self.hdr = hdr && hdr_available(window);
         let white = unsafe {
@@ -253,6 +253,17 @@ impl Screenshot {
         self.error = None;
         self.cancel_blocked = false;
         self.replace = None;
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        if driver() == "wayland" {
+            // GNOME's portal v2 can select an area interactively but cannot
+            // expose an overlay window's global Wayland position. Let GNOME
+            // choose the region instead of blindly cropping the wrong pixels.
+            let job = Job::start_interactive(window)?;
+            self.hdr = false;
+            self.stage = Stage::Capturing(Rect::NOTHING, job, Instant::now());
+            self.cursor = None;
+        }
+        Ok(())
     }
 
     pub fn active(&self) -> bool {
@@ -462,7 +473,15 @@ impl Screenshot {
             Stage::Ready(region, _) => region,
             _ => return,
         };
-        shade(ui, screen, Some(region), units);
+        let portal_selection = region == Rect::NOTHING;
+        if !portal_selection {
+            shade(ui, screen, Some(region), units);
+        }
+        let anchor = if portal_selection {
+            Rect::from_center_size(screen.center(), vec2(2., 2.))
+        } else {
+            region
+        };
         let replace = self.replace.as_ref().map(|path| {
             format!(
                 "{} {}",
@@ -487,7 +506,7 @@ impl Screenshot {
             .or(replace.as_deref());
         let size = MENU_SIZE + vec2(0., if detail.is_some() { 26. } else { 0. });
         let scale = toolbar::menu_scale(screen, size, units);
-        let rect = toolbar::context_menu_rect(region, screen, size * scale, None, scale);
+        let rect = toolbar::context_menu_rect(anchor, screen, size * scale, None, scale);
         ui.painter().rect(
             rect,
             8. * scale,
