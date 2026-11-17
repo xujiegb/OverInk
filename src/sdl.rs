@@ -23,6 +23,10 @@ pub fn error() -> String {
 pub fn check(value: bool) -> Result<(), String> {
     if value { Ok(()) } else { Err(error()) }
 }
+pub fn event_type(event: &SDL_Event) -> SDL_EventType {
+    // Every SDL event record starts with its type tag.
+    unsafe { SDL_EventType(event.r#type) }
+}
 pub fn cstring(v: &str) -> CString {
     CString::new(v.replace('\0', "")).unwrap()
 }
@@ -123,7 +127,15 @@ impl Window {
     }
 
     pub fn input_focused(&self) -> bool {
-        unsafe { (SDL_GetWindowFlags(self.raw) & SDL_WINDOW_INPUT_FOCUS).0 != 0 }
+        self.flags() & SDL_WINDOW_INPUT_FOCUS != 0
+    }
+
+    pub fn hidden(&self) -> bool {
+        self.flags() & SDL_WINDOW_HIDDEN != 0
+    }
+
+    fn flags(&self) -> SDL_WindowFlags {
+        unsafe { SDL_GetWindowFlags(self.raw) }
     }
 
     pub fn new(title: &str, w: i32, h: i32, overlay: bool) -> Result<Self, String> {
@@ -286,8 +298,16 @@ impl Window {
     pub fn scale(&self) -> f32 {
         unsafe { SDL_GetWindowDisplayScale(self.raw).max(1.) }
     }
+    pub fn pixel_density(&self) -> f32 {
+        let density = unsafe { SDL_GetWindowPixelDensity(self.raw) };
+        if density.is_finite() && density > 0. {
+            density
+        } else {
+            1.
+        }
+    }
     pub fn ui_scale(&self) -> f32 {
-        self.scale() / unsafe { SDL_GetWindowPixelDensity(self.raw) }.max(0.1)
+        self.scale() / self.pixel_density()
     }
     pub fn show(&self, show: bool) -> Result<(), String> {
         unsafe {

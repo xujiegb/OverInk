@@ -12,13 +12,19 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicU8, Ordering},
         mpsc,
     },
     time::{Duration, Instant},
 };
 
-const MENU_SIZE: Vec2 = vec2(286., 42.);
+const MENU_BUTTON: Vec2 = vec2(108., 44.);
+const MENU_PADDING: f32 = 6.;
+const MENU_GAP: f32 = 5.;
+const MENU_SIZE: Vec2 = vec2(
+    3. * MENU_BUTTON.x + 2. * (MENU_GAP + MENU_PADDING),
+    MENU_BUTTON.y + 2. * MENU_PADDING,
+);
 const CAPTURE_DELAY: Duration = Duration::from_millis(120);
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -67,7 +73,7 @@ impl SelectionEvent {
         let mouse = |id| id != SDL_TOUCH_MOUSEID && id != SDL_PEN_MOUSEID;
         // Read only the union member selected by SDL's event type.
         unsafe {
-            match SDL_EventType(event.r#type) {
+            match event_type(event) {
                 ty @ (SDL_EVENT_MOUSE_BUTTON_DOWN | SDL_EVENT_MOUSE_BUTTON_UP) => {
                     let b = event.button;
                     if b.button != SDL_BUTTON_LEFT as u8 || !mouse(b.which) {
@@ -130,9 +136,11 @@ impl SelectionEvent {
     }
 }
 
-fn capture_mouse(pointer: Pointer, captured: bool) {
+fn capture_mouse(pointer: Pointer, captured: bool) -> bool {
     if matches!(pointer, Pointer::Mouse(_)) {
-        unsafe { SDL_CaptureMouse(captured) };
+        unsafe { SDL_CaptureMouse(captured) }
+    } else {
+        true
     }
 }
 
@@ -140,6 +148,7 @@ fn capture_mouse(pointer: Pointer, captured: bool) {
 pub enum SaveError {
     Failed(String),
     Exists(PathBuf),
+    Cancelled,
 }
 
 impl From<String> for SaveError {
@@ -150,15 +159,61 @@ impl From<String> for SaveError {
 
 type SaveResult = Result<PathBuf, SaveError>;
 
+// Serialize cancellation against the first irreversible filesystem operation.
+const SAVE_PENDING: u8 = 0;
+const SAVE_CANCELLED: u8 = 1;
+const SAVE_PUBLISHING: u8 = 2;
+const SAVE_CANCEL_REQUESTED: u8 = 3;
+
 struct SaveJob {
     direct: bool,
     receiver: mpsc::Receiver<SaveResult>,
-    cancelled: Arc<AtomicBool>,
+    cancelled: Arc<AtomicU8>,
+}
+
+impl SaveJob {
+    fn try_cancel(&self) -> bool {
+        loop {
+            match self.cancelled.load(Ordering::Acquire) {
+                SAVE_PENDING => {
+                    if self
+                        .cancelled
+                        .compare_exchange(
+                            SAVE_PENDING,
+                            SAVE_CANCELLED,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        )
+                        .is_ok()
+                    {
+                        return true;
+                    }
+                }
+                SAVE_PUBLISHING => {
+                    if self
+                        .cancelled
+                        .compare_exchange(
+                            SAVE_PUBLISHING,
+                            SAVE_CANCEL_REQUESTED,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        )
+                        .is_ok()
+                    {
+                        return false;
+                    }
+                }
+                SAVE_CANCELLED => return true,
+                SAVE_CANCEL_REQUESTED => return false,
+                _ => unreachable!("invalid screenshot save state"),
+            }
+        }
+    }
 }
 
 impl Drop for SaveJob {
     fn drop(&mut self) {
-        self.cancelled.store(true, Ordering::Relaxed);
+        let _ = self.try_cancel();
     }
 }
 
@@ -172,6 +227,7 @@ pub struct Screenshot {
     action: Option<MenuAction>,
     save_job: Option<SaveJob>,
     error: Option<String>,
+    cancel_blocked: bool,
     replace: Option<PathBuf>,
     save_dialog: bool,
 }
@@ -195,6 +251,7 @@ impl Screenshot {
         self.stage = Stage::Selecting(None);
         self.cursor = Crosshair::new();
         self.error = None;
+        self.cancel_blocked = false;
         self.replace = None;
     }
 
@@ -219,6 +276,25 @@ impl Screenshot {
     }
 
     pub fn cancel(&mut self) {
+        // A file already being published cannot be promised as cancelled.
+        if self.save_job.as_ref().is_some_and(|job| !job.try_cancel()) {
+            self.cancel_blocked = true;
+            return;
+        }
+        self.clear_capture();
+        self.save_job = None;
+    }
+
+    pub fn abandon(&mut self) {
+        // A display can disappear while a file is being published. Detach its
+        // screenshot UI but keep the save receiver until publication finishes.
+        if self.save_job.as_ref().is_some_and(SaveJob::try_cancel) {
+            self.save_job = None;
+        }
+        self.clear_capture();
+    }
+
+    fn clear_capture(&mut self) {
         if let Stage::Selecting(Some(drag)) = self.stage {
             capture_mouse(drag.pointer, false);
         }
@@ -226,9 +302,9 @@ impl Screenshot {
         self.cursor = None;
         self.action = None;
         self.error = None;
+        self.cancel_blocked = false;
         self.replace = None;
         self.save_dialog = false;
-        self.save_job = None;
     }
 
     pub fn event(&mut self, event: &SDL_Event, window: &Window, touch_enabled: bool) -> bool {
@@ -240,6 +316,40 @@ impl Screenshot {
             .is_some_and(|event| self.select(event, size))
     }
 
+    pub fn recover_mouse_drag(&mut self, released: bool) -> bool {
+        if released
+            && matches!(
+                self.stage,
+                Stage::Selecting(Some(Drag {
+                    pointer: Pointer::Mouse(_),
+                    ..
+                }))
+            )
+        {
+            if let Stage::Selecting(Some(drag)) = self.stage {
+                capture_mouse(drag.pointer, false);
+            }
+            self.stage = Stage::Selecting(None);
+            self.error = None;
+            return true;
+        }
+        false
+    }
+
+    pub fn reject_touch_drag(&mut self) -> bool {
+        if matches!(
+            self.stage,
+            Stage::Selecting(Some(Drag {
+                pointer: Pointer::Touch(_),
+                ..
+            }))
+        ) {
+            self.stage = Stage::Selecting(None);
+            return true;
+        }
+        false
+    }
+
     fn select(&mut self, event: SelectionEvent, size: [f32; 2]) -> bool {
         let Stage::Selecting(drag) = &mut self.stage else {
             return false;
@@ -249,12 +359,14 @@ impl Screenshot {
         match event {
             SelectionEvent::Down(pointer, point) if drag.is_none() && point.is_finite() => {
                 let start = clamp(point);
+                // SDL capture is not available on every backend. Still allow
+                // in-window dragging; losing focus cancels an unfinished drag.
+                let _ = capture_mouse(pointer, true);
                 *drag = Some(Drag {
                     pointer,
                     start,
                     end: start,
                 });
-                capture_mouse(pointer, true);
                 true
             }
             SelectionEvent::Move(pointer, point)
@@ -271,6 +383,7 @@ impl Screenshot {
             {
                 *drag = None;
                 capture_mouse(pointer, false);
+                self.error = None;
                 if point.is_finite() {
                     let region = Rect::from_two_pos(current.start, clamp(point));
                     if region.width() >= 2. && region.height() >= 2. {
@@ -338,18 +451,18 @@ impl Screenshot {
         Some(result.map(|_| false))
     }
 
-    pub fn ui(&mut self, ui: &mut Ui, tr: Language) {
+    pub fn ui(&mut self, ui: &mut Ui, tr: Language, units: f32) {
         let screen = ui.clip_rect();
         let region = match self.stage {
             Stage::Selecting(drag) => {
                 let region = drag.map(|drag| Rect::from_two_pos(drag.start, drag.end));
-                shade(ui, screen, region);
+                shade(ui, screen, region, units);
                 return;
             }
             Stage::Ready(region, _) => region,
             _ => return,
         };
-        shade(ui, screen, Some(region));
+        shade(ui, screen, Some(region), units);
         let replace = self.replace.as_ref().map(|path| {
             format!(
                 "{} {}",
@@ -361,12 +474,23 @@ impl Screenshot {
                 )
             )
         });
-        let detail = self.error.as_deref().or(replace.as_deref());
-        let size = MENU_SIZE + vec2(0., if detail.is_some() { 42. } else { 0. });
-        let rect = toolbar::context_menu_rect(region, screen, size, None);
+        let detail = self
+            .cancel_blocked
+            .then(|| {
+                tr.text(
+                    "The screenshot is being saved and can no longer be cancelled",
+                    "截图正在保存，已无法取消",
+                    "螢幕擷取正在儲存，已無法取消",
+                )
+            })
+            .or(self.error.as_deref())
+            .or(replace.as_deref());
+        let size = MENU_SIZE + vec2(0., if detail.is_some() { 26. } else { 0. });
+        let scale = toolbar::menu_scale(screen, size, units);
+        let rect = toolbar::context_menu_rect(region, screen, size * scale, None, scale);
         ui.painter().rect(
             rect,
-            6.,
+            8. * scale,
             ui.visuals().window_fill(),
             ui.visuals().window_stroke(),
             StrokeKind::Inside,
@@ -374,9 +498,10 @@ impl Screenshot {
         let mut menu = ui.new_child(
             UiBuilder::new()
                 .id_salt("screenshot-actions")
-                .max_rect(rect.shrink(5.)),
+                .max_rect(rect.shrink(MENU_PADDING * scale)),
         );
-        menu.spacing_mut().item_spacing.x = 4.;
+        menu.spacing_mut().item_spacing = Vec2::splat(MENU_GAP * scale);
+        menu.spacing_mut().button_padding = vec2(6., 4.) * scale;
         let primary = if self.replace.is_some() {
             (MenuAction::Replace, tr.text("Replace", "替换", "取代"))
         } else {
@@ -395,7 +520,10 @@ impl Screenshot {
                 let enabled =
                     !self.save_dialog && (!saving || matches!(action, MenuAction::Cancel));
                 if ui
-                    .add_enabled(enabled, egui::Button::new(label).min_size(vec2(89., 32.)))
+                    .add_enabled(
+                        enabled,
+                        toolbar::menu_button(label, scale).min_size(MENU_BUTTON * scale),
+                    )
                     .clicked()
                 {
                     self.action = Some(action);
@@ -403,7 +531,8 @@ impl Screenshot {
             }
         });
         if let Some(detail) = detail {
-            menu.add(egui::Label::new(detail).truncate())
+            let detail = egui::RichText::new(detail).size(14. * scale);
+            menu.add(egui::Label::new(detail.clone()).truncate())
                 .on_hover_text(detail);
         }
     }
@@ -413,6 +542,7 @@ impl Screenshot {
     }
 
     pub fn show_error(&mut self, message: String) {
+        self.cancel_blocked = false;
         self.error = Some(message);
     }
 
@@ -465,7 +595,7 @@ impl Screenshot {
         let image = Arc::clone(image);
         let (hdr, sdr_white) = (self.hdr, self.sdr_white);
         let (sender, receiver) = mpsc::channel();
-        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancelled = Arc::new(AtomicU8::new(SAVE_PENDING));
         let worker_cancelled = Arc::clone(&cancelled);
         std::thread::Builder::new()
             .name("overink-save-screenshot".into())
@@ -480,6 +610,7 @@ impl Screenshot {
             })
             .map_err(|error| error.to_string())?;
         self.error = None;
+        self.cancel_blocked = false;
         self.replace = None;
         self.save_job = Some(SaveJob {
             direct,
@@ -500,11 +631,12 @@ impl Screenshot {
         };
         let direct = job.direct;
         self.save_job = None;
+        self.cancel_blocked = false;
         Some((direct, result))
     }
 }
 
-fn shade(ui: &Ui, screen: Rect, region: Option<Rect>) {
+fn shade(ui: &Ui, screen: Rect, region: Option<Rect>, units: f32) {
     let shade = Color32::from_black_alpha(76);
     let painter = ui.painter();
     if let Some(region) = region {
@@ -519,7 +651,7 @@ fn shade(ui: &Ui, screen: Rect, region: Option<Rect>) {
         painter.rect_stroke(
             region,
             0.,
-            Stroke::new(1.5, toolbar::ACTIVE),
+            Stroke::new(1.5 * units, toolbar::ACTIVE),
             StrokeKind::Inside,
         );
     } else {
@@ -597,7 +729,7 @@ fn file_stem() -> String {
 
 struct CancellableWriter<'a, W> {
     writer: W,
-    cancelled: &'a AtomicBool,
+    cancelled: &'a AtomicU8,
 }
 
 impl<W: Write> Write for CancellableWriter<'_, W> {
@@ -612,9 +744,37 @@ impl<W: Write> Write for CancellableWriter<'_, W> {
     }
 }
 
-fn check_cancelled(cancelled: &AtomicBool) -> io::Result<()> {
-    if cancelled.load(Ordering::Relaxed) {
+fn check_cancelled(cancelled: &AtomicU8) -> io::Result<()> {
+    if cancelled.load(Ordering::Acquire) == SAVE_CANCELLED {
         return Err(io::Error::other("Screenshot save cancelled"));
+    }
+    Ok(())
+}
+
+fn begin_publish(cancelled: &AtomicU8) -> io::Result<()> {
+    cancelled
+        .compare_exchange(
+            SAVE_PENDING,
+            SAVE_PUBLISHING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .map(|_| ())
+        .map_err(|_| io::Error::other("Screenshot save cancelled"))
+}
+
+fn retry_after_name_conflict(cancelled: &AtomicU8) -> Result<(), SaveError> {
+    if cancelled
+        .compare_exchange(
+            SAVE_PUBLISHING,
+            SAVE_PENDING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_err()
+    {
+        cancelled.store(SAVE_CANCELLED, Ordering::Release);
+        return Err(SaveError::Cancelled);
     }
     Ok(())
 }
@@ -636,7 +796,7 @@ fn write_screenshot(
     destination: Destination,
     hdr: bool,
     white: f32,
-    cancelled: &AtomicBool,
+    cancelled: &AtomicU8,
 ) -> SaveResult {
     check_cancelled(cancelled).map_err(|error| error.to_string())?;
     let destination = match destination {
@@ -670,11 +830,12 @@ fn write_screenshot(
                     format!("{stem}-{suffix}.png")
                 };
                 let path = folder.join(name);
-                check_cancelled(cancelled).map_err(|error| error.to_string())?;
+                begin_publish(cancelled).map_err(|error| error.to_string())?;
                 match output.persist_noclobber(&path) {
                     Ok(_) => return Ok(path),
                     Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
-                        output = error.file
+                        output = error.file;
+                        retry_after_name_conflict(cancelled)?;
                     }
                     Err(error) => return Err(error.error.to_string().into()),
                 }
@@ -682,7 +843,7 @@ fn write_screenshot(
             unreachable!()
         }
         Destination::File(path) => {
-            check_cancelled(cancelled).map_err(|error| error.to_string())?;
+            begin_publish(cancelled).map_err(|error| error.to_string())?;
             output.persist_noclobber(&path).map_err(|error| {
                 if error.error.kind() == io::ErrorKind::AlreadyExists {
                     SaveError::Exists(path.clone())
@@ -693,7 +854,7 @@ fn write_screenshot(
             Ok(path)
         }
         Destination::Replace(path) => {
-            check_cancelled(cancelled).map_err(|error| error.to_string())?;
+            begin_publish(cancelled).map_err(|error| error.to_string())?;
             output
                 .persist(&path)
                 .map_err(|error| error.error.to_string())?;
@@ -707,6 +868,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn screenshot_actions_accept_clicks_in_the_scaled_button_area() {
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(1440., 900.));
+        let region = Rect::from_min_size(pos2(400., 200.), vec2(320., 240.));
+        let units = 2.;
+        let rect = toolbar::context_menu_rect(region, screen, MENU_SIZE * units, None, units);
+        let pos = rect.min
+            + vec2(
+                MENU_PADDING + MENU_BUTTON.x + MENU_GAP + MENU_BUTTON.x * 0.5,
+                MENU_PADDING + MENU_BUTTON.y * 0.5,
+            ) * units;
+        let mut screenshot = Screenshot {
+            stage: Stage::Ready(region, Arc::new(Image::buffer(1, 1).unwrap())),
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        let mut render = |events| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    screenshot.ui(ui, Language::English, units);
+                },
+            )
+            .drop_without_applying_deltas();
+        };
+        render(vec![egui::Event::PointerMoved(pos)]);
+        for pressed in [true, false] {
+            render(vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            }]);
+        }
+        assert!(matches!(screenshot.action(), Some(MenuAction::SaveAs)));
+    }
+
+    #[test]
     fn saving_png_never_recreates_a_missing_default_folder_or_overwrites_an_automatic_name() {
         let folder = tempfile::tempdir().unwrap();
         let missing = folder.path().join("missing");
@@ -715,7 +917,7 @@ mod tests {
             .rgba
             .copy_from_slice(&[255, 0, 0, 255, 0, 255, 0, 255]);
 
-        let cancelled = AtomicBool::new(false);
+        let cancelled = AtomicU8::new(SAVE_PENDING);
         assert!(
             write_screenshot(
                 &image,
@@ -733,7 +935,7 @@ mod tests {
                 Destination::Folder(folder.path().into()),
                 false,
                 1.,
-                &cancelled,
+                &AtomicU8::new(SAVE_PENDING),
             )
             .unwrap()
         };
@@ -752,9 +954,14 @@ mod tests {
         let path = folder.path().join("capture.png");
         std::fs::write(&path, b"existing file").unwrap();
         let image = Image::buffer(1, 1).unwrap();
-        let cancelled = AtomicBool::new(false);
         for chosen in [path.clone(), path.with_extension("")] {
-            let result = write_screenshot(&image, Destination::File(chosen), false, 1., &cancelled);
+            let result = write_screenshot(
+                &image,
+                Destination::File(chosen),
+                false,
+                1.,
+                &AtomicU8::new(SAVE_PENDING),
+            );
             assert!(matches!(result, Err(SaveError::Exists(existing)) if existing == path));
             assert_eq!(std::fs::read(&path).unwrap(), b"existing file");
         }
@@ -763,7 +970,7 @@ mod tests {
             Destination::Replace(path.clone()),
             false,
             1.,
-            &cancelled,
+            &AtomicU8::new(SAVE_PENDING),
         );
         assert_eq!(saved.unwrap(), path);
         assert!(image::open(path).is_ok());
@@ -772,7 +979,7 @@ mod tests {
 
     #[test]
     fn cancelling_save_disconnects_its_result_and_prevents_file_creation() {
-        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancelled = Arc::new(AtomicU8::new(SAVE_PENDING));
         let (sender, receiver) = mpsc::channel();
         let mut screenshot = Screenshot {
             save_job: Some(SaveJob {
@@ -783,6 +990,7 @@ mod tests {
             ..Default::default()
         };
         screenshot.cancel();
+        assert_eq!(cancelled.load(Ordering::Acquire), SAVE_CANCELLED);
         let folder = tempfile::tempdir().unwrap();
         let image = Image::buffer(1, 1).unwrap();
         let result = write_screenshot(
@@ -796,6 +1004,141 @@ mod tests {
         assert!(sender.send(result).is_err());
         assert!(screenshot.poll_save().is_none());
         assert_eq!(std::fs::read_dir(folder.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn cancellation_cannot_hide_an_already_publishing_save() {
+        let (sender, receiver) = mpsc::channel();
+        let cancelled = Arc::new(AtomicU8::new(SAVE_PUBLISHING));
+        let mut screenshot = Screenshot {
+            stage: Stage::Ready(Rect::NOTHING, Arc::new(Image::buffer(1, 1).unwrap())),
+            save_job: Some(SaveJob {
+                direct: true,
+                receiver,
+                cancelled: Arc::clone(&cancelled),
+            }),
+            ..Default::default()
+        };
+        screenshot.cancel();
+        assert!(screenshot.ready());
+        assert!(screenshot.saving());
+        assert_eq!(cancelled.load(Ordering::Acquire), SAVE_CANCEL_REQUESTED);
+        assert!(screenshot.cancel_blocked);
+        sender.send(Ok(PathBuf::from("saved.png"))).unwrap();
+        assert!(matches!(screenshot.poll_save(), Some((true, Ok(_)))));
+        screenshot.cancel();
+        assert!(!screenshot.active());
+    }
+
+    #[test]
+    fn cancelled_during_filename_collision_prevents_retry() {
+        let state = AtomicU8::new(SAVE_PUBLISHING);
+        state.store(SAVE_CANCEL_REQUESTED, Ordering::Release);
+        assert!(matches!(
+            retry_after_name_conflict(&state),
+            Err(SaveError::Cancelled)
+        ));
+        assert_eq!(state.load(Ordering::Acquire), SAVE_CANCELLED);
+
+        let state = AtomicU8::new(SAVE_PUBLISHING);
+        assert!(retry_after_name_conflict(&state).is_ok());
+        assert_eq!(state.load(Ordering::Acquire), SAVE_PENDING);
+    }
+
+    #[test]
+    fn detached_screenshot_keeps_publishing_save_until_result() {
+        let (sender, receiver) = mpsc::channel();
+        let cancelled = Arc::new(AtomicU8::new(SAVE_PUBLISHING));
+        let mut screenshot = Screenshot {
+            stage: Stage::Ready(Rect::NOTHING, Arc::new(Image::buffer(1, 1).unwrap())),
+            save_job: Some(SaveJob {
+                direct: false,
+                receiver,
+                cancelled: Arc::clone(&cancelled),
+            }),
+            ..Default::default()
+        };
+        screenshot.abandon();
+        assert!(!screenshot.active());
+        assert!(screenshot.saving());
+        assert_eq!(cancelled.load(Ordering::Acquire), SAVE_CANCEL_REQUESTED);
+        sender.send(Ok(PathBuf::from("detached.png"))).unwrap();
+        assert!(matches!(screenshot.poll_save(), Some((false, Ok(_)))));
+        assert!(!screenshot.saving());
+    }
+
+    #[test]
+    fn detached_screenshot_cancels_save_before_publication() {
+        let (sender, receiver) = mpsc::channel();
+        let cancelled = Arc::new(AtomicU8::new(SAVE_PENDING));
+        let mut screenshot = Screenshot {
+            stage: Stage::Ready(Rect::NOTHING, Arc::new(Image::buffer(1, 1).unwrap())),
+            save_job: Some(SaveJob {
+                direct: true,
+                receiver,
+                cancelled: Arc::clone(&cancelled),
+            }),
+            ..Default::default()
+        };
+        screenshot.abandon();
+        assert!(!screenshot.active());
+        assert!(!screenshot.saving());
+        assert_eq!(cancelled.load(Ordering::Acquire), SAVE_CANCELLED);
+        assert!(sender.send(Ok(PathBuf::from("never.png"))).is_err());
+    }
+
+    #[test]
+    fn mouse_recovery_clears_missing_release() {
+        let mut screenshot = Screenshot {
+            stage: Stage::Selecting(Some(Drag {
+                pointer: Pointer::Mouse(SDL_MouseID(1)),
+                start: pos2(1., 1.),
+                end: pos2(8., 9.),
+            })),
+            ..Default::default()
+        };
+        assert!(!screenshot.recover_mouse_drag(false));
+        assert!(screenshot.recover_mouse_drag(true));
+        assert!(matches!(screenshot.stage, Stage::Selecting(None)));
+    }
+
+    #[test]
+    fn cancelling_before_publication_does_not_replace_existing_file() {
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("existing.png");
+        std::fs::write(&path, b"original").unwrap();
+        let state = AtomicU8::new(SAVE_PENDING);
+        state.store(SAVE_CANCELLED, Ordering::Release);
+        let image = Image::buffer(1, 1).unwrap();
+        assert!(
+            write_screenshot(
+                &image,
+                Destination::Replace(path.clone()),
+                false,
+                1.,
+                &state
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(path).unwrap(), b"original");
+    }
+
+    #[test]
+    fn pen_proximity_cancels_a_touch_selection_without_cancelling_pen_selection() {
+        let mut screenshot = Screenshot {
+            stage: Stage::Selecting(Some(Drag {
+                pointer: Pointer::Touch(TouchKey {
+                    device: 3,
+                    finger: 5,
+                }),
+                start: pos2(10., 10.),
+                end: pos2(20., 30.),
+            })),
+            ..Default::default()
+        };
+        assert!(screenshot.reject_touch_drag());
+        assert!(matches!(screenshot.stage, Stage::Selecting(None)));
+        assert!(!screenshot.reject_touch_drag());
     }
 
     #[test]

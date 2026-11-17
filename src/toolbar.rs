@@ -141,12 +141,28 @@ pub fn swatch(ui: &mut Ui, size: Vec2, rgb: [u8; 3], label: &str, selected: bool
     hint(response, label)
 }
 
-pub fn context_menu_rect(anchor: Rect, screen: Rect, size: Vec2, protected: Option<Rect>) -> Rect {
-    let gap = 6.;
+const MENU_EDGE: f32 = 6.;
+
+pub fn menu_scale(screen: Rect, size: Vec2, units: f32) -> f32 {
+    units.min((screen.size() / (size + Vec2::splat(2. * MENU_EDGE))).min_elem())
+}
+
+pub fn menu_button(text: &str, scale: f32) -> egui::Button<'_> {
+    egui::Button::new(egui::RichText::new(text).size(16. * scale))
+}
+
+pub fn context_menu_rect(
+    anchor: Rect,
+    screen: Rect,
+    size: Vec2,
+    protected: Option<Rect>,
+    scale: f32,
+) -> Rect {
+    let gap = MENU_EDGE * scale;
     let inner = screen.shrink(gap);
     let x =
         (anchor.right() - size.x).clamp(inner.left(), (inner.right() - size.x).max(inner.left()));
-    let below = anchor.bottom() + gap;
+    let below = (anchor.bottom() + gap).max(inner.top());
     let y = if below + size.y <= inner.bottom() {
         below
     } else {

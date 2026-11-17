@@ -125,7 +125,7 @@ fn rectangle(canvas: &Window, toolbar: &Window) -> Option<Rect> {
     if crate::sdl::driver() == "wayland" {
         return None;
     }
-    if unsafe { SDL_GetWindowFlags(toolbar.raw) } & SDL_WINDOW_HIDDEN != 0 {
+    if toolbar.hidden() {
         return None;
     }
     let bounds = crate::native::controller_bounds(canvas, toolbar)?;

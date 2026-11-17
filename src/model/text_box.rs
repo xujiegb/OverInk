@@ -18,18 +18,30 @@ pub struct TextBox {
 
 impl TextBox {
     pub const FONT_SIZE: std::ops::RangeInclusive<f32> = 8. ..=144.;
+    pub const DEFAULT_FONT_SIZE: f32 = 32.;
     pub const PADDING: f32 = 6.;
     const MIN_SIZE: [f32; 2] = [48., 28.];
     const MAX_SIZE: f32 = 16384.;
 
-    pub fn new(position: Pos2, canvas: Rect, color: InkColor) -> Self {
+    pub fn new(position: Pos2, canvas: Rect, color: InkColor, units: f32) -> Self {
         let mut item = Self {
             origin: [position.x, position.y],
             size: [
-                (canvas.right() - position.x).clamp(144., 320.),
-                (canvas.bottom() - position.y).clamp(64., 112.),
+                (canvas.right() - position.x)
+                    .clamp(144. * units, 320. * units)
+                    .clamp(
+                        Self::MIN_SIZE[0],
+                        canvas.width().clamp(Self::MIN_SIZE[0], Self::MAX_SIZE),
+                    ),
+                (canvas.bottom() - position.y)
+                    .clamp(64. * units, 112. * units)
+                    .clamp(
+                        Self::MIN_SIZE[1],
+                        canvas.height().clamp(Self::MIN_SIZE[1], Self::MAX_SIZE),
+                    ),
             ],
-            font_size: 28.,
+            font_size: (Self::DEFAULT_FONT_SIZE * units)
+                .clamp(*Self::FONT_SIZE.start(), *Self::FONT_SIZE.end()),
             color,
             text: String::new(),
             scroll_offset: 0.,

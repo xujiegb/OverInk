@@ -171,7 +171,7 @@ impl Content {
 
 impl Popup {
     fn visible(&self) -> bool {
-        (unsafe { SDL_GetWindowFlags(self.window.raw) } & SDL_WINDOW_HIDDEN) == 0
+        !self.window.hidden()
     }
 
     fn configure(&mut self, bounds: [i32; 4]) -> Result<(), String> {

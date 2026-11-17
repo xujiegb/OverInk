@@ -16,13 +16,40 @@ use egui::{
 };
 use std::time::{Duration, Instant};
 
-const MENU_BUTTON: Vec2 = vec2(30., 28.);
-const MENU_GAP: f32 = 2.;
-const MENU_PADDING: f32 = 4.;
+mod color_wheel;
+use color_wheel::ColorWheel;
+
+const MENU_BUTTON: Vec2 = vec2(44., 44.);
+const MENU_GAP: f32 = 5.;
+const MENU_PADDING: f32 = 6.;
+const PALETTE_SIZE: Vec2 = vec2(266., 312.);
 const MENU_SIZE: Vec2 = vec2(
-    7. * MENU_BUTTON.x + 6. * MENU_GAP + 2. * MENU_PADDING,
+    8. * MENU_BUTTON.x + 7. * MENU_GAP + 2. * MENU_PADDING,
     MENU_BUTTON.y + 2. * MENU_PADDING,
 );
+
+#[derive(Clone, Copy)]
+struct TextMenus {
+    actions: Rect,
+    scale: f32,
+    palette: Option<(Rect, f32)>,
+}
+
+// A screen pick must not recolor a different annotation when the toolbar is
+// still interactive while the native picker is running.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct TextPickTarget {
+    selected: Option<usize>,
+    editing: bool,
+    item: TextBox,
+    committed: Option<String>,
+}
+
+impl TextMenus {
+    fn contains(self, pos: Pos2) -> bool {
+        self.actions.contains(pos) || self.palette.is_some_and(|(rect, _)| rect.contains(pos))
+    }
+}
 
 #[derive(Default)]
 pub(super) struct ToolbarTextFocus {
@@ -79,6 +106,8 @@ pub(super) struct TextInput {
     press: Option<Press>,
     click: Option<(usize, Pos2, Instant)>,
     menu_pointer: MenuPointer,
+    color_wheel: Option<ColorWheel>,
+    screen_pick_requested: bool,
 }
 
 #[derive(Default)]
@@ -88,7 +117,7 @@ struct MenuPointer {
 }
 
 impl MenuPointer {
-    fn wants_event(&mut self, event: &Event, menu: Option<Rect>) -> bool {
+    fn wants_event(&mut self, event: &Event, menu: Option<TextMenus>) -> bool {
         let contains = |pos| menu.is_some_and(|rect| rect.contains(pos));
         match *event {
             Event::PointerMoved(pos) => {
@@ -150,6 +179,10 @@ impl TextInput {
         self.draft.is_some()
     }
 
+    pub fn take_screen_pick(&mut self) -> bool {
+        std::mem::take(&mut self.screen_pick_requested)
+    }
+
     pub fn has_edit(&self, history: &History) -> bool {
         self.draft
             .as_ref()
@@ -191,6 +224,7 @@ impl TextInput {
     }
 
     pub fn finish(&mut self, history: &mut History) {
+        self.color_wheel = None;
         if let Some((index, item)) = self.take_draft(history) {
             self.selected = history.set_text_box(index, item);
         }
@@ -209,6 +243,7 @@ impl TextInput {
     fn edit(&mut self, index: Option<usize>, item: TextBox) {
         self.cancel_press();
         self.menu_pointer = MenuPointer::default();
+        self.color_wheel = None;
         self.selected = index;
         self.draft = Some(Draft {
             committed: item.text.clone(),
@@ -240,7 +275,7 @@ impl App {
     ) -> bool {
         use crate::sdl::*;
 
-        let ty = unsafe { SDL_EventType(event.r#type) };
+        let ty = event_type(event);
         let editing = self.input.text.editing();
         if !editing && self.input.text.selected.is_none() {
             gui.clear_events();
@@ -268,7 +303,7 @@ impl App {
                 return true;
             }
             changed |= self.text_pointer(event, size);
-            let menu = self.text_menu_rect(canvas);
+            let menu = self.text_menus(canvas);
             let forward = self.input.text.menu_pointer.wants_event(event, menu);
             changed |= forward;
             forward
@@ -296,12 +331,13 @@ impl App {
                     return false;
                 }
                 if self
-                    .text_menu_rect(canvas)
-                    .is_some_and(|rect| rect.contains(pos))
+                    .text_menus(canvas)
+                    .is_some_and(|menus| menus.contains(pos))
                 {
                     return true;
                 }
                 let state = &mut self.input.text;
+                state.color_wheel = None;
                 state.press = Some(Press {
                     origin: pos,
                     target: text_hit(&self.history, state.selected, pos, self.input.canvas_units),
@@ -355,7 +391,15 @@ impl App {
                             )
                             .into();
                         } else {
-                            state.edit(None, TextBox::new(press.origin, canvas, self.color));
+                            state.edit(
+                                None,
+                                TextBox::new(
+                                    press.origin,
+                                    canvas,
+                                    self.color,
+                                    self.input.canvas_units,
+                                ),
+                            );
                         }
                     }
                 }
@@ -446,7 +490,7 @@ impl App {
         })
     }
 
-    fn text_menu_rect(&self, canvas: Rect) -> Option<Rect> {
+    fn text_menus(&self, canvas: Rect) -> Option<TextMenus> {
         let item = self.text_menu_item()?;
         let protected = self.input.protected.map(|hole| {
             Rect::from_min_size(
@@ -454,12 +498,46 @@ impl App {
                 vec2(hole.w as f32, hole.h as f32),
             )
         });
-        Some(toolbar::context_menu_rect(
-            item.rect(),
-            canvas,
-            MENU_SIZE,
-            protected,
-        ))
+        let units = self.input.canvas_units;
+        let scale = toolbar::menu_scale(canvas, MENU_SIZE, units);
+        let actions =
+            toolbar::context_menu_rect(item.rect(), canvas, MENU_SIZE * scale, protected, scale);
+        let palette = self.input.text.color_wheel.map(|_| {
+            let scale = toolbar::menu_scale(canvas, PALETTE_SIZE, units);
+            let protected = Some(protected.map_or(actions, |hole| hole.union(actions)));
+            let rect =
+                toolbar::context_menu_rect(actions, canvas, PALETTE_SIZE * scale, protected, scale);
+            (rect, scale)
+        });
+        Some(TextMenus {
+            actions,
+            scale,
+            palette,
+        })
+    }
+
+    pub(super) fn text_pick_target(&self) -> Option<TextPickTarget> {
+        if !self.tool.is_text() || self.pass || self.hidden {
+            return None;
+        }
+        Some(TextPickTarget {
+            selected: self.input.text.selected,
+            editing: self.input.text.editing(),
+            item: self.text_menu_item()?.clone(),
+            committed: self
+                .input
+                .text
+                .draft
+                .as_ref()
+                .map(|draft| draft.committed.clone()),
+        })
+    }
+
+    pub(super) fn pick_text_color(&mut self, color: InkColor) -> Option<InkColor> {
+        let target = self.text_pick_target()?;
+        let color = color.converted(target.item.color.space);
+        // Picking an already selected color is still a successful pick.
+        (target.item.color == color || self.recolor_text(color)).then_some(color)
     }
 
     fn resize_text_font(&mut self, step: f32) {
@@ -478,16 +556,20 @@ impl App {
         }
     }
 
-    fn text_menu(&mut self, ui: &mut Ui, rect: Rect) {
+    fn text_menu(&mut self, ui: &mut Ui, menus: TextMenus) {
         let Some(item) = self.text_menu_item() else {
             return;
         };
         let color = item.color;
         let font_size = item.font_size;
         let tr = self.language;
+        let scale = menus.scale;
+        let rect = menus.actions;
+        let button = MENU_BUTTON * scale;
+        let font_step = 2. * self.input.canvas_units;
         ui.painter().rect(
             rect,
-            6.,
+            8. * scale,
             ui.visuals().window_fill(),
             ui.visuals().window_stroke(),
             StrokeKind::Inside,
@@ -495,14 +577,14 @@ impl App {
         let mut menu = ui.new_child(
             UiBuilder::new()
                 .id_salt("annotation-actions")
-                .max_rect(rect.shrink(MENU_PADDING))
+                .max_rect(rect.shrink(MENU_PADDING * scale))
                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
-        menu.spacing_mut().item_spacing.x = MENU_GAP;
-        menu.spacing_mut().button_padding.x = 4.;
+        menu.spacing_mut().item_spacing.x = MENU_GAP * scale;
+        menu.spacing_mut().button_padding = vec2(5., 4.) * scale;
         let mut acted = false;
         if menu
-            .add_sized(MENU_BUTTON, egui::Button::new("×"))
+            .add_sized(button, toolbar::menu_button("×", scale))
             .on_hover_text(tr.text("Delete text box", "删除文本框", "刪除文字框"))
             .clicked()
         {
@@ -512,19 +594,19 @@ impl App {
             (
                 "A+",
                 tr.text("Increase font size", "加大字号", "加大字級"),
-                2.,
+                font_step,
                 font_size < *TextBox::FONT_SIZE.end(),
             ),
             (
                 "A−",
                 tr.text("Decrease font size", "缩小字号", "縮小字級"),
-                -2.,
+                -font_step,
                 font_size > *TextBox::FONT_SIZE.start(),
             ),
         ] {
             if menu
                 .add_enabled_ui(enabled, |ui| {
-                    ui.add_sized(MENU_BUTTON, egui::Button::new(label))
+                    ui.add_sized(button, toolbar::menu_button(label, scale))
                 })
                 .inner
                 .on_hover_text(hint)
@@ -541,21 +623,95 @@ impl App {
                 tr.text("Text color", "文字颜色", "文字顏色"),
                 preset.hex()
             );
-            if toolbar::swatch(&mut menu, MENU_BUTTON, rgb, &label, color.srgb8() == rgb)
+            if toolbar::swatch(&mut menu, button, rgb, &label, color.srgb8() == rgb)
                 .on_hover_text(label)
                 .clicked()
             {
                 acted |= self.recolor_text(preset.converted(color.space));
+                self.input.text.color_wheel = None;
             }
+        }
+        let wheel_open = self.input.text.color_wheel.is_some();
+        let label = tr.text("Color wheel", "色轮", "色輪");
+        let (icon, response) = menu.allocate_exact_size(button, egui::Sense::click());
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(egui::Role::Button, menu.is_enabled(), wheel_open, label)
+        });
+        if wheel_open || response.hovered() || response.has_focus() {
+            menu.painter()
+                .rect_filled(icon, 6. * scale, menu.visuals().widgets.hovered.bg_fill);
+        }
+        color_wheel::paint_disc(menu.painter(), icon.center(), 12. * scale, 1.);
+        if response.on_hover_text(label).clicked() && self.text_menu_item().is_some() {
+            self.input.text.color_wheel = (!wheel_open).then(|| ColorWheel::new(color));
+            acted = true;
         }
         if acted {
             ui.ctx().request_repaint();
         }
     }
 
+    fn text_color_wheel(&mut self, ui: &mut Ui, rect: Rect, scale: f32) {
+        let Some(mut wheel) = self.input.text.color_wheel else {
+            return;
+        };
+        let tr = self.language;
+        ui.painter().rect(
+            rect,
+            8. * scale,
+            ui.visuals().window_fill(),
+            ui.visuals().window_stroke(),
+            StrokeKind::Inside,
+        );
+        let mut palette = ui.new_child(
+            UiBuilder::new()
+                .id_salt("wheel-controls")
+                .max_rect(rect.shrink(10. * scale)),
+        );
+        palette.spacing_mut().item_spacing = vec2(6., 7.) * scale;
+        palette.spacing_mut().button_padding = vec2(6., 4.) * scale;
+        palette.vertical_centered(|ui| wheel.show(ui, 200. * scale, scale));
+        palette.horizontal(|ui| {
+            ui.label(egui::RichText::new(tr.text("Brightness", "亮度", "亮度")).size(14. * scale));
+            ui.spacing_mut().slider_width = 135. * scale;
+            ui.spacing_mut().interact_size.y = 28. * scale;
+            ui.add(egui::Slider::new(&mut wheel.value.v, 0. ..=1.).show_value(false));
+        });
+        let (apply, pick) = palette
+            .horizontal(|ui| {
+                let apply = ui
+                    .add_sized(
+                        vec2(100., 44.) * scale,
+                        toolbar::menu_button(tr.text("Apply", "应用", "套用"), scale),
+                    )
+                    .clicked();
+                let pick = ui
+                    .add_sized(
+                        vec2(126., 44.) * scale,
+                        toolbar::menu_button(tr.text("Pick screen", "屏幕取色", "螢幕取色"), scale),
+                    )
+                    .clicked();
+                (apply, pick)
+            })
+            .inner;
+        if apply || pick {
+            self.input.text.color_wheel = None;
+            self.input.text.screen_pick_requested |= pick;
+            if apply && let Some(color) = wheel.chosen_color() {
+                self.pick_text_color(color);
+            }
+            ui.ctx().request_repaint();
+        } else {
+            self.input.text.color_wheel = Some(wheel);
+        }
+    }
+
     pub(super) fn text_key(&mut self, key: crate::sdl::SDL_Keycode) -> bool {
         use crate::sdl::*;
         let state = &mut self.input.text;
+        if key == SDLK_ESCAPE && state.color_wheel.take().is_some() {
+            return true;
+        }
         let Some(index) = state.selected else {
             return false;
         };
@@ -602,48 +758,69 @@ impl App {
             draw_text_box(ui, &self.text_fonts, item);
         }
         if interactive {
-            let menu = self.text_menu_rect(ui.clip_rect());
+            let screen = ui.clip_rect();
+            let mut menus = self.text_menus(screen);
+            if self.input.text.color_wheel.is_some() {
+                let escape = !composing
+                    && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, Key::Escape));
+                let outside = ui.input(|input| {
+                    input.pointer.primary_clicked()
+                        && input
+                            .pointer
+                            .interact_pos()
+                            .is_some_and(|point| menus.is_none_or(|menus| !menus.contains(point)))
+                });
+                if escape || outside {
+                    self.input.text.color_wheel = None;
+                    menus = self.text_menus(screen);
+                }
+            }
             if self.input.text.editing() {
-                self.text_editor(ui, composing, keep_editor_open, menu);
+                self.text_editor(ui, composing, keep_editor_open, menus);
             } else if let Some(item) =
                 selected.and_then(|index| self.history.text_boxes().get(index))
             {
                 let rect = preview.unwrap_or(item).rect();
-                let [resize, font] = handles(rect, self.input.canvas_units);
+                let scale = self.input.canvas_units;
+                let [resize, font] = handles(rect, scale);
                 let color = crate::toolbar::ACTIVE;
                 let painter = ui.painter();
-                painter.rect_stroke(rect, 3., Stroke::new(1., color), StrokeKind::Inside);
-                painter.rect_filled(resize.shrink(2.), 2., color);
-                painter.circle_filled(font.center(), (font.width() / 2. - 2.).max(1.), color);
+                painter.rect_stroke(
+                    rect,
+                    3. * scale,
+                    Stroke::new(1.25 * scale, color),
+                    StrokeKind::Inside,
+                );
+                painter.rect_filled(resize.shrink(2. * scale), 2. * scale, color);
+                painter.circle_filled(
+                    font.center(),
+                    (font.width() / 2. - 2. * scale).max(1.),
+                    color,
+                );
             }
-            if let Some(rect) = menu {
-                if !self.input.text.editing() {
-                    self.text_menu(ui, rect);
-                    return;
-                }
-                let clip = ui.clip_rect();
-                egui::Area::new(ui.make_persistent_id("annotation-menu"))
-                    .order(egui::Order::Foreground)
-                    .fixed_pos(rect.min)
-                    .default_size(rect.size())
-                    .constrain(false)
-                    .fade_in(false)
-                    .show(ui.ctx(), |ui| {
-                        ui.set_clip_rect(clip);
-                        ui.set_min_size(rect.size());
-                        self.text_menu(ui, rect);
+            if let Some(menus) = menus {
+                if self.input.text.editing() {
+                    overlay(ui, "annotation-menu", menus.actions, |ui| {
+                        self.text_menu(ui, menus)
                     });
-                if self.input.text.editing()
-                    && ui.input(|input| {
-                        input.pointer.primary_clicked()
+                    if ui.input(|input| {
+                        (input.pointer.any_pressed() || input.pointer.any_released())
                             && input
                                 .pointer
                                 .interact_pos()
-                                .is_some_and(|p| rect.contains(p))
-                    })
+                                .is_some_and(|point| menus.contains(point))
+                    }) {
+                        let id = ui.make_persistent_id("annotation-editor");
+                        ui.memory_mut(|mem| mem.request_focus(id));
+                    }
+                } else {
+                    self.text_menu(ui, menus);
+                }
+                if let Some((rect, scale)) = self.text_menus(screen).and_then(|menus| menus.palette)
                 {
-                    let id = ui.make_persistent_id("annotation-editor");
-                    ui.memory_mut(|mem| mem.request_focus(id));
+                    overlay(ui, "annotation-palette", rect, |ui| {
+                        self.text_color_wheel(ui, rect, scale)
+                    });
                 }
             }
         }
@@ -654,8 +831,9 @@ impl App {
         ui: &mut Ui,
         composing: bool,
         keep_editor_open: bool,
-        menu: Option<Rect>,
+        menus: Option<TextMenus>,
     ) {
+        let wheel_open = self.input.text.color_wheel.is_some();
         let draft = self.input.text.draft.as_mut().unwrap();
         let rect = draft.item.rect();
         let text_rect = draft.item.text_rect();
@@ -669,8 +847,8 @@ impl App {
         }
         ui.painter().rect_stroke(
             rect,
-            3.,
-            Stroke::new(1., crate::toolbar::ACTIVE),
+            3. * self.input.canvas_units,
+            Stroke::new(1.25 * self.input.canvas_units, crate::toolbar::ACTIVE),
             StrokeKind::Inside,
         );
         let (focused, finish, committed_input, menu_clicked) = ui.input(|input| {
@@ -680,7 +858,9 @@ impl App {
                 && (draft.had_input_focus
                     || input.events.iter().any(|event| matches!(event, Event::WindowFocused(false))));
             let clicked = input.pointer.primary_clicked().then(|| input.pointer.interact_pos()).flatten();
-            let menu_clicked = clicked.is_some_and(|point| menu.is_some_and(|menu| menu.contains(point)));
+            let menu_pointer = input.pointer.interact_pos().is_some_and(|point| {
+                menus.is_some_and(|menus| menus.contains(point))
+            });
             let finish = lost_window_focus
                 || (!composing
                     && (input.key_pressed(Key::Escape)
@@ -689,11 +869,11 @@ impl App {
                     key: Key::Enter, pressed: true, modifiers, ..
                 } if modifiers.command)
                         })))
-                || (!menu_clicked && clicked.is_some_and(|point| !rect.contains(point)));
+                || (!menu_pointer && clicked.is_some_and(|point| !rect.contains(point)));
             let committed_input = input.events.iter().any(|event| {
                 matches!(event, Event::Text(value) | Event::Paste(value) | Event::Ime(ImeEvent::Commit(value)) if !value.is_empty())
             });
-            (input.focused, finish, committed_input, menu_clicked)
+            (input.focused, finish, committed_input, menu_pointer)
         });
         draft.had_input_focus |= focused;
         let font_size = draft.item.font_size;
@@ -750,13 +930,33 @@ impl App {
             }
         }
         if finish
-            || (focused && !started && !composing && !menu_clicked && output.response.lost_focus())
+            || (focused
+                && !started
+                && !composing
+                && !wheel_open
+                && !menu_clicked
+                && output.response.lost_focus())
         {
             self.input.text.finish(&mut self.history);
             ui.memory_mut(|mem| mem.surrender_focus(id));
             ui.ctx().request_repaint();
         }
     }
+}
+
+fn overlay(ui: &Ui, id: &str, rect: Rect, content: impl FnOnce(&mut Ui)) {
+    let clip = ui.clip_rect();
+    egui::Area::new(ui.make_persistent_id(id))
+        .order(egui::Order::Foreground)
+        .fixed_pos(rect.min)
+        .default_size(rect.size())
+        .constrain(false)
+        .fade_in(false)
+        .show(ui.ctx(), |ui| {
+            ui.set_clip_rect(clip);
+            ui.set_min_size(rect.size());
+            content(ui);
+        });
 }
 
 fn draw_text_box(ui: &Ui, fonts: &TextFonts, item: &TextBox) {
@@ -777,7 +977,7 @@ fn ink(item: &TextBox) -> Color32 {
 }
 
 fn handles(rect: Rect, scale: f32) -> [Rect; 2] {
-    let size = Vec2::splat((16. * scale).min(rect.height() / 2.));
+    let size = Vec2::splat((20. * scale).min(rect.height() / 2.));
     [
         Rect::from_min_size(rect.right_bottom() - size, size),
         Rect::from_min_size(pos2(rect.right() - size.x, rect.top()), size),
@@ -1259,7 +1459,7 @@ mod tests {
         let mut app = app();
         app.use_tool(Tool::Text);
         let rect = Rect::from_min_size(Pos2::ZERO, Vec2::from(SIZE));
-        let mut item = TextBox::new(pos2(20., 20.), rect, app.color);
+        let mut item = TextBox::new(pos2(20., 20.), rect, app.color, 1.);
         item.text = "文字".into();
         let item = std::sync::Arc::new(item);
         app.history.set_document(
@@ -1353,7 +1553,7 @@ mod tests {
         let edited = app.history.text_boxes()[0].clone();
         assert_eq!(edited.origin, [230., 175.]);
         assert_eq!(edited.size, [393., 148.]);
-        assert_eq!(edited.font_size, 43.);
+        assert_eq!(edited.font_size, original.font_size + 15.);
         assert!(app.text_key(SDLK_DELETE));
         assert!(app.history.document().is_empty());
         app.history.undo();
@@ -1370,13 +1570,13 @@ mod tests {
         let mut gui = Gui::new();
         gui.ctx.set_fonts(app.text_fonts.definitions());
         let screen = Rect::from_min_size(Pos2::ZERO, Vec2::from(SIZE));
-        let mut item = TextBox::new(pos2(500., 300.), screen, InkColor::default());
+        let mut item = TextBox::new(pos2(500., 300.), screen, InkColor::default(), 1.);
         item.text = "Selected text".into();
         let index = app.history.set_text_box(None, item.clone()).unwrap();
         app.tool = Tool::Select;
-        assert!(app.text_menu_rect(screen).is_none());
+        assert!(app.text_menus(screen).is_none());
         click(&mut app, item.rect().center());
-        let menu = app.text_menu_rect(screen).unwrap();
+        let menu = app.text_menus(screen).unwrap().actions;
         assert!(menu.top() > item.rect().bottom());
         render(&mut app, &mut gui);
         let bigger = menu.min
@@ -1405,10 +1605,11 @@ mod tests {
         assert_eq!(app.history.text_boxes()[index].font_size, item.font_size);
         item.move_to(pos2(500., 580.), screen);
         app.history.set_text_box(Some(index), item.clone());
-        let menu = app.text_menu_rect(screen).unwrap();
-        assert!(item.rect().contains_rect(menu));
+        let menu = app.text_menus(screen).unwrap().actions;
+        assert!(item.rect().intersects(menu));
+        assert!(screen.contains_rect(menu));
         click(&mut app, pos2(50., 50.));
-        assert!(app.text_menu_rect(screen).is_none());
+        assert!(app.text_menus(screen).is_none());
     }
 
     #[test]
@@ -1417,7 +1618,7 @@ mod tests {
         app.use_tool(Tool::Text);
         click(&mut app, pos2(520., 555.));
         let screen = Rect::from_min_size(Pos2::ZERO, Vec2::from(SIZE));
-        let rect = app.text_menu_rect(screen).unwrap();
+        let rect = app.text_menus(screen).unwrap().actions;
         let draft = app.input.text.draft.as_ref().unwrap();
         assert!(draft.item.rect().intersects(rect));
         let font = draft.item.font_size;
@@ -1457,10 +1658,10 @@ mod tests {
         let mut app = app();
         let mut gui = Gui::new();
         let screen = Rect::from_min_size(Pos2::ZERO, Vec2::from(SIZE));
-        let mut item = TextBox::new(pos2(350., 100.), screen, InkColor::default());
+        let mut item = TextBox::new(pos2(350., 100.), screen, InkColor::default(), 1.);
         item.text = "Annotation".into();
         app.input.text.selected = app.history.set_text_box(None, item);
-        let menu = app.text_menu_rect(screen).unwrap();
+        let menu = app.text_menus(screen).unwrap().actions;
         let window = SDL_WindowID(1);
         let motion = |p: Pos2| SDL_Event {
             motion: SDL_MouseMotionEvent {
@@ -1477,6 +1678,114 @@ mod tests {
         assert!(app.text_event(&mut gui, &motion(Pos2::ZERO), window, SIZE));
         assert!(!app.text_event(&mut gui, &motion(pos2(1., 1.)), window, SIZE));
         assert_eq!(gui.raw.events.len(), 2);
+    }
+
+    #[test]
+    fn new_annotations_and_controls_scale_with_the_canvas() {
+        let mut app = app();
+        app.use_tool(Tool::Text);
+        app.input.canvas_units = 2.;
+        let size = [1920., 1080.];
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::from(size));
+        for pressed in [true, false] {
+            assert!(app.text_pointer(
+                &Event::PointerButton {
+                    pos: pos2(100., 100.),
+                    button: PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                size
+            ));
+        }
+        let item = &app.input.text.draft.as_ref().unwrap().item;
+        assert_eq!(item.size, [640., 224.]);
+        assert_eq!(item.font_size, 2. * TextBox::DEFAULT_FONT_SIZE);
+        let menus = app.text_menus(screen).unwrap();
+        assert_eq!(menus.actions.size(), MENU_SIZE * 2.);
+        assert!(screen.contains_rect(menus.actions));
+        let narrow = Rect::from_min_size(Pos2::ZERO, vec2(480., 650.));
+        assert!(narrow.contains_rect(app.text_menus(narrow).unwrap().actions));
+    }
+
+    #[test]
+    fn annotation_palette_requests_a_screen_pick_without_finishing_a_draft() {
+        let mut app = app();
+        app.use_tool(Tool::Text);
+        let original_brush = app.color;
+        click(&mut app, pos2(500., 338.));
+        app.input.text.draft.as_mut().unwrap().committed = "Draft".into();
+        app.input.text.refocus();
+        let mut gui = Gui::new();
+        gui.ctx.set_fonts(app.text_fonts.definitions());
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::from(SIZE));
+        let mut tap = |app: &mut App, point: Pos2| {
+            render(app, &mut gui);
+            render(app, &mut gui);
+            gui.raw.events.push(Event::PointerMoved(point));
+            for pressed in [true, false] {
+                gui.raw.events.push(Event::PointerButton {
+                    pos: point,
+                    button: PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                });
+                render(app, &mut gui);
+            }
+        };
+
+        let row = app.text_menus(screen).unwrap().actions;
+        let wheel_button = row.right_center() - vec2(MENU_PADDING + MENU_BUTTON.x * 0.5, 0.);
+        tap(&mut app, wheel_button);
+        let (palette, scale) = app.text_menus(screen).unwrap().palette.unwrap();
+        assert!(screen.contains_rect(palette));
+        assert!(app.input.text.editing());
+        tap(&mut app, palette.min + vec2(210., 110.) * scale);
+        let color = app.input.text.color_wheel.unwrap().chosen_color().unwrap();
+        tap(&mut app, palette.min + vec2(60., 274.) * scale);
+        assert_eq!(app.input.text.draft.as_ref().unwrap().item.color, color);
+        assert_eq!(app.color, original_brush);
+        assert!(app.input.text.color_wheel.is_none());
+
+        tap(&mut app, wheel_button);
+        tap(&mut app, palette.min + vec2(175., 274.) * scale);
+        assert!(app.input.text.take_screen_pick());
+        assert!(!app.input.text.take_screen_pick());
+        assert!(app.input.text.color_wheel.is_none());
+        let sampled = InkColor::from_rgb8([4, 171, 131]);
+        assert_eq!(app.pick_text_color(sampled), Some(sampled));
+        let draft = app.input.text.draft.as_ref().unwrap();
+        assert_eq!(draft.committed, "Draft");
+        assert_eq!(draft.item.color, sampled);
+        assert_eq!(app.color, original_brush);
+        assert!(app.history.text_boxes().is_empty());
+    }
+
+    #[test]
+    fn screen_pick_rejects_stale_targets_and_invalid_modes() {
+        let mut app = app();
+        app.use_tool(Tool::Text);
+        click(&mut app, pos2(150., 120.));
+        let target = app.text_pick_target().unwrap();
+        let color = InkColor::from_rgb8([4, 171, 131]);
+
+        // A different text draft is not the target captured when picking began.
+        app.input.text.draft.as_mut().unwrap().committed = "changed".into();
+        assert_ne!(app.text_pick_target(), Some(target));
+        assert_eq!(app.pick_text_color(color), Some(color));
+        assert_eq!(app.pick_text_color(color), Some(color));
+
+        app.pass = true;
+        assert!(app.text_pick_target().is_none());
+        assert!(app.pick_text_color(color).is_none());
+        app.pass = false;
+        app.hidden = true;
+        assert!(app.text_pick_target().is_none());
+        assert!(app.pick_text_color(color).is_none());
+        app.hidden = false;
+        app.input.text = TextInput::default();
+        assert!(app.text_pick_target().is_none());
+        assert!(app.pick_text_color(color).is_none());
     }
 
     #[test]
