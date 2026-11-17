@@ -225,6 +225,16 @@ pub fn system_theme() -> SDL_SystemTheme {
     unsafe { SDL_GetSystemTheme() }
 }
 
+/// Reserve a single SDL user event type, returning zero on failure.
+pub fn register_user_event() -> u32 {
+    unsafe { SDL_RegisterEvents(1) }
+}
+
+/// Push a copied SDL event into its queue.
+pub fn push_event(event: &mut SDL_Event) -> bool {
+    unsafe { SDL_PushEvent(event) }
+}
+
 pub struct Window {
     pub raw: *mut SDL_Window,
     pub id: SDL_WindowID,
