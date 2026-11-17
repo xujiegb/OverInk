@@ -90,7 +90,7 @@ impl SystemJob<Image> {
                 bridge.call("CaptureArea", &request).await
             })
             .map_err(|error| format!(
-                "GNOME capture failed: {error}. Update and enable OverInk Overlay (revision 2), then log out and back in."
+                "GNOME capture failed: {error}. Update and enable OverInk Overlay (revision 3), then log out and back in."
             ))?;
             let file = PathBuf::from(path);
             let expected = std::env::temp_dir()
