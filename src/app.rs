@@ -997,7 +997,11 @@ impl App {
                     let p = pen.point(t.x, t.y);
                     if t.down {
                         self.begin(source, p, t.eraser);
-                        self.input.pens.entry(t.which.0).or_default().down = true;
+                        let accepted = self
+                            .input
+                            .contact
+                            .is_some_and(|contact| contact.source == source);
+                        self.input.pens.entry(t.which.0).or_default().down = accepted;
                         if let Some(contact) = &mut self.input.contact
                             && contact.source == source
                         {
