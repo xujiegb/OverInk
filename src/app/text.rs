@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 mod color_wheel;
 use color_wheel::ColorWheel;
 
-const MENU_BUTTON: Vec2 = vec2(44., 44.);
+const MENU_BUTTON: Vec2 = vec2(34., 34.);
 const MENU_GAP: f32 = 5.;
 const MENU_PADDING: f32 = 6.;
 const PALETTE_SIZE: Vec2 = vec2(266., 312.);
@@ -585,7 +585,10 @@ impl App {
         let mut acted = false;
         if menu
             .add_sized(button, toolbar::menu_button("×", scale))
-            .on_hover_text(tr.text("Delete text box", "删除文本框", "刪除文字框"))
+            .on_hover_text(
+                egui::RichText::new(tr.text("Delete text box", "删除文本框", "刪除文字框"))
+                    .size(14. * scale),
+            )
             .clicked()
         {
             acted = self.delete_text_box();
@@ -609,7 +612,7 @@ impl App {
                     ui.add_sized(button, toolbar::menu_button(label, scale))
                 })
                 .inner
-                .on_hover_text(hint)
+                .on_hover_text(egui::RichText::new(hint).size(14. * scale))
                 .clicked()
             {
                 self.resize_text_font(step);
@@ -624,7 +627,7 @@ impl App {
                 preset.hex()
             );
             if toolbar::swatch(&mut menu, button, rgb, &label, color.srgb8() == rgb)
-                .on_hover_text(label)
+                .on_hover_text(egui::RichText::new(label).size(14. * scale))
                 .clicked()
             {
                 acted |= self.recolor_text(preset.converted(color.space));
@@ -642,7 +645,11 @@ impl App {
                 .rect_filled(icon, 6. * scale, menu.visuals().widgets.hovered.bg_fill);
         }
         color_wheel::paint_disc(menu.painter(), icon.center(), 12. * scale, 1.);
-        if response.on_hover_text(label).clicked() && self.text_menu_item().is_some() {
+        if response
+            .on_hover_text(egui::RichText::new(label).size(14. * scale))
+            .clicked()
+            && self.text_menu_item().is_some()
+        {
             self.input.text.color_wheel = (!wheel_open).then(|| ColorWheel::new(color));
             acted = true;
         }
