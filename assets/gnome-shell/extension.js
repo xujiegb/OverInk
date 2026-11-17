@@ -16,6 +16,7 @@ const BUS_PATH = '/org/overink/Overlay';
 const CAPTURE_INTERFACE = `<node>
     <interface name="org.overink.Overlay">
         <method name="CaptureArea">
+            <arg type="s" direction="in" name="requestId"/>
             <arg type="d" direction="in" name="left"/>
             <arg type="d" direction="in" name="top"/>
             <arg type="d" direction="in" name="right"/>
@@ -26,6 +27,9 @@ const CAPTURE_INTERFACE = `<node>
             <arg type="d" direction="in" name="canvasX"/>
             <arg type="d" direction="in" name="canvasY"/>
             <arg type="s" direction="out" name="pngPath"/>
+        </method>
+        <method name="CancelCapture">
+            <arg type="s" direction="in" name="requestId"/>
         </method>
     </interface>
 </node>`;
@@ -40,13 +44,36 @@ class CaptureBridge {
         // Approval is ephemeral: one explicit Shell confirmation per live PID
         // and /proc start time, never a persistent "trusted app name".
         this._approved = new Set();
-        this._cancelDialog = null;
+        this._deniedUntil = new Map();
+        this._pending = null;
     }
 
     stop() {
         this._active = false;
         this._approved.clear();
-        this._cancelDialog?.();
+        this._deniedUntil.clear();
+        this._cancel(this._pending);
+    }
+
+    _cancel(state) {
+        if (!state || state.cancelled)
+            return;
+        state.cancelled = true;
+        state.dismissDialog?.();
+        state.cancelAfterPaint?.();
+    }
+
+    _checkActive(state) {
+        if (!this._active || state.cancelled)
+            throw new Error('Screenshot capture was cancelled');
+    }
+
+    CancelCaptureAsync([requestId], invocation) {
+        const state = this._pending;
+        if (state?.sender === invocation.get_sender() && state.requestId === requestId)
+            this._cancel(state);
+        // Only the exact calling D-Bus connection can cancel its request.
+        invocation.return_value(new GLib.Variant('()', []));
     }
 
     _processIdentity(pid, executable) {
@@ -63,39 +90,44 @@ class CaptureBridge {
         return `${pid}:${fields[19]}:${executable}`;
     }
 
-    _requestPermission(executable) {
+    _requestPermission(executable, state) {
         return new Promise(resolve => {
-            // GNOME Shell owns this dialog: the caller cannot grant its own
-            // permission by sending a different D-Bus method or a forged title.
+            // The user approves via a GNOME Shell modal; the caller cannot
+            // forge approval by setting a window title or invoking D-Bus.
             const dialog = new ModalDialog.ModalDialog({destroyOnClose: false});
             dialog.contentLayout.add_child(new Dialog.MessageDialogContent({
                 title: 'Allow OverInk screen capture?',
                 description: `A process at ${executable} requests access to screen pixels. Allow screenshots for this running process only? Your OverInk rectangle selection stays unchanged.`,
             }));
-            let allowed = false;
-            const deny = () => {
-                allowed = false;
-                dialog.close(global.get_current_time());
+            let settled = false;
+            const finish = allowed => {
+                if (settled)
+                    return;
+                settled = true;
+                state.dismissDialog = null;
+                resolve(allowed && this._active && !state.cancelled);
+                if (dialog.state === ModalDialog.State.OPENED ||
+                    dialog.state === ModalDialog.State.OPENING)
+                    dialog.close(global.get_current_time());
+                else
+                    dialog.destroy();
             };
-            this._cancelDialog = deny;
+            state.dismissDialog = () => finish(false);
             dialog.connect('closed', () => {
-                if (this._cancelDialog === deny)
-                    this._cancelDialog = null;
+                if (!settled) {
+                    settled = true;
+                    state.dismissDialog = null;
+                    resolve(false);
+                }
                 dialog.destroy();
-                resolve(allowed && this._active);
             });
             dialog.setButtons([
-                {label: 'Deny', key: Clutter.KEY_Escape, isDefault: true, action: deny},
-                {label: 'Allow for this run', action: () => {
-                    allowed = true;
-                    dialog.close(global.get_current_time());
-                }},
+                {label: 'Deny', key: Clutter.KEY_Escape, isDefault: true,
+                    action: () => finish(false)},
+                {label: 'Allow for this run', action: () => finish(true)},
             ]);
-            if (!dialog.open(global.get_current_time())) {
-                this._cancelDialog = null;
-                dialog.destroy();
-                resolve(false);
-            }
+            if (!dialog.open(global.get_current_time()))
+                finish(false);
         });
     }
 
@@ -106,18 +138,29 @@ class CaptureBridge {
         });
     }
 
-    async _capture([left, top, right, bottom, width, height,
+    async _capture([requestId, left, top, right, bottom, width, height,
         hasPosition, canvasX, canvasY], invocation) {
         if (this._busy)
             throw new Error('Another screenshot is still running');
         this._busy = true;
+        const state = {
+            sender: invocation.get_sender(),
+            requestId,
+            cancelled: false,
+            dismissDialog: null,
+            cancelAfterPaint: null,
+        };
+        this._pending = state;
         let file = null;
         let io = null;
         let completed = false;
         const hiddenActors = [];
         try {
-            if (!this._active || !this._extension._windows)
+            this._checkActive(state);
+            if (!this._extension._windows)
                 throw new Error('OverInk Overlay is disabled');
+            if (typeof requestId !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(requestId))
+                throw new Error('Invalid screenshot request ID');
             const values = [left, top, right, bottom, width, height];
             if (!values.every(Number.isFinite) || width <= 0 || height <= 0 ||
                 left < 0 || top < 0 || right <= left || bottom <= top ||
@@ -129,6 +172,7 @@ class CaptureBridge {
                 new GLib.Variant('(s)', [invocation.get_sender()]),
                 new GLib.VariantType('(u)'), Gio.DBusCallFlags.NONE, 2000, null);
             const [pid] = reply.deepUnpack();
+            this._checkActive(state);
             // Window title/class alone can be forged by another application.
             // The D-Bus caller must also be a local process running OverInk.
             const executable = GLib.file_read_link(`/proc/${pid}/exe`);
@@ -152,22 +196,35 @@ class CaptureBridge {
                 }) : null);
             if (!canvas)
                 throw new Error('Cannot identify the selected OverInk canvas');
-            const focused = global.display.focus_window;
-            if (!focused || !mine.some(actor => actor.meta_window === focused))
-                throw new Error('Screen capture requires a focused OverInk window');
-
+            // The canvas may legitimately lose keyboard focus while OverInk
+            // hides its toolbar and the Shell consent dialog is displayed.
+            // Do not treat compositor keyboard focus as screenshot authority.
+            const now = GLib.get_monotonic_time();
+            if ((this._deniedUntil.get(processIdentity) ?? 0) > now)
+                throw new Error('Screen capture denied recently; retry in 30 seconds');
             if (!this._approved.has(processIdentity)) {
-                if (!await this._requestPermission(executable))
+                if (!await this._requestPermission(executable, state)) {
+                    this._checkActive(state);
+                    // Rate-limit repeated permission prompts from an impostor.
+                    if (this._deniedUntil.size > 32) {
+                        for (const [key, deadline] of this._deniedUntil) {
+                            if (deadline <= now)
+                                this._deniedUntil.delete(key);
+                        }
+                        if (this._deniedUntil.size > 32)
+                            this._deniedUntil.clear();
+                    }
+                    this._deniedUntil.set(processIdentity, GLib.get_monotonic_time() + 30_000_000);
                     throw new Error('Screen capture was not authorized');
-                // Do not grant a replacement process (or an unmapped window)
-                // an approval that belonged to the process that requested it.
+                }
+                this._checkActive(state);
+                // Recheck lifetime after the modal may have been open for a while.
                 if (this._processIdentity(pid, executable) !== processIdentity ||
                     !global.get_window_actors().includes(canvas))
                     throw new Error('OverInk changed while authorizing screen capture');
                 this._approved.add(processIdentity);
             }
-            if (!this._active)
-                throw new Error('OverInk Overlay was disabled during capture');
+            this._checkActive(state);
             const frame = canvas.meta_window.get_frame_rect();
             if (frame.width <= 0 || frame.height <= 0)
                 throw new Error('The screenshot canvas has no visible frame');
@@ -186,14 +243,26 @@ class CaptureBridge {
                 actor.opacity = 0;
             }
             await new Promise(resolve => {
+                let done = false;
                 const signal = global.stage.connect('after-paint', () => {
+                    if (done)
+                        return;
+                    done = true;
                     global.stage.disconnect(signal);
+                    state.cancelAfterPaint = null;
                     resolve();
                 });
+                state.cancelAfterPaint = () => {
+                    if (done)
+                        return;
+                    done = true;
+                    global.stage.disconnect(signal);
+                    state.cancelAfterPaint = null;
+                    resolve();
+                };
                 global.stage.queue_redraw();
             });
-            if (!this._active)
-                throw new Error('OverInk Overlay was disabled during capture');
+            this._checkActive(state);
             // g_file_new_tmp creates a private temporary file (mode 0600).
             [file, io] = Gio.File.new_tmp('overink-capture-XXXXXX');
             const screenshot = new Shell.Screenshot();
@@ -214,19 +283,25 @@ class CaptureBridge {
             });
             io.close(null);
             io = null;
+            this._checkActive(state);
             const size = file.query_info('standard::size',
                 Gio.FileQueryInfoFlags.NONE, null).get_size();
             if (size === 0 || size > 128 * 1024 * 1024)
                 throw new Error('Screenshot PNG size is unsupported');
+            this._checkActive(state);
             invocation.return_value(new GLib.Variant('(s)', [file.get_path()]));
             completed = true;
         } finally {
+            state.cancelAfterPaint?.();
+            state.dismissDialog?.();
             for (const [actor, opacity] of hiddenActors)
                 actor.opacity = opacity;
             if (io)
                 io.close(null);
             if (!completed && file)
                 file.delete(null);
+            if (this._pending === state)
+                this._pending = null;
             this._busy = false;
         }
     }
