@@ -22,52 +22,7 @@ pub(super) const MAX_EXTENDED_INK_TEXTURE_BYTES: usize = 64 * 1024 * 1024;
 const EXTENDED_CACHE_STROKES: usize = 64;
 const EXTENDED_CACHE_POINTS: usize = 8192;
 
-struct Texture(*mut SDL_Texture);
-impl Texture {
-    fn new(
-        renderer: &Renderer,
-        [width, height]: [i32; 2],
-        access: SDL_TextureAccess,
-        blend: SDL_BlendMode,
-    ) -> Result<Self, String> {
-        Self::with_format(
-            renderer,
-            [width, height],
-            access,
-            blend,
-            SDL_PIXELFORMAT_RGBA32,
-        )
-    }
-
-    fn with_format(
-        renderer: &Renderer,
-        [width, height]: [i32; 2],
-        access: SDL_TextureAccess,
-        blend: SDL_BlendMode,
-        format: SDL_PixelFormat,
-    ) -> Result<Self, String> {
-        unsafe {
-            let raw = SDL_CreateTexture(renderer.raw, format, access, width, height);
-            if raw.is_null() {
-                return Err(error());
-            }
-            let texture = Self(raw);
-            check(SDL_SetTextureBlendMode(raw, blend))?;
-            check(SDL_SetTextureScaleMode(raw, SDL_SCALEMODE_NEAREST))?;
-            Ok(texture)
-        }
-    }
-
-    /// Renderer reset invalidates its textures; do not destroy a stale handle.
-    fn abandon(self) {
-        std::mem::forget(self);
-    }
-}
-impl Drop for Texture {
-    fn drop(&mut self) {
-        unsafe { SDL_DestroyTexture(self.0) };
-    }
-}
+use crate::sdl::InkTexture as Texture;
 
 struct Frame<'a> {
     renderer: &'a Renderer,
@@ -332,7 +287,7 @@ impl Ink {
             layer.append = append;
             layer.erase = erase;
             if rebuild || damage.is_some() || first < count {
-                let result = renderer.with_target(layer.texture.0, || {
+                let result = renderer.with_target(layer.texture.raw(), || {
                     self.painter.queued = 0;
                     // Match the SDR white point used when drawing directly to
                     // the window. A highlighter builds its mask at scale 1.
@@ -355,13 +310,8 @@ impl Ink {
 
             // The history was painted with source-over into a transparent
             // texture, so its stored RGB is already premultiplied by alpha.
-            return with_color_scale(renderer, revision_white_scale(layer), || unsafe {
-                check(SDL_RenderTexture(
-                    renderer.raw,
-                    layer.texture.0,
-                    ptr::null(),
-                    ptr::null(),
-                ))
+            return with_color_scale(renderer, revision_white_scale(layer), || {
+                layer.texture.draw(renderer, None, None)
             });
         }
         self.painter.history(frame, app, 0, None, 1.)
@@ -429,16 +379,7 @@ fn clear_hole(renderer: &Renderer, rect: Rect) -> Result<(), String> {
 }
 
 fn clear_rect(renderer: &Renderer, rect: SDL_FRect) -> Result<(), String> {
-    unsafe {
-        check(SDL_SetRenderDrawColorFloat(renderer.raw, 0., 0., 0., 0.))?;
-        check(SDL_SetRenderDrawBlendMode(renderer.raw, SDL_BLENDMODE_NONE))?;
-        let draw = check(SDL_RenderFillRect(renderer.raw, &rect));
-        let restore = check(SDL_SetRenderDrawBlendMode(
-            renderer.raw,
-            SDL_BLENDMODE_BLEND,
-        ));
-        draw.and(restore)
-    }
+    renderer.clear_rect_transparent(&rect)
 }
 
 #[derive(Default)]
@@ -637,14 +578,7 @@ impl StrokePainter {
                         ]);
                     }
                 }
-                unsafe {
-                    check(SDL_UpdateTexture(
-                        texture.0,
-                        ptr::null(),
-                        pixels.as_ptr().cast(),
-                        PAPER_SIZE * 4,
-                    ))?;
-                }
+                texture.update_rgba8(&pixels)?;
                 Ok(texture)
             };
             self.paper = create().ok();
@@ -652,7 +586,7 @@ impl StrokePainter {
         }
         self.paper
             .as_ref()
-            .map_or(ptr::null_mut(), |texture| texture.0)
+            .map_or(ptr::null_mut(), |texture| texture.raw())
     }
 
     fn marker_texture(&mut self, renderer: &Renderer) -> Option<*mut SDL_Texture> {
@@ -666,7 +600,7 @@ impl StrokePainter {
             .ok();
             self.marker_unavailable = self.marker_mask.is_none();
         }
-        self.marker_mask.as_ref().map(|texture| texture.0)
+        self.marker_mask.as_ref().map(Texture::raw)
     }
 
     fn marker(
@@ -704,10 +638,10 @@ impl StrokePainter {
         if left >= right || top >= bottom {
             return Ok(());
         }
-        unsafe {
-            check(SDL_SetTextureColorModFloat(mask, rgb[0], rgb[1], rgb[2]))?;
-            check(SDL_SetTextureAlphaModFloat(mask, stroke.opacity))?;
-        }
+        self.marker_mask
+            .as_ref()
+            .ok_or("Missing marker mask")?
+            .set_modulation(rgb, stroke.opacity)?;
         let tiled = right - left > MARKER_TILE || bottom - top > MARKER_TILE;
         for y in (top..bottom).step_by(MARKER_TILE as usize) {
             for x in (left..right).step_by(MARKER_TILE as usize) {
@@ -798,8 +732,11 @@ impl StrokePainter {
                         h: height / frame.scale[1],
                     }
                 };
-                with_color_scale(renderer, white, || unsafe {
-                    check(SDL_RenderTexture(renderer.raw, mask, &src, &dst))
+                with_color_scale(renderer, white, || {
+                    self.marker_mask
+                        .as_ref()
+                        .ok_or("Missing marker mask")?
+                        .draw(renderer, Some(&src), Some(&dst))
                 })?;
             }
         }
