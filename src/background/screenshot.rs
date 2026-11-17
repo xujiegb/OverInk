@@ -56,11 +56,18 @@ impl Job {
         {
             #[cfg(target_os = "linux")]
             if crate::gnome::in_wayland_session() {
-                // The Shell extension knows the compositor's true canvas
-                // location and captures only the OverInk-drawn selection.
-                // Never start GNOME's interactive screenshot picker.
-                return crate::picker::portal::SystemJob::shell_area(window, region, size)
-                    .map(Self::Shell);
+                // Native Wayland requires the Shell extension. XWayland is
+                // optional: only request compositor capture when the extension
+                // is actually active and at the bundled revision.
+                // Never launch GNOME's interactive screenshot chooser.
+                if driver() == "wayland" || crate::gnome::Guide::check().is_none() {
+                    return crate::picker::portal::SystemJob::shell_area(window, region, size)
+                        .map(Self::Shell);
+                }
+                // Without the extension, XWayland can only see X11 windows.
+                // This is a limited fallback, not a Wayland desktop capture.
+                let image = crate::picker::desktop::capture(window)?;
+                return Ok(Self::X11(Some(crop.apply(image)?)));
             }
             if _hdr {
                 return Err("HDR capture is unavailable on this display backend".into());
