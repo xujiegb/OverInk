@@ -171,16 +171,16 @@ impl Canvas {
     }
 
     pub fn renderer_reset(&mut self) {
+        // Release live SDL texture objects before rebuilding their contents
+        // or destroying the old renderer.
         self.ink.reset_textures();
-        // SDL already invalidated native texture handles. Do not destroy them
-        // again when discarding the old egui context.
         self.suspend_text_input();
         if let Some(gui) = &mut self.text {
-            gui.forget_renderer_textures();
+            gui.reset_renderer_textures();
         }
         self.text = None;
         self.text_style = None;
-        self.background.renderer_reset();
+        self.background.invalidate_texture();
         self.dirty = true;
     }
 
