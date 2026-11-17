@@ -3,12 +3,12 @@
 //! scRGB surfaces; applying an ICC transform there would double-manage color.
 #![forbid(unsafe_code)]
 
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+use crate::sdl::Window;
 use crate::{
     appearance::{Text, text},
     icc_native::{DisplayError, Transform},
 };
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
-use crate::sdl::Window;
 use std::hash::{Hash, Hasher};
 
 /// Convert embedded-profile RGBA8 images without exposing native CMS handles.
