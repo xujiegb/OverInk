@@ -6,8 +6,8 @@ use crate::{
     sdl::*,
 };
 use lcms2_sys as cms;
-use std::ptr;
 use std::hash::{Hash, Hasher};
+use std::ptr;
 /// Convert a captured RGBA8 image using the embedded input ICC profile.
 ///
 /// Little CMS allows in-place RGBA8 transforms; the profile and transform stay
@@ -215,10 +215,8 @@ pub fn display_sample_to_srgb(window: &Window, rgb: [f32; 3]) -> crate::color::I
         return result;
     };
     unsafe {
-        let profile = cms::cmsOpenProfileFromMem(
-            profile_data.as_ptr().cast(),
-            profile_data.len() as u32,
-        );
+        let profile =
+            cms::cmsOpenProfileFromMem(profile_data.as_ptr().cast(), profile_data.len() as u32);
         if profile.is_null() {
             return result;
         }
