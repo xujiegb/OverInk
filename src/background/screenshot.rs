@@ -337,7 +337,13 @@ mod tests {
             size: [600., 450.],
         };
         let (crop, _) = selection
-            .for_portal(&display, std::slice::from_ref(&display), [1200, 900], None, None)
+            .for_portal(
+                &display,
+                std::slice::from_ref(&display),
+                [1200, 900],
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(crop.region.min, egui::pos2(200., 200.));
         assert_eq!(crop.region.max, egui::pos2(600., 400.));
