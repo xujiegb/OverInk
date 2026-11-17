@@ -376,13 +376,6 @@ impl Background {
         self.texture = None;
     }
 
-    /// SDL renderer resets invalidate native textures before notification.
-    /// Abandon the old handle without asking SDL to destroy it a second time.
-    pub fn renderer_reset(&mut self) {
-        if let Some(texture) = self.texture.take() {
-            texture.abandon();
-        }
-    }
     pub fn poll(&mut self, window: &Window) -> Option<Result<(), String>> {
         if self.pending() && self.started.elapsed() > Duration::from_secs(120) {
             self.live();
