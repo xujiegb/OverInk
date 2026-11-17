@@ -195,13 +195,16 @@ impl Crop {
                 && (area.width() - self.size[0]).abs() <= 2.
                 && (area.height() - self.size[1]).abs() <= 2.
         };
-        let visible = location
-            .filter(matches_canvas)
-            .or_else(|| {
-                (self.size == <[f32; 2]>::from(monitor.size())).then_some(monitor)
-            })
-            .or_else(|| usable.filter(matches_canvas))
-            .ok_or("Cannot determine the screenshot canvas position on this display")?;
+        let visible = if let Some(area) = location {
+            // A reported X11 window origin takes precedence. Never replace
+            // an invalid actual location with a guessed fullscreen rectangle.
+            matches_canvas(&area).then_some(area)
+        } else {
+            (self.size == <[f32; 2]>::from(monitor.size()))
+                .then_some(monitor)
+                .or_else(|| usable.filter(matches_canvas))
+        }
+        .ok_or("Cannot determine the screenshot canvas position on this display")?;
         let scale_x = visible.width() / self.size[0];
         let scale_y = visible.height() / self.size[1];
         let map = |point: egui::Pos2| {
