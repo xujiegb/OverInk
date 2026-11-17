@@ -2337,10 +2337,18 @@ pub fn run(options: Options) -> Result<(), String> {
             app.finish_all_contacts();
             gui.suspend_input(&toolbar);
             gui.clear_events();
-            app.screenshot
-                .start(&canvas.window, app.preferences.screenshot_hdr);
-            mode_changed = true;
-            cmd.redraw_canvas = true;
+            match app.screenshot.start(&canvas.window, app.preferences.screenshot_hdr) {
+                Ok(()) => {
+                    mode_changed = true;
+                    cmd.redraw_canvas = true;
+                }
+                Err(error) => {
+                    app.panel = Some(crate::toolbar::Panel::Settings);
+                    app.status =
+                        text("Screenshot failed", "截图失败", "螢幕擷取失敗").detail(error);
+                    toolbar_dirty = true;
+                }
+            }
         }
         if let Some(source) = cmd.font_path.take() {
             app.finish_all_contacts();
