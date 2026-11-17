@@ -509,22 +509,18 @@ mod tests {
             let color = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
             assert!(!color.is_null());
             let color = Data(color);
-            let context = CGBitmapContextCreate(
-                pixels.as_mut_ptr().cast(),
-                1,
-                2,
-                8,
-                4,
-                color.0,
-                0x4001,
-            );
+            let context =
+                CGBitmapContextCreate(pixels.as_mut_ptr().cast(), 1, 2, 8, 4, color.0, 0x4001);
             assert!(!context.is_null());
             let context = Data(context);
             let source = CGBitmapContextCreateImage(context.0.cast_mut());
             assert!(!source.is_null());
             let source = Data(source);
             let actual = copy_sdr_screenshot(source.0).unwrap();
-            assert_eq!(actual.rgba, pixels, "SDR screenshot must not flip vertically");
+            assert_eq!(
+                actual.rgba, pixels,
+                "SDR screenshot must not flip vertically"
+            );
         }
     }
 }
