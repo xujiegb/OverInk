@@ -952,6 +952,89 @@ impl Drop for Window {
 ///
 /// The caller must retain its renderer while the texture is live and abandon a
 /// handle after an SDL renderer reset, when SDL has already invalidated it.
+/// Owned SDL texture used by the ink renderer. Native calls and the texture
+/// destructor stay in the SDL adapter rather than in the drawing state machine.
+pub struct InkTexture(pub *mut SDL_Texture);
+
+impl InkTexture {
+    pub fn new(
+        renderer: &Renderer,
+        dimensions: [i32; 2],
+        access: SDL_TextureAccess,
+        blend: SDL_BlendMode,
+    ) -> Result<Self, String> {
+        Self::with_format(renderer, dimensions, access, blend, SDL_PIXELFORMAT_RGBA32)
+    }
+
+    pub fn with_format(
+        renderer: &Renderer,
+        [width, height]: [i32; 2],
+        access: SDL_TextureAccess,
+        blend: SDL_BlendMode,
+        format: SDL_PixelFormat,
+    ) -> Result<Self, String> {
+        if width <= 0 || height <= 0 {
+            return Err("Ink texture dimensions must be positive".into());
+        }
+        unsafe {
+            let raw = SDL_CreateTexture(renderer.raw, format, access, width, height);
+            if raw.is_null() {
+                return Err(error());
+            }
+            let texture = Self(raw);
+            check(SDL_SetTextureBlendMode(raw, blend))?;
+            check(SDL_SetTextureScaleMode(raw, SDL_SCALEMODE_NEAREST))?;
+            Ok(texture)
+        }
+    }
+
+    pub fn update_rgba8(
+        &self,
+        dimensions: [i32; 2],
+        pixels: &[u8],
+    ) -> Result<(), String> {
+        let [width, height] = dimensions;
+        let pitch = usize::try_from(width)
+            .ok()
+            .and_then(|w| w.checked_mul(4))
+            .and_then(|row| i32::try_from(row).ok())
+            .ok_or("Invalid ink texture upload pitch")?;
+        let expected = usize::try_from(height)
+            .ok()
+            .and_then(|h| h.checked_mul(pitch as usize))
+            .ok_or("Invalid ink texture upload dimensions")?;
+        if width <= 0 || height <= 0 || pixels.len() != expected {
+            return Err("Ink texture pixel buffer size mismatch".into());
+        }
+        unsafe {
+            check(SDL_UpdateTexture(
+                self.0,
+                ptr::null(),
+                pixels.as_ptr().cast(),
+                pitch,
+            ))
+        }
+    }
+
+    pub fn set_modulation(&self, rgb: [f32; 3], alpha: f32) -> Result<(), String> {
+        unsafe {
+            check(SDL_SetTextureColorModFloat(self.0, rgb[0], rgb[1], rgb[2]))?;
+            check(SDL_SetTextureAlphaModFloat(self.0, alpha))
+        }
+    }
+
+    /// SDL renderer reset may already have invalidated this native handle.
+    pub fn abandon(self) {
+        std::mem::forget(self);
+    }
+}
+
+impl Drop for InkTexture {
+    fn drop(&mut self) {
+        unsafe { SDL_DestroyTexture(self.0) };
+    }
+}
+
 pub struct SnapshotTexture(*mut SDL_Texture);
 
 impl SnapshotTexture {
@@ -1305,6 +1388,34 @@ impl Renderer {
                 SDL_PROP_RENDERER_SDR_WHITE_POINT_FLOAT,
                 1.,
             )
+        }
+    }
+
+    pub fn render_texture(
+        &self,
+        texture: *mut SDL_Texture,
+        source: Option<&SDL_FRect>,
+        destination: Option<&SDL_FRect>,
+    ) -> Result<(), String> {
+        unsafe {
+            check(SDL_RenderTexture(
+                self.raw,
+                texture,
+                source.map_or(ptr::null(), |rect| rect),
+                destination.map_or(ptr::null(), |rect| rect),
+            ))
+        }
+    }
+
+    /// Clear a damaged rectangle without blending, restoring normal draw
+    /// blending even if rendering the rectangle returns an error.
+    pub fn clear_rect_transparent(&self, rect: &SDL_FRect) -> Result<(), String> {
+        unsafe {
+            check(SDL_SetRenderDrawColorFloat(self.raw, 0., 0., 0., 0.))?;
+            check(SDL_SetRenderDrawBlendMode(self.raw, SDL_BLENDMODE_NONE))?;
+            let draw = check(SDL_RenderFillRect(self.raw, rect));
+            let restore = check(SDL_SetRenderDrawBlendMode(self.raw, SDL_BLENDMODE_BLEND));
+            draw.and(restore)
         }
     }
 
