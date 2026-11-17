@@ -524,7 +524,12 @@ impl App {
             selected: self.input.text.selected,
             editing: self.input.text.editing(),
             item: self.text_menu_item()?.clone(),
-            committed: self.input.text.draft.as_ref().map(|draft| draft.committed.clone()),
+            committed: self
+                .input
+                .text
+                .draft
+                .as_ref()
+                .map(|draft| draft.committed.clone()),
         })
     }
 
