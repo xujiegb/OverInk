@@ -127,13 +127,13 @@ impl Job {
                     crate::picker::portal::screenshot_parent(window),
                     false,
                     move |image| {
-                    if !sizes.contains(&[image.width, image.height]) {
-                        return Err(
-                            "The portal screenshot dimensions do not match the selected desktop"
-                                .into(),
-                        );
-                    }
-                    crop.apply(image)
+                        if !sizes.contains(&[image.width, image.height]) {
+                            return Err(
+                                "The portal screenshot dimensions do not match the selected desktop"
+                                    .into(),
+                            );
+                        }
+                        crop.apply(image)
                     },
                 )
                 .map(Self::Portal);
