@@ -914,6 +914,21 @@ impl Window {
         }
     }
 
+    /// Read the Cocoa Metal view tag without exposing the SDL property handle.
+    #[cfg(target_os = "macos")]
+    pub fn cocoa_metal_view_tag(&self) -> Option<isize> {
+        // SAFETY: This numeric SDL window property is read-only and its value
+        // does not transfer any native object ownership.
+        let tag = unsafe {
+            SDL_GetNumberProperty(
+                SDL_GetWindowProperties(self.raw),
+                SDL_PROP_WINDOW_COCOA_METAL_VIEW_TAG_NUMBER,
+                0,
+            )
+        };
+        (tag != 0).then_some(tag).and_then(|tag| tag.try_into().ok())
+    }
+
     /// Borrow the native X11 Display for the lifetime of the SDL window.
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     pub fn x11_display(&self) -> Option<std::ptr::NonNull<c_void>> {
