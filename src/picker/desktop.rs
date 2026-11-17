@@ -61,8 +61,14 @@ pub fn position(window: &Window, local: [f32; 2]) -> Result<ScreenPoint, String>
     })
 }
 #[cfg(target_os = "windows")]
-pub fn sample(_window: &Window, point: ScreenPoint) -> Result<InkColor, String> {
-    use std::{ffi::c_void, ptr};
+mod win32_capture {
+    #![deny(clippy::undocumented_unsafe_blocks)]
+
+    use std::{
+        ffi::c_void,
+        ptr::{self, NonNull},
+    };
+
     #[link(name = "user32")]
     unsafe extern "system" {
         fn GetDC(window: *mut c_void) -> *mut c_void;
@@ -76,26 +82,58 @@ pub fn sample(_window: &Window, point: ScreenPoint) -> Result<InkColor, String> 
     unsafe extern "system" {
         fn DwmFlush() -> i32;
     }
-    unsafe {
-        // Both OverInk windows have been hidden before this readback. GDI returns
-        // the system's SDR RGB representation, not the source scene's HDR values.
-        DwmFlush();
-        let dc = GetDC(ptr::null_mut());
-        if dc.is_null() {
-            return Err("Cannot read the desktop".into());
+
+    /// The screen DC is tied to a null HWND and must be released with the same
+    /// null HWND. The non-null handle is exclusively owned by this guard.
+    struct ScreenDc(NonNull<c_void>);
+
+    impl ScreenDc {
+        fn acquire() -> Result<Self, String> {
+            // SAFETY: A null HWND requests the desktop device context. The
+            // returned handle is validated before it is stored in ScreenDc.
+            NonNull::new(unsafe { GetDC(ptr::null_mut()) })
+                .map(Self)
+                .ok_or_else(|| "Cannot read the desktop".into())
         }
-        let pixel = GetPixel(dc, point.x, point.y);
-        ReleaseDC(ptr::null_mut(), dc);
-        if pixel == u32::MAX {
-            return Err("The desktop pixel is unavailable".into());
+
+        fn sample(&self, [x, y]: [i32; 2]) -> Result<[u8; 3], String> {
+            // SAFETY: ScreenDc holds a live desktop DC until Drop.
+            let pixel = unsafe { GetPixel(self.0.as_ptr(), x, y) };
+            if pixel == u32::MAX {
+                return Err("The desktop pixel is unavailable".into());
+            }
+            Ok([pixel as u8, (pixel >> 8) as u8, (pixel >> 16) as u8])
         }
-        let _ = point.root;
-        Ok(InkColor::from_rgb8([
-            pixel as u8,
-            (pixel >> 8) as u8,
-            (pixel >> 16) as u8,
-        ]))
     }
+
+    impl Drop for ScreenDc {
+        fn drop(&mut self) {
+            // SAFETY: This is the non-null desktop DC returned by GetDC(null),
+            // and the owning ScreenDc is never cloned or copied.
+            unsafe {
+                ReleaseDC(ptr::null_mut(), self.0.as_ptr());
+            }
+        }
+    }
+
+    pub(super) fn sample(point: [i32; 2]) -> Result<[u8; 3], String> {
+        // Both OverInk windows have been hidden before this readback. GDI
+        // returns the system SDR representation rather than scene HDR data.
+        // SAFETY: DwmFlush takes no pointers and is safe to call on this thread.
+        unsafe {
+            DwmFlush();
+        }
+        let dc = ScreenDc::acquire()?;
+        dc.sample(point)
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub fn sample(_window: &Window, point: ScreenPoint) -> Result<InkColor, String> {
+    let _ = point.root;
+    Ok(InkColor::from_rgb8(win32_capture::sample([
+        point.x, point.y,
+    ])?))
 }
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
