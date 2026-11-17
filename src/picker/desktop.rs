@@ -224,6 +224,48 @@ mod x11 {
         green_mask: c_ulong,
         blue_mask: c_ulong,
     }
+    /// Own an XGetImage result while retaining the library that supplied its
+    /// XDestroyImage function. Every early return now releases the XImage.
+    struct OwnedImage<'lib> {
+        raw: *mut Image,
+        destroy: Symbol<'lib, unsafe extern "C" fn(*mut Image) -> c_int>,
+    }
+
+    impl<'lib> OwnedImage<'lib> {
+        fn new(
+            raw: *mut Image,
+            destroy: Symbol<'lib, unsafe extern "C" fn(*mut Image) -> c_int>,
+            message: &'static str,
+        ) -> Result<Self, String> {
+            if raw.is_null() {
+                return Err(message.into());
+            }
+            Ok(Self { raw, destroy })
+        }
+
+        fn masks(&self) -> [c_ulong; 3] {
+            // SAFETY: XGetImage supplied a live non-null XImage, whose
+            // prefix matches Image. The guard owns it until Drop.
+            unsafe {
+                [
+                    (*self.raw).red_mask,
+                    (*self.raw).green_mask,
+                    (*self.raw).blue_mask,
+                ]
+            }
+        }
+    }
+
+    impl Drop for OwnedImage<'_> {
+        fn drop(&mut self) {
+            // SAFETY: This non-null XImage is owned exclusively by the guard.
+            // The borrowed Symbol also keeps the X11 library loaded.
+            unsafe {
+                (self.destroy)(self.raw);
+            }
+        }
+    }
+
     pub fn sample(window: &Window, point: ScreenPoint) -> Result<InkColor, String> {
         unsafe {
             let lib = library()?;
@@ -277,13 +319,13 @@ mod x11 {
                 lib.get(b"XGetPixel\0").map_err(|e| e.to_string())?;
             let destroy: Symbol<unsafe extern "C" fn(*mut Image) -> c_int> =
                 lib.get(b"XDestroyImage\0").map_err(|e| e.to_string())?;
-            let image = get(d, point.root, point.x, point.y, 1, 1, c_ulong::MAX, 2);
-            if image.is_null() {
-                return Err("Cannot read the selected desktop pixel".into());
-            }
-            let masks = [(*image).red_mask, (*image).green_mask, (*image).blue_mask];
-            let value = pixel(image, 0, 0);
-            destroy(image);
+            let image = OwnedImage::new(
+                get(d, point.root, point.x, point.y, 1, 1, c_ulong::MAX, 2),
+                destroy,
+                "Cannot read the selected desktop pixel",
+            )?;
+            let masks = image.masks();
+            let value = pixel(image.raw, 0, 0);
             let mut rgb = [0.; 3];
             for (i, mask) in masks.into_iter().enumerate() {
                 rgb[i] = channel(value, mask)?;
@@ -355,35 +397,34 @@ mod x11 {
                 lib.get(b"XGetPixel\0").map_err(|e| e.to_string())?;
             let destroy: Symbol<unsafe extern "C" fn(*mut Image) -> c_int> =
                 lib.get(b"XDestroyImage\0").map_err(|e| e.to_string())?;
-            let image = get(
-                d,
-                origin.root,
-                origin.x,
-                origin.y,
-                w as u32,
-                h as u32,
-                c_ulong::MAX,
-                2,
-            );
-            if image.is_null() {
-                return Err("Cannot capture the desktop".into());
-            }
-            let masks = [(*image).red_mask, (*image).green_mask, (*image).blue_mask];
+            let image = OwnedImage::new(
+                get(
+                    d,
+                    origin.root,
+                    origin.x,
+                    origin.y,
+                    w as u32,
+                    h as u32,
+                    c_ulong::MAX,
+                    2,
+                ),
+                destroy,
+                "Cannot capture the desktop",
+            )?;
+            let masks = image.masks();
             if masks.contains(&0) {
-                destroy(image);
                 return Err("Desktop capture requires a TrueColor visual".into());
             }
             for y in 0..h {
                 for x in 0..w {
-                    let value = pixel(image, x, y);
+                    let value = pixel(image.raw, x, y);
                     let offset = (y as usize * w as usize + x as usize) * 4;
                     for (i, mask) in masks.into_iter().enumerate() {
-                        out.rgba[offset + i] = (channel(value, mask).unwrap() * 255.).round() as u8;
+                        out.rgba[offset + i] = (channel(value, mask)? * 255.).round() as u8;
                     }
                     out.rgba[offset + 3] = 255;
                 }
             }
-            destroy(image);
         }
         // Keep SDL-owned ICC bytes out of the X11 unsafe readback region.
         // The Window adapter copies the profile and frees SDL's allocation.
