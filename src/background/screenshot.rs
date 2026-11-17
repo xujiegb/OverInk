@@ -83,11 +83,29 @@ impl Job {
                 } else {
                     None
                 };
-                let (crop, sizes) = crop.for_portal(display, _displays, pixels, density)?;
+                // Wayland maximization uses the work area on GNOME; that can be
+                // smaller than the display bounds (e.g. the top panel). Map the
+                // canvas into the display before cropping the portal's desktop.
+                let usable = unsafe {
+                    let mut bounds = SDL_Rect::default();
+                    SDL_GetDisplayUsableBounds(SDL_DisplayID(display.id), &mut bounds).then(|| {
+                        Rect::from_min_size(
+                            egui::pos2(bounds.x as f32, bounds.y as f32),
+                            egui::vec2(bounds.w as f32, bounds.h as f32),
+                        )
+                    })
+                };
+                let (crop, sizes) =
+                    crop.for_portal(display, _displays, pixels, density, usable)?;
                 return crate::picker::portal::SystemJob::screenshot(multi, move |image| {
-                    if !sizes.contains(&[image.width, image.height]) {
+                    if multi && !sizes.contains(&[image.width, image.height]) {
                         return Err(
                             "The portal screenshot dimensions do not match the desktop".into()
+                        );
+                    }
+                    if !multi && !crop.matches_desktop_aspect([image.width, image.height]) {
+                        return Err(
+                            "The portal screenshot does not match the selected display".into()
                         );
                     }
                     crop.apply(image)
@@ -135,12 +153,24 @@ impl Crop {
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    fn matches_desktop_aspect(self, [width, height]: [u32; 2]) -> bool {
+        width > 0
+            && height > 0
+            && ((width as f64 / height as f64)
+                / (f64::from(self.size[0]) / f64::from(self.size[1]))
+                - 1.)
+                .abs()
+                < 0.03
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     fn for_portal(
         self,
         display: &Display,
         displays: &[Display],
         pixels: [u32; 2],
         desktop_density: Option<f32>,
+        usable: Option<Rect>,
     ) -> Result<(Self, [[u32; 2]; 2]), String> {
         let bounds = |[x, y, w, h]: [i32; 4]| {
             Rect::from_min_size(
@@ -149,9 +179,28 @@ impl Crop {
             )
         };
         let monitor = bounds(display.bounds);
-        if self.size != <[f32; 2]>::from(monitor.size()) {
-            return Err("The screenshot canvas does not cover the selected display".into());
+        if !monitor.is_positive()
+            || self.size.iter().any(|size| !size.is_finite() || *size <= 0.)
+        {
+            return Err("Invalid screenshot canvas size".into());
         }
+        // A maximized overlay can occupy the usable work area instead of the
+        // whole display. Prefer that exact inset when SDL reports it. If the
+        // compositor doesn't supply an accurate work area, map normalized canvas
+        // coordinates over the display instead of rejecting every screenshot.
+        let visible = usable
+            .filter(|area| {
+                area.is_positive()
+                    && monitor.contains_rect(*area)
+                    && (area.width() - self.size[0]).abs() <= 2.
+                    && (area.height() - self.size[1]).abs() <= 2.
+            })
+            .unwrap_or(monitor);
+        let ratio = visible.size() / Vec2::from(self.size);
+        let mapped = Rect::from_min_max(
+            visible.min - monitor.min.to_vec2() + self.region.min.to_vec2() * ratio,
+            visible.min - monitor.min.to_vec2() + self.region.max.to_vec2() * ratio,
+        );
         let mut desktop = monitor;
         if desktop_density.is_some() {
             for (index, output) in displays.iter().enumerate() {
@@ -174,7 +223,7 @@ impl Crop {
             desktop_density.map_or(pixels, |density| size.map(|n| (n * density).round() as u32));
         Ok((
             Self {
-                region: self.region.translate(offset),
+                region: mapped.translate(offset),
                 size,
             },
             [size.map(|n| n as u32), pixels],
@@ -216,7 +265,7 @@ mod tests {
             size: [800., 600.],
         };
         let (crop, sizes) = selection
-            .for_portal(&right, &[left, right.clone()], [1200, 900], Some(1.5))
+            .for_portal(&right, &[left, right.clone()], [1200, 900], Some(1.5), None)
             .unwrap();
         assert_eq!(sizes, [[1600, 800], [2400, 1200]]);
         assert_eq!(crop.region, local.translate(egui::vec2(800., 200.)));
@@ -228,7 +277,8 @@ mod tests {
                     &right,
                     &[right.clone(), right.clone()],
                     [1200, 900],
-                    Some(1.5)
+                    Some(1.5),
+                    None,
                 )
                 .is_err()
         );
