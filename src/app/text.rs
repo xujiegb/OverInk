@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 mod color_wheel;
 use color_wheel::ColorWheel;
 
-const MENU_BUTTON: Vec2 = toolbar::RAIL_BUTTON_SIZE;
+const MENU_BUTTON: Vec2 = vec2(toolbar::RAIL_BUTTON_SIZE.x, 35.);
 const MENU_GAP: f32 = 4.;
 const MENU_PADDING: f32 = 5.;
 const PALETTE_SIZE: Vec2 = vec2(240., 272.);
