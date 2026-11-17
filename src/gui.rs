@@ -57,6 +57,13 @@ impl Gui {
             composition_ended: None,
         }
     }
+    // A renderer reset invalidates SDL textures without notifying egui.
+    // Discard their handles before dropping this Gui, then build a fresh
+    // Context so the glyph atlas and custom textures are uploaded again.
+    pub fn forget_renderer_textures(&mut self) {
+        self.textures.clear();
+    }
+
     pub fn input(&mut self, w: &Window) -> RawInput {
         self.input_with_units(w, w.ui_scale().max(0.5))
     }
