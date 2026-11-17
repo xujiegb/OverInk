@@ -292,6 +292,11 @@ impl Pages {
         match serde_json::from_slice(&data).map_err(|e| e.to_string())? {
             SessionFile::Single(doc) => {
                 doc.validate()?;
+                // A legacy single-page document replaces the session, not
+                // only the active display. Otherwise parked and unmatched
+                // pages silently reappear after a display change/save.
+                self.parked.clear();
+                self.unmatched.clear();
                 history.set_document(doc, restore);
                 self.changed = true;
                 Ok(0)
