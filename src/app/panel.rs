@@ -219,7 +219,7 @@ impl App {
                     {
                         self.toggle_panel(Panel::Shapes);
                     }
-                    ui.separator();
+                    ui.add(egui::Separator::default().spacing(3.));
                     self.panel_button(
                         ui,
                         Icon::Brush,
@@ -278,7 +278,7 @@ impl App {
                         Panel::Settings,
                         tr.text("Settings and files", "设置与文件", "設定與檔案"),
                     );
-                    ui.separator();
+                    ui.add(egui::Separator::default().spacing(3.));
                     for row in PRESETS.as_chunks::<2>().0 {
                         ui.horizontal(|ui| {
                             ui.add_space(((ui.available_width() - 40.) * 0.5).max(0.));
