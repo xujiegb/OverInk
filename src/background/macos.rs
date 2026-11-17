@@ -90,8 +90,6 @@ unsafe extern "C" {
         color_space: *const c_void,
         bitmap_info: u32,
     ) -> *mut c_void;
-    fn CGContextTranslateCTM(context: *mut c_void, tx: f64, ty: f64);
-    fn CGContextScaleCTM(context: *mut c_void, sx: f64, sy: f64);
     fn CGContextDrawImage(context: *mut c_void, rect: CGRect, image: *const c_void);
     #[cfg(test)]
     fn CGBitmapContextCreateImage(context: *mut c_void) -> *const c_void;
@@ -460,9 +458,9 @@ fn copy_sdr_screenshot(image: *const c_void) -> Result<Image, String> {
             return Err("Cannot create the SDR screenshot bitmap".into());
         }
         let context = Data(context);
-        // Core Graphics uses a bottom-left origin. Output rows are top-down.
-        CGContextTranslateCTM(context.0.cast_mut(), 0., height as f64);
-        CGContextScaleCTM(context.0.cast_mut(), 1., -1.);
+        // The bitmap context stores top-to-bottom RGBA rows. The Core
+        // Graphics user-space convention already maps the image into them.
+        // Flipping the CTM here would invert the output scanlines.
         CGContextDrawImage(
             context.0.cast_mut(),
             CGRect {
