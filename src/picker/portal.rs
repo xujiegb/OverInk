@@ -1,6 +1,7 @@
 use crate::{
     background::Image,
     color::{InkColor, Space},
+    sdl::*,
 };
 use futures_lite::{StreamExt, future};
 use std::{
@@ -34,11 +35,19 @@ impl SystemJob<InkColor> {
 impl SystemJob<Image> {
     pub fn screenshot(
         require_screen_target: bool,
+        parent_window: String,
+        interactive: bool,
         prepare: impl FnOnce(Image) -> Result<Image, String> + Send + 'static,
     ) -> Result<Self, String> {
         Self::spawn("overink-screenshot-portal", move |cancelled| {
-            let values = zbus::block_on(request("Screenshot", require_screen_target, cancelled))
-                .map_err(|error| format!("Screen capture: {error}"))?;
+            let values = zbus::block_on(request(
+                "Screenshot",
+                require_screen_target,
+                &parent_window,
+                interactive,
+                cancelled,
+            ))
+            .map_err(|error| format!("Screen capture: {error}"))?;
             let Some(mut values) = values else {
                 return Ok(None);
             };
@@ -51,6 +60,28 @@ impl SystemJob<Image> {
         })
     }
 }
+// Portal Screenshot uses a platform window identifier to parent its permission
+// prompt. On XWayland, supplying the real X11 ID avoids a GNOME portal failure
+// observed when parent_window is empty. GNOME's Wayland portal supports the
+// "wayland:" no-parent form when SDL cannot export an xdg-foreign handle.
+pub fn screenshot_parent(window: &Window) -> String {
+    if driver() == "x11" {
+        let id = unsafe {
+            SDL_GetNumberProperty(
+                SDL_GetWindowProperties(window.raw),
+                SDL_PROP_WINDOW_X11_WINDOW_NUMBER,
+                0,
+            )
+        };
+        if id > 0 {
+            return format!("x11:0x{id:x}");
+        }
+    } else if driver() == "wayland" {
+        return "wayland:".into();
+    }
+    String::new()
+}
+
 impl<T: Send + 'static> SystemJob<T> {
     fn spawn(
         thread_name: &str,
@@ -120,7 +151,7 @@ fn local_file(uri: &str) -> Result<PathBuf, String> {
 async fn pick(
     cancelled: &async_channel::Receiver<()>,
 ) -> Result<Option<InkColor>, Box<dyn std::error::Error + Send + Sync>> {
-    let Some(mut values) = request("PickColor", false, cancelled).await? else {
+    let Some(mut values) = request("PickColor", false, "", false, cancelled).await? else {
         return Ok(None);
     };
     let value = values.remove("color").ok_or("Portal returned no color")?;
@@ -145,6 +176,8 @@ async fn pick(
 async fn request(
     method: &str,
     require_screen_target: bool,
+    parent_window: &str,
+    interactive: bool,
     cancelled: &async_channel::Receiver<()>,
 ) -> Result<Option<HashMap<String, OwnedVariant>>, Box<dyn std::error::Error + Send + Sync>> {
     let connection = Connection::session().await?;
@@ -186,19 +219,24 @@ async fn request(
     }
     let mut options = HashMap::from([("handle_token", Variant::from(token))]);
     if method == "Screenshot" {
-        if version >= 2 {
-            options.insert("interactive", Variant::from(false));
+        if interactive && version < 2 {
+            return Err("Interactive screenshot capture requires portal version 2 or later".into());
         }
-        if version >= 3
-            && let Ok(targets) = screenshot.get_property::<u32>("AvailableTargets").await
-            && targets & 1 != 0
-        {
-            options.insert("target", Variant::from(1_u32));
-        } else if require_screen_target {
-            return Err("The portal cannot request the entire desktop explicitly".into());
+        if version >= 2 {
+            options.insert("interactive", Variant::from(interactive));
+        }
+        if !interactive {
+            if version >= 3
+                && let Ok(targets) = screenshot.get_property::<u32>("AvailableTargets").await
+                && targets & 1 != 0
+            {
+                options.insert("target", Variant::from(1_u32));
+            } else if require_screen_target {
+                return Err("The portal cannot request the entire desktop explicitly".into());
+            }
         }
     }
-    let handle: OwnedObjectPath = screenshot.call(method, &("", options)).await?;
+    let handle: OwnedObjectPath = screenshot.call(method, &(parent_window, options)).await?;
     if handle.as_str() != path {
         return Err("Portal returned an unexpected request handle".into());
     }
@@ -220,7 +258,7 @@ async fn request(
         return Ok(None);
     }
     if code != 0 {
-        return Err("Screen capture or color selection was denied or failed".into());
+        return Err(format!("Screen capture or color selection failed (portal response {code})"));
     }
     Ok(Some(values))
 }
@@ -321,7 +359,7 @@ mod tests {
         assert_eq!(color.srgb8(), [0x12, 0xab, 0xef]);
         assert_eq!(color.space, Space::Srgb);
 
-        let screenshot = SystemJob::screenshot(true, Ok).unwrap();
+        let screenshot = SystemJob::screenshot(true, String::new(), false, Ok).unwrap();
         let error = screenshot
             .receiver
             .recv_timeout(timeout)
