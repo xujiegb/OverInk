@@ -70,19 +70,19 @@ impl SystemJob<Image> {
         let mut y = 0;
         let positioned = crate::sdl::driver() != "wayland"
             && unsafe { crate::sdl::SDL_GetWindowPosition(window.raw, &mut x, &mut y) };
-        let request = (
-            request_id.as_str(),
-            region.left() as f64,
-            region.top() as f64,
-            region.right() as f64,
-            region.bottom() as f64,
-            canvas[0] as f64,
-            canvas[1] as f64,
-            positioned,
-            f64::from(x),
-            f64::from(y),
-        );
         Self::spawn("overink-gnome-shell-capture", move |cancelled| {
+            let request = (
+                request_id.as_str(),
+                region.left() as f64,
+                region.top() as f64,
+                region.right() as f64,
+                region.bottom() as f64,
+                canvas[0] as f64,
+                canvas[1] as f64,
+                positioned,
+                f64::from(x),
+                f64::from(y),
+            );
             let path: Option<String> = zbus::block_on(async {
                 if cancelled.is_closed() {
                     return Ok(None);
