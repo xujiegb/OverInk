@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use crate::{
     model::{Document, History, MAX_FILE_BYTES},
     sdl::*,
@@ -5,7 +7,6 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    ffi::CStr,
     fs::{self, File},
     io::{self, BufWriter, Read, Write},
     path::Path,
@@ -52,45 +53,18 @@ impl Topology {
     }
 }
 fn sdl_displays() -> Result<Vec<Display>, String> {
-    unsafe {
-        let mut count = 0;
-        let list = SDL_GetDisplays(&mut count);
-        if list.is_null() {
-            return Err(crate::sdl::error());
-        }
-        let result = (0..count.max(0) as usize)
-            .map(|i| {
-                let id = *list.add(i);
-                let mut bounds = SDL_Rect::default();
-                if !SDL_GetDisplayBounds(id, &mut bounds) {
-                    return Err(crate::sdl::error());
-                }
-                let name = SDL_GetDisplayName(id);
-                let mode = SDL_GetCurrentDisplayMode(id);
-                let refresh = if mode.is_null() {
-                    0.0
-                } else if (*mode).refresh_rate_numerator > 0 && (*mode).refresh_rate_denominator > 0
-                {
-                    (*mode).refresh_rate_numerator as f64 / (*mode).refresh_rate_denominator as f64
-                } else {
-                    (*mode).refresh_rate as f64
-                };
-                Ok(Display {
-                    id: id.0,
-                    name: if name.is_null() {
-                        format!("Display {}", i + 1)
-                    } else {
-                        CStr::from_ptr(name).to_string_lossy().into_owned()
-                    },
-                    bounds: [bounds.x, bounds.y, bounds.w, bounds.h],
-                    refresh,
-                    scale: SDL_GetDisplayContentScale(id),
-                })
+    crate::sdl::display_info().map(|displays| {
+        displays
+            .into_iter()
+            .map(|info| Display {
+                id: info.id,
+                name: info.name,
+                bounds: info.bounds,
+                refresh: info.refresh,
+                scale: info.scale,
             })
-            .collect::<Result<Vec<_>, String>>();
-        SDL_free(list.cast());
-        result
-    }
+            .collect()
+    })
 }
 
 // SDL instance IDs identify live outputs. Use names and positions on disk.
