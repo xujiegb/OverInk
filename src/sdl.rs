@@ -304,6 +304,14 @@ pub fn mod_state() -> SDL_Keymod {
 }
 
 /// Copy SDL-owned clipboard text and release its allocation.
+/// Copy text to the native clipboard using SDL.
+pub fn set_clipboard_text(value: &str) {
+    let text = cstring(value);
+    unsafe {
+        SDL_SetClipboardText(text.as_ptr());
+    }
+}
+
 pub fn clipboard_text() -> Option<String> {
     unsafe {
         let p = SDL_GetClipboardText();
@@ -535,6 +543,12 @@ impl Window {
     /// Set a popup's size and origin, preserving SDL's native error reporting.
     pub fn text_input_active(&self) -> bool {
         unsafe { SDL_TextInputActive(self.raw) }
+    }
+
+    pub fn set_text_input_area(&self, area: &SDL_Rect) {
+        unsafe {
+            SDL_SetTextInputArea(self.raw, area, 0);
+        }
     }
 
     pub fn sync_text_input(&self, enabled: bool) {
@@ -908,6 +922,82 @@ impl Drop for Window {
         }
     }
 }
+/// SDL texture owned by the egui atlas renderer.
+///
+/// The renderer must remain alive while a texture is active. On SDL renderer
+/// reset, callers must explicitly abandon invalidated handles rather than
+/// trying to destroy already-invalid textures.
+pub struct GuiTexture(*mut SDL_Texture);
+
+impl GuiTexture {
+    pub fn new(renderer: &Renderer, width: usize, height: usize) -> Result<Self, String> {
+        let w = i32::try_from(width).map_err(|_| "egui texture width is too large")?;
+        let h = i32::try_from(height).map_err(|_| "egui texture height is too large")?;
+        if w <= 0 || h <= 0 {
+            return Err("egui texture dimensions must be positive".into());
+        }
+        unsafe {
+            let raw = SDL_CreateTexture(
+                renderer.raw,
+                SDL_PIXELFORMAT_RGBA32,
+                SDL_TEXTUREACCESS_STATIC,
+                w,
+                h,
+            );
+            if raw.is_null() {
+                return Err(error());
+            }
+            let texture = Self(raw);
+            check(SDL_SetTextureBlendMode(raw, SDL_BLENDMODE_BLEND))?;
+            SDL_SetTextureScaleMode(raw, SDL_SCALEMODE_LINEAR);
+            Ok(texture)
+        }
+    }
+
+    pub fn update(
+        &self,
+        dimensions: [usize; 2],
+        rgba: &[u8],
+        rect: Option<&SDL_Rect>,
+    ) -> Result<(), String> {
+        let [width, height] = dimensions;
+        let pitch = width
+            .checked_mul(4)
+            .and_then(|n| i32::try_from(n).ok())
+            .ok_or("egui texture row is too wide")?;
+        let bytes = width
+            .checked_mul(height)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or("egui texture is too large")?;
+        if rgba.len() != bytes {
+            return Err("egui texture pixel buffer size mismatch".into());
+        }
+        unsafe {
+            check(SDL_UpdateTexture(
+                self.0,
+                rect.map_or(ptr::null(), |area| area),
+                rgba.as_ptr().cast(),
+                pitch,
+            ))
+        }
+    }
+
+    pub fn geometry(
+        &self,
+        renderer: &Renderer,
+        vertices: &[SDL_Vertex],
+        indices: &[u32],
+    ) -> Result<(), String> {
+        renderer.geometry(self.0, vertices, indices)
+    }
+}
+
+impl Drop for GuiTexture {
+    fn drop(&mut self) {
+        unsafe { SDL_DestroyTexture(self.0) }
+    }
+}
+
 pub struct Renderer {
     pub raw: *mut SDL_Renderer,
     pub extended: bool,
@@ -1050,6 +1140,12 @@ impl Renderer {
             result.and(restore)
         }
     }
+    pub fn set_clip_rect(&self, clip: Option<&SDL_Rect>) {
+        unsafe {
+            SDL_SetRenderClipRect(self.raw, clip.map_or(ptr::null(), |rect| rect));
+        }
+    }
+
     pub fn geometry(
         &self,
         texture: *mut SDL_Texture,
