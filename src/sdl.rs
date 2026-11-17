@@ -899,6 +899,21 @@ impl Window {
         }
     }
 
+    /// Borrow the Cocoa NSWindow for this live SDL window without exposing
+    /// property-list FFI to the platform input-routing code.
+    #[cfg(target_os = "macos")]
+    pub fn cocoa_window(&self) -> Option<std::ptr::NonNull<c_void>> {
+        // SAFETY: SDL's Cocoa window property is borrowed; the caller is
+        // required to keep this SDL Window alive while using the NSWindow.
+        unsafe {
+            std::ptr::NonNull::new(SDL_GetPointerProperty(
+                SDL_GetWindowProperties(self.raw),
+                SDL_PROP_WINDOW_COCOA_WINDOW_POINTER,
+                ptr::null_mut(),
+            ))
+        }
+    }
+
     /// Borrow the native X11 Display for the lifetime of the SDL window.
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     pub fn x11_display(&self) -> Option<std::ptr::NonNull<c_void>> {
