@@ -1511,6 +1511,93 @@ impl Drop for Renderer {
     }
 }
 
+/// Test-only owned surface for SDL's software renderer. The test harness
+/// must drop the renderer before this backing surface.
+#[cfg(test)]
+pub struct TestSurface(*mut SDL_Surface);
+
+#[cfg(test)]
+impl TestSurface {
+    pub fn new([width, height]: [i32; 2]) -> Result<Self, String> {
+        if width <= 0 || height <= 0 {
+            return Err("Test surface dimensions must be positive".into());
+        }
+        unsafe {
+            let raw = SDL_CreateSurface(width, height, SDL_PIXELFORMAT_RGBA32);
+            if raw.is_null() {
+                return Err(error());
+            }
+            Ok(Self(raw))
+        }
+    }
+
+    pub fn software_renderer(&self) -> Result<Renderer, String> {
+        unsafe {
+            let raw = SDL_CreateSoftwareRenderer(self.0);
+            if raw.is_null() {
+                return Err(error());
+            }
+            let renderer = Renderer {
+                raw,
+                extended: false,
+                name: "software".into(),
+            };
+            check(SDL_SetRenderDrawBlendMode(raw, SDL_BLENDMODE_BLEND))?;
+            Ok(renderer)
+        }
+    }
+
+    pub fn size(&self) -> [i32; 2] {
+        unsafe { [(*self.0).w, (*self.0).h] }
+    }
+
+    fn readback(renderer: &Renderer) -> Result<Self, String> {
+        unsafe {
+            let raw = SDL_RenderReadPixels(renderer.raw, ptr::null());
+            if raw.is_null() {
+                return Err(error());
+            }
+            Ok(Self(raw))
+        }
+    }
+
+    pub fn pixel(renderer: &Renderer, x: i32, y: i32) -> Result<[u8; 4], String> {
+        let image = Self::readback(renderer)?;
+        unsafe {
+            let [mut r, mut g, mut b, mut a] = [0; 4];
+            check(SDL_ReadSurfacePixel(
+                image.0, x, y, &mut r, &mut g, &mut b, &mut a,
+            ))?;
+            Ok([r, g, b, a])
+        }
+    }
+
+    pub fn pixels(renderer: &Renderer) -> Result<Vec<[u8; 4]>, String> {
+        let image = Self::readback(renderer)?;
+        let [width, height] = image.size();
+        let mut pixels = Vec::with_capacity(width as usize * height as usize);
+        for y in 0..height {
+            for x in 0..width {
+                unsafe {
+                    let [mut r, mut g, mut b, mut a] = [0; 4];
+                    check(SDL_ReadSurfacePixel(
+                        image.0, x, y, &mut r, &mut g, &mut b, &mut a,
+                    ))?;
+                    pixels.push([r, g, b, a]);
+                }
+            }
+        }
+        Ok(pixels)
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestSurface {
+    fn drop(&mut self) {
+        unsafe { SDL_DestroySurface(self.0) };
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
