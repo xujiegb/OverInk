@@ -49,6 +49,11 @@ impl ColorWheel {
     }
 
     fn select(&mut self, offset: Vec2, radius: f32) {
+        // The wheel displays bright hues. Picking one from pure black must
+        // produce a visible color even if the brightness slider is untouched.
+        if self.value.v == 0. {
+            self.value.v = 1.;
+        }
         self.value.s = (offset.length() / radius).min(1.);
         if self.value.s > 0. {
             self.value.h = (offset.y.atan2(offset.x) / TAU).rem_euclid(1.);
@@ -98,6 +103,15 @@ pub(super) fn paint_disc(painter: &Painter, center: Pos2, radius: f32, value: f3
 mod tests {
     use super::*;
 
+
+    #[test]
+    fn choosing_hue_from_black_produces_visible_color_without_brightness_drag() {
+        let mut wheel = ColorWheel::new(InkColor::from_rgb8([0, 0, 0]));
+        assert!(wheel.chosen_color().is_none());
+        wheel.select(vec2(100., 0.), 100.);
+        assert_eq!(wheel.chosen_color().unwrap().srgb8(), [255, 0, 0]);
+        assert_eq!(wheel.value.v, 1.);
+    }
     #[test]
     fn the_wheel_selects_hue_and_saturation_without_changing_brightness() {
         let mut wheel = ColorWheel::new(InkColor::from_rgb8([128; 3]));
