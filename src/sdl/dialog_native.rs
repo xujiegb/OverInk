@@ -2,7 +2,11 @@
 //! the initial location for the duration of the native show call.
 #![deny(clippy::undocumented_unsafe_blocks)]
 
-use super::{Window, dialog::{DialogKind, USE_WINDOW_PARENT, complete}, error};
+use super::{
+    Window,
+    dialog::{DialogKind, USE_WINDOW_PARENT, complete},
+    error,
+};
 use sdl3_sys::dialog::*;
 use std::{
     ffi::{CStr, CString, c_char, c_int, c_void},
@@ -17,11 +21,7 @@ const PNG_FILTER: &SDL_DialogFileFilter = &SDL_DialogFileFilter {
 
 /// Called from SDL, potentially on a different thread or before show returns.
 /// Userdata is an opaque numeric ID, never a pointer to Rust-owned storage.
-pub(super) extern "C" fn chosen(
-    user: *mut c_void,
-    files: *const *const c_char,
-    _filter: c_int,
-) {
+pub(super) extern "C" fn chosen(user: *mut c_void, files: *const *const c_char, _filter: c_int) {
     complete(user.addr(), || {
         if files.is_null() {
             return Err(error());
@@ -55,15 +55,9 @@ pub(super) fn show(id: usize, kind: DialogKind, window: &Window, location: Optio
     // native dialog callbacks may outlive the original parent.
     unsafe {
         match kind {
-            DialogKind::Font => SDL_ShowOpenFileDialog(
-                Some(chosen),
-                user,
-                parent,
-                ptr::null(),
-                0,
-                initial,
-                false,
-            ),
+            DialogKind::Font => {
+                SDL_ShowOpenFileDialog(Some(chosen), user, parent, ptr::null(), 0, initial, false)
+            }
             DialogKind::ScreenshotFolder => {
                 SDL_ShowOpenFolderDialog(Some(chosen), user, parent, initial, false)
             }
