@@ -297,11 +297,11 @@ impl Screenshot {
         match event {
             SelectionEvent::Down(pointer, point) if drag.is_none() && point.is_finite() => {
                 let start = clamp(point);
-                if !capture_mouse(pointer, true) {
-                    self.error = Some(format!("Cannot capture the mouse: {}", crate::sdl::error()));
-                    return true;
-                }
-                self.error = None;
+                // SDL capture is not available on every backend. Still allow
+                // in-window dragging; losing focus cancels an unfinished drag.
+                self.error = (!capture_mouse(pointer, true)).then(|| {
+                    format!("Mouse capture unavailable: {}", crate::sdl::error())
+                });
                 *drag = Some(Drag {
                     pointer,
                     start,
@@ -323,6 +323,7 @@ impl Screenshot {
             {
                 *drag = None;
                 capture_mouse(pointer, false);
+                self.error = None;
                 if point.is_finite() {
                     let region = Rect::from_two_pos(current.start, clamp(point));
                     if region.width() >= 2. && region.height() >= 2. {
