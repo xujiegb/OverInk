@@ -2,6 +2,8 @@
 //! current-display ICC profile there. Other backends retain OS-managed sRGB /
 //! scRGB surfaces; applying an ICC transform there would double-manage color.
 use crate::appearance::{Text, text};
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+use crate::sdl::Window;
 use lcms2_sys as cms;
 use std::hash::{Hash, Hasher};
 use std::ptr;
