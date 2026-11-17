@@ -21,6 +21,7 @@ mod geometry;
 mod gnome;
 mod gui;
 mod icc;
+mod icc_native;
 mod model;
 mod native;
 mod picker;
