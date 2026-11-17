@@ -119,7 +119,6 @@ pub fn wayland_scale_to_display_forced() -> bool {
 }
 
 /// Return usable display bounds only when SDL provides them.
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub fn usable_display_bounds(id: u32) -> Option<[i32; 4]> {
     unsafe {
         let mut bounds = SDL_Rect::default();
@@ -240,6 +239,14 @@ pub struct Window {
     pub id: SDL_WindowID,
 }
 impl Window {
+    /// Set a popup's size and origin, preserving SDL's native error reporting.
+    pub fn set_geometry(&self, x: i32, y: i32, w: i32, h: i32) -> Result<(), String> {
+        unsafe {
+            check(SDL_SetWindowSize(self.raw, w, h))?;
+            check(SDL_SetWindowPosition(self.raw, x, y))
+        }
+    }
+
     pub fn set_always_on_top(&self, enabled: bool) {
         unsafe {
             let _ = SDL_SetWindowAlwaysOnTop(self.raw, enabled);
