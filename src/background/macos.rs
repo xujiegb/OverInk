@@ -93,6 +93,8 @@ unsafe extern "C" {
     fn CGContextTranslateCTM(context: *mut c_void, tx: f64, ty: f64);
     fn CGContextScaleCTM(context: *mut c_void, sx: f64, sy: f64);
     fn CGContextDrawImage(context: *mut c_void, rect: CGRect, image: *const c_void);
+    #[cfg(test)]
+    fn CGBitmapContextCreateImage(context: *mut c_void) -> *const c_void;
     fn CGImageGetWidth(image: *const c_void) -> usize;
     fn CGImageGetHeight(image: *const c_void) -> usize;
     fn CGImageGetBitsPerComponent(image: *const c_void) -> usize;
@@ -495,4 +497,36 @@ fn sdr_capture(bounds: [i32; 4], cancelled: &AtomicBool) -> CaptureResult {
         return Ok(None);
     }
     copy_sdr_screenshot(image.0).map(Some)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sdr_conversion_preserves_top_and_bottom_rows() {
+        // Two opaque rows in raw CGImage pixel order: red above blue.
+        let mut pixels = [255, 0, 0, 255, 0, 0, 255, 255_u8];
+        unsafe {
+            let color = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+            assert!(!color.is_null());
+            let color = Data(color);
+            let context = CGBitmapContextCreate(
+                pixels.as_mut_ptr().cast(),
+                1,
+                2,
+                8,
+                4,
+                color.0,
+                0x4001,
+            );
+            assert!(!context.is_null());
+            let context = Data(context);
+            let source = CGBitmapContextCreateImage(context.0.cast_mut());
+            assert!(!source.is_null());
+            let source = Data(source);
+            let actual = copy_sdr_screenshot(source.0).unwrap();
+            assert_eq!(actual.rgba, pixels, "SDR screenshot must not flip vertically");
+        }
+    }
 }
