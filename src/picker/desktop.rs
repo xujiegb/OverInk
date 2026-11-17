@@ -384,14 +384,11 @@ mod x11 {
                 }
             }
             destroy(image);
-            let mut size = 0;
-            let profile = SDL_GetWindowICCProfile(window.raw, &mut size);
-            if !profile.is_null() {
-                if size > 0 && size <= 16 * 1024 * 1024 {
-                    out.convert_to_srgb(std::slice::from_raw_parts(profile.cast::<u8>(), size));
-                }
-                SDL_free(profile);
-            }
+        }
+        // Keep SDL-owned ICC bytes out of the X11 unsafe readback region.
+        // The Window adapter copies the profile and frees SDL's allocation.
+        if let Some(profile) = window.icc_profile() {
+            out.convert_to_srgb(&profile);
         }
         Ok(out)
     }
