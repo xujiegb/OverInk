@@ -118,8 +118,8 @@ struct Wayland {
     // its event queue, and unload the library only after both native handles.
     compositor: OwnedWaylandHandle,
     _queue: OwnedWaylandHandle,
-    region_interface: *const c_void,
-    applied: Option<(*mut c_void, bool, Option<Rect>, [i32; 2])>,
+    region_interface: NonNull<c_void>,
+    applied: Option<(NonNull<c_void>, bool, Option<Rect>, [i32; 2])>,
     marshal: Marshal,
     version: Version,
     _lib: Library,
@@ -200,9 +200,11 @@ impl Wayland {
             let compositor_interface: *const c_void = *lib
                 .get(b"wl_compositor_interface\0")
                 .map_err(|e| e.to_string())?;
-            let region_interface = *lib
-                .get(b"wl_region_interface\0")
-                .map_err(|e| e.to_string())?;
+            let region_interface = NonNull::new(
+                *lib.get(b"wl_region_interface\0")
+                    .map_err(|e| e.to_string())?,
+            )
+            .ok_or("No Wayland region interface")?;
             let display = w.wayland_display().ok_or("No Wayland display")?.as_ptr();
             // Every created resource is guarded immediately. An error or
             // unwind runs the correct native destructor before unloading lib.
@@ -264,7 +266,7 @@ impl Wayland {
         }
     }
     fn set(&mut self, w: &Window, pass: bool, hole: Option<Rect>) -> Result<(), String> {
-        let surface = w.wayland_surface().ok_or("No Wayland surface")?.as_ptr();
+        let surface = w.wayland_surface().ok_or("No Wayland surface")?;
         // wl_region coordinates are surface-local logical units, not
         // physical pixels like XShape rectangles. Compute and validate
         // the region entirely in safe Rust before crossing the FFI boundary.
@@ -274,7 +276,7 @@ impl Wayland {
         } else {
             hole.and_then(|area| area.clipped(size))
         };
-        if self.applied == Some((surface, pass, hole, size)) {
+        if self.applied == Some((surface.as_non_null(), pass, hole, size)) {
             return Ok(());
         }
         // SAFETY: The Wayland display, compositor and wl_surface are owned
@@ -288,7 +290,7 @@ impl Wayland {
                 let p = (self.marshal)(
                     self.compositor.as_ptr(),
                     1,
-                    self.region_interface,
+                    self.region_interface.as_ptr(),
                     (self.version)(self.compositor.as_ptr()),
                     0,
                     ptr::null_mut::<c_void>(),
@@ -330,18 +332,24 @@ impl Wayland {
                 .as_ref()
                 .map_or(ptr::null_mut(), |region| region.as_ptr());
             (self.marshal)(
-                surface,
+                surface.as_ptr(),
                 5,
                 ptr::null(),
-                (self.version)(surface),
+                (self.version)(surface.as_ptr()),
                 0,
                 region_ptr,
             ); // wl_surface.set_input_region
-            (self.marshal)(surface, 6, ptr::null(), (self.version)(surface), 0); // wl_surface.commit
+            (self.marshal)(
+                surface.as_ptr(),
+                6,
+                ptr::null(),
+                (self.version)(surface.as_ptr()),
+                0,
+            ); // wl_surface.commit
             // The region is destroyed through RAII, even if a Rust unwind
             // occurs between creation and the surface commit.
         }
-        self.applied = Some((surface, pass, hole, size));
+        self.applied = Some((surface.as_non_null(), pass, hole, size));
         Ok(())
     }
 }
