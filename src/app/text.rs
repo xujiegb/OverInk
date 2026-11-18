@@ -360,7 +360,9 @@ impl App {
             } if state.press.is_some() => {
                 self.move_text_pointer(pos, canvas);
                 let state = &mut self.input.text;
-                let press = state.press.take().unwrap();
+                let Some(press) = state.press.take() else {
+                    return true;
+                };
                 if let Some((index, handle)) = press.target
                     && let Some(item) = self.history.text_boxes().get(index)
                 {
@@ -417,7 +419,9 @@ impl App {
 
     fn move_text_pointer(&mut self, point: Pos2, canvas: Rect) {
         let state = &mut self.input.text;
-        let press = state.press.as_mut().unwrap();
+        let Some(press) = state.press.as_mut() else {
+            return;
+        };
         let delta = point - press.origin;
         press.moved |= delta.length() >= 3. * self.input.canvas_units;
         if let Some((index, handle)) = press.target
@@ -854,7 +858,9 @@ impl App {
         menus: Option<TextMenus>,
     ) {
         let wheel_open = self.input.text.color_wheel.is_some();
-        let draft = self.input.text.draft.as_mut().unwrap();
+        let Some(draft) = self.input.text.draft.as_mut() else {
+            return;
+        };
         let rect = draft.item.rect();
         let text_rect = draft.item.text_rect();
         let id = ui.make_persistent_id("annotation-editor");
