@@ -648,7 +648,7 @@ mod tests {
             bundled_metadata()["version"]
                 .as_f64()
                 .ok_or("Missing bundled GNOME extension version")?,
-        );
+        )?;
         assert!(matches!(
             zbus::block_on(inspect(&proxy))?,
             Some(Guide::Install | Guide::Relogin)
@@ -676,7 +676,7 @@ mod tests {
             "49.2",
             &[Some(OUT_OF_DATE)],
             0.,
-        );
+        )?;
         let guide = zbus::block_on(inspect(&supported))?.ok_or("Expected a GNOME Shell guide")?;
         assert_eq!(
             std::mem::discriminant(&guide),
@@ -687,12 +687,12 @@ mod tests {
             "99.0",
             &[Some(OUT_OF_DATE)],
             0.,
-        );
+        )?;
         assert!(matches!(
             zbus::block_on(inspect(&unsupported))?,
             Some(Guide::Unavailable(_))
         ));
-        let active = mock_shell("org.gnome.Shell.TestOldActive", "49.2", &[Some(ACTIVE)], 0.);
+        let active = mock_shell("org.gnome.Shell.TestOldActive", "49.2", &[Some(ACTIVE)], 0.)?;
         let guide = zbus::block_on(inspect(&active))?.ok_or("Expected a GNOME Shell guide")?;
         assert_eq!(
             std::mem::discriminant(&guide),
