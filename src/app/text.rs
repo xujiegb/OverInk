@@ -428,17 +428,30 @@ impl App {
             && press.moved
             && let Some(item) = self.history.text_boxes().get(index)
         {
-            let mut item = (**item).clone();
+            // Drag events can arrive at high refresh rates. Reuse the
+            // preview's text allocation instead of cloning the annotation's
+            // String for every pointer movement. Reset geometry from the
+            // committed source so deltas remain absolute, not cumulative.
+            let source = item.as_ref();
+            let mut preview = press.preview.take().unwrap_or_else(|| source.clone());
+            preview.origin = source.origin;
+            preview.size = source.size;
+            preview.font_size = source.font_size;
+            preview.color = source.color;
+            preview.scroll_offset = source.scroll_offset;
+            if preview.text != source.text {
+                preview.text.clone_from(&source.text);
+            }
             match handle {
-                Handle::Move => item.move_to(item.rect().min + delta, canvas),
-                Handle::Resize => item.resize(Vec2::from(item.size) + delta, canvas),
+                Handle::Move => preview.move_to(preview.rect().min + delta, canvas),
+                Handle::Resize => preview.resize(Vec2::from(preview.size) + delta, canvas),
                 Handle::FontSize => {
-                    item.font_size = (item.font_size - delta.y * 0.5)
+                    preview.font_size = (preview.font_size - delta.y * 0.5)
                         .clamp(*TextBox::FONT_SIZE.start(), *TextBox::FONT_SIZE.end());
                 }
             }
             state.selected = Some(index);
-            press.preview = Some(item);
+            press.preview = Some(preview);
         }
     }
 
