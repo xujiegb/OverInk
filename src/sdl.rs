@@ -23,6 +23,9 @@ unsafe extern "C" {
     safe fn native_system_theme() -> SDL_SystemTheme;
     #[link_name = "SDL_DelayPrecise"]
     safe fn native_delay_precise(nanoseconds: u64);
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[link_name = "SDL_RegisterEvents"]
+    safe fn native_register_events(count: i32) -> u32;
 }
 
 /// Known SDL window property keys, with no arbitrary raw C-string input.
@@ -363,7 +366,9 @@ pub fn system_theme() -> SDL_SystemTheme {
 /// Reserve a single SDL user event type, returning zero on failure.
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub fn register_user_event() -> u32 {
-    unsafe { SDL_RegisterEvents(1) }
+    // SDL_RegisterEvents takes a fixed, positive scalar count; no caller
+    // pointer, buffer or resource ownership crosses this ABI.
+    native_register_events(1)
 }
 
 /// Push a copied SDL event into its queue.
