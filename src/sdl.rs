@@ -944,10 +944,7 @@ impl Window {
     /// Borrow a native backend handle from the window property list.
     /// The returned pointer remains owned by SDL; callers must not use it
     /// after the corresponding Window has been destroyed.
-    fn native_pointer_property(
-        &self,
-        property: NativeWindowProperty,
-    ) -> Option<NonNull<c_void>> {
+    fn native_pointer_property(&self, property: NativeWindowProperty) -> Option<NonNull<c_void>> {
         // SAFETY: SDL owns the window and its property list; the property
         // value is borrowed and checked for null before it escapes.
         unsafe {
