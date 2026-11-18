@@ -13,7 +13,7 @@ pub fn configure_metal(raw: NonNull<SDL_Renderer>, extended: bool) {
     }
     #[link(name = "CoreGraphics", kind = "framework")]
     unsafe extern "C" {
-        static kCGColorSpaceSRGB: *const c_void;
+        static kCGColorSpaceSRGB: Option<NonNull<c_void>>;
         fn CGColorSpaceCreateWithName(name: NonNull<c_void>) -> Option<NonNull<c_void>>;
     }
     #[link(name = "CoreFoundation", kind = "framework")]
@@ -27,7 +27,7 @@ pub fn configure_metal(raw: NonNull<SDL_Renderer>, extended: bool) {
         }
         let _: () = msg_send![layer, setMaximumDrawableCount: 2_usize];
         if !extended
-            && let Some(name) = NonNull::new(kCGColorSpaceSRGB.cast_mut())
+            && let Some(name) = kCGColorSpaceSRGB
             && let Some(srgb) = CGColorSpaceCreateWithName(name)
         {
             let _: () = msg_send![layer, setColorspace: srgb.as_ptr().cast::<ColorSpace>()];
