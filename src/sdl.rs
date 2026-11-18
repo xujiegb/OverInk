@@ -517,7 +517,14 @@ pub fn register_user_event() -> u32 {
 /// monitor; safe callers can no longer enqueue an arbitrary SDL union.
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub fn push_user_event(ty: u32) -> bool {
-    event_queue_action(EventQueueAction::PushUser(ty))
+    if !(SDL_EVENT_USER.0..SDL_EVENT_LAST.0).contains(&ty) {
+        return false;
+    }
+    // Only the SDL-defined type field is set. The rest of the union stays
+    // zeroed and carries no borrowed native data.
+    let mut event = SDL_Event::default();
+    event.r#type = ty;
+    native_push_event(&mut event)
 }
 
 /// Owned display metadata, copied from SDL before its native allocation is freed.
@@ -778,53 +785,17 @@ pub fn screenshot_file_stem() -> String {
     }
 }
 
-/// Known event-queue operations, with borrowed event storage and no
-/// caller-supplied native pointers or event type values.
-enum EventQueueAction<'a> {
-    Poll(&'a mut SDL_Event),
-    Wait(i32),
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    PushUser(u32),
-    #[cfg(target_os = "linux")]
-    FlushQuit,
-}
-
-fn event_queue_action(action: EventQueueAction<'_>) -> bool {
-    match action {
-        EventQueueAction::Poll(event) => native_is_main_thread() && native_poll_event(event),
-        EventQueueAction::Wait(timeout_ms) => {
-            native_is_main_thread() && native_wait_event_timeout(None, timeout_ms)
-        }
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        EventQueueAction::PushUser(ty) => {
-            if !(SDL_EVENT_USER.0..SDL_EVENT_LAST.0).contains(&ty) {
-                return false;
-            }
-            // Only the SDL-defined type field is set. The rest of the
-            // union stays zeroed and carries no borrowed native data.
-            let mut event = SDL_Event::default();
-            event.r#type = ty;
-            native_push_event(&mut event)
-        }
-        #[cfg(target_os = "linux")]
-        EventQueueAction::FlushQuit => {
-            if native_is_main_thread() {
-                native_flush_event(SDL_EVENT_QUIT.0);
-            }
-            false
-        }
-    }
-}
-
 /// Take the next queued SDL event on the SDL-owning thread.
 pub fn poll_event(event: &mut SDL_Event) -> bool {
-    event_queue_action(EventQueueAction::Poll(event))
+    native_is_main_thread() && native_poll_event(event)
 }
 
 /// Remove the leftover SDL quit event when dismissing a temporary guide.
 #[cfg(target_os = "linux")]
 pub fn flush_quit_event() {
-    let _ = event_queue_action(EventQueueAction::FlushQuit);
+    if native_is_main_thread() {
+        native_flush_event(SDL_EVENT_QUIT.0);
+    }
 }
 
 /// Read an SDL display-removal event only after checking its union tag.
@@ -868,7 +839,9 @@ pub fn mouse_buttons_released() -> bool {
 
 /// Wait without dequeuing the SDL event, preserving the polling loop's order.
 pub fn wait_for_event(timeout_ms: i32) {
-    let _ = event_queue_action(EventQueueAction::Wait(timeout_ms));
+    if native_is_main_thread() {
+        let _ = native_wait_event_timeout(None, timeout_ms);
+    }
 }
 
 /// Boolean window queries return owned scalars rather than native flags.
