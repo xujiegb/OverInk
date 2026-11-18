@@ -1958,9 +1958,15 @@ fn run_inner(options: Options) -> Result<(), String> {
                     },
                     DialogKind::ScreenshotFolder => match result {
                         Ok(Some(path)) => {
-                            let previous = app.preferences.clone();
-                            app.preferences.screenshot_folder = Some(path);
-                            update_preferences(&mut app, previous, !wayland && !options.smoke);
+                            let previous = app.preferences.screenshot_folder.replace(path);
+                            if let Err(error) =
+                                app.preferences.save(&state_dir().join("ui.json"))
+                            {
+                                app.preferences.screenshot_folder = previous;
+                                app.status =
+                                    text("Settings save failed", "保存设置失败", "儲存設定失敗")
+                                        .detail(error);
+                            }
                         }
                         Ok(None) => (),
                         Err(error) => {
