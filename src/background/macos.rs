@@ -292,12 +292,12 @@ fn capture_error(error: Option<NonNull<AnyObject>>, hdr: bool) -> String {
         return "macOS screenshot returned no image or error".into();
     };
     let description = unsafe {
-        let message: Option<NonNull<AnyObject>> = NonNull::new(msg_send![error.as_ptr(), localizedDescription]);
+        let message: Option<NonNull<AnyObject>> =
+            NonNull::new(msg_send![error.as_ptr(), localizedDescription]);
         let Some(message) = message else {
             return "macOS screenshot returned an error without a description".into();
         };
-        let text: Option<NonNull<c_char>> =
-            NonNull::new(msg_send![message.as_ptr(), UTF8String]);
+        let text: Option<NonNull<c_char>> = NonNull::new(msg_send![message.as_ptr(), UTF8String]);
         if let Some(text) = text {
             CStr::from_ptr(text.as_ptr()).to_string_lossy()
         } else {
@@ -325,7 +325,8 @@ fn begin_screenshot(
         return Err("Invalid macOS screenshot dimensions".into());
     }
     unsafe {
-        let displays: Option<NonNull<AnyObject>> = NonNull::new(msg_send![content.as_ptr(), displays]);
+        let displays: Option<NonNull<AnyObject>> =
+            NonNull::new(msg_send![content.as_ptr(), displays]);
         let displays = displays.ok_or("ScreenCaptureKit returned no display list")?;
         let count: usize = msg_send![displays.as_ptr(), count];
         let mut selected = None;
