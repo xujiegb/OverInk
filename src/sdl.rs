@@ -391,20 +391,40 @@ pub fn mod_state() -> SDL_Keymod {
     unsafe { SDL_GetModState() }
 }
 
-/// Copy SDL-owned clipboard text and release its allocation.
-/// Copy text to the native clipboard using SDL.
-pub fn set_clipboard_text(value: &str) {
-    let text = cstring(value);
+/// Clipboard writes borrow a terminated Rust string; reads take ownership
+/// of the returned allocation and release it through SDL_free.
+enum ClipboardAction<'a> {
+    Write(&'a CStr),
+    Read,
+}
+
+fn clipboard_action(action: ClipboardAction<'_>) -> Option<String> {
+    // SAFETY: The only write argument is a borrowed, NUL-terminated CStr,
+    // valid for SDL's synchronous copy. SDL_GetClipboardText returns a
+    // caller-owned SDL allocation, released by SdlAllocation on drop.
     unsafe {
-        SDL_SetClipboardText(text.as_ptr());
+        match action {
+            ClipboardAction::Write(value) => {
+                SDL_SetClipboardText(value.as_ptr());
+                None
+            }
+            ClipboardAction::Read => {
+                let text = SdlAllocation::from_native(SDL_GetClipboardText())?;
+                Some(CStr::from_ptr(text.as_ptr()).to_string_lossy().into_owned())
+            }
+        }
     }
 }
 
+/// Copy text to the native clipboard.
+pub fn set_clipboard_text(value: &str) {
+    let text = cstring(value);
+    clipboard_action(ClipboardAction::Write(&text));
+}
+
+/// Copy SDL-owned clipboard text before releasing its allocation.
 pub fn clipboard_text() -> Option<String> {
-    unsafe {
-        let text = SdlAllocation::from_native(SDL_GetClipboardText())?;
-        Some(CStr::from_ptr(text.as_ptr()).to_string_lossy().into_owned())
-    }
+    clipboard_action(ClipboardAction::Read)
 }
 
 /// Return text input while the SDL event's native text pointer remains valid.
