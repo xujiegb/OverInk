@@ -87,6 +87,7 @@ unsafe extern "C" {
     safe fn native_poll_event(event: &mut SDL_Event) -> bool;
     #[link_name = "SDL_WaitEventTimeout"]
     safe fn native_wait_event_timeout(event: Option<&mut SDL_Event>, timeout_ms: i32) -> bool;
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     #[link_name = "SDL_PushEvent"]
     safe fn native_push_event(event: &mut SDL_Event) -> bool;
     // Both geometry queries write exactly two initialized integers and never
