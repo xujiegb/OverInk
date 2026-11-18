@@ -78,8 +78,10 @@ struct CGRect {
 unsafe extern "C" {
     fn CGGetDisplaysWithPoint(point: Point, max: u32, displays: *mut u32, count: *mut u32) -> i32;
     fn CGDisplayCreateImage(display: u32) -> *const c_void;
-    fn CGPreflightScreenCaptureAccess() -> bool;
-    fn CGRequestScreenCaptureAccess() -> bool;
+    // Both APIs take and return scalar values and do not borrow or retain
+    // Rust memory. The UI-thread permission flow remains in capture_permission.
+    safe fn CGPreflightScreenCaptureAccess() -> bool;
+    safe fn CGRequestScreenCaptureAccess() -> bool;
     fn CGColorSpaceCreateWithName(name: *const c_void) -> *const c_void;
     fn CGBitmapContextCreate(
         data: *mut c_void,
@@ -141,13 +143,13 @@ fn screen_capture_kit() -> Result<(), String> {
 }
 
 fn capture_permission() -> Result<(), String> {
-    if unsafe { CGPreflightScreenCaptureAccess() } {
+    if CGPreflightScreenCaptureAccess() {
         return Ok(());
     }
     // TCC may cache a denial until the application is restarted. Request once
     // per process rather than showing another OS alert for every screenshot.
     static REQUESTED: OnceLock<bool> = OnceLock::new();
-    if *REQUESTED.get_or_init(|| unsafe { CGRequestScreenCaptureAccess() }) {
+    if *REQUESTED.get_or_init(CGRequestScreenCaptureAccess) {
         // A newly granted permission may be usable immediately even if TCC's
         // preflight result remains cached until the next process launch.
         Ok(())
