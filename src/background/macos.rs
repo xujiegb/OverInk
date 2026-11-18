@@ -290,15 +290,16 @@ fn capture_error(error: *mut AnyObject, hdr: bool) -> String {
         return "macOS screenshot returned no image or error".into();
     }
     let description = unsafe {
-        let message: *mut AnyObject = msg_send![error, localizedDescription];
-        if message.is_null() {
+        let message: Option<NonNull<AnyObject>> = NonNull::new(msg_send![error, localizedDescription]);
+        let Some(message) = message else {
             return "macOS screenshot returned an error without a description".into();
-        }
-        let text: *const c_char = msg_send![message, UTF8String];
-        if text.is_null() {
-            "No image returned".into()
+        };
+        let text: Option<NonNull<c_char>> =
+            NonNull::new(msg_send![message.as_ptr(), UTF8String]);
+        if let Some(text) = text {
+            CStr::from_ptr(text.as_ptr()).to_string_lossy()
         } else {
-            CStr::from_ptr(text).to_string_lossy()
+            "No image returned".into()
         }
     };
     let mode = if hdr { "HDR" } else { "SDR" };
