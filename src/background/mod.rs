@@ -488,7 +488,9 @@ impl Background {
                 pixels.as_ref(),
             )?);
         }
-        let texture = self.texture.as_ref().unwrap();
+        let Some(texture) = self.texture.as_ref() else {
+            return Err("Background snapshot texture was not initialized".into());
+        };
         let [w, h] = window.size();
         let dst = SDL_FRect { x: 0., y: 0., w, h };
         texture.draw(render, &dst, linear)
