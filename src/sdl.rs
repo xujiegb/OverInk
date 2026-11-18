@@ -706,6 +706,7 @@ enum WindowCommand<'a> {
     RaiseIfCurrent,
     Show(bool),
     SetParent(Option<&'a Window>),
+    ToolbarSetup([i32; 2], &'a mut [u8]),
     #[cfg(not(target_os = "windows"))]
     ShapeRegions([i32; 2], Option<&'a [SDL_Rect]>),
 }
@@ -715,6 +716,37 @@ enum WindowCommand<'a> {
 enum WindowCreation<'a> {
     Main(&'a CStr, i32, i32, bool),
     Tooltip(&'a Window, [i32; 4]),
+}
+
+/// SDL only borrows the hit-test point while this callback runs.
+extern "C" fn toolbar_hit_test(
+    window: *mut SDL_Window,
+    point: *const SDL_Point,
+    _: *mut c_void,
+) -> SDL_HitTestResult {
+    if window.is_null() {
+        return SDL_HITTEST_NORMAL;
+    }
+    // SAFETY: SDL invokes this callback with a valid live window
+    // and a point borrowed for the duration of the call. The null
+    // check protects against malformed callback inputs.
+    let (point, scale) = unsafe {
+        let Some(point) = point.as_ref() else {
+            return SDL_HITTEST_NORMAL;
+        };
+        let scale =
+            SDL_GetWindowDisplayScale(window) / SDL_GetWindowPixelDensity(window).max(0.1);
+        (point, scale)
+    };
+    if point.x >= 0
+        && (point.x as f32) < crate::toolbar::WIDTH * scale
+        && point.y >= 0
+        && (point.y as f32) < crate::toolbar::GRIP_HEIGHT * scale
+    {
+        SDL_HITTEST_DRAGGABLE
+    } else {
+        SDL_HITTEST_NORMAL
+    }
 }
 
 pub struct Window {
@@ -901,6 +933,35 @@ impl Window {
                     }
                     check(SDL_SetWindowParent(self.raw, raw))
                 }
+                WindowCommand::ToolbarSetup([width, height], pixels) => {
+                    SDL_SetWindowResizable(self.raw, false);
+                    if SDL_SetWindowHitTest(self.raw, Some(toolbar_hit_test), ptr::null_mut()) {
+                        SDL_SetWindowBordered(self.raw, false);
+                    }
+                    // The pixel slice remains mutably borrowed until the
+                    // surface has been released by the OwnedSurface guard.
+                    let pitch = width
+                        .checked_mul(4)
+                        .ok_or("Invalid toolbar icon pitch")?;
+                    let expected = usize::try_from(height)
+                        .ok()
+                        .and_then(|h| usize::try_from(pitch).ok().and_then(|p| h.checked_mul(p)))
+                        .ok_or("Invalid toolbar icon dimensions")?;
+                    if width <= 0 || height <= 0 || pixels.len() != expected {
+                        return Err("Invalid toolbar icon pixel buffer".into());
+                    }
+                    let surface = SDL_CreateSurfaceFrom(
+                        width,
+                        height,
+                        SDL_PIXELFORMAT_RGBA32,
+                        pixels.as_mut_ptr().cast(),
+                        pitch,
+                    );
+                    if let Some(surface) = OwnedSurface::from_native(surface) {
+                        SDL_SetWindowIcon(self.raw, surface.as_ptr());
+                    }
+                    Ok(())
+                }
                 #[cfg(not(target_os = "windows"))]
                 WindowCommand::ShapeRegions(size, opaque_regions) => {
                     let Some(regions) = opaque_regions else {
@@ -1085,55 +1146,10 @@ impl Window {
         [width.max(1) as f32, height.max(1) as f32]
     }
     pub fn setup_toolbar(&self) {
-        extern "C" fn toolbar_hit_test(
-            window: *mut SDL_Window,
-            point: *const SDL_Point,
-            _: *mut c_void,
-        ) -> SDL_HitTestResult {
-            if window.is_null() {
-                return SDL_HITTEST_NORMAL;
-            }
-            // SAFETY: SDL invokes this callback with a valid live window
-            // and a point borrowed for the duration of the call. The null
-            // check protects against malformed callback inputs.
-            let (point, scale) = unsafe {
-                let Some(point) = point.as_ref() else {
-                    return SDL_HITTEST_NORMAL;
-                };
-                let scale =
-                    SDL_GetWindowDisplayScale(window) / SDL_GetWindowPixelDensity(window).max(0.1);
-                (point, scale)
-            };
-            if point.x >= 0
-                && (point.x as f32) < crate::toolbar::WIDTH * scale
-                && point.y >= 0
-                && (point.y as f32) < crate::toolbar::GRIP_HEIGHT * scale
-            {
-                SDL_HITTEST_DRAGGABLE
-            } else {
-                SDL_HITTEST_NORMAL
-            }
-        }
-
-        unsafe {
-            SDL_SetWindowResizable(self.raw, false);
-            if SDL_SetWindowHitTest(self.raw, Some(toolbar_hit_test), ptr::null_mut()) {
-                SDL_SetWindowBordered(self.raw, false);
-            }
-            let icon = crate::toolbar::image();
-            let (w, h) = (icon.width() as i32, icon.height() as i32);
-            let mut pixels = icon.into_raw();
-            let surface = SDL_CreateSurfaceFrom(
-                w,
-                h,
-                SDL_PIXELFORMAT_RGBA32,
-                pixels.as_mut_ptr().cast(),
-                w * 4,
-            );
-            if let Some(surface) = OwnedSurface::from_native(surface) {
-                SDL_SetWindowIcon(self.raw, surface.as_ptr());
-            }
-        }
+        let icon = crate::toolbar::image();
+        let size = [icon.width() as i32, icon.height() as i32];
+        let mut pixels = icon.into_raw();
+        let _ = self.run_command(WindowCommand::ToolbarSetup(size, &mut pixels));
     }
     pub fn arrange_toolbar(&self, expanded: bool, on_display: Option<u32>) -> Result<(), String> {
         let units = self.ui_scale();
