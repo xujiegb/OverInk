@@ -41,7 +41,7 @@ pub(crate) fn library(which: NativeLibrary) -> Result<Library, String> {
 }
 type Marshal = unsafe extern "C" fn(*mut c_void, u32, *const c_void, u32, u32, ...) -> *mut c_void;
 type Version = unsafe extern "C" fn(*mut c_void) -> u32;
-type Destroy = unsafe extern "C" fn(*mut c_void);
+type Destroy = unsafe extern "C" fn(NonNull<c_void>);
 
 /// A uniquely owned native Wayland proxy or event queue, paired with its
 /// exact C destructor. The library supplying the destructor must outlive it.
@@ -67,7 +67,7 @@ impl Drop for OwnedWaylandHandle {
     fn drop(&mut self) {
         // SAFETY: The guard exclusively owns the non-null native resource,
         // and Wayland keeps its library loaded until after this destructor.
-        unsafe { (self.destroy)(self.raw.as_ptr()) };
+        unsafe { (self.destroy)(self.raw) };
     }
 }
 
@@ -602,10 +602,10 @@ mod tests {
         }
     }
 
-    unsafe extern "C" fn release_test_handle(raw: *mut c_void) {
+    unsafe extern "C" fn release_test_handle(raw: NonNull<c_void>) {
         // SAFETY: The test hands its unique Box allocation to the native
         // guard, and this simulated destructor reconstructs it exactly once.
-        unsafe { drop(Box::from_raw(raw.cast::<DropCounter>())) };
+        unsafe { drop(Box::from_raw(raw.as_ptr().cast::<DropCounter>())) };
     }
 
     #[test]

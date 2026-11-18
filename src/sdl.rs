@@ -2640,10 +2640,11 @@ mod tests {
     }
 
     #[test]
-    fn null_text_event_semantics_remain_distinct() {
+    fn null_text_event_semantics_remain_distinct() -> Result<(), &'static str> {
         let mut event = SDL_Event::default();
         event.r#type = SDL_EVENT_TEXT_EDITING.0;
-        let edit = text_editing_data(&event, SDL_WindowID(0)).unwrap();
+        let edit = text_editing_data(&event, SDL_WindowID(0))
+            .ok_or("SDL text editing event should have a payload")?;
         assert!(edit.text.is_empty());
         assert_eq!(edit.start, 0);
         assert_eq!(edit.length, 0);
@@ -2651,6 +2652,7 @@ mod tests {
         event.r#type = SDL_EVENT_TEXT_INPUT.0;
         assert!(text_input_data(&event, SDL_WindowID(0)).is_none());
         assert!(text_editing_data(&event, SDL_WindowID(0)).is_none());
+        Ok(())
     }
 
     #[test]

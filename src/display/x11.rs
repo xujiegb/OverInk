@@ -38,7 +38,7 @@ fn checked_crtc_count(count: c_int, has_crtcs: bool) -> Option<usize> {
 /// `Randr` keeps the libraries providing these functions loaded.
 struct OwnedRandr<T> {
     raw: NonNull<T>,
-    free: unsafe extern "C" fn(*mut T),
+    free: unsafe extern "C" fn(NonNull<T>),
 }
 
 impl<T> OwnedRandr<T> {
@@ -47,7 +47,7 @@ impl<T> OwnedRandr<T> {
     /// function corresponding to `free`; the library must outlive this guard.
     unsafe fn from_native(
         raw: Option<NonNull<T>>,
-        free: unsafe extern "C" fn(*mut T),
+        free: unsafe extern "C" fn(NonNull<T>),
     ) -> Option<Self> {
         raw.map(|raw| Self { raw, free })
     }
@@ -57,8 +57,8 @@ impl<T> OwnedRandr<T> {
         unsafe { self.raw.as_ref() }
     }
 
-    fn as_ptr(&self) -> *mut T {
-        self.raw.as_ptr()
+    fn as_non_null(&self) -> NonNull<T> {
+        self.raw
     }
 }
 
@@ -66,7 +66,7 @@ impl<T> Drop for OwnedRandr<T> {
     fn drop(&mut self) {
         // SAFETY: This is the allocation's matching native destructor and
         // `Randr` retains the backing library for the duration of the query.
-        unsafe { (self.free)(self.raw.as_ptr()) };
+        unsafe { (self.free)(self.raw) };
     }
 }
 
@@ -95,20 +95,26 @@ impl Randr {
         // self, and SDL keeps the display live for the borrowed Window.
         // OwnedRandr guards ensure every native allocation is released.
         unsafe {
-            let count: Symbol<unsafe extern "C" fn(*mut c_void) -> c_int> =
+            let count: Symbol<unsafe extern "C" fn(NonNull<c_void>) -> c_int> =
                 self.x11.get(b"XScreenCount\0").ok()?;
-            let root: Symbol<unsafe extern "C" fn(*mut c_void, c_int) -> c_ulong> =
+            let root: Symbol<unsafe extern "C" fn(NonNull<c_void>, c_int) -> c_ulong> =
                 self.x11.get(b"XRootWindow\0").ok()?;
-            let resources: Symbol<unsafe extern "C" fn(*mut c_void, c_ulong) -> *mut Resources> =
+            let resources: Symbol<
+                unsafe extern "C" fn(NonNull<c_void>, c_ulong) -> Option<NonNull<Resources>>,
+            > =
                 self.randr.get(b"XRRGetScreenResourcesCurrent\0").ok()?;
-            let free_resources: Symbol<unsafe extern "C" fn(*mut Resources)> =
+            let free_resources: Symbol<unsafe extern "C" fn(NonNull<Resources>)> =
                 self.randr.get(b"XRRFreeScreenResources\0").ok()?;
             let crtc: Symbol<
-                unsafe extern "C" fn(*mut c_void, *mut Resources, c_ulong) -> *mut Crtc,
+                unsafe extern "C" fn(
+                    NonNull<c_void>,
+                    NonNull<Resources>,
+                    c_ulong,
+                ) -> Option<NonNull<Crtc>>,
             > = self.randr.get(b"XRRGetCrtcInfo\0").ok()?;
-            let free_crtc: Symbol<unsafe extern "C" fn(*mut Crtc)> =
+            let free_crtc: Symbol<unsafe extern "C" fn(NonNull<Crtc>)> =
                 self.randr.get(b"XRRFreeCrtcInfo\0").ok()?;
-            let display = window.x11_display()?.as_ptr();
+            let display = window.x11_display()?.as_non_null();
             let mut areas = Vec::new();
             let mut queried = false;
             let mut failed = false;
@@ -118,7 +124,7 @@ impl Randr {
             }
             for screen in 0..screen_count {
                 let Some(list) = OwnedRandr::from_native(
-                    NonNull::new(resources(display, root(display, screen))),
+                    resources(display, root(display, screen)),
                     *free_resources,
                 ) else {
                     failed = true;
@@ -142,7 +148,7 @@ impl Randr {
                     let ids = std::slice::from_raw_parts(list.data().crtcs, crtc_count);
                     for &id in ids {
                         let Some(info) = OwnedRandr::from_native(
-                            NonNull::new(crtc(display, list.as_ptr(), id)),
+                            crtc(display, list.as_non_null(), id),
                             *free_crtc,
                         ) else {
                             failed = true;
@@ -184,9 +190,9 @@ mod tests {
         }
     }
 
-    unsafe extern "C" fn free_test_resource(raw: *mut CountDrop) {
+    unsafe extern "C" fn free_test_resource(raw: NonNull<CountDrop>) {
         // SAFETY: The test transfers its unique Box allocation to the guard.
-        unsafe { drop(Box::from_raw(raw)) };
+        unsafe { drop(Box::from_raw(raw.as_ptr())) };
     }
 
     #[test]
