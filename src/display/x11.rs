@@ -27,8 +27,8 @@ struct Crtc {
 const MAX_X11_SCREENS: c_int = 256;
 const MAX_RANDR_CRTCS: c_int = 4096;
 
-fn checked_crtc_count(count: c_int, ptr: *const c_ulong) -> Option<usize> {
-    if !(0..=MAX_RANDR_CRTCS).contains(&count) || (count > 0 && ptr.is_null()) {
+fn checked_crtc_count(count: c_int, has_crtcs: bool) -> Option<usize> {
+    if !(0..=MAX_RANDR_CRTCS).contains(&count) || (count > 0 && !has_crtcs) {
         return None;
     }
     Some(count as usize)
@@ -124,7 +124,8 @@ impl Randr {
                 // A positive CRTC count must have a backing array. Without
                 // this check another screen could hide a malformed response
                 // and make the incomplete result look authoritative.
-                let Some(crtc_count) = checked_crtc_count(list.data().count, list.data().crtcs)
+                let Some(crtc_count) =
+                    checked_crtc_count(list.data().count, !list.data().crtcs.is_null())
                 else {
                     failed = true;
                     continue;
@@ -185,13 +186,11 @@ mod tests {
 
     #[test]
     fn rejects_invalid_native_crtc_array_lengths() {
-        let id: std::ffi::c_ulong = 1;
-        let ptr = &id as *const _;
-        assert_eq!(checked_crtc_count(0, std::ptr::null()), Some(0));
-        assert_eq!(checked_crtc_count(1, std::ptr::null()), None);
-        assert_eq!(checked_crtc_count(-1, ptr), None);
-        assert_eq!(checked_crtc_count(4097, ptr), None);
-        assert_eq!(checked_crtc_count(1, ptr), Some(1));
+        assert_eq!(checked_crtc_count(0, false), Some(0));
+        assert_eq!(checked_crtc_count(1, false), None);
+        assert_eq!(checked_crtc_count(-1, true), None);
+        assert_eq!(checked_crtc_count(4097, true), None);
+        assert_eq!(checked_crtc_count(1, true), Some(1));
     }
 
     #[test]
