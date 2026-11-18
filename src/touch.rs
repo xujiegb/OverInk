@@ -56,10 +56,14 @@ mod tests {
             y: 0.5,
             ..Default::default()
         };
-        let p = point(event, [800., 600.]).unwrap();
-        assert_eq!([p.x, p.y, p.pressure], [200., 300., 1.]);
-        let p = point(SDL_TouchFingerEvent { x: -0.1, ..event }, [800., 600.]).unwrap();
-        assert_eq!(p.x, -80.);
+        assert_eq!(
+            point(event, [800., 600.]).map(|p| [p.x, p.y, p.pressure]),
+            Some([200., 300., 1.])
+        );
+        assert_eq!(
+            point(SDL_TouchFingerEvent { x: -0.1, ..event }, [800., 600.]).map(|p| p.x),
+            Some(-80.)
+        );
     }
     #[test]
     fn invalid_coordinates_are_rejected_and_devices_keep_distinct_fingers() {
