@@ -433,7 +433,7 @@ impl App {
             // String for every pointer movement. Reset geometry from the
             // committed source so deltas remain absolute, not cumulative.
             let source = item.as_ref();
-            let mut preview = press.preview.take().unwrap_or_else(|| source.clone());
+            let mut preview = press.preview.take().unwrap_or_else(|| (*source).clone());
             preview.origin = source.origin;
             preview.size = source.size;
             preview.font_size = source.font_size;
