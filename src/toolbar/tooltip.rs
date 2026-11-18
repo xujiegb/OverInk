@@ -70,9 +70,9 @@ struct Content {
 
 impl Tooltips {
     pub fn renderer_reset(&mut self) {
-        if let Some(mut popup) = self.0.take() {
-            popup.gui.reset_renderer_textures();
-        }
+        // Popup declares Gui before Renderer, so owned SDL textures are
+        // dropped before the renderer they reference.
+        self.0 = None;
     }
 
     pub fn renderer_reset_window(&mut self, id: SDL_WindowID) {
