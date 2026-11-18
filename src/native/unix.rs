@@ -630,7 +630,7 @@ mod tests {
             .is_some_and(|resource| NonNull::from(resource.as_mut()).cast() == raw)
         {
             // The matching Rust-owned allocation is released exactly once.
-            slot.take();
+            drop(slot.take());
         }
     }
 
