@@ -2164,7 +2164,7 @@ impl Renderer {
                         RenderTarget::Ink(texture) => texture.raw.as_ptr(),
                         RenderTarget::Previous(previous) => {
                             previous.map_or(ptr::null_mut(), NonNull::as_ptr)
-                        },
+                        }
                     };
                     check(SDL_SetRenderTarget(self.raw, raw))
                 }
