@@ -189,13 +189,29 @@ pub fn wayland_scale_to_display_forced() -> bool {
     unsafe { SDL_GetHintBoolean(SDL_HINT_VIDEO_WAYLAND_SCALE_TO_DISPLAY, false) }
 }
 
+/// Only these two display-bound queries cross into SDL.
+enum DisplayBoundsKind {
+    Full,
+    Usable,
+}
+
+fn query_display_bounds(id: u32, kind: DisplayBoundsKind) -> Result<[i32; 4], String> {
+    let mut bounds = SDL_Rect::default();
+    // SAFETY: The output rectangle is initialized, writable Rust storage and
+    // SDL copies the selected display's bounds before returning.
+    let ok = unsafe {
+        match kind {
+            DisplayBoundsKind::Full => SDL_GetDisplayBounds(SDL_DisplayID(id), &mut bounds),
+            DisplayBoundsKind::Usable => SDL_GetDisplayUsableBounds(SDL_DisplayID(id), &mut bounds),
+        }
+    };
+    check(ok)?;
+    Ok([bounds.x, bounds.y, bounds.w, bounds.h])
+}
+
 /// Return usable display bounds only when SDL provides them.
 pub fn usable_display_bounds(id: u32) -> Option<[i32; 4]> {
-    unsafe {
-        let mut bounds = SDL_Rect::default();
-        SDL_GetDisplayUsableBounds(SDL_DisplayID(id), &mut bounds)
-            .then_some([bounds.x, bounds.y, bounds.w, bounds.h])
-    }
+    query_display_bounds(id, DisplayBoundsKind::Usable).ok()
 }
 
 /// Read the native mode's logical dimensions and pixel density.
@@ -605,7 +621,9 @@ enum WindowCommand<'a> {
     SyncAndPumpEvents,
     SetSize([i32; 2]),
     SetPosition([i32; 2]),
-    SyncWindow,
+    SyncWindow(bool),
+    Maximize,
+    CenterOnDisplay(u32),
     SetGeometry {
         x: i32,
         y: i32,
@@ -710,7 +728,17 @@ impl Window {
                 WindowCommand::SetPosition([x, y]) => {
                     check(SDL_SetWindowPosition(self.raw, x, y))
                 }
-                WindowCommand::SyncWindow => check(SDL_SyncWindow(self.raw)),
+                WindowCommand::SyncWindow(clear_error) => {
+                    if clear_error {
+                        SDL_ClearError();
+                    }
+                    check(SDL_SyncWindow(self.raw))
+                }
+                WindowCommand::Maximize => check(SDL_MaximizeWindow(self.raw)),
+                WindowCommand::CenterOnDisplay(id) => {
+                    let center = SDL_WINDOWPOS_CENTERED_DISPLAY(SDL_DisplayID(id));
+                    check(SDL_SetWindowPosition(self.raw, center, center))
+                }
                 WindowCommand::SetGeometry { x, y, w, h } => {
                     check(SDL_SetWindowSize(self.raw, w, h))?;
                     check(SDL_SetWindowPosition(self.raw, x, y))
@@ -1004,7 +1032,7 @@ impl Window {
             }
             // X11 reports the actual geometry through ConfigureNotify.
             if video != "x11" {
-                self.run_command(WindowCommand::SyncWindow)?;
+                self.run_command(WindowCommand::SyncWindow(false))?;
             }
         }
         Ok(())
@@ -1155,32 +1183,25 @@ impl Window {
         self.query_bool(WindowBooleanQuery::HdrEnabled)
     }
     pub fn place_on_display(&self, id: u32, overlay: bool) -> Result<(), String> {
-        unsafe {
-            let video = driver();
-            let display = SDL_DisplayID(id);
-            let mut r = SDL_Rect::default();
-            check(SDL_GetDisplayBounds(display, &mut r))?;
-            if overlay && video == "wayland" {
-                // XDG fullscreen hides unrelated content behind transparent
-                // surfaces. Maximizing keeps the desktop in the compositor.
-                check(SDL_MaximizeWindow(self.raw))?;
-            } else if overlay {
-                check(SDL_SetWindowSize(self.raw, r.w, r.h))?;
-                check(SDL_SetWindowPosition(self.raw, r.x, r.y))?;
-                // Give the resize time to settle before allocating a software
-                // framebuffer. X11 can time out before the window manager's
-                // configure event. SDL will still report the later resize.
-                SDL_ClearError();
-                let synced = SDL_SyncWindow(self.raw);
-                if video != "x11" {
-                    check(synced)?;
-                }
-            } else {
-                let center = SDL_WINDOWPOS_CENTERED_DISPLAY(display);
-                check(SDL_SetWindowPosition(self.raw, center, center))?;
+        let video = driver();
+        let [x, y, width, height] = query_display_bounds(id, DisplayBoundsKind::Full)?;
+        if overlay && video == "wayland" {
+            // XDG fullscreen hides unrelated content behind transparent
+            // surfaces. Maximizing keeps the desktop in the compositor.
+            self.run_command(WindowCommand::Maximize)?;
+        } else if overlay {
+            self.set_geometry(x, y, width, height)?;
+            // Give the resize time to settle before allocating a software
+            // framebuffer. X11 can time out before the window manager's
+            // configure event. SDL will still report the later resize.
+            let synced = self.run_command(WindowCommand::SyncWindow(true));
+            if video != "x11" {
+                synced?;
             }
-            Ok(())
+        } else {
+            self.run_command(WindowCommand::CenterOnDisplay(id))?;
         }
+        Ok(())
     }
     pub fn recover_on_display(&self, id: u32) -> Result<(), String> {
         if driver() == "wayland" {
