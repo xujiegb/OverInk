@@ -254,12 +254,14 @@ fn screen_capture(
         let completion =
             block2::RcBlock::new(move |content: *mut AnyObject, error: *mut AnyObject| {
                 autoreleasepool(|_| {
-                    if content.is_null() {
-                        let _ = sender.send(Err(capture_error(error, hdr)));
-                    } else if let Err(error) =
-                        begin_screenshot(content, id, pixels, hdr, sender.clone())
-                    {
-                        let _ = sender.send(Err(error));
+                    if let Some(content) = NonNull::new(content) {
+                        if let Err(error) =
+                            begin_screenshot(content, id, pixels, hdr, sender.clone())
+                        {
+                            let _ = sender.send(Err(error));
+                        }
+                    } else {
+                        let _ = sender.send(Err(capture_error(NonNull::new(error), hdr)));
                     }
                 });
             });
@@ -285,12 +287,12 @@ fn screen_capture(
     Ok(None)
 }
 
-fn capture_error(error: *mut AnyObject, hdr: bool) -> String {
-    if error.is_null() {
+fn capture_error(error: Option<NonNull<AnyObject>>, hdr: bool) -> String {
+    let Some(error) = error else {
         return "macOS screenshot returned no image or error".into();
-    }
+    };
     let description = unsafe {
-        let message: Option<NonNull<AnyObject>> = NonNull::new(msg_send![error, localizedDescription]);
+        let message: Option<NonNull<AnyObject>> = NonNull::new(msg_send![error.as_ptr(), localizedDescription]);
         let Some(message) = message else {
             return "macOS screenshot returned an error without a description".into();
         };
@@ -307,7 +309,7 @@ fn capture_error(error: *mut AnyObject, hdr: bool) -> String {
 }
 
 fn begin_screenshot(
-    content: *mut AnyObject,
+    content: NonNull<AnyObject>,
     id: u32,
     [width, height]: [i32; 2],
     hdr: bool,
@@ -323,7 +325,7 @@ fn begin_screenshot(
         return Err("Invalid macOS screenshot dimensions".into());
     }
     unsafe {
-        let displays: Option<NonNull<AnyObject>> = NonNull::new(msg_send![content, displays]);
+        let displays: Option<NonNull<AnyObject>> = NonNull::new(msg_send![content.as_ptr(), displays]);
         let displays = displays.ok_or("ScreenCaptureKit returned no display list")?;
         let count: usize = msg_send![displays.as_ptr(), count];
         let mut selected = None;
@@ -355,17 +357,20 @@ fn begin_screenshot(
         // Ordinary SDR captures use the standard configuration on macOS 14+.
         // The HDR preset is autoreleased (+0); +new returns an owned (+1)
         // object. Retained balances both cases, including early returns.
-        let config: *mut AnyObject = if hdr {
+        let config: Option<NonNull<AnyObject>> = NonNull::new(if hdr {
             msg_send![configuration, streamConfigurationWithPreset: 2_isize]
         } else {
             msg_send![configuration, new]
-        };
-        let config = if hdr {
-            Retained::retain(config)
-        } else {
-            Retained::from_raw(config)
-        }
-        .ok_or("Cannot configure the macOS screenshot")?;
+        });
+        let config = config
+            .and_then(|config| {
+                if hdr {
+                    Retained::retain(config.as_ptr())
+                } else {
+                    Retained::from_raw(config.as_ptr())
+                }
+            })
+            .ok_or("Cannot configure the macOS screenshot")?;
         let _: () = msg_send![&*config, setWidth: width as usize];
         let _: () = msg_send![&*config, setHeight: height as usize];
         let _: () = msg_send![&*config, setShowsCursor: false];
@@ -390,7 +395,7 @@ fn begin_screenshot(
                             copy_sdr_screenshot(image).map(Some)
                         }
                     } else {
-                        Err(capture_error(error, hdr))
+                        Err(capture_error(NonNull::new(error), hdr))
                     };
                     let _ = sender.send(result);
                 });
