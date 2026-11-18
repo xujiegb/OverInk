@@ -721,8 +721,7 @@ impl Window {
             SDL_GetWindowSize(self.raw, &mut w, &mut h)
                 && SDL_GetWindowSizeInPixels(self.raw, &mut px, &mut py)
         };
-        (valid && w > 0 && h > 0 && px > 0 && py > 0)
-            .then_some(([w as f32, h as f32], [px, py]))
+        (valid && w > 0 && h > 0 && px > 0 && py > 0).then_some(([w as f32, h as f32], [px, py]))
     }
 
     pub fn size(&self) -> [f32; 2] {
