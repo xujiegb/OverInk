@@ -1770,30 +1770,30 @@ impl SnapshotTexture {
                 let props = OwnedProperties::new()?;
                 check(SDL_SetNumberProperty(
                     props.id(),
-                        SDL_PROP_TEXTURE_CREATE_FORMAT_NUMBER,
-                        SDL_PIXELFORMAT_RGBA64_FLOAT.0 as i64,
-                    ))?;
+                    SDL_PROP_TEXTURE_CREATE_FORMAT_NUMBER,
+                    SDL_PIXELFORMAT_RGBA64_FLOAT.0 as i64,
+                ))?;
                 check(SDL_SetNumberProperty(
                     props.id(),
-                        SDL_PROP_TEXTURE_CREATE_COLORSPACE_NUMBER,
-                        SDL_COLORSPACE_SRGB_LINEAR.0 as i64,
-                    ))?;
+                    SDL_PROP_TEXTURE_CREATE_COLORSPACE_NUMBER,
+                    SDL_COLORSPACE_SRGB_LINEAR.0 as i64,
+                ))?;
                 check(SDL_SetNumberProperty(
                     props.id(),
-                        SDL_PROP_TEXTURE_CREATE_WIDTH_NUMBER,
-                        width as i64,
-                    ))?;
+                    SDL_PROP_TEXTURE_CREATE_WIDTH_NUMBER,
+                    width as i64,
+                ))?;
                 check(SDL_SetNumberProperty(
                     props.id(),
-                        SDL_PROP_TEXTURE_CREATE_HEIGHT_NUMBER,
-                        height as i64,
-                    ))?;
+                    SDL_PROP_TEXTURE_CREATE_HEIGHT_NUMBER,
+                    height as i64,
+                ))?;
                     // A display snapshot is already mapped. Do not tone-map it again.
                 check(SDL_SetFloatProperty(
                     props.id(),
-                        SDL_PROP_TEXTURE_CREATE_HDR_HEADROOM_FLOAT,
-                        0.,
-                    ))?;
+                    SDL_PROP_TEXTURE_CREATE_HDR_HEADROOM_FLOAT,
+                    0.,
+                ))?;
                 SDL_CreateTextureWithProperties(renderer.raw, props.id())
             } else {
                 SDL_CreateTexture(
@@ -2151,7 +2151,7 @@ impl Renderer {
         unsafe {
             let props = OwnedProperties::new()?;
             if !SDL_SetPointerProperty(
-                props,
+                props.id(),
                 SDL_PROP_RENDERER_CREATE_WINDOW_POINTER,
                 window.raw.cast(),
             ) {
@@ -2159,7 +2159,11 @@ impl Renderer {
                 return Err(message);
             }
             if let Some(driver) = driver {
-                SDL_SetStringProperty(props, SDL_PROP_RENDERER_CREATE_NAME_STRING, driver.as_ptr());
+                SDL_SetStringProperty(
+                    props.id(),
+                    SDL_PROP_RENDERER_CREATE_NAME_STRING,
+                    driver.as_ptr(),
+                );
             }
             let mut raw = ptr::null_mut();
             // SDL's transparent Win32 swap chain uses the DXGI bitblt model.
