@@ -1082,6 +1082,14 @@ mod tests {
         render_with_toolbar_focus(app, gui, false);
     }
 
+    fn draft_preview(app: &App) -> Option<&str> {
+        app.input.text.draft.as_ref().map(|draft| draft.item.text.as_str())
+    }
+
+    fn draft_committed(app: &App) -> Option<&str> {
+        app.input.text.draft.as_ref().map(|draft| draft.committed.as_str())
+    }
+
     fn render_with_toolbar_focus(app: &mut App, gui: &mut Gui, toolbar_focused: bool) {
         gui.raw.screen_rect = Some(Rect::from_min_size(Pos2::ZERO, Vec2::from(SIZE)));
         let composing = gui.composing();
@@ -1158,15 +1166,15 @@ mod tests {
 
         ime(&mut gui, SDL_EVENT_TEXT_EDITING, "zhong");
         render(&mut app, &mut gui);
-        assert_eq!(app.input.text.draft.as_ref().unwrap().item.text, "zhong");
-        assert!(app.input.text.draft.as_ref().unwrap().committed.is_empty());
+        assert_eq!(draft_preview(&app), Some("zhong"));
+        assert_eq!(draft_committed(&app), Some(""));
 
         key_down(&mut gui, SDLK_RETURN);
         ime(&mut gui, SDL_EVENT_TEXT_INPUT, "中");
         ime(&mut gui, SDL_EVENT_TEXT_EDITING, "wen");
         render(&mut app, &mut gui);
-        assert_eq!(app.input.text.draft.as_ref().unwrap().item.text, "中wen");
-        assert_eq!(app.input.text.draft.as_ref().unwrap().committed, "中");
+        assert_eq!(draft_preview(&app), Some("中wen"));
+        assert_eq!(draft_committed(&app), Some("中"));
         assert!(!app.history.can_undo());
         app.stop();
         assert_eq!(app.history.text_boxes()[0].text, "中");
@@ -1212,7 +1220,7 @@ mod tests {
             ime_at(&mut gui, SDL_EVENT_TEXT_EDITING, "", 10_000_000);
             key_down_at(&mut gui, key, 10_000_000);
             render(&mut app, &mut gui);
-            assert_eq!(app.input.text.draft.as_ref().unwrap().committed, "甲");
+            assert_eq!(draft_committed(&app), Some("甲"));
         }
 
         ime(&mut gui, SDL_EVENT_TEXT_EDITING, "yi");
@@ -1221,18 +1229,18 @@ mod tests {
         ime_at(&mut gui, SDL_EVENT_TEXT_INPUT, "乙", 20_150_000);
         key_down_at(&mut gui, SDLK_RETURN, 20_200_000);
         render(&mut app, &mut gui);
-        assert_eq!(app.input.text.draft.as_ref().unwrap().committed, "甲乙");
+        assert_eq!(draft_committed(&app), Some("甲乙"));
 
         ime(&mut gui, SDL_EVENT_TEXT_EDITING, "bing");
         render(&mut app, &mut gui);
         ime_at(&mut gui, SDL_EVENT_TEXT_INPUT, "丙", 30_000_000);
         key_down_at(&mut gui, SDLK_RETURN, 30_400_000);
         render(&mut app, &mut gui);
-        assert_eq!(app.input.text.draft.as_ref().unwrap().committed, "甲乙丙");
+        assert_eq!(draft_committed(&app), Some("甲乙丙"));
 
         key_down(&mut gui, SDLK_RETURN);
         render(&mut app, &mut gui);
-        assert_eq!(app.input.text.draft.as_ref().unwrap().committed, "甲乙丙\n");
+        assert_eq!(draft_committed(&app), Some("甲乙丙\n"));
     }
 
     #[test]
@@ -1254,7 +1262,7 @@ mod tests {
             ime_at(&mut gui, SDL_EVENT_TEXT_INPUT, value, clock);
             key_down_at(&mut gui, key, clock + 15_000_000);
             render(&mut app, &mut gui);
-            assert_eq!(app.input.text.draft.as_ref().unwrap().committed, expected);
+            assert_eq!(draft_committed(&app), Some(expected));
         }
         ime(&mut gui, SDL_EVENT_TEXT_EDITING, "ding");
         render(&mut app, &mut gui);
@@ -1478,7 +1486,7 @@ mod tests {
         gui.ctx.set_fonts(app.text_fonts.definitions());
         ime(&mut gui, SDL_EVENT_TEXT_INPUT, "乙");
         render(&mut app, &mut gui);
-        assert_eq!(app.input.text.draft.as_ref().unwrap().committed, "甲乙丙");
+        assert_eq!(draft_committed(&app), Some("甲乙丙"));
     }
 
     #[test]
