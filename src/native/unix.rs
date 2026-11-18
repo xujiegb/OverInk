@@ -538,10 +538,9 @@ mod tests {
         assert_eq!(releases.load(Ordering::SeqCst), 1);
 
         // SAFETY: A null native resource transfers no ownership.
-        assert!(unsafe {
-            OwnedWaylandHandle::from_native(std::ptr::null_mut(), release_test_handle)
-        }
-        .is_none());
+        let empty =
+            unsafe { OwnedWaylandHandle::from_native(std::ptr::null_mut(), release_test_handle) };
+        assert!(empty.is_none());
         assert_eq!(releases.load(Ordering::SeqCst), 1);
     }
 }
