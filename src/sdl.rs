@@ -237,7 +237,10 @@ pub fn event_type(event: &SDL_Event) -> SDL_EventType {
     unsafe { SDL_EventType(event.r#type) }
 }
 pub fn cstring(v: &str) -> CString {
-    CString::new(v.replace('\0', "")).unwrap_or_default()
+    CString::new(v).unwrap_or_else(|_| {
+        // Only malformed inputs need a second allocation to remove NULs.
+        CString::new(v.replace('\0', "")).unwrap_or_default()
+    })
 }
 pub fn is_wayland_session() -> bool {
     std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland")
@@ -2643,6 +2646,13 @@ mod tests {
         assert!(renderer.clear([0.; 4]).is_err());
         assert!(renderer.flush().is_err());
         assert!(renderer.present().is_err());
+    }
+
+    #[test]
+    fn cstring_keeps_valid_strings_and_strips_embedded_nuls() {
+        assert_eq!(cstring("OverInk").as_c_str(), c"OverInk");
+        assert_eq!(cstring("Over\0Ink\0").as_c_str(), c"OverInk");
+        assert_eq!(cstring("\0").as_c_str(), c"");
     }
 
     #[test]
