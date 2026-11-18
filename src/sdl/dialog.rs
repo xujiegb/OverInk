@@ -104,7 +104,9 @@ mod tests {
     #[test]
     fn delivers_a_callback_from_another_thread_once() -> Result<(), String> {
         let mut dialog = FileDialog::default();
-        let id = dialog.begin(DialogKind::ScreenshotFile).ok_or("Cannot begin file dialog")?;
+        let id = dialog
+            .begin(DialogKind::ScreenshotFile)
+            .ok_or("Cannot begin file dialog")?;
         assert!(dialog.begin(DialogKind::Font).is_none());
         assert!(dialog.poll().is_none());
 
@@ -127,7 +129,9 @@ mod tests {
     #[test]
     fn drop_unregisters_a_request_without_a_callback() -> Result<(), String> {
         let mut dialog = FileDialog::default();
-        let id = dialog.begin(DialogKind::Font).ok_or("Cannot begin font dialog")?;
+        let id = dialog
+            .begin(DialogKind::Font)
+            .ok_or("Cannot begin font dialog")?;
         drop(dialog);
         assert!(!callbacks().results.contains_key(&id));
 
@@ -150,7 +154,9 @@ mod tests {
     #[test]
     fn native_callback_copies_selected_path() -> Result<(), String> {
         let mut dialog = FileDialog::default();
-        let id = dialog.begin(DialogKind::ScreenshotFile).ok_or("Cannot begin file dialog")?;
+        let id = dialog
+            .begin(DialogKind::ScreenshotFile)
+            .ok_or("Cannot begin file dialog")?;
         let files = [c"sample.png".as_ptr(), ptr::null()];
         native::chosen(ptr::without_provenance_mut(id), files.as_ptr(), -1);
         let (kind, result) = dialog.poll().ok_or("Expected a file dialog result")?;
@@ -162,7 +168,9 @@ mod tests {
     #[test]
     fn native_callback_cancellation_is_owned_and_consumed_once() -> Result<(), String> {
         let mut dialog = FileDialog::default();
-        let id = dialog.begin(DialogKind::Font).ok_or("Cannot begin font dialog")?;
+        let id = dialog
+            .begin(DialogKind::Font)
+            .ok_or("Cannot begin font dialog")?;
         let list = [ptr::null()];
         native::chosen(ptr::without_provenance_mut(id), list.as_ptr(), -1);
         assert!(matches!(dialog.poll(), Some((DialogKind::Font, Ok(None)))));
