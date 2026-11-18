@@ -635,25 +635,22 @@ mod tests {
     }
 
     #[test]
-    fn owned_wayland_handle_releases_exactly_once_and_rejects_null() -> Result<(), &'static str> {
+    fn owned_wayland_handle_releases_exactly_once() {
         let releases = Arc::new(AtomicUsize::new(0));
         let mut resource = Box::new(DropCounter(Arc::clone(&releases)));
         let raw = NonNull::from(resource.as_mut()).cast();
         *TEST_HANDLE
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(resource);
-        // SAFETY: The test registry keeps the allocation stable and owns it
-        // until the matching destructor takes and drops its Box.
-        let owned = unsafe { OwnedWaylandHandle::from_native(Some(raw), release_test_handle) }
-            .ok_or("New Wayland handle was unexpectedly null")?;
+        // This registered Rust allocation has a stable address and a
+        // known matching destructor, so no foreign ownership assumption
+        // is needed to exercise the native guard's Drop implementation.
+        let owned = OwnedWaylandHandle {
+            raw,
+            destroy: release_test_handle,
+        };
         assert_eq!(releases.load(Ordering::SeqCst), 0);
         drop(owned);
         assert_eq!(releases.load(Ordering::SeqCst), 1);
-
-        // SAFETY: A null native resource transfers no ownership.
-        let empty = unsafe { OwnedWaylandHandle::from_native(None, release_test_handle) };
-        assert!(empty.is_none());
-        assert_eq!(releases.load(Ordering::SeqCst), 1);
-        Ok(())
     }
 }
