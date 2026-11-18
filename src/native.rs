@@ -51,7 +51,8 @@ pub fn set_controller_region(
             window
                 .win32_hwnd()
                 .ok_or("No Win32 window handle")?
-                .as_non_null().as_ptr(),
+                .as_non_null()
+                .as_ptr(),
         );
         let region = if let Some(hole) = hole {
             let full = CreateRectRgn(0, 0, size[0], size[1]);
@@ -102,7 +103,8 @@ impl Passthrough {
         let raw = window
             .win32_hwnd()
             .ok_or("No Win32 window handle")?
-            .as_non_null().as_ptr();
+            .as_non_null()
+            .as_ptr();
         let identity = std::ptr::NonNull::new(raw).ok_or("No Win32 window handle")?;
         if self.applied == Some((identity, pass)) {
             return Ok(());
@@ -167,7 +169,8 @@ impl Passthrough {
             let ns = window
                 .cocoa_window()
                 .ok_or("No Cocoa window handle")?
-                .as_non_null().as_ptr();
+                .as_non_null()
+                .as_ptr();
             let identity = std::ptr::NonNull::new(ns).ok_or("No Cocoa window handle")?;
             let cocoa = ns.cast::<AnyObject>();
             if self.applied != Some((identity, pass)) {
