@@ -1083,11 +1083,19 @@ mod tests {
     }
 
     fn draft_preview(app: &App) -> Option<&str> {
-        app.input.text.draft.as_ref().map(|draft| draft.item.text.as_str())
+        app.input
+            .text
+            .draft
+            .as_ref()
+            .map(|draft| draft.item.text.as_str())
     }
 
     fn draft_committed(app: &App) -> Option<&str> {
-        app.input.text.draft.as_ref().map(|draft| draft.committed.as_str())
+        app.input
+            .text
+            .draft
+            .as_ref()
+            .map(|draft| draft.committed.as_str())
     }
 
     fn render_with_toolbar_focus(app: &mut App, gui: &mut Gui, toolbar_focused: bool) {
