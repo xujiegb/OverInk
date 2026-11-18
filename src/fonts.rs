@@ -243,7 +243,8 @@ impl TextFonts {
                 selector = Some(ch);
             }
             sequence |= matches!(ch, '\u{200d}' | '\u{20e3}' | '\u{1f3fb}'..='\u{1f3ff}' | '\u{e0020}'..='\u{e007f}')
-                || matches!(base, '\u{1f1e6}'..='\u{1f1ff}') && matches!(ch, '\u{1f1e6}'..='\u{1f1ff}');
+                || matches!(base, '\u{1f1e6}'..='\u{1f1ff}')
+                    && matches!(ch, '\u{1f1e6}'..='\u{1f1ff}');
         }
         if selector.is_none() && !sequence {
             return ANNOTATION;
