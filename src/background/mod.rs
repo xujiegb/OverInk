@@ -500,14 +500,16 @@ impl Background {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
     #[test]
-    fn disconnect_forgets_frozen_frames_and_live_mode_releases_images() {
+    fn disconnect_forgets_frozen_frames_and_live_mode_releases_images() -> TestResult {
         let mut bg = Background::default();
-        bg.images.insert(7, Image::buffer(2, 2).unwrap().into());
+        bg.images.insert(7, Image::buffer(2, 2)?.into());
         bg.display = Some(7);
         bg.frozen = true;
         bg.display(None, &BTreeSet::new(), SnapshotMode::Sdr, true)
-            .unwrap();
+            ?;
         assert!(bg.images.is_empty());
         assert!(!bg.pending());
         bg.freeze();
@@ -516,12 +518,13 @@ mod tests {
         assert!(!bg.pending());
         assert!(!bg.frozen);
         assert!(Image::buffer(u32::MAX, u32::MAX).is_err());
+        Ok(())
     }
     #[test]
-    fn frozen_png_decodes_without_modifying_the_source_file() {
+    fn frozen_png_decodes_without_modifying_the_source_file() -> TestResult {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            ?
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
             "overink-png-test-{}-{unique}.png",
@@ -529,8 +532,8 @@ mod tests {
         ));
         image::RgbaImage::from_pixel(3, 2, image::Rgba([18, 171, 239, 255]))
             .save(&path)
-            .unwrap();
-        let image = Image::load(&path).unwrap();
+            ?;
+        let image = Image::load(&path)?;
         assert_eq!((image.width, image.height), (3, 2));
         assert!(
             image
@@ -541,10 +544,11 @@ mod tests {
                 .all(|v| *v == [18, 171, 239, 255])
         );
         assert!(path.exists());
-        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(path)?;
+        Ok(())
     }
     #[test]
-    fn mouse_mode_defers_capture_without_discarding_frozen_pages() {
+    fn mouse_mode_defers_capture_without_discarding_frozen_pages() -> TestResult {
         let mut bg = Background::default();
         let screen = crate::display::Display {
             id: 7,
@@ -555,20 +559,21 @@ mod tests {
         };
         let connected = BTreeSet::from([7]);
         bg.display(Some(&screen), &connected, SnapshotMode::Sdr, true)
-            .unwrap();
+            ?;
         bg.freeze();
         bg.display(Some(&screen), &connected, SnapshotMode::Sdr, false)
-            .unwrap();
+            ?;
         assert!(!bg.pending());
         assert!(bg.frozen);
-        bg.images.insert(7, Image::buffer(2, 2).unwrap().into());
+        bg.images.insert(7, Image::buffer(2, 2)?.into());
         bg.display(Some(&screen), &connected, SnapshotMode::Sdr, true)
-            .unwrap();
+            ?;
         assert!(!bg.pending());
         assert!(bg.images.contains_key(&7));
+        Ok(())
     }
     #[test]
-    fn enabling_hdr_replaces_the_cached_sdr_capture() {
+    fn enabling_hdr_replaces_the_cached_sdr_capture() -> TestResult {
         let mut bg = Background::default();
         let screen = crate::display::Display {
             id: 7,
@@ -579,11 +584,11 @@ mod tests {
         };
         let connected = BTreeSet::from([7]);
         bg.display(Some(&screen), &connected, SnapshotMode::Sdr, true)
-            .unwrap();
-        bg.images.insert(7, Image::buffer(2, 2).unwrap().into());
+            ?;
+        bg.images.insert(7, Image::buffer(2, 2)?.into());
         bg.frozen = true;
         bg.display(Some(&screen), &connected, SnapshotMode::Linear, true)
-            .unwrap();
+            ?;
         assert!(bg.images.is_empty());
         assert!(bg.pending());
         let reason = crate::appearance::text(
@@ -598,9 +603,10 @@ mod tests {
         );
         assert!(!bg.pending());
         assert!(!bg.frozen);
+        Ok(())
     }
     #[test]
-    fn completed_capture_exits_pending_and_exposes_the_snapshot() {
+    fn completed_capture_exits_pending_and_exposes_the_snapshot() -> TestResult {
         let mut bg = Background {
             display: Some(7),
             mode: SnapshotMode::Linear,
@@ -608,14 +614,15 @@ mod tests {
         };
         bg.freeze();
         assert!(bg.pending());
-        let snapshot = Snapshot::compress(Image::hdr_buffer(128, 128).unwrap()).unwrap();
+        let snapshot = Snapshot::compress(Image::hdr_buffer(128, 128)?)?;
         assert!(bg.finish_capture(Ok(Some(snapshot))).is_ok());
         assert!(bg.frozen && !bg.pending());
         assert_eq!(bg.images[&7].encoding, Encoding::LinearRgba16);
+        Ok(())
     }
     #[test]
-    fn fp16_capture_keeps_highlights_and_negative_color_components() {
-        let mut image = Image::hdr_buffer(1, 2).unwrap();
+    fn fp16_capture_keeps_highlights_and_negative_color_components() -> TestResult {
+        let mut image = Image::hdr_buffer(1, 2)?;
         let mut padded = [0; 24];
         padded[..2].copy_from_slice(&0x4800_u16.to_ne_bytes()); // 8.0
         padded[2..4].copy_from_slice(&0xb800_u16.to_ne_bytes()); // -0.5
@@ -624,25 +631,26 @@ mod tests {
             .copy_hdr_rows(padded.len(), 12, |offset, row| {
                 row.copy_from_slice(&padded[offset..offset + row.len()]);
             })
-            .unwrap();
+            ?;
         assert_eq!(&image.rgba[..6], &padded[..6]);
         assert_eq!(&image.rgba[8..14], &padded[12..18]);
         assert_eq!(&image.rgba[6..8], &0x3c00_u16.to_ne_bytes());
         assert_eq!(&image.rgba[14..16], &0x3c00_u16.to_ne_bytes());
+        Ok(())
     }
     #[test]
-    fn compressed_hdr_snapshot_can_rebuild_the_texture_losslessly() {
-        let mut image = Image::hdr_buffer(128, 64).unwrap();
+    fn compressed_hdr_snapshot_can_rebuild_the_texture_losslessly() -> TestResult {
+        let mut image = Image::hdr_buffer(128, 64)?;
         let pixel = [0x4800_u16, 0xb800, 0x4000, 0x3c00].map(u16::to_ne_bytes);
         for bytes in image.rgba.as_chunks_mut::<8>().0 {
             bytes.copy_from_slice(pixel.as_flattened());
         }
-        let snapshot = Snapshot::compress(image).unwrap();
+        let snapshot = Snapshot::compress(image)?;
         assert!(snapshot.compressed);
         assert_eq!(snapshot.encoding, Encoding::LinearRgba16);
         assert!(snapshot.bytes.len() < 8192);
         for _ in 0..2 {
-            let rgba = snapshot.pixels().unwrap();
+            let rgba = snapshot.pixels()?;
             assert_eq!(rgba.len(), 128 * 64 * 8);
             assert!(
                 rgba.as_chunks::<8>()
@@ -651,5 +659,6 @@ mod tests {
                     .all(|rgba| rgba == pixel.as_flattened())
             );
         }
+        Ok(())
     }
 }
