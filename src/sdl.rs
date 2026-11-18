@@ -1355,6 +1355,14 @@ fn destroy_owned_surface(raw: *mut SDL_Surface) {
     unsafe { SDL_DestroySurface(raw) };
 }
 
+/// A limited source of new caller-owned SDL surfaces. No borrowed surfaces
+/// or arbitrary native surface pointers may be passed to the safe constructor.
+enum SurfaceSource<'a> {
+    Readback(&'a Renderer),
+    #[cfg(test)]
+    Test([i32; 2]),
+}
+
 /// Temporary SDL surface whose native allocation is released even when an
 /// operation returns early or unwinds.
 struct OwnedSurface(*mut SDL_Surface);
@@ -1365,6 +1373,31 @@ impl OwnedSurface {
     /// Borrowed surfaces and pointers already owned elsewhere are forbidden.
     unsafe fn from_native(raw: *mut SDL_Surface) -> Option<Self> {
         (!raw.is_null()).then(|| Self(raw))
+    }
+
+    /// Acquire one of the known SDL-created surfaces and copy its dimensions
+    /// before returning to entirely safe test and screenshot code.
+    fn acquire(source: SurfaceSource<'_>) -> Result<(Self, [i32; 2]), String> {
+        // SAFETY: Both SDL calls return unique, caller-owned surfaces and
+        // the owned guard releases them on all success and failure paths.
+        // The readback surface is live while reading its C-layout fields.
+        unsafe {
+            let raw = match source {
+                SurfaceSource::Readback(renderer) => {
+                    SDL_RenderReadPixels(renderer.raw, ptr::null())
+                }
+                #[cfg(test)]
+                SurfaceSource::Test([width, height]) => {
+                    SDL_CreateSurface(width, height, SDL_PIXELFORMAT_RGBA32)
+                }
+            };
+            let surface = Self::from_native(raw).ok_or_else(error)?;
+            let dimensions = [(*surface.as_ptr()).w, (*surface.as_ptr()).h];
+            if dimensions[0] <= 0 || dimensions[1] <= 0 {
+                return Err("SDL returned invalid surface dimensions".into());
+            }
+            Ok((surface, dimensions))
+        }
     }
 
     fn as_ptr(&self) -> *mut SDL_Surface {
@@ -1990,12 +2023,11 @@ impl Renderer {
     /// Write a renderer snapshot to BMP for headless smoke tests.
     /// The returned surface is always destroyed, including on write failures.
     pub fn save_bmp(&self, path: &std::path::Path) -> Result<(), String> {
-        unsafe {
-            let surface = OwnedSurface::from_native(SDL_RenderReadPixels(self.raw, ptr::null()))
-                .ok_or_else(error)?;
-            let name = cstring(&path.to_string_lossy());
-            check(SDL_SaveBMP(surface.as_ptr(), name.as_ptr()))
-        }
+        let (surface, _) = OwnedSurface::acquire(SurfaceSource::Readback(self))?;
+        let name = cstring(&path.to_string_lossy());
+        // SAFETY: The surface and NUL-terminated path remain live during
+        // SDL's synchronous BMP write. The owned surface is then dropped.
+        unsafe { check(SDL_SaveBMP(surface.as_ptr(), name.as_ptr())) }
     }
 
     pub fn hdr(&self) -> (bool, f32) {
@@ -2163,17 +2195,11 @@ impl TestSurface {
         if width <= 0 || height <= 0 {
             return Err("Test surface dimensions must be positive".into());
         }
-        // SAFETY: SDL_CreateSurface transfers ownership of its new surface
-        // to the caller; the existing OwnedSurface guard releases it once.
-        unsafe {
-            let surface =
-                OwnedSurface::from_native(SDL_CreateSurface(width, height, SDL_PIXELFORMAT_RGBA32))
-                    .ok_or_else(error)?;
-            Ok(Self {
-                surface,
-                dimensions: [width, height],
-            })
-        }
+        let (surface, dimensions) = OwnedSurface::acquire(SurfaceSource::Test([width, height]))?;
+        Ok(Self {
+            surface,
+            dimensions,
+        })
     }
 
     pub fn software_renderer(&self) -> Result<Renderer, String> {
@@ -2197,21 +2223,11 @@ impl TestSurface {
     }
 
     fn readback(renderer: &Renderer) -> Result<Self, String> {
-        // SAFETY: SDL_RenderReadPixels returns a new caller-owned surface.
-        // Read the dimensions while it is live, and let OwnedSurface drop it.
-        unsafe {
-            let surface =
-                OwnedSurface::from_native(SDL_RenderReadPixels(renderer.raw, ptr::null()))
-                    .ok_or_else(error)?;
-            let dimensions = [(*surface.as_ptr()).w, (*surface.as_ptr()).h];
-            if dimensions[0] <= 0 || dimensions[1] <= 0 {
-                return Err("SDL readback returned invalid surface dimensions".into());
-            }
-            Ok(Self {
-                surface,
-                dimensions,
-            })
-        }
+        let (surface, dimensions) = OwnedSurface::acquire(SurfaceSource::Readback(renderer))?;
+        Ok(Self {
+            surface,
+            dimensions,
+        })
     }
 
     /// Read a pixel from an owned test surface; share this one native read
