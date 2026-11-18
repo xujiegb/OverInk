@@ -4,9 +4,7 @@
 //! through its RAII guards. Callers only provide validated Rust pixel slices.
 #![forbid(unsafe_code)]
 
-use lcms2::{
-    Flags, Intent, PixelFormat, Profile, Transform as LcmsTransform,
-};
+use lcms2::{Flags, Intent, PixelFormat, Profile, Transform as LcmsTransform};
 
 const MAX_PROFILE_BYTES: usize = 16 * 1024 * 1024;
 
@@ -206,8 +204,8 @@ mod tests {
     #[test]
     fn rgba8_identity_preserves_alpha_channel() -> Result<(), &'static str> {
         let profile = Profile::new_srgb();
-        let transform = Transform::rgba8(&profile, &profile)
-            .ok_or("Could not create an RGBA8 transform")?;
+        let transform =
+            Transform::rgba8(&profile, &profile).ok_or("Could not create an RGBA8 transform")?;
         let mut bytes = [40, 80, 120, 17, 200, 150, 100, 231];
         transform.apply(PixelBuffer::Rgba8(&mut bytes));
         assert_eq!(bytes[3], 17);
