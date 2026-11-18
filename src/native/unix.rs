@@ -119,11 +119,19 @@ struct Wayland {
     compositor: OwnedWaylandHandle,
     _queue: OwnedWaylandHandle,
     region_interface: NonNull<c_void>,
-    applied: Option<(NonNull<c_void>, bool, Option<Rect>, [i32; 2])>,
+    applied: Option<WaylandApplied>,
     marshal: Marshal,
     version: Version,
     _lib: Library,
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct WaylandApplied {
+    surface: NonNull<c_void>,
+    pass: bool,
+    hole: Option<Rect>,
+    size: [i32; 2],
+}
+
 #[derive(Default)]
 struct Globals {
     compositor: u32,
@@ -276,7 +284,13 @@ impl Wayland {
         } else {
             hole.and_then(|area| area.clipped(size))
         };
-        if self.applied == Some((surface.as_non_null(), pass, hole, size)) {
+        let applied = WaylandApplied {
+            surface: surface.as_non_null(),
+            pass,
+            hole,
+            size,
+        };
+        if self.applied == Some(applied) {
             return Ok(());
         }
         // SAFETY: The Wayland display, compositor and wl_surface are owned
@@ -349,7 +363,7 @@ impl Wayland {
             // The region is destroyed through RAII, even if a Rust unwind
             // occurs between creation and the surface commit.
         }
-        self.applied = Some((surface.as_non_null(), pass, hole, size));
+        self.applied = Some(applied);
         Ok(())
     }
 }
