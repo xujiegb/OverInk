@@ -580,6 +580,13 @@ pub fn wait_for_event(timeout_ms: i32) {
     }
 }
 
+/// Window floating-point metrics are read using one constrained SDL boundary.
+enum WindowFloatQuery {
+    SdrWhiteLevel,
+    DisplayScale,
+    PixelDensity,
+}
+
 /// Allowed state changes for one live SDL window. Callers provide only
 /// ordinary values and borrowed, initialized rectangles.
 enum WindowCommand<'a> {
@@ -604,6 +611,23 @@ pub struct Window {
     pub id: SDL_WindowID,
 }
 impl Window {
+    /// Read one SDL-owned window metric without exporting native handles.
+    fn query_float(&self, query: WindowFloatQuery) -> f32 {
+        // SAFETY: The SDL window belongs to this live Window instance.
+        // These queries return scalar copies and do not transfer ownership.
+        unsafe {
+            match query {
+                WindowFloatQuery::SdrWhiteLevel => SDL_GetFloatProperty(
+                    SDL_GetWindowProperties(self.raw),
+                    SDL_PROP_WINDOW_SDR_WHITE_LEVEL_FLOAT,
+                    1.,
+                ),
+                WindowFloatQuery::DisplayScale => SDL_GetWindowDisplayScale(self.raw),
+                WindowFloatQuery::PixelDensity => SDL_GetWindowPixelDensity(self.raw),
+            }
+        }
+    }
+
     /// Dispatch a closed set of window operations on SDL's owning thread.
     /// Input rectangles remain borrowed only for the synchronous FFI call.
     fn run_command(&self, command: WindowCommand<'_>) -> Result<(), String> {
@@ -680,13 +704,7 @@ impl Window {
     }
 
     pub fn sdr_white_level(&self) -> f32 {
-        unsafe {
-            SDL_GetFloatProperty(
-                SDL_GetWindowProperties(self.raw),
-                SDL_PROP_WINDOW_SDR_WHITE_LEVEL_FLOAT,
-                1.,
-            )
-        }
+        self.query_float(WindowFloatQuery::SdrWhiteLevel)
     }
 
     #[cfg(target_os = "linux")]
@@ -968,10 +986,10 @@ impl Window {
         [width.max(1), height.max(1)]
     }
     pub fn scale(&self) -> f32 {
-        unsafe { SDL_GetWindowDisplayScale(self.raw).max(1.) }
+        self.query_float(WindowFloatQuery::DisplayScale).max(1.)
     }
     pub fn pixel_density(&self) -> f32 {
-        let density = unsafe { SDL_GetWindowPixelDensity(self.raw) };
+        let density = self.query_float(WindowFloatQuery::PixelDensity);
         if density.is_finite() && density > 0. {
             density
         } else {
