@@ -4,7 +4,7 @@
 //! owned resources and work only with Rust slices or fixed-size RGB values.
 #![deny(clippy::undocumented_unsafe_blocks)]
 use lcms2_sys as cms;
-use std::{ffi::c_void, ptr::NonNull};
+use std::ptr::NonNull;
 
 // Creating the standard sRGB profile accepts no pointer or memory owned by
 // Rust. A non-null result is transferred to Profile and freed in Drop.
@@ -15,7 +15,7 @@ unsafe extern "C" {
 
 const MAX_PROFILE_BYTES: usize = 16 * 1024 * 1024;
 
-struct Profile(NonNull<c_void>);
+struct Profile(NonNull<cms::_HPROFILE>);
 
 impl Profile {
     fn open(bytes: &[u8]) -> Option<Self> {
@@ -59,7 +59,7 @@ enum PixelLayout {
 /// Keep the native transform's pixel layout attached to its handle so
 /// safe callers cannot invoke Little CMS with an incompatible buffer.
 pub struct Transform {
-    raw: NonNull<c_void>,
+    raw: NonNull<cms::_HTRANSFORM>,
     layout: PixelLayout,
 }
 
