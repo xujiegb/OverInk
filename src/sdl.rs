@@ -163,20 +163,29 @@ pub fn desktop_display_mode(id: u32) -> Option<([i32; 2], f32)> {
     }
 }
 
+// Consolidate the checked SDL_Event union reads in one audited boundary.
+macro_rules! tagged_event {
+    ($event:expr, $field:ident, $($tag:pat_param)|+) => {{
+        let event = $event;
+        if matches!(event_type(event), $($tag)|+) {
+            // SAFETY: The field is read only for SDL event tags that own it.
+            Some(unsafe { event.$field })
+        } else {
+            None
+        }
+    }};
+}
+
 /// Read an SDL finger event only for a matching SDL event type.
 pub fn finger_event(event: &SDL_Event) -> Option<SDL_TouchFingerEvent> {
-    let ty = event_type(event);
-    if matches!(
-        ty,
+    tagged_event!(
+        event,
+        tfinger,
         SDL_EVENT_FINGER_DOWN
             | SDL_EVENT_FINGER_MOTION
             | SDL_EVENT_FINGER_UP
             | SDL_EVENT_FINGER_CANCELED
-    ) {
-        Some(unsafe { event.tfinger })
-    } else {
-        None
-    }
+    )
 }
 
 /// Returns the owning SDL window for an event after checking its union tag.
@@ -314,11 +323,7 @@ pub fn display_info() -> Result<Vec<DisplayInfo>, String> {
 /// field. Do not use `then_some(unsafe { ... })`: it evaluates eagerly.
 /// Read the wheel payload only for a mouse-wheel event.
 pub fn mouse_wheel_event(event: &SDL_Event) -> Option<SDL_MouseWheelEvent> {
-    if event_type(event) == SDL_EVENT_MOUSE_WHEEL {
-        Some(unsafe { event.wheel })
-    } else {
-        None
-    }
+    tagged_event!(event, wheel, SDL_EVENT_MOUSE_WHEEL)
 }
 
 /// Read keyboard modifiers without exposing the native SDL function.
@@ -391,65 +396,39 @@ pub fn text_editing_data(event: &SDL_Event, window: SDL_WindowID) -> Option<Text
 }
 
 pub fn mouse_button_event(event: &SDL_Event) -> Option<SDL_MouseButtonEvent> {
-    if matches!(
-        event_type(event),
+    tagged_event!(
+        event,
+        button,
         SDL_EVENT_MOUSE_BUTTON_DOWN | SDL_EVENT_MOUSE_BUTTON_UP
-    ) {
-        Some(unsafe { event.button })
-    } else {
-        None
-    }
+    )
 }
 
 pub fn mouse_motion_event(event: &SDL_Event) -> Option<SDL_MouseMotionEvent> {
-    if event_type(event) == SDL_EVENT_MOUSE_MOTION {
-        Some(unsafe { event.motion })
-    } else {
-        None
-    }
+    tagged_event!(event, motion, SDL_EVENT_MOUSE_MOTION)
 }
 
 pub fn pen_touch_event(event: &SDL_Event) -> Option<SDL_PenTouchEvent> {
-    if matches!(event_type(event), SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP) {
-        Some(unsafe { event.ptouch })
-    } else {
-        None
-    }
+    tagged_event!(event, ptouch, SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP)
 }
 
 pub fn pen_axis_event(event: &SDL_Event) -> Option<SDL_PenAxisEvent> {
-    if event_type(event) == SDL_EVENT_PEN_AXIS {
-        Some(unsafe { event.paxis })
-    } else {
-        None
-    }
+    tagged_event!(event, paxis, SDL_EVENT_PEN_AXIS)
 }
 
 pub fn pen_motion_event(event: &SDL_Event) -> Option<SDL_PenMotionEvent> {
-    if event_type(event) == SDL_EVENT_PEN_MOTION {
-        Some(unsafe { event.pmotion })
-    } else {
-        None
-    }
+    tagged_event!(event, pmotion, SDL_EVENT_PEN_MOTION)
 }
 
 pub fn pen_proximity_event(event: &SDL_Event) -> Option<SDL_PenProximityEvent> {
-    if matches!(
-        event_type(event),
+    tagged_event!(
+        event,
+        pproximity,
         SDL_EVENT_PEN_PROXIMITY_IN | SDL_EVENT_PEN_PROXIMITY_OUT
-    ) {
-        Some(unsafe { event.pproximity })
-    } else {
-        None
-    }
+    )
 }
 
 pub fn key_event(event: &SDL_Event) -> Option<SDL_KeyboardEvent> {
-    if matches!(event_type(event), SDL_EVENT_KEY_DOWN | SDL_EVENT_KEY_UP) {
-        Some(unsafe { event.key })
-    } else {
-        None
-    }
+    tagged_event!(event, key, SDL_EVENT_KEY_DOWN | SDL_EVENT_KEY_UP)
 }
 
 pub fn capture_mouse(enable: bool) -> bool {
@@ -512,11 +491,7 @@ pub fn flush_quit_event() {
 
 /// Read an SDL display-removal event only after checking its union tag.
 pub fn removed_display_id(event: &SDL_Event) -> Option<u32> {
-    if event_type(event) == SDL_EVENT_DISPLAY_REMOVED {
-        Some(unsafe { event.display.displayID.0 })
-    } else {
-        None
-    }
+    tagged_event!(event, display, SDL_EVENT_DISPLAY_REMOVED).map(|display| display.displayID.0)
 }
 
 /// Read a window event's owning ID only for a tagged window event.
@@ -530,14 +505,12 @@ pub fn window_event_id(event: &SDL_Event) -> Option<SDL_WindowID> {
 
 /// A reset may apply to an individual window, or all windows (ID zero).
 pub fn render_reset_window_id(event: &SDL_Event) -> Option<SDL_WindowID> {
-    if matches!(
-        event_type(event),
+    tagged_event!(
+        event,
+        render,
         SDL_EVENT_RENDER_TARGETS_RESET | SDL_EVENT_RENDER_DEVICE_RESET
-    ) {
-        Some(unsafe { event.render.windowID })
-    } else {
-        None
-    }
+    )
+    .map(|render| render.windowID)
 }
 
 /// Check physical buttons on macOS, and SDL's per-window state elsewhere.
@@ -732,6 +705,20 @@ impl Window {
             })
         }
     }
+    /// Unclamped dimensions for converting local input into screen pixels.
+    /// Render sizes may be clamped to one; input picking must reject zero.
+    pub fn capture_coordinate_sizes(&self) -> Option<([f32; 2], [i32; 2])> {
+        let (mut w, mut h, mut px, mut py) = (0, 0, 0, 0);
+        // SAFETY: SDL owns this live window, and the four integer outputs
+        // remain writable for these synchronous FFI calls.
+        let valid = unsafe {
+            SDL_GetWindowSize(self.raw, &mut w, &mut h)
+                && SDL_GetWindowSizeInPixels(self.raw, &mut px, &mut py)
+        };
+        (valid && w > 0 && h > 0 && px > 0 && py > 0)
+            .then_some(([w as f32, h as f32], [px, py]))
+    }
+
     pub fn size(&self) -> [f32; 2] {
         unsafe {
             let (mut w, mut h) = (0, 0);
