@@ -120,8 +120,9 @@ unsafe extern "C" {
     fn CGColorSpaceGetName(space: NonNull<c_void>) -> Option<NonNull<c_void>>;
     fn CGImageGetDataProvider(image: NonNull<c_void>) -> Option<NonNull<c_void>>;
     fn CGDataProviderCopyData(provider: NonNull<c_void>) -> Option<NonNull<c_void>>;
-    static kCGColorSpaceExtendedLinearSRGB: *const c_void;
-    static kCGColorSpaceSRGB: *const c_void;
+    // CoreGraphics constants are nullable C object pointers.
+    static kCGColorSpaceExtendedLinearSRGB: Option<NonNull<c_void>>;
+    static kCGColorSpaceSRGB: Option<NonNull<c_void>>;
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -361,10 +362,13 @@ fn begin_screenshot(
         let _: () = msg_send![&*config, setCapturesAudio: false];
         if hdr {
             let _: () = msg_send![&*config, setPixelFormat: u32::from_be_bytes(*b"RGhA")];
-            let _: () = msg_send![&*config, setColorSpaceName: kCGColorSpaceExtendedLinearSRGB];
+            let space = kCGColorSpaceExtendedLinearSRGB
+                .map_or(ptr::null(), |name| name.as_ptr().cast_const());
+            let _: () = msg_send![&*config, setColorSpaceName: space];
         } else {
             let _: () = msg_send![&*config, setPixelFormat: u32::from_be_bytes(*b"BGRA")];
-            let _: () = msg_send![&*config, setColorSpaceName: kCGColorSpaceSRGB];
+            let space = kCGColorSpaceSRGB.map_or(ptr::null(), |name| name.as_ptr().cast_const());
+            let _: () = msg_send![&*config, setColorSpaceName: space];
         }
         let completion =
             block2::RcBlock::new(move |image: *const c_void, error: *mut AnyObject| {
@@ -411,7 +415,7 @@ fn copy_screenshot(image: NonNull<c_void>) -> Result<Image, String> {
             return Err("ScreenCaptureKit did not return an FP16 HDR screenshot".into());
         }
         let name = CGImageGetColorSpace(image).and_then(|space| CGColorSpaceGetName(space));
-        let expected = NonNull::new(kCGColorSpaceExtendedLinearSRGB.cast_mut())
+        let expected = kCGColorSpaceExtendedLinearSRGB
             .ok_or("Extended linear sRGB is unavailable")?;
         if !name.is_some_and(|name| CFEqual(name, expected) != 0) {
             return Err("The HDR screenshot did not use extended linear sRGB".into());
@@ -443,8 +447,7 @@ fn copy_sdr_screenshot(image: NonNull<c_void>) -> Result<Image, String> {
             .ok()
             .and_then(|width| width.checked_mul(4))
             .ok_or("Invalid SDR screenshot row width")?;
-        let srgb = NonNull::new(kCGColorSpaceSRGB.cast_mut())
-            .ok_or("The sRGB screenshot color space is unavailable")?;
+        let srgb = kCGColorSpaceSRGB.ok_or("The sRGB screenshot color space is unavailable")?;
         let space = Data(
             CGColorSpaceCreateWithName(srgb)
                 .ok_or("Cannot create an sRGB screenshot color space")?,
@@ -507,8 +510,7 @@ mod tests {
         // SAFETY: This test creates and owns bitmap contexts through the
         // same +1 Core Graphics APIs as production capture.
         unsafe {
-            let srgb = NonNull::new(kCGColorSpaceSRGB.cast_mut())
-                .ok_or("The test sRGB color space is unavailable")?;
+            let srgb = kCGColorSpaceSRGB.ok_or("The test sRGB color space is unavailable")?;
             let color =
                 Data(CGColorSpaceCreateWithName(srgb).ok_or("Cannot create a test color space")?);
             let buffer = NonNull::new(pixels.as_mut_ptr().cast())
