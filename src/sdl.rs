@@ -307,6 +307,12 @@ pub fn delay_precise(nanoseconds: u64) {
     unsafe { SDL_DelayPrecise(nanoseconds) }
 }
 
+/// Validate SDL-provided array counts before forming slices over foreign
+/// allocations. Real desktop and locale lists are far below these limits.
+fn bounded_sdl_count(count: i32, maximum: usize) -> Option<usize> {
+    usize::try_from(count).ok().filter(|&n| n <= maximum)
+}
+
 /// Enumerate SDL preferred locales and release SDL-owned storage before return.
 pub fn preferred_locales() -> Vec<(String, String)> {
     unsafe {
@@ -314,6 +320,12 @@ pub fn preferred_locales() -> Vec<(String, String)> {
         let Some(locales) = SdlAllocation::from_native(SDL_GetPreferredLocales(&mut count)) else {
             return Vec::new();
         };
+        let Some(count) = bounded_sdl_count(count, 256) else {
+            return Vec::new();
+        };
+        // SDL allocated the returned pointer array, and the count is now
+        // bounded before any pointer arithmetic or slice construction.
+        let entries = std::slice::from_raw_parts(locales.as_ptr(), count);
         let name = |ptr: *const std::ffi::c_char| {
             if ptr.is_null() {
                 String::new()
@@ -321,8 +333,9 @@ pub fn preferred_locales() -> Vec<(String, String)> {
                 CStr::from_ptr(ptr).to_str().unwrap_or_default().to_owned()
             }
         };
-        (0..count.max(0) as usize)
-            .filter_map(|i| (*locales.as_ptr().add(i)).as_ref())
+        entries
+            .iter()
+            .filter_map(|locale| locale.as_ref())
             .map(|locale| (name(locale.language), name(locale.country)))
             .collect()
     }
@@ -358,9 +371,16 @@ pub fn display_info() -> Result<Vec<DisplayInfo>, String> {
     unsafe {
         let mut count = 0;
         let list = SdlAllocation::from_native(SDL_GetDisplays(&mut count)).ok_or_else(error)?;
-        (0..count.max(0) as usize)
-            .map(|i| {
-                let id = *list.as_ptr().add(i);
+        let count = bounded_sdl_count(count, 256)
+            .ok_or_else(|| "SDL returned an invalid display count".to_owned())?;
+        // Keep the owned SDL allocation alive while iterating a bounded
+        // borrowed slice; Rust performs subsequent indexing safely.
+        let displays = std::slice::from_raw_parts(list.as_ptr(), count);
+        displays
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(i, id)| {
                 let mut bounds = SDL_Rect::default();
                 if !SDL_GetDisplayBounds(id, &mut bounds) {
                     return Err(error());
@@ -2339,6 +2359,16 @@ impl TestSurface {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_invalid_native_array_counts() {
+        assert_eq!(bounded_sdl_count(0, 256), Some(0));
+        assert_eq!(bounded_sdl_count(1, 256), Some(1));
+        assert_eq!(bounded_sdl_count(256, 256), Some(256));
+        assert_eq!(bounded_sdl_count(-1, 256), None);
+        assert_eq!(bounded_sdl_count(257, 256), None);
+        assert_eq!(bounded_sdl_count(i32::MAX, 256), None);
+    }
 
     #[test]
     fn gui_upload_rejects_invalid_full_and_partial_regions() {
