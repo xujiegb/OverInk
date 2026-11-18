@@ -143,8 +143,8 @@ impl<T> SdlAllocation<T> {
     /// # Safety
     /// `raw` must be null or a uniquely owned allocation returned by an SDL
     /// API that explicitly requires the caller to release it with SDL_free.
-    unsafe fn from_native(raw: *mut T) -> Option<Self> {
-        NonNull::new(raw).map(Self)
+    unsafe fn from_native(raw: Option<NonNull<T>>) -> Option<Self> {
+        raw.map(Self)
     }
 
     fn as_ptr(&self) -> *mut T {
@@ -425,7 +425,7 @@ fn bounded_sdl_count(count: i32, maximum: usize) -> Option<usize> {
 pub fn preferred_locales() -> Vec<(String, String)> {
     unsafe {
         let mut count = 0;
-        let Some(locales) = SdlAllocation::from_native(SDL_GetPreferredLocales(&mut count)) else {
+        let Some(locales) = SdlAllocation::from_native(NonNull::new(SDL_GetPreferredLocales(&mut count))) else {
             return Vec::new();
         };
         let Some(count) = bounded_sdl_count(count, 256) else {
@@ -487,7 +487,7 @@ pub struct DisplayInfo {
 pub fn display_info() -> Result<Vec<DisplayInfo>, String> {
     unsafe {
         let mut count = 0;
-        let list = SdlAllocation::from_native(SDL_GetDisplays(&mut count)).ok_or_else(error)?;
+        let list = SdlAllocation::from_native(NonNull::new(SDL_GetDisplays(&mut count))).ok_or_else(error)?;
         let count = bounded_sdl_count(count, 256)
             .ok_or_else(|| "SDL returned an invalid display count".to_owned())?;
         // Keep the owned SDL allocation alive while iterating a bounded
@@ -558,7 +558,7 @@ fn clipboard_action(action: ClipboardAction<'_>) -> Option<String> {
                 None
             }
             ClipboardAction::Read => {
-                let text = SdlAllocation::from_native(SDL_GetClipboardText())?;
+                let text = SdlAllocation::from_native(NonNull::new(SDL_GetClipboardText()))?;
                 Some(CStr::from_ptr(text.as_ptr()).to_string_lossy().into_owned())
             }
         }
@@ -1485,7 +1485,7 @@ impl Window {
         unsafe {
             let mut size = 0;
             let Some(profile) =
-                SdlAllocation::from_native(SDL_GetWindowICCProfile(self.raw, &mut size))
+                SdlAllocation::from_native(NonNull::new(SDL_GetWindowICCProfile(self.raw, &mut size)))
             else {
                 // A missing ICC profile is normal; avoid leaving a stale SDL error.
                 SDL_ClearError();
