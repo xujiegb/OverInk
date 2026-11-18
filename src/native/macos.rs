@@ -48,13 +48,14 @@ pub fn remove_metal_view(window: &Window) {
     // Check the intermediate contentView before messaging it.
     unsafe {
         let ns = ns.as_non_null().as_ptr().cast::<AnyObject>();
-        let content: *mut AnyObject = msg_send![ns, contentView];
-        if content.is_null() {
+        let content: Option<NonNull<AnyObject>> = NonNull::new(msg_send![ns, contentView]);
+        let Some(content) = content else {
             return;
-        }
-        let metal: *mut AnyObject = msg_send![content, viewWithTag: tag];
-        if !metal.is_null() {
-            let _: () = msg_send![metal, removeFromSuperview];
+        };
+        let metal: Option<NonNull<AnyObject>> =
+            NonNull::new(msg_send![content.as_ptr(), viewWithTag: tag]);
+        if let Some(metal) = metal {
+            let _: () = msg_send![metal.as_ptr(), removeFromSuperview];
         }
     }
 }
