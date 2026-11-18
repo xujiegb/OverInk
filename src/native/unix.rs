@@ -62,13 +62,15 @@ impl Wayland {
             if data.is_null() || interface.is_null() {
                 return;
             }
-            // The private queue dispatches this listener during the roundtrip
-            // below, while its Globals storage is alive.
-            let interface = unsafe { CStr::from_ptr(interface) };
-            if interface == c"wl_compositor" {
-                let globals = unsafe { &mut *data.cast::<Globals>() };
-                globals.compositor = name;
-                globals.version = version.min(4);
+            // SAFETY: The listener checks both pointers above. The Wayland
+            // roundtrip dispatches it synchronously while its boxed Globals
+            // and the protocol-owned interface C string are both live.
+            unsafe {
+                if CStr::from_ptr(interface) == c"wl_compositor" {
+                    let globals = &mut *data.cast::<Globals>();
+                    globals.compositor = name;
+                    globals.version = version.min(4);
+                }
             }
         }
         extern "C" fn removed(_data: *mut c_void, _registry: *mut c_void, _name: u32) {}
