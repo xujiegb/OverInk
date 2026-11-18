@@ -147,14 +147,8 @@ mod x11 {
     use libloading::{Library, Symbol};
     use std::ffi::{c_char, c_int, c_ulong, c_void};
     fn library() -> Result<Library, String> {
-        for name in ["libX11.so.6", "libX11.so"] {
-            // SAFETY: Only the system libX11 sonames are loaded here. Every
-            // dynamically loaded function pointer retains its Library owner.
-            if let Ok(lib) = unsafe { Library::new(name) } {
-                return Ok(lib);
-            }
-        }
-        Err("X11 screen capture is unavailable".into())
+        crate::native::native_library(&["libX11.so.6", "libX11.so"])
+            .map_err(|_| "X11 screen capture is unavailable".into())
     }
     fn display(window: &Window) -> Result<*mut c_void, String> {
         window
