@@ -162,10 +162,10 @@ fn sdr_supported() -> bool {
     screen_capture_kit().is_ok()
         && AnyClass::get(c"SCShareableContent").is_some()
         && AnyClass::get(c"SCStreamConfiguration").is_some()
-        && AnyClass::get(c"SCScreenshotManager").is_some_and(|manager| unsafe {
-            msg_send![
-                manager, respondsToSelector: sel!(captureImageWithFilter:configuration:completionHandler:)
-            ]
+        && AnyClass::get(c"SCScreenshotManager").is_some_and(|manager| {
+            manager
+                .class_method(sel!(captureImageWithFilter:configuration:completionHandler:))
+                .is_some()
         })
 }
 
@@ -181,15 +181,12 @@ pub fn hdr_supported() -> bool {
         let Some(manager) = AnyClass::get(c"SCScreenshotManager") else {
             return false;
         };
-        unsafe {
-            let preset: bool = msg_send![
-                configuration, respondsToSelector: sel!(streamConfigurationWithPreset:)
-            ];
-            let capture: bool = msg_send![
-                manager, respondsToSelector: sel!(captureImageWithFilter:configuration:completionHandler:)
-            ];
-            preset && capture
-        }
+        configuration
+            .class_method(sel!(streamConfigurationWithPreset:))
+            .is_some()
+            && manager
+                .class_method(sel!(captureImageWithFilter:configuration:completionHandler:))
+                .is_some()
     })
 }
 
