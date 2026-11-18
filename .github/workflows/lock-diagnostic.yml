@@ -21,6 +21,6 @@ jobs:
         shell: bash
         run: |
           set -eu
-          cargo metadata --format-version 1 --no-deps >/dev/null
+          cargo metadata --format-version 1 >/dev/null
           git diff -- Cargo.lock
           git diff --exit-code -- Cargo.lock
