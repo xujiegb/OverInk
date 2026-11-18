@@ -523,15 +523,14 @@ impl App {
             toolbar::context_menu_rect(item.rect(), canvas, MENU_SIZE * scale, protected, scale);
         let palette = self.input.text.color_wheel.map(|_| {
             let scale = toolbar::menu_scale(canvas, PALETTE_SIZE, units);
-            let mut obstacles = vec![actions];
-            if let Some(hole) = protected {
-                obstacles.push(hole);
-            }
+            // At most two obstacles: avoid allocating a Vec every palette frame.
+            let obstacles = [actions, protected.unwrap_or(actions)];
+            let count = if protected.is_some() { 2 } else { 1 };
             let rect = toolbar::context_menu_rect_avoiding(
                 actions,
                 canvas,
                 PALETTE_SIZE * scale,
-                &obstacles,
+                &obstacles[..count],
                 scale,
             );
             (rect, scale)
