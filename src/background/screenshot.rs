@@ -319,7 +319,7 @@ mod tests {
 
     #[test]
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    fn portal_crop_uses_the_monitor_origin_and_expected_desktop_sizes() {
+    fn portal_crop_uses_the_monitor_origin_and_expected_desktop_sizes() -> Result<(), String> {
         let display = |id, bounds| Display {
             id,
             name: id.to_string(),
@@ -343,7 +343,7 @@ mod tests {
                 None,
                 None,
             )
-            .unwrap();
+            ?;
         assert_eq!(sizes, [[1600, 800], [2400, 1200], [0, 0]]);
         assert_eq!(crop.region, local.translate(egui::vec2(800., 200.)));
         assert!(!sizes.contains(&[1200, 900]));
@@ -360,11 +360,12 @@ mod tests {
                 )
                 .is_err()
         );
+        Ok(())
     }
 
     #[test]
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    fn portal_crop_accounts_for_gnome_work_area() {
+    fn portal_crop_accounts_for_gnome_work_area() -> Result<(), String> {
         let display = Display {
             id: 7,
             name: "GNOME".into(),
@@ -387,16 +388,17 @@ mod tests {
                 Some(usable),
                 None,
             )
-            .unwrap();
+            ?;
         assert_eq!(crop.size, [1440., 900.]);
         assert_eq!(crop.region.min, egui::pos2(100., 84.));
         assert_eq!(crop.region.max, egui::pos2(300., 234.));
         assert_eq!(crop.size, [1440., 900.]);
+        Ok(())
     }
 
     #[test]
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    fn portal_crop_rejects_unknown_position_instead_of_guessing() {
+    fn portal_crop_rejects_unknown_position_instead_of_guessing() -> Result<(), String> {
         let display = Display {
             id: 7,
             name: "GNOME".into(),
@@ -431,14 +433,15 @@ mod tests {
                 None,
                 Some(location),
             )
-            .unwrap();
+            ?;
         assert_eq!(crop.region.min, egui::pos2(400., 300.));
         assert_eq!(crop.region.max, egui::pos2(600., 400.));
+        Ok(())
     }
 
     #[test]
-    fn logical_selection_crops_fractional_scale_to_pixel_edges() {
-        let mut image = Image::buffer(5, 5).unwrap();
+    fn logical_selection_crops_fractional_scale_to_pixel_edges() -> Result<(), String> {
+        let mut image = Image::buffer(5, 5)?;
         for (i, pixel) in image.rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             pixel[0] = i as u8;
         }
@@ -446,7 +449,7 @@ mod tests {
             region: Rect::from_min_max(egui::pos2(1., 2.), egui::pos2(3., 3.)),
             size: [4., 4.],
         };
-        let image = crop.apply(image).unwrap();
+        let image = crop.apply(image)?;
         assert_eq!([image.width, image.height], [3, 2]);
         assert_eq!(
             image
@@ -458,5 +461,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             [11, 12, 13, 16, 17, 18]
         );
+        Ok(())
     }
 }
