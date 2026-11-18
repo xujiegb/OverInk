@@ -382,18 +382,22 @@ struct Rectangle {
     width: u16,
     height: u16,
 }
+// All Xlib display handles come from a checked, live SDL window. The
+// rectangles remain borrowed through the synchronous XShape call; None
+// represents the null pointer used for an empty shape.
 type CombineRectangles = unsafe extern "C" fn(
-    *mut c_void,
+    NonNull<c_void>,
     c_ulong,
     c_int,
     c_int,
     c_int,
-    *const Rectangle,
+    Option<&Rectangle>,
     c_int,
     c_int,
     c_int,
 );
-type CombineMask = unsafe extern "C" fn(*mut c_void, c_ulong, c_int, c_int, c_int, c_ulong, c_int);
+type CombineMask =
+    unsafe extern "C" fn(NonNull<c_void>, c_ulong, c_int, c_int, c_int, c_ulong, c_int);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct InputRegion {
@@ -407,8 +411,8 @@ struct InputRegion {
 struct X11 {
     rectangles: CombineRectangles,
     mask: CombineMask,
-    raise: unsafe extern "C" fn(*mut c_void, c_ulong) -> c_int,
-    flush: unsafe extern "C" fn(*mut c_void) -> c_int,
+    raise: unsafe extern "C" fn(NonNull<c_void>, c_ulong) -> c_int,
+    flush: unsafe extern "C" fn(NonNull<c_void>) -> c_int,
     applied: Option<InputRegion>,
 }
 
@@ -444,22 +448,27 @@ impl X11 {
         unsafe {
             match command {
                 X11Command::Shape(Some(rectangles)) => {
-                    let data = if rectangles.is_empty() {
-                        ptr::null()
-                    } else {
-                        rectangles.as_ptr()
-                    };
-                    (self.rectangles)(display.as_ptr(), window, 2, 0, 0, data, count, 0, 0);
+                    (self.rectangles)(
+                        display.as_non_null(),
+                        window,
+                        2,
+                        0,
+                        0,
+                        rectangles.first(),
+                        count,
+                        0,
+                        0,
+                    );
                 }
                 X11Command::Shape(None) => {
-                    (self.mask)(display.as_ptr(), window, 2, 0, 0, 0, 0);
+                    (self.mask)(display.as_non_null(), window, 2, 0, 0, 0, 0);
                 }
                 X11Command::Raise => {
                     // Do not transfer keyboard focus away from the canvas.
-                    (self.raise)(display.as_ptr(), window);
+                    (self.raise)(display.as_non_null(), window);
                 }
             }
-            (self.flush)(display.as_ptr());
+            (self.flush)(display.as_non_null());
         }
         Ok(())
     }
@@ -474,11 +483,11 @@ impl X11 {
                 .as_ref()
                 .map_err(Clone::clone)?;
             let (display, _) = x11_window(w)?;
-            let query: unsafe extern "C" fn(*mut c_void, *mut c_int, *mut c_int) -> c_int = *ext
+            let query: unsafe extern "C" fn(NonNull<c_void>, &mut c_int, &mut c_int) -> c_int = *ext
                 .get(b"XShapeQueryExtension\0")
                 .map_err(|e| e.to_string())?;
             let (mut event, mut error) = (0, 0);
-            if query(display.as_ptr(), &mut event, &mut error) == 0 {
+            if query(display.as_non_null(), &mut event, &mut error) == 0 {
                 return Err("X11 Shape extension unavailable".into());
             }
             Ok(Self {
