@@ -844,7 +844,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn screenshot_actions_accept_clicks_in_the_scaled_button_area() {
+    fn screenshot_actions_accept_clicks_in_the_scaled_button_area() -> Result<(), Box<dyn std::error::Error>> {
         let screen = Rect::from_min_size(Pos2::ZERO, vec2(1440., 900.));
         let region = Rect::from_min_size(pos2(400., 200.), vec2(320., 240.));
         let units = 2.;
@@ -855,7 +855,7 @@ mod tests {
                 MENU_PADDING + MENU_BUTTON.y * 0.5,
             ) * units;
         let mut screenshot = Screenshot {
-            stage: Stage::Ready(region, Arc::new(Image::buffer(1, 1).unwrap())),
+            stage: Stage::Ready(region, Arc::new(Image::buffer(1, 1)?)),
             ..Default::default()
         };
         let ctx = egui::Context::default();
@@ -882,13 +882,14 @@ mod tests {
             }]);
         }
         assert!(matches!(screenshot.action(), Some(MenuAction::SaveAs)));
+        Ok(())
     }
 
     #[test]
-    fn saving_png_never_recreates_a_missing_default_folder_or_overwrites_an_automatic_name() {
-        let folder = tempfile::tempdir().unwrap();
+    fn saving_png_never_recreates_a_missing_default_folder_or_overwrites_an_automatic_name() -> Result<(), Box<dyn std::error::Error>> {
+        let folder = tempfile::tempdir()?;
         let missing = folder.path().join("missing");
-        let mut image = Image::buffer(2, 1).unwrap();
+        let mut image = Image::buffer(2, 1)?;
         image
             .rgba
             .copy_from_slice(&[255, 0, 0, 255, 0, 255, 0, 255]);
@@ -913,23 +914,24 @@ mod tests {
                 1.,
                 &AtomicU8::new(SAVE_PENDING),
             )
-            .unwrap()
+            .map_err(|error| format!("{error:?}"))
         };
-        let (first, second) = (save(), save());
+        let (first, second) = (save()?, save()?);
         assert_ne!(first, second);
         assert_eq!(
-            image::open(first).unwrap().into_rgb8().into_raw(),
+            image::open(first)?.into_rgb8().into_raw(),
             [255, 0, 0, 0, 255, 0]
         );
         assert!(second.is_file());
+        Ok(())
     }
 
     #[test]
-    fn save_as_confirms_the_final_png_path_before_replacing_it() {
-        let folder = tempfile::tempdir().unwrap();
+    fn save_as_confirms_the_final_png_path_before_replacing_it() -> Result<(), Box<dyn std::error::Error>> {
+        let folder = tempfile::tempdir()?;
         let path = folder.path().join("capture.png");
-        std::fs::write(&path, b"existing file").unwrap();
-        let image = Image::buffer(1, 1).unwrap();
+        std::fs::write(&path, b"existing file")?;
+        let image = Image::buffer(1, 1)?;
         for chosen in [path.clone(), path.with_extension("")] {
             let result = write_screenshot(
                 &image,
@@ -939,7 +941,7 @@ mod tests {
                 &AtomicU8::new(SAVE_PENDING),
             );
             assert!(matches!(result, Err(SaveError::Exists(existing)) if existing == path));
-            assert_eq!(std::fs::read(&path).unwrap(), b"existing file");
+            assert_eq!(std::fs::read(&path)?, b"existing file");
         }
         let saved = write_screenshot(
             &image,
@@ -948,13 +950,14 @@ mod tests {
             1.,
             &AtomicU8::new(SAVE_PENDING),
         );
-        assert_eq!(saved.unwrap(), path);
+        assert_eq!(saved.map_err(|error| format!("{error:?}"))?, path);
         assert!(image::open(path).is_ok());
-        assert_eq!(std::fs::read_dir(folder.path()).unwrap().count(), 1);
+        assert_eq!(std::fs::read_dir(folder.path())?.count(), 1);
+        Ok(())
     }
 
     #[test]
-    fn cancelling_save_disconnects_its_result_and_prevents_file_creation() {
+    fn cancelling_save_disconnects_its_result_and_prevents_file_creation() -> Result<(), Box<dyn std::error::Error>> {
         let cancelled = Arc::new(AtomicU8::new(SAVE_PENDING));
         let (sender, receiver) = mpsc::channel();
         let mut screenshot = Screenshot {
@@ -967,8 +970,8 @@ mod tests {
         };
         screenshot.cancel();
         assert_eq!(cancelled.load(Ordering::Acquire), SAVE_CANCELLED);
-        let folder = tempfile::tempdir().unwrap();
-        let image = Image::buffer(1, 1).unwrap();
+        let folder = tempfile::tempdir()?;
+        let image = Image::buffer(1, 1)?;
         let result = write_screenshot(
             &image,
             Destination::Folder(folder.path().into()),
@@ -979,15 +982,16 @@ mod tests {
         assert!(result.is_err());
         assert!(sender.send(result).is_err());
         assert!(screenshot.poll_save().is_none());
-        assert_eq!(std::fs::read_dir(folder.path()).unwrap().count(), 0);
+        assert_eq!(std::fs::read_dir(folder.path())?.count(), 0);
+        Ok(())
     }
 
     #[test]
-    fn cancellation_cannot_hide_an_already_publishing_save() {
+    fn cancellation_cannot_hide_an_already_publishing_save() -> Result<(), Box<dyn std::error::Error>> {
         let (sender, receiver) = mpsc::channel();
         let cancelled = Arc::new(AtomicU8::new(SAVE_PUBLISHING));
         let mut screenshot = Screenshot {
-            stage: Stage::Ready(Rect::NOTHING, Arc::new(Image::buffer(1, 1).unwrap())),
+            stage: Stage::Ready(Rect::NOTHING, Arc::new(Image::buffer(1, 1)?)),
             save_job: Some(SaveJob {
                 direct: true,
                 receiver,
@@ -1000,10 +1004,11 @@ mod tests {
         assert!(screenshot.saving());
         assert_eq!(cancelled.load(Ordering::Acquire), SAVE_CANCEL_REQUESTED);
         assert!(screenshot.cancel_blocked);
-        sender.send(Ok(PathBuf::from("saved.png"))).unwrap();
+        sender.send(Ok(PathBuf::from("saved.png")))?;
         assert!(matches!(screenshot.poll_save(), Some((true, Ok(_)))));
         screenshot.cancel();
         assert!(!screenshot.active());
+        Ok(())
     }
 
     #[test]
@@ -1022,11 +1027,11 @@ mod tests {
     }
 
     #[test]
-    fn detached_screenshot_keeps_publishing_save_until_result() {
+    fn detached_screenshot_keeps_publishing_save_until_result() -> Result<(), Box<dyn std::error::Error>> {
         let (sender, receiver) = mpsc::channel();
         let cancelled = Arc::new(AtomicU8::new(SAVE_PUBLISHING));
         let mut screenshot = Screenshot {
-            stage: Stage::Ready(Rect::NOTHING, Arc::new(Image::buffer(1, 1).unwrap())),
+            stage: Stage::Ready(Rect::NOTHING, Arc::new(Image::buffer(1, 1)?)),
             save_job: Some(SaveJob {
                 direct: false,
                 receiver,
@@ -1038,17 +1043,18 @@ mod tests {
         assert!(!screenshot.active());
         assert!(screenshot.saving());
         assert_eq!(cancelled.load(Ordering::Acquire), SAVE_CANCEL_REQUESTED);
-        sender.send(Ok(PathBuf::from("detached.png"))).unwrap();
+        sender.send(Ok(PathBuf::from("detached.png")))?;
         assert!(matches!(screenshot.poll_save(), Some((false, Ok(_)))));
         assert!(!screenshot.saving());
+        Ok(())
     }
 
     #[test]
-    fn detached_screenshot_cancels_save_before_publication() {
+    fn detached_screenshot_cancels_save_before_publication() -> Result<(), Box<dyn std::error::Error>> {
         let (sender, receiver) = mpsc::channel();
         let cancelled = Arc::new(AtomicU8::new(SAVE_PENDING));
         let mut screenshot = Screenshot {
-            stage: Stage::Ready(Rect::NOTHING, Arc::new(Image::buffer(1, 1).unwrap())),
+            stage: Stage::Ready(Rect::NOTHING, Arc::new(Image::buffer(1, 1)?)),
             save_job: Some(SaveJob {
                 direct: true,
                 receiver,
@@ -1061,6 +1067,7 @@ mod tests {
         assert!(!screenshot.saving());
         assert_eq!(cancelled.load(Ordering::Acquire), SAVE_CANCELLED);
         assert!(sender.send(Ok(PathBuf::from("never.png"))).is_err());
+        Ok(())
     }
 
     #[test]
@@ -1079,13 +1086,13 @@ mod tests {
     }
 
     #[test]
-    fn cancelling_before_publication_does_not_replace_existing_file() {
-        let folder = tempfile::tempdir().unwrap();
+    fn cancelling_before_publication_does_not_replace_existing_file() -> Result<(), Box<dyn std::error::Error>> {
+        let folder = tempfile::tempdir()?;
         let path = folder.path().join("existing.png");
-        std::fs::write(&path, b"original").unwrap();
+        std::fs::write(&path, b"original")?;
         let state = AtomicU8::new(SAVE_PENDING);
         state.store(SAVE_CANCELLED, Ordering::Release);
-        let image = Image::buffer(1, 1).unwrap();
+        let image = Image::buffer(1, 1)?;
         assert!(matches!(
             write_screenshot(
                 &image,
@@ -1096,7 +1103,8 @@ mod tests {
             ),
             Err(SaveError::Cancelled)
         ));
-        assert_eq!(std::fs::read(path).unwrap(), b"original");
+        assert_eq!(std::fs::read(path)?, b"original");
+        Ok(())
     }
 
     #[test]
