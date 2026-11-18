@@ -45,7 +45,7 @@ pub(super) fn show(id: usize, kind: DialogKind, window: &Window, location: Optio
     let location = location.and_then(location_to_c);
     let initial = location.as_ref().map_or(ptr::null(), |path| path.as_ptr());
     let parent = if USE_WINDOW_PARENT {
-        window.raw
+        window.raw.as_ptr()
     } else {
         ptr::null_mut()
     };
