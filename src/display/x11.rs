@@ -12,7 +12,7 @@ struct Resources {
     timestamp: c_ulong,
     config_timestamp: c_ulong,
     count: c_int,
-    crtcs: *mut c_ulong,
+    crtcs: Option<NonNull<c_ulong>>,
 }
 #[repr(C)]
 struct Crtc {
@@ -133,7 +133,7 @@ impl Randr {
                 // this check another screen could hide a malformed response
                 // and make the incomplete result look authoritative.
                 let Some(crtc_count) =
-                    checked_crtc_count(list.data().count, !list.data().crtcs.is_null())
+                    checked_crtc_count(list.data().count, list.data().crtcs.is_some())
                 else {
                     failed = true;
                     continue;
@@ -144,7 +144,11 @@ impl Randr {
                     // checked_crtc_count established a non-null pointer and
                     // bounded native element count. The owned resources guard
                     // outlives the borrowed slice and every CRTC query.
-                    let ids = std::slice::from_raw_parts(list.data().crtcs, crtc_count);
+                    let Some(crtcs) = list.data().crtcs else {
+                        failed = true;
+                        continue;
+                    };
+                    let ids = std::slice::from_raw_parts(crtcs.as_ptr(), crtc_count);
                     for &id in ids {
                         let Some(info) = OwnedRandr::from_native(
                             crtc(display, list.as_non_null(), id),
