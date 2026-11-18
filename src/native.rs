@@ -14,7 +14,7 @@ pub(crate) use unix::{NativeLibrary, library as native_library};
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 #[derive(Default)]
 pub struct Passthrough {
-    applied: Option<(*mut c_void, bool)>,
+    applied: Option<(std::ptr::NonNull<c_void>, bool)>,
 }
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 impl Passthrough {
@@ -103,7 +103,8 @@ impl Passthrough {
             .win32_hwnd()
             .ok_or("No Win32 window handle")?
             .as_ptr();
-        if self.applied == Some((raw, pass)) {
+        let identity = std::ptr::NonNull::new(raw).ok_or("No Win32 window handle")?;
+        if self.applied == Some((identity, pass)) {
             return Ok(());
         }
         self.invalidate();
@@ -147,7 +148,7 @@ impl Passthrough {
             )
             .map_err(|error| error.to_string())?;
         }
-        self.applied = Some((raw, pass));
+        self.applied = Some((identity, pass));
         Ok(())
     }
 }
@@ -167,8 +168,9 @@ impl Passthrough {
                 .cocoa_window()
                 .ok_or("No Cocoa window handle")?
                 .as_ptr();
+            let identity = std::ptr::NonNull::new(ns).ok_or("No Cocoa window handle")?;
             let cocoa = ns.cast::<AnyObject>();
-            if self.applied != Some((ns, pass)) {
+            if self.applied != Some((identity, pass)) {
                 // SDL's Cocoa listener can reset ignoresMouseEvents when it
                 // handles motion for a transparent window. Disable that motion
                 // while passing input through, as Cocoa does for tooltips.
@@ -180,7 +182,7 @@ impl Passthrough {
             if ignoring.as_bool() != pass {
                 let _: () = msg_send![cocoa, setIgnoresMouseEvents: Bool::new(pass)];
             }
-            self.applied = Some((ns, pass));
+            self.applied = Some((identity, pass));
             Ok(())
         }
     }
