@@ -97,19 +97,19 @@ unsafe extern "C" {
     // Rust memory. The UI-thread permission flow remains in capture_permission.
     safe fn CGPreflightScreenCaptureAccess() -> bool;
     safe fn CGRequestScreenCaptureAccess() -> bool;
-    fn CGColorSpaceCreateWithName(name: *const c_void) -> *const c_void;
+    fn CGColorSpaceCreateWithName(name: NonNull<c_void>) -> Option<NonNull<c_void>>;
     fn CGBitmapContextCreate(
-        data: *mut c_void,
+        data: NonNull<c_void>,
         width: usize,
         height: usize,
         bits_per_component: usize,
         bytes_per_row: usize,
-        color_space: *const c_void,
+        color_space: NonNull<c_void>,
         bitmap_info: u32,
-    ) -> *mut c_void;
-    fn CGContextDrawImage(context: *mut c_void, rect: CGRect, image: *const c_void);
+    ) -> Option<NonNull<c_void>>;
+    fn CGContextDrawImage(context: NonNull<c_void>, rect: CGRect, image: NonNull<c_void>);
     #[cfg(test)]
-    fn CGBitmapContextCreateImage(context: *mut c_void) -> *const c_void;
+    fn CGBitmapContextCreateImage(context: NonNull<c_void>) -> Option<NonNull<c_void>>;
     fn CGImageGetWidth(image: NonNull<c_void>) -> usize;
     fn CGImageGetHeight(image: NonNull<c_void>) -> usize;
     fn CGImageGetBitsPerComponent(image: NonNull<c_void>) -> usize;
@@ -126,10 +126,10 @@ unsafe extern "C" {
 
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
-    fn CFEqual(left: *const c_void, right: *const c_void) -> u8;
-    fn CFDataGetLength(data: *const c_void) -> isize;
-    fn CFDataGetBytePtr(data: *const c_void) -> *const u8;
-    fn CFRelease(value: *const c_void);
+    fn CFEqual(left: NonNull<c_void>, right: NonNull<c_void>) -> u8;
+    fn CFDataGetLength(data: NonNull<c_void>) -> isize;
+    fn CFDataGetBytePtr(data: NonNull<c_void>) -> Option<NonNull<u8>>;
+    fn CFRelease(value: NonNull<c_void>);
 }
 
 fn display_id([x, y, w, h]: [i32; 4]) -> Result<u32, String> {
@@ -392,7 +392,7 @@ impl Drop for Data {
     fn drop(&mut self) {
         // SAFETY: Data exclusively owns a non-null Core Foundation object
         // created by a +1 Copy/Create API and releases it exactly once.
-        unsafe { CFRelease(self.0.as_ptr()) }
+        unsafe { CFRelease(self.0) }
     }
 }
 
@@ -411,7 +411,9 @@ fn copy_screenshot(image: NonNull<c_void>) -> Result<Image, String> {
             return Err("ScreenCaptureKit did not return an FP16 HDR screenshot".into());
         }
         let name = CGImageGetColorSpace(image).and_then(|space| CGColorSpaceGetName(space));
-        if !name.is_some_and(|name| CFEqual(name.as_ptr(), kCGColorSpaceExtendedLinearSRGB) != 0) {
+        let expected = NonNull::new(kCGColorSpaceExtendedLinearSRGB.cast_mut())
+            .ok_or("Extended linear sRGB is unavailable")?;
+        if !name.is_some_and(|name| CFEqual(name, expected) != 0) {
             return Err("The HDR screenshot did not use extended linear sRGB".into());
         }
         let width = u32::try_from(CGImageGetWidth(image)).map_err(|_| "Capture is too large")?;
@@ -420,14 +422,11 @@ fn copy_screenshot(image: NonNull<c_void>) -> Result<Image, String> {
         let provider = CGImageGetDataProvider(image)
             .ok_or("The HDR screenshot has no pixel data")?;
         let data = Data(CGDataProviderCopyData(provider).ok_or("Cannot read the HDR screenshot")?);
-        let len = usize::try_from(CFDataGetLength(data.0.as_ptr()))
+        let len = usize::try_from(CFDataGetLength(data.0))
             .map_err(|_| "Invalid screenshot data")?;
-        let bytes = CFDataGetBytePtr(data.0.as_ptr());
-        if bytes.is_null() {
-            return Err("The HDR screenshot has no pixel data".into());
-        }
+        let bytes = CFDataGetBytePtr(data.0).ok_or("The HDR screenshot has no pixel data")?;
         // CFData owns the initialized byte buffer until the row copy completes.
-        let pixels = std::slice::from_raw_parts(bytes, len);
+        let pixels = std::slice::from_raw_parts(bytes.as_ptr(), len);
         snapshot.copy_hdr_rows(len, CGImageGetBytesPerRow(image), |offset, row| {
             row.copy_from_slice(&pixels[offset..offset + row.len()]);
         })?;
@@ -444,26 +443,28 @@ fn copy_sdr_screenshot(image: NonNull<c_void>) -> Result<Image, String> {
             .ok()
             .and_then(|width| width.checked_mul(4))
             .ok_or("Invalid SDR screenshot row width")?;
-        let space = Data(
-            NonNull::new(CGColorSpaceCreateWithName(kCGColorSpaceSRGB).cast_mut())
-                .ok_or("Cannot create an sRGB screenshot color space")?,
-        );
+        let srgb = NonNull::new(kCGColorSpaceSRGB.cast_mut())
+            .ok_or("The sRGB screenshot color space is unavailable")?;
+        let space =
+            Data(CGColorSpaceCreateWithName(srgb).ok_or("Cannot create an sRGB screenshot color space")?);
         // kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big is RGBA8.
+        let buffer = NonNull::new(snapshot.rgba.as_mut_ptr().cast())
+            .ok_or("Cannot obtain SDR screenshot pixel storage")?;
         let context = CGBitmapContextCreate(
-            snapshot.rgba.as_mut_ptr().cast(),
+            buffer,
             width as usize,
             height as usize,
             8,
             stride,
-            space.0.as_ptr(),
+            space.0,
             0x4001,
         );
-        let context = Data(NonNull::new(context).ok_or("Cannot create the SDR screenshot bitmap")?);
+        let context = Data(context.ok_or("Cannot create the SDR screenshot bitmap")?);
         // The bitmap context stores top-to-bottom RGBA rows. The Core
         // Graphics user-space convention already maps the image into them.
         // Flipping the CTM here would invert the output scanlines.
         CGContextDrawImage(
-            context.0.as_ptr(),
+            context.0,
             CGRect {
                 origin: Point { x: 0., y: 0. },
                 size: Size {
@@ -471,7 +472,7 @@ fn copy_sdr_screenshot(image: NonNull<c_void>) -> Result<Image, String> {
                     height: height as f64,
                 },
             },
-            image.as_ptr(),
+            image,
         );
         Ok(snapshot)
     }
@@ -504,25 +505,17 @@ mod tests {
         // SAFETY: This test creates and owns bitmap contexts through the
         // same +1 Core Graphics APIs as production capture.
         unsafe {
-            let color = Data(
-                NonNull::new(CGColorSpaceCreateWithName(kCGColorSpaceSRGB).cast_mut())
-                    .ok_or("Cannot create a test color space")?,
-            );
+            let srgb = NonNull::new(kCGColorSpaceSRGB.cast_mut())
+                .ok_or("The test sRGB color space is unavailable")?;
+            let color = Data(CGColorSpaceCreateWithName(srgb).ok_or("Cannot create a test color space")?);
+            let buffer = NonNull::new(pixels.as_mut_ptr().cast())
+                .ok_or("Cannot obtain the test pixel buffer")?;
             let context = Data(
-                NonNull::new(CGBitmapContextCreate(
-                    pixels.as_mut_ptr().cast(),
-                    1,
-                    2,
-                    8,
-                    4,
-                    color.0.as_ptr(),
-                    0x4001,
-                ))
-                .ok_or("Cannot create a test bitmap")?,
+                CGBitmapContextCreate(buffer, 1, 2, 8, 4, color.0, 0x4001)
+                    .ok_or("Cannot create a test bitmap")?,
             );
             let source = Data(
-                NonNull::new(CGBitmapContextCreateImage(context.0.as_ptr()).cast_mut())
-                    .ok_or("Cannot create a test image")?,
+                CGBitmapContextCreateImage(context.0).ok_or("Cannot create a test image")?,
             );
             let actual = copy_sdr_screenshot(source.0)?;
             assert_eq!(
