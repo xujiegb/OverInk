@@ -282,7 +282,7 @@ impl Ink {
             layer.append = append;
             layer.erase = erase;
             if rebuild || damage.is_some() || first < count {
-                let result = renderer.with_target(layer.texture.raw(), || {
+                let result = renderer.with_target(&layer.texture, || {
                     self.painter.queued = 0;
                     // Match the SDR white point used when drawing directly to
                     // the window. A highlighter builds its mask at scale 1.
@@ -507,10 +507,8 @@ impl StrokePainter {
         let vertex_grain = paper.is_null();
         geometry::prepare_samples(stroke, points, vertex_grain, &mut self.samples);
         let rgb = frame.color.map(stroke.color.output_rgb(renderer.extended));
-        if stroke.tool == Tool::Marker
-            && let Some(mask) = self.marker_texture(renderer)
-        {
-            return self.marker(frame, mask, rgb, stroke, region, white);
+        if stroke.tool == Tool::Marker && self.ensure_marker_texture(renderer) {
+            return self.marker(frame, rgb, stroke, region, white);
         }
         with_color_scale(renderer, white, || {
             let margin = stroke.max_radius() * 2. + frame.aa;
@@ -584,7 +582,7 @@ impl StrokePainter {
             .map_or(ptr::null_mut(), |texture| texture.raw())
     }
 
-    fn marker_texture(&mut self, renderer: &Renderer) -> Option<*mut SDL_Texture> {
+    fn ensure_marker_texture(&mut self, renderer: &Renderer) -> bool {
         if self.marker_mask.is_none() && !self.marker_unavailable {
             self.marker_mask = Texture::new(
                 renderer,
@@ -595,13 +593,12 @@ impl StrokePainter {
             .ok();
             self.marker_unavailable = self.marker_mask.is_none();
         }
-        self.marker_mask.as_ref().map(Texture::raw)
+        self.marker_mask.is_some()
     }
 
     fn marker(
         &mut self,
         frame: &Frame<'_>,
-        mask: *mut SDL_Texture,
         rgb: [f32; 3],
         stroke: &Stroke,
         region: Option<Bounds>,
@@ -655,7 +652,9 @@ impl StrokePainter {
                 // The mask accumulates coverage at full opacity. Tint it and
                 // apply the marker's opacity only once, after intersections.
                 self.queued = 0;
-                renderer.with_target(mask, || {
+                renderer.with_target(
+                    self.marker_mask.as_ref().ok_or("Missing marker mask")?,
+                    || {
                     renderer.set_render_scale([1., 1.])?;
                     renderer.clear([1., 1., 1., 0.])?;
                     let visible = |a, b| {
@@ -704,7 +703,8 @@ impl StrokePainter {
                         )?;
                     }
                     Ok(())
-                })?;
+                    },
+                )?;
                 self.queued = 0;
                 let src = SDL_FRect {
                     x: 0.,
