@@ -4,6 +4,7 @@
 //! owned resources and work only with Rust slices or fixed-size RGB values.
 #![deny(clippy::undocumented_unsafe_blocks)]
 use lcms2_sys as cms;
+use std::{ffi::c_void, ptr::NonNull};
 
 // Creating the standard sRGB profile accepts no pointer or memory owned by
 // Rust. A non-null result is transferred to Profile and freed in Drop.
@@ -14,7 +15,7 @@ unsafe extern "C" {
 
 const MAX_PROFILE_BYTES: usize = 16 * 1024 * 1024;
 
-struct Profile(cms::HPROFILE);
+struct Profile(NonNull<c_void>);
 
 impl Profile {
     fn open(bytes: &[u8]) -> Option<Self> {
@@ -24,21 +25,21 @@ impl Profile {
         let len = u32::try_from(bytes.len()).ok()?;
         // SAFETY: Little CMS borrows this byte slice only during this call.
         let raw = unsafe { cms::cmsOpenProfileFromMem(bytes.as_ptr().cast(), len) };
-        (!raw.is_null()).then(|| Self(raw))
+        NonNull::new(raw).map(Self)
     }
 
     fn srgb() -> Option<Self> {
         // The parameter-free Little CMS constructor transfers ownership
         // only on success. Profile::drop remains the native release point.
         let raw = native_create_srgb_profile();
-        (!raw.is_null()).then(|| Self(raw))
+        NonNull::new(raw).map(Self)
     }
 }
 
 impl Drop for Profile {
     fn drop(&mut self) {
         // SAFETY: Profile exclusively owns a non-null Little CMS profile.
-        unsafe { cms::cmsCloseProfile(self.0) };
+        unsafe { cms::cmsCloseProfile(self.0.as_ptr()) };
     }
 }
 
@@ -58,7 +59,7 @@ enum PixelLayout {
 /// Keep the native transform's pixel layout attached to its handle so
 /// safe callers cannot invoke Little CMS with an incompatible buffer.
 pub struct Transform {
-    raw: cms::HTRANSFORM,
+    raw: NonNull<c_void>,
     layout: PixelLayout,
 }
 
@@ -82,15 +83,15 @@ impl Transform {
         // takes its own transform ownership, paired with Transform::drop.
         let raw = unsafe {
             cms::cmsCreateTransform(
-                input.0,
+                input.0.as_ptr(),
                 format,
-                output.0,
+                output.0.as_ptr(),
                 format,
                 cms::Intent::RelativeColorimetric,
                 flags,
             )
         };
-        (!raw.is_null()).then(|| Self { raw, layout })
+        NonNull::new(raw).map(|raw| Self { raw, layout })
     }
 
     fn rgb(input: &Profile, output: &Profile) -> Option<Self> {
@@ -163,7 +164,7 @@ impl Transform {
         // buffer. Its native allocation remains valid through this call;
         // Little CMS supports these exact in-place pixel transforms.
         unsafe {
-            cms::cmsDoTransform(self.raw, data.as_ptr().cast_const(), data.as_ptr(), count);
+            cms::cmsDoTransform(self.raw.as_ptr(), data.as_ptr().cast_const(), data.as_ptr(), count);
         }
     }
 
@@ -175,7 +176,7 @@ impl Transform {
 impl Drop for Transform {
     fn drop(&mut self) {
         // SAFETY: Transform exclusively owns the non-null native handle.
-        unsafe { cms::cmsDeleteTransform(self.raw) };
+        unsafe { cms::cmsDeleteTransform(self.raw.as_ptr()) };
     }
 }
 
