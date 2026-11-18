@@ -1736,10 +1736,17 @@ impl OwnedTextureRef<'_> {
     }
 }
 
+/// Query only the renderer color-space information that callers need.
+enum RendererPropertyQuery {
+    HdrState,
+    SdrWhitePoint,
+}
+
 /// Closed set of SDL renderer commands; callers cannot supply native function
 /// pointers or arbitrary memory for the renderer to access.
 enum RenderCommand<'a> {
     Clear([f32; 4]),
+    TransparentRect(&'a SDL_FRect),
     Clip(Option<&'a SDL_Rect>),
     Scale([f32; 2]),
     Flush,
@@ -1752,6 +1759,26 @@ pub struct Renderer {
     pub name: String,
 }
 impl Renderer {
+    /// Read only known SDL renderer color properties at the FFI boundary.
+    /// HDR uses both fields from the same property handle.
+    fn query_color_property(&self, query: RendererPropertyQuery) -> (bool, f32) {
+        // SAFETY: Renderer owns a live SDL renderer. These SDL getters
+        // return copied numeric values without exporting native pointers.
+        unsafe {
+            let props = SDL_GetRendererProperties(self.raw);
+            match query {
+                RendererPropertyQuery::HdrState => (
+                    SDL_GetBooleanProperty(props, SDL_PROP_RENDERER_HDR_ENABLED_BOOLEAN, false),
+                    SDL_GetFloatProperty(props, SDL_PROP_RENDERER_HDR_HEADROOM_FLOAT, 1.),
+                ),
+                RendererPropertyQuery::SdrWhitePoint => (
+                    false,
+                    SDL_GetFloatProperty(props, SDL_PROP_RENDERER_SDR_WHITE_POINT_FLOAT, 1.),
+                ),
+            }
+        }
+    }
+
     /// Render an adapter-owned texture. The enum keeps the native pointer
     /// tied to an active Rust borrow, including across color-scale callbacks.
     fn draw_owned_texture(
@@ -1784,6 +1811,13 @@ impl Renderer {
                 RenderCommand::Clear([r, g, b, a]) => {
                     check(SDL_SetRenderDrawColorFloat(self.raw, r, g, b, a))?;
                     check(SDL_RenderClear(self.raw))
+                }
+                RenderCommand::TransparentRect(rect) => {
+                    check(SDL_SetRenderDrawColorFloat(self.raw, 0., 0., 0., 0.))?;
+                    check(SDL_SetRenderDrawBlendMode(self.raw, SDL_BLENDMODE_NONE))?;
+                    let draw = check(SDL_RenderFillRect(self.raw, rect));
+                    let restore = check(SDL_SetRenderDrawBlendMode(self.raw, SDL_BLENDMODE_BLEND));
+                    draw.and(restore)
                 }
                 RenderCommand::Clip(clip) => check(SDL_SetRenderClipRect(
                     self.raw,
@@ -1913,13 +1947,7 @@ impl Renderer {
     }
 
     pub fn hdr(&self) -> (bool, f32) {
-        unsafe {
-            let p = SDL_GetRendererProperties(self.raw);
-            (
-                SDL_GetBooleanProperty(p, SDL_PROP_RENDERER_HDR_ENABLED_BOOLEAN, false),
-                SDL_GetFloatProperty(p, SDL_PROP_RENDERER_HDR_HEADROOM_FLOAT, 1.),
-            )
-        }
+        self.query_color_property(RendererPropertyQuery::HdrState)
     }
     pub fn begin(&self, window: &Window, color: [f32; 4]) -> Result<[f32; 2], String> {
         let logical = window.size();
@@ -1955,25 +1983,14 @@ impl Renderer {
     }
     /// Query the renderer's SDR reference white, keeping SDL properties internal.
     pub fn sdr_white_point(&self) -> f32 {
-        unsafe {
-            SDL_GetFloatProperty(
-                SDL_GetRendererProperties(self.raw),
-                SDL_PROP_RENDERER_SDR_WHITE_POINT_FLOAT,
-                1.,
-            )
-        }
+        self.query_color_property(RendererPropertyQuery::SdrWhitePoint)
+            .1
     }
 
     /// Clear a damaged rectangle without blending, restoring normal draw
     /// blending even if rendering the rectangle returns an error.
     pub fn clear_rect_transparent(&self, rect: &SDL_FRect) -> Result<(), String> {
-        unsafe {
-            check(SDL_SetRenderDrawColorFloat(self.raw, 0., 0., 0., 0.))?;
-            check(SDL_SetRenderDrawBlendMode(self.raw, SDL_BLENDMODE_NONE))?;
-            let draw = check(SDL_RenderFillRect(self.raw, rect));
-            let restore = check(SDL_SetRenderDrawBlendMode(self.raw, SDL_BLENDMODE_BLEND));
-            draw.and(restore)
-        }
+        self.run_command(RenderCommand::TransparentRect(rect))
     }
 
     pub fn set_render_scale(&self, scale: [f32; 2]) -> Result<(), String> {
