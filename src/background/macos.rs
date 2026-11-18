@@ -74,9 +74,22 @@ struct CGRect {
     size: Size,
 }
 
+// The only permitted array count is one. The ABI-compatible repr(u32)
+// prevents safe Rust callers from requesting more elements than the single
+// initialized output slot provided to Core Graphics.
+#[repr(u32)]
+enum SingleDisplay {
+    One = 1,
+}
+
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
-    fn CGGetDisplaysWithPoint(point: Point, max: u32, displays: *mut u32, count: *mut u32) -> i32;
+    safe fn CGGetDisplaysWithPoint(
+        point: Point,
+        max: SingleDisplay,
+        displays: &mut u32,
+        count: &mut u32,
+    ) -> i32;
     fn CGDisplayCreateImage(display: u32) -> *const c_void;
     // Both APIs take and return scalar values and do not borrow or retain
     // Rust memory. The UI-thread permission flow remains in capture_permission.
@@ -123,7 +136,7 @@ fn display_id([x, y, w, h]: [i32; 4]) -> Result<u32, String> {
         y: f64::from(y) + f64::from(h) / 2.,
     };
     let (mut id, mut count) = (0, 0);
-    if unsafe { CGGetDisplaysWithPoint(center, 1, &mut id, &mut count) } != 0 || count == 0 {
+    if CGGetDisplaysWithPoint(center, SingleDisplay::One, &mut id, &mut count) != 0 || count == 0 {
         return Err("Cannot find the selected macOS display".into());
     }
     Ok(id)
