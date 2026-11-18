@@ -8,8 +8,31 @@ pub use sdl3_sys::{
 };
 use std::{
     ffi::{CStr, CString, c_void},
-    ptr,
+    ptr::{self, NonNull},
 };
+
+/// A native buffer returned by an SDL API that explicitly transfers
+/// ownership to the caller via SDL_free. Borrowed SDL strings must not
+/// be wrapped by this type.
+struct SdlAllocation<T>(NonNull<T>);
+
+impl<T> SdlAllocation<T> {
+    fn from_native(raw: *mut T) -> Option<Self> {
+        NonNull::new(raw).map(Self)
+    }
+
+    fn as_ptr(&self) -> *mut T {
+        self.0.as_ptr()
+    }
+}
+
+impl<T> Drop for SdlAllocation<T> {
+    fn drop(&mut self) {
+        // SAFETY: Only caller-owned SDL allocations are wrapped; SDL_free is
+        // their matching allocator, and each allocation has a single owner.
+        unsafe { SDL_free(self.as_ptr().cast()) };
+    }
+}
 
 pub fn error() -> String {
     unsafe {
@@ -204,10 +227,9 @@ pub fn delay_precise(nanoseconds: u64) {
 pub fn preferred_locales() -> Vec<(String, String)> {
     unsafe {
         let mut count = 0;
-        let locales = SDL_GetPreferredLocales(&mut count);
-        if locales.is_null() {
+        let Some(locales) = SdlAllocation::from_native(SDL_GetPreferredLocales(&mut count)) else {
             return Vec::new();
-        }
+        };
         let name = |ptr: *const std::ffi::c_char| {
             if ptr.is_null() {
                 String::new()
@@ -216,10 +238,9 @@ pub fn preferred_locales() -> Vec<(String, String)> {
             }
         };
         let result = (0..count.max(0) as usize)
-            .filter_map(|i| (*locales.add(i)).as_ref())
+            .filter_map(|i| (*locales.as_ptr().add(i)).as_ref())
             .map(|locale| (name(locale.language), name(locale.country)))
             .collect();
-        SDL_free(locales.cast());
         result
     }
 }
@@ -253,13 +274,11 @@ pub struct DisplayInfo {
 pub fn display_info() -> Result<Vec<DisplayInfo>, String> {
     unsafe {
         let mut count = 0;
-        let list = SDL_GetDisplays(&mut count);
-        if list.is_null() {
-            return Err(error());
-        }
+        let list = SdlAllocation::from_native(SDL_GetDisplays(&mut count))
+            .ok_or_else(error)?;
         let result = (0..count.max(0) as usize)
             .map(|i| {
-                let id = *list.add(i);
+                let id = *list.as_ptr().add(i);
                 let mut bounds = SDL_Rect::default();
                 if !SDL_GetDisplayBounds(id, &mut bounds) {
                     return Err(error());
@@ -287,7 +306,6 @@ pub fn display_info() -> Result<Vec<DisplayInfo>, String> {
                 })
             })
             .collect::<Result<Vec<_>, String>>();
-        SDL_free(list.cast());
         result
     }
 }
@@ -319,13 +337,8 @@ pub fn set_clipboard_text(value: &str) {
 
 pub fn clipboard_text() -> Option<String> {
     unsafe {
-        let p = SDL_GetClipboardText();
-        if p.is_null() {
-            return None;
-        }
-        let result = CStr::from_ptr(p).to_string_lossy().into_owned();
-        SDL_free(p.cast());
-        Some(result)
+        let text = SdlAllocation::from_native(SDL_GetClipboardText())?;
+        Some(CStr::from_ptr(text.as_ptr()).to_string_lossy().into_owned())
     }
 }
 
@@ -977,19 +990,18 @@ impl Window {
     pub fn icc_profile(&self) -> Option<Vec<u8>> {
         unsafe {
             let mut size = 0;
-            let profile = SDL_GetWindowICCProfile(self.raw, &mut size);
-            if profile.is_null() {
+            let Some(profile) =
+                SdlAllocation::from_native(SDL_GetWindowICCProfile(self.raw, &mut size))
+            else {
                 // A missing ICC profile is normal; avoid leaving a stale SDL error.
                 SDL_ClearError();
                 return None;
-            }
-            let bytes = if size > 0 && size <= 16 * 1024 * 1024 {
-                Some(std::slice::from_raw_parts(profile.cast::<u8>(), size).to_vec())
+            };
+            if size > 0 && size <= 16 * 1024 * 1024 {
+                Some(std::slice::from_raw_parts(profile.as_ptr().cast::<u8>(), size).to_vec())
             } else {
                 None
-            };
-            SDL_free(profile);
-            bytes
+            }
         }
     }
 
