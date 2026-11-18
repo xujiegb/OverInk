@@ -96,7 +96,8 @@ impl NativeWindowHandle<'_> {
         self.raw
     }
 
-    /// Extract the foreign pointer only at the native FFI boundary.
+    /// Extract the foreign pointer only at the Win32/Cocoa FFI boundary.
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     pub fn as_ptr(&self) -> *mut c_void {
         self.raw.as_ptr()
     }
