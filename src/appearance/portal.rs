@@ -161,8 +161,7 @@ mod tests {
                 .serve_at(path, LegacySettings)
                 .build()
                 .await?;
-            let proxy = Proxy::new(&service, name, path, "org.freedesktop.portal.Settings")
-                .await?;
+            let proxy = Proxy::new(&service, name, path, "org.freedesktop.portal.Settings").await?;
             assert_eq!(read_scheme(&proxy).await?, 1);
             Ok(())
         })
