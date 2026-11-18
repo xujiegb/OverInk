@@ -26,7 +26,7 @@ impl Gui {
     pub fn new() -> Self {
         let ctx = Context::default();
         // Apply input actions once per native frame, including mode toggles.
-        ctx.options_mut(|options| options.max_passes = std::num::NonZeroUsize::new(1).unwrap());
+        ctx.options_mut(|options| options.max_passes = std::num::NonZeroUsize::MIN);
         ctx.set_theme(egui::Theme::Light);
         ctx.set_fonts(crate::fonts::ui_definitions());
         ctx.all_styles_mut(|s| {
