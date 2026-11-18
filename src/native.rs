@@ -90,15 +90,16 @@ impl Passthrough {
         use windows::Win32::{
             Foundation::{ERROR_SUCCESS, GetLastError, HWND, SetLastError},
             UI::WindowsAndMessaging::{
-                GWL_EXSTYLE, GetWindowLongW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-                SWP_NOSIZE, SWP_NOZORDER, SetWindowLongW, SetWindowPos, WS_EX_LAYERED,
-                WS_EX_TRANSPARENT,
+                GWL_EXSTYLE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+                SWP_NOZORDER, SetWindowPos, WS_EX_LAYERED, WS_EX_TRANSPARENT,
             },
         };
         #[cfg(target_pointer_width = "64")]
         use windows::Win32::UI::WindowsAndMessaging::{
             GetWindowLongPtrW, SetWindowLongPtrW,
         };
+        #[cfg(target_pointer_width = "32")]
+        use windows::Win32::UI::WindowsAndMessaging::{GetWindowLongW, SetWindowLongW};
 
         let raw = window
             .win32_hwnd()
@@ -217,7 +218,7 @@ pub fn keep_controller_above(canvas: &Window, controller: &Window, _native: &Pas
         use windows::Win32::{
             Foundation::HWND,
             UI::WindowsAndMessaging::{
-                HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+                HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
                 SetWindowPos,
             },
         };
@@ -232,7 +233,7 @@ pub fn keep_controller_above(canvas: &Window, controller: &Window, _native: &Pas
                     0,
                     0,
                     0,
-                    SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                    SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
                 )
             };
         }
