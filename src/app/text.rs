@@ -568,7 +568,9 @@ impl App {
             && !self.hidden
             && self.input.text.selected == target.selected
             && self.input.text.editing() == target.editing
-            && self.text_menu_item().is_some_and(|item| item == &target.item)
+            && self
+                .text_menu_item()
+                .is_some_and(|item| item == &target.item)
             && self
                 .input
                 .text
