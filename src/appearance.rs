@@ -265,8 +265,8 @@ mod tests {
     }
 
     #[test]
-    fn ui_preferences_default_to_system_and_roundtrip() {
-        let default: Preferences = serde_json::from_str("{}").unwrap();
+    fn ui_preferences_default_to_system_and_roundtrip() -> serde_json::Result<()> {
+        let default: Preferences = serde_json::from_str("{}")?;
         assert_eq!(default, Preferences::default());
         assert_eq!(default.language, None);
         assert_eq!(default.theme, ThemeMode::System);
@@ -282,9 +282,8 @@ mod tests {
             screenshot_hdr: true,
             screenshot_folder: Some(PathBuf::from("OverInk Captures")),
         };
-        assert_eq!(
-            serde_json::from_str::<Preferences>(&serde_json::to_string(&manual).unwrap()).unwrap(),
-            manual,
-        );
+        let encoded = serde_json::to_string(&manual)?;
+        assert_eq!(serde_json::from_str::<Preferences>(&encoded)?, manual);
+        Ok(())
     }
 }

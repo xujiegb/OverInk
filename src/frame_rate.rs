@@ -106,20 +106,19 @@ impl FramePacer {
 mod tests {
     use super::*;
     #[test]
-    fn auto_tracks_fractional_refresh_and_fixed_rates_stay_fixed() {
+    fn auto_tracks_fractional_refresh_and_fixed_rates_stay_fixed() -> serde_json::Result<()> {
         assert_eq!(FrameRate::Auto.hz(60000.0 / 1001.0), 60000.0 / 1001.0);
         for rate in FrameRate::ALL {
             for bad in [0.0, f64::NAN, f64::INFINITY, -60.0] {
                 assert!(rate.hz(bad).is_finite());
             }
-            assert_eq!(
-                serde_json::from_str::<FrameRate>(&serde_json::to_string(&rate).unwrap()).unwrap(),
-                rate
-            );
+            let encoded = serde_json::to_string(&rate)?;
+            assert_eq!(serde_json::from_str::<FrameRate>(&encoded)?, rate);
         }
         assert_eq!(FrameRate::Fps120.hz(60.0), 120.0);
         assert_eq!(FrameRate::Fps30.hz(144.0), 30.0);
         assert!(serde_json::from_str::<FrameRate>("\"Fps999\"").is_err());
+        Ok(())
     }
     #[test]
     fn deadlines_do_not_add_render_time_or_catch_up_after_a_long_stall() {
