@@ -706,6 +706,8 @@ enum WindowCommand<'a> {
     RaiseIfCurrent,
     Show(bool),
     SetParent(Option<&'a Window>),
+    #[cfg(not(target_os = "windows"))]
+    ShapeRegions([i32; 2], Option<&'a [SDL_Rect]>),
 }
 
 /// Closed SDL window constructors, retaining borrowed title and parent
@@ -899,6 +901,29 @@ impl Window {
                     }
                     check(SDL_SetWindowParent(self.raw, raw))
                 }
+                #[cfg(not(target_os = "windows"))]
+                WindowCommand::ShapeRegions(size, opaque_regions) => {
+                    let Some(regions) = opaque_regions else {
+                        return check(SDL_SetWindowShape(self.raw, ptr::null_mut()));
+                    };
+                    let surface = OwnedSurface::from_native(SDL_CreateSurface(
+                        size[0],
+                        size[1],
+                        SDL_PIXELFORMAT_RGBA32,
+                    ))
+                    .ok_or_else(error)?;
+                    let opaque = SDL_MapSurfaceRGBA(surface.as_ptr(), 255, 255, 255, 255);
+                    let transparent = SDL_MapSurfaceRGBA(surface.as_ptr(), 0, 0, 0, 0);
+                    check(SDL_FillSurfaceRect(
+                        surface.as_ptr(),
+                        ptr::null(),
+                        transparent,
+                    ))?;
+                    for region in regions {
+                        check(SDL_FillSurfaceRect(surface.as_ptr(), region, opaque))?;
+                    }
+                    check(SDL_SetWindowShape(self.raw, surface.as_ptr()))
+                }
             }
         }
     }
@@ -966,28 +991,7 @@ impl Window {
         size: [i32; 2],
         opaque_regions: Option<&[SDL_Rect]>,
     ) -> Result<(), String> {
-        unsafe {
-            let Some(regions) = opaque_regions else {
-                return check(SDL_SetWindowShape(self.raw, ptr::null_mut()));
-            };
-            let surface = OwnedSurface::from_native(SDL_CreateSurface(
-                size[0],
-                size[1],
-                SDL_PIXELFORMAT_RGBA32,
-            ))
-            .ok_or_else(error)?;
-            let opaque = SDL_MapSurfaceRGBA(surface.as_ptr(), 255, 255, 255, 255);
-            let transparent = SDL_MapSurfaceRGBA(surface.as_ptr(), 0, 0, 0, 0);
-            check(SDL_FillSurfaceRect(
-                surface.as_ptr(),
-                ptr::null(),
-                transparent,
-            ))?;
-            for region in regions {
-                check(SDL_FillSurfaceRect(surface.as_ptr(), region, opaque))?;
-            }
-            check(SDL_SetWindowShape(self.raw, surface.as_ptr()))
-        }
+        self.run_command(WindowCommand::ShapeRegions(size, opaque_regions))
     }
 
     /// Create either kind of SDL window at one native ownership boundary.
