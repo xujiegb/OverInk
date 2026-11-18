@@ -175,9 +175,7 @@ impl Canvas {
         // or destroying the old renderer.
         self.ink.reset_textures();
         self.suspend_text_input();
-        if let Some(gui) = &mut self.text {
-            gui.reset_renderer_textures();
-        }
+        // Dropping the old text GUI releases its SDL texture handles.
         self.text = None;
         self.text_style = None;
         self.background.invalidate_texture();
