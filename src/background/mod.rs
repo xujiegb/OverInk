@@ -502,13 +502,17 @@ mod tests {
     use super::*;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn display_result(result: Result<(), crate::appearance::Text>) -> TestResult {
+        result.map_err(|message| message.get(crate::appearance::Language::English).into())
+    }
     #[test]
     fn disconnect_forgets_frozen_frames_and_live_mode_releases_images() -> TestResult {
         let mut bg = Background::default();
         bg.images.insert(7, Image::buffer(2, 2)?.into());
         bg.display = Some(7);
         bg.frozen = true;
-        bg.display(None, &BTreeSet::new(), SnapshotMode::Sdr, true)?;
+        display_result(bg.display(None, &BTreeSet::new(), SnapshotMode::Sdr, true))?;
         assert!(bg.images.is_empty());
         assert!(!bg.pending());
         bg.freeze();
@@ -554,13 +558,13 @@ mod tests {
             scale: 1.,
         };
         let connected = BTreeSet::from([7]);
-        bg.display(Some(&screen), &connected, SnapshotMode::Sdr, true)?;
+        display_result(bg.display(Some(&screen), &connected, SnapshotMode::Sdr, true))?;
         bg.freeze();
-        bg.display(Some(&screen), &connected, SnapshotMode::Sdr, false)?;
+        display_result(bg.display(Some(&screen), &connected, SnapshotMode::Sdr, false))?;
         assert!(!bg.pending());
         assert!(bg.frozen);
         bg.images.insert(7, Image::buffer(2, 2)?.into());
-        bg.display(Some(&screen), &connected, SnapshotMode::Sdr, true)?;
+        display_result(bg.display(Some(&screen), &connected, SnapshotMode::Sdr, true))?;
         assert!(!bg.pending());
         assert!(bg.images.contains_key(&7));
         Ok(())
@@ -576,10 +580,10 @@ mod tests {
             scale: 1.,
         };
         let connected = BTreeSet::from([7]);
-        bg.display(Some(&screen), &connected, SnapshotMode::Sdr, true)?;
+        display_result(bg.display(Some(&screen), &connected, SnapshotMode::Sdr, true))?;
         bg.images.insert(7, Image::buffer(2, 2)?.into());
         bg.frozen = true;
-        bg.display(Some(&screen), &connected, SnapshotMode::Linear, true)?;
+        display_result(bg.display(Some(&screen), &connected, SnapshotMode::Linear, true))?;
         assert!(bg.images.is_empty());
         assert!(bg.pending());
         let reason = crate::appearance::text(
