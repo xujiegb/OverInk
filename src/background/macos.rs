@@ -323,25 +323,34 @@ fn begin_screenshot(
         return Err("Invalid macOS screenshot dimensions".into());
     }
     unsafe {
-        let displays: *mut AnyObject = msg_send![content, displays];
-        let count: usize = msg_send![displays, count];
-        let mut display = ptr::null_mut::<AnyObject>();
+        let displays: Option<NonNull<AnyObject>> = NonNull::new(msg_send![content, displays]);
+        let displays = displays.ok_or("ScreenCaptureKit returned no display list")?;
+        let count: usize = msg_send![displays.as_ptr(), count];
+        let mut selected = None;
         for index in 0..count {
-            let item: *mut AnyObject = msg_send![displays, objectAtIndex: index];
-            let display_id: u32 = msg_send![item, displayID];
+            let item: Option<NonNull<AnyObject>> =
+                NonNull::new(msg_send![displays.as_ptr(), objectAtIndex: index]);
+            let Some(item) = item else {
+                continue;
+            };
+            let display_id: u32 = msg_send![item.as_ptr(), displayID];
             if display_id == id {
-                display = item;
+                selected = Some(item);
                 break;
             }
         }
-        if display.is_null() {
-            return Err("ScreenCaptureKit did not return the selected display".into());
-        }
-        let empty: *mut AnyObject = msg_send![array, array];
-        let filter: *mut AnyObject = msg_send![filter_class, alloc];
-        let filter: *mut AnyObject =
-            msg_send![filter, initWithDisplay: display, excludingWindows: empty];
-        let filter = Retained::from_raw(filter).ok_or("Cannot configure the selected display")?;
+        let display = selected.ok_or("ScreenCaptureKit did not return the selected display")?;
+        let empty: Option<NonNull<AnyObject>> = NonNull::new(msg_send![array, array]);
+        let filter: Option<NonNull<AnyObject>> = NonNull::new(msg_send![filter_class, alloc]);
+        let filter = filter.ok_or("Cannot allocate the selected display filter")?;
+        let filter: Option<NonNull<AnyObject>> = NonNull::new(msg_send![
+            filter.as_ptr(),
+            initWithDisplay: display.as_ptr(),
+            excludingWindows: empty.map_or(ptr::null_mut(), NonNull::as_ptr)
+        ]);
+        let filter = filter
+            .and_then(|filter| Retained::from_raw(filter.as_ptr()))
+            .ok_or("Cannot configure the selected display")?;
         // The HDR preset is available on supported Apple silicon systems.
         // Ordinary SDR captures use the standard configuration on macOS 14+.
         // The HDR preset is autoreleased (+0); +new returns an owned (+1)
