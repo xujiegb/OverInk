@@ -342,7 +342,7 @@ mod x11 {
             let (mut returned_root, mut rx, mut ry, mut rw, mut rh, mut border, mut depth) =
                 (0, 0, 0, 0, 0, 0, 0);
             if geometry(
-                display.as_ptr(),
+                display.as_non_null(),
                 root,
                 &mut returned_root,
                 &mut rx,
