@@ -6,7 +6,9 @@ use std::{
     ptr,
     sync::OnceLock,
 };
-fn library(names: &[&str]) -> Result<Library, String> {
+/// Load only the fixed desktop ABI sonames requested by our native backends.
+/// The caller never supplies paths or names from configuration or the network.
+pub(crate) fn library(names: &[&str]) -> Result<Library, String> {
     for &name in names {
         if let Ok(lib) = unsafe { Library::new(name) } {
             return Ok(lib);
@@ -354,27 +356,41 @@ impl X11 {
         if self.applied == Some(region) {
             return Ok(());
         }
+        // Convert and validate every coordinate before crossing into Xlib.
         // ShapeInput = 2, ShapeSet = 0, Unsorted = 0.
-        unsafe {
-            if pass || hole.is_some() {
-                let mut rectangles = Vec::new();
-                if hole.is_some() {
-                    for area in crate::controller::outside(size, hole) {
-                        rectangles.push(Rectangle {
-                            x: area.x.try_into().map_err(|_| "Input region is too large")?,
-                            y: area.y.try_into().map_err(|_| "Input region is too large")?,
-                            width: area.w.try_into().map_err(|_| "Input region is too large")?,
-                            height: area.h.try_into().map_err(|_| "Input region is too large")?,
-                        });
-                    }
+        let rectangles = if pass || hole.is_some() {
+            let mut rectangles = Vec::new();
+            if hole.is_some() {
+                for area in crate::controller::outside(size, hole) {
+                    rectangles.push(Rectangle {
+                        x: area.x.try_into().map_err(|_| "Input region is too large")?,
+                        y: area.y.try_into().map_err(|_| "Input region is too large")?,
+                        width: area.w.try_into().map_err(|_| "Input region is too large")?,
+                        height: area.h.try_into().map_err(|_| "Input region is too large")?,
+                    });
                 }
+            }
+            Some(rectangles)
+        } else {
+            None
+        };
+        // SAFETY: The SDL window and X11 Display remain live throughout the
+        // calls. Native XRectangle arguments are checked and the borrowed
+        // buffer remains alive until XShapeCombineRectangles returns.
+        unsafe {
+            if let Some(rectangles) = rectangles.as_ref() {
+                let data = if rectangles.is_empty() {
+                    ptr::null()
+                } else {
+                    rectangles.as_ptr()
+                };
                 (self.rectangles)(
                     display,
                     window,
                     2,
                     0,
                     0,
-                    rectangles.as_ptr(),
+                    data,
                     rectangles.len() as c_int,
                     0,
                     0,
