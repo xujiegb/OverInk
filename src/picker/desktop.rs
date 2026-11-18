@@ -146,6 +146,7 @@ mod x11 {
     use super::*;
     use libloading::{Library, Symbol};
     use std::ffi::{c_char, c_int, c_ulong, c_void};
+    use std::ptr::NonNull;
     fn library() -> Result<Library, String> {
         crate::native::native_library(&["libX11.so.6", "libX11.so"])
             .map_err(|_| "X11 screen capture is unavailable".into())
@@ -270,7 +271,7 @@ mod x11 {
     /// Own an XGetImage result while retaining the library that supplied its
     /// XDestroyImage function. Every early return now releases the XImage.
     struct OwnedImage<'lib> {
-        raw: *mut Image,
+        raw: NonNull<Image>,
         destroy: Symbol<'lib, unsafe extern "C" fn(*mut Image) -> c_int>,
     }
 
@@ -280,9 +281,7 @@ mod x11 {
             destroy: Symbol<'lib, unsafe extern "C" fn(*mut Image) -> c_int>,
             message: &'static str,
         ) -> Result<Self, String> {
-            if raw.is_null() {
-                return Err(message.into());
-            }
+            let raw = NonNull::new(raw).ok_or(message)?;
             Ok(Self { raw, destroy })
         }
     }
@@ -292,7 +291,7 @@ mod x11 {
             // SAFETY: This non-null XImage is owned exclusively by the guard.
             // The borrowed Symbol also keeps the X11 library loaded.
             unsafe {
-                (self.destroy)(self.raw);
+                (self.destroy)(self.raw.as_ptr());
             }
         }
     }
@@ -384,17 +383,25 @@ mod x11 {
                 destroy,
                 image_error,
             )?;
-            let masks = [
-                (*image.raw).red_mask,
-                (*image.raw).green_mask,
-                (*image.raw).blue_mask,
-            ];
+            // SAFETY: XGetImage returned a non-null, owned image that stays
+            // alive through the OwnedImage guard. Reject malformed metadata
+            // before asking XGetPixel to address its native pixel buffer.
+            let header = image.raw.as_ref();
+            if header.width != width
+                || header.height != height
+                || header.data.is_null()
+                || header.bytes_per_line <= 0
+                || header.bits_per_pixel <= 0
+            {
+                return Err(image_error.into());
+            }
+            let masks = [header.red_mask, header.green_mask, header.blue_mask];
             if masks.contains(&0) {
                 return Err(visual_error.into());
             }
             for y in 0..height {
                 for x in 0..width {
-                    consume(x, y, pixel(image.raw, x, y), masks)?;
+                    consume(x, y, pixel(image.raw.as_ptr(), x, y), masks)?;
                 }
             }
             Ok(())
