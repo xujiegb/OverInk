@@ -161,8 +161,8 @@ enum NativeWindowProperty {
 }
 
 impl NativeWindowProperty {
-    fn key(&self) -> *const std::ffi::c_char {
-        match self {
+    fn key(&self) -> Option<NonNull<std::ffi::c_char>> {
+        let key = match self {
             #[cfg(target_os = "windows")]
             Self::Win32Hwnd => SDL_PROP_WINDOW_WIN32_HWND_POINTER,
             #[cfg(target_os = "macos")]
@@ -173,7 +173,8 @@ impl NativeWindowProperty {
             Self::WaylandSurface => SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER,
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             Self::WaylandDisplay => SDL_PROP_WINDOW_WAYLAND_DISPLAY_POINTER,
-        }
+        };
+        NonNull::new(key.cast_mut())
     }
 }
 
@@ -479,17 +480,25 @@ pub fn preferred_locales() -> Vec<(String, String)> {
         // SDL allocated the returned pointer array, and the count is now
         // bounded before any pointer arithmetic or slice construction.
         let entries = std::slice::from_raw_parts(locales.as_ptr(), count);
-        let name = |ptr: *const std::ffi::c_char| {
-            if ptr.is_null() {
-                String::new()
+        let name = |ptr: Option<NonNull<std::ffi::c_char>>| {
+            if let Some(ptr) = ptr {
+                CStr::from_ptr(ptr.as_ptr())
+                    .to_str()
+                    .unwrap_or_default()
+                    .to_owned()
             } else {
-                CStr::from_ptr(ptr).to_str().unwrap_or_default().to_owned()
+                String::new()
             }
         };
         entries
             .iter()
             .filter_map(|locale| locale.as_ref())
-            .map(|locale| (name(locale.language), name(locale.country)))
+            .map(|locale| {
+                (
+                    name(NonNull::new(locale.language.cast_mut())),
+                    name(NonNull::new(locale.country.cast_mut())),
+                )
+            })
             .collect()
     }
 }
@@ -1437,10 +1446,11 @@ impl Window {
         // SAFETY: SDL owns the window and its property list; the property
         // value is borrowed and checked for null. PhantomData ties the native
         // handle to this SDL Window's lifetime and thread restrictions.
+        let key = property.key()?;
         unsafe {
             NonNull::new(SDL_GetPointerProperty(
                 SDL_GetWindowProperties(self.raw),
-                property.key(),
+                key.as_ptr(),
                 ptr::null_mut(),
             ))
             .map(|raw| NativeWindowHandle {
