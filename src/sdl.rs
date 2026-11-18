@@ -147,16 +147,10 @@ pub struct NativeWindowHandle<'a> {
 }
 
 impl NativeWindowHandle<'_> {
-    /// Keep non-null identity when caching a borrowed native handle.
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    /// Keep the non-null identity and the SDL window borrow tied together
+    /// across all supported native backends.
     pub fn as_non_null(&self) -> NonNull<c_void> {
         self.raw
-    }
-
-    /// Extract the foreign pointer only at the Win32/Cocoa FFI boundary.
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
-    pub fn as_ptr(&self) -> *mut c_void {
-        self.raw.as_ptr()
     }
 }
 
