@@ -192,7 +192,10 @@ impl<'a> PointSpan<'a> {
         self.points
             .get(index.checked_sub(usize::from(self.start.is_some()))?)
             .copied()
-            .or_else(|| self.end.filter(|_| self.len().checked_sub(1) == Some(index)))
+            .or_else(|| {
+                self.end
+                    .filter(|_| self.len().checked_sub(1) == Some(index))
+            })
     }
 }
 
