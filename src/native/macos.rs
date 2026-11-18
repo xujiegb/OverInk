@@ -47,7 +47,7 @@ pub fn remove_metal_view(window: &Window) {
     // selectors use their Cocoa object-pointer and NSInteger signatures.
     // Check the intermediate contentView before messaging it.
     unsafe {
-        let ns = ns.as_ptr().cast::<AnyObject>();
+        let ns = ns.as_non_null().as_ptr().cast::<AnyObject>();
         let content: *mut AnyObject = msg_send![ns, contentView];
         if content.is_null() {
             return;
