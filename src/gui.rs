@@ -56,13 +56,6 @@ impl Gui {
             composition_ended: None,
         }
     }
-    // A render-target reset invalidates contents, not SDL texture ownership.
-    // Release the old textures while the renderer is still alive, then rebuild
-    // egui's atlas from a new Context.
-    pub fn reset_renderer_textures(&mut self) {
-        self.textures.clear();
-    }
-
     pub fn input(&mut self, w: &Window) -> RawInput {
         self.input_with_units(w, w.ui_scale().max(0.5))
     }
