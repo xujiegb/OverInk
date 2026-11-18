@@ -289,17 +289,6 @@ mod x11 {
             Ok(Self { raw, destroy })
         }
 
-        fn masks(&self) -> [c_ulong; 3] {
-            // SAFETY: XGetImage supplied a live non-null XImage, whose
-            // prefix matches Image. The guard owns it until Drop.
-            unsafe {
-                [
-                    (*self.raw).red_mask,
-                    (*self.raw).green_mask,
-                    (*self.raw).blue_mask,
-                ]
-            }
-        }
     }
 
     impl Drop for OwnedImage<'_> {
@@ -312,13 +301,31 @@ mod x11 {
         }
     }
 
-    pub fn sample(window: &Window, point: ScreenPoint) -> Result<InkColor, String> {
-        // SAFETY: Xlib calls use the active SDL Display and compatible C
-        // symbol signatures. The root coordinates are bounds-checked before
-        // XGetImage, and OwnedImage releases the result while libX11 is live.
+    /// Shared X11 image readback for both the color picker and screenshots.
+    /// Exactly one native call boundary owns the XGetImage result and its
+    /// dynamically loaded X11 destructor.
+    fn read_pixels(
+        window: &Window,
+        root: c_ulong,
+        origin: [i32; 2],
+        dimensions: [i32; 2],
+        bounds_error: &'static str,
+        image_error: &'static str,
+        visual_error: &'static str,
+        mut consume: impl FnMut(i32, i32, c_ulong, [c_ulong; 3]) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let [x, y] = origin;
+        let [width, height] = dimensions;
+        if width <= 0 || height <= 0 {
+            return Err(bounds_error.into());
+        }
+        // SAFETY: SDL owns the live X11 Display. Symbol types match the Xlib
+        // C signatures and all output parameters are writable stack values.
+        // The root geometry is checked before requesting an image. OwnedImage
+        // retains the XDestroyImage symbol and frees the image on every exit.
         unsafe {
             let lib = library()?;
-            let d = display(window)?;
+            let display = display(window)?;
             let geometry: Symbol<
                 unsafe extern "C" fn(
                     *mut c_void,
@@ -332,107 +339,25 @@ mod x11 {
                     *mut u32,
                 ) -> c_int,
             > = lib.get(b"XGetGeometry\0").map_err(|e| e.to_string())?;
-            let (mut root, mut x, mut y, mut width, mut height, mut border, mut depth) =
+            let (mut returned_root, mut rx, mut ry, mut rw, mut rh, mut border, mut depth) =
                 (0, 0, 0, 0, 0, 0, 0);
             if geometry(
-                d,
-                point.root,
-                &mut root,
-                &mut x,
-                &mut y,
-                &mut width,
-                &mut height,
-                &mut border,
-                &mut depth,
-            ) == 0
-                || point.x < 0
-                || point.y < 0
-                || point.x as u32 >= width
-                || point.y as u32 >= height
-            {
-                return Err("Screen coordinate is out of bounds".into());
-            }
-            let get: Symbol<
-                unsafe extern "C" fn(
-                    *mut c_void,
-                    c_ulong,
-                    c_int,
-                    c_int,
-                    u32,
-                    u32,
-                    c_ulong,
-                    c_int,
-                ) -> *mut Image,
-            > = lib.get(b"XGetImage\0").map_err(|e| e.to_string())?;
-            let pixel: Symbol<unsafe extern "C" fn(*mut Image, c_int, c_int) -> c_ulong> =
-                lib.get(b"XGetPixel\0").map_err(|e| e.to_string())?;
-            let destroy: Symbol<unsafe extern "C" fn(*mut Image) -> c_int> =
-                lib.get(b"XDestroyImage\0").map_err(|e| e.to_string())?;
-            let image = OwnedImage::new(
-                get(d, point.root, point.x, point.y, 1, 1, c_ulong::MAX, 2),
-                destroy,
-                "Cannot read the selected desktop pixel",
-            )?;
-            let masks = image.masks();
-            let value = pixel(image.raw, 0, 0);
-            let mut rgb = [0.; 3];
-            for (i, mask) in masks.into_iter().enumerate() {
-                rgb[i] = channel(value, mask)?;
-            }
-            Ok(crate::icc::display_sample_to_srgb(window, rgb))
-        }
-    }
-    fn channel(pixel: c_ulong, mask: c_ulong) -> Result<f32, String> {
-        if mask == 0 {
-            return Err("Screen picking requires a TrueColor visual".into());
-        }
-        let shift = mask.trailing_zeros();
-        let max = mask >> shift;
-        Ok(((pixel & mask) >> shift) as f32 / max as f32)
-    }
-    pub fn capture(window: &Window) -> Result<crate::background::Image, String> {
-        let origin = position(window, [0.; 2])?;
-        let [w, h] = window.pixel_size();
-        let mut out = crate::background::Image::buffer(w as u32, h as u32)?;
-        // SAFETY: Window and SDL keep the X11 Display/drawable alive. The
-        // requested rectangle is validated against XGetGeometry before
-        // XGetImage; the returned image is owned by OwnedImage, which also
-        // retains the library used for XDestroyImage and XGetPixel.
-        unsafe {
-            let lib = library()?;
-            let d = display(window)?;
-            let geometry: Symbol<
-                unsafe extern "C" fn(
-                    *mut c_void,
-                    c_ulong,
-                    *mut c_ulong,
-                    *mut c_int,
-                    *mut c_int,
-                    *mut u32,
-                    *mut u32,
-                    *mut u32,
-                    *mut u32,
-                ) -> c_int,
-            > = lib.get(b"XGetGeometry\0").map_err(|e| e.to_string())?;
-            let (mut root, mut x, mut y, mut rw, mut rh, mut border, mut depth) =
-                (0, 0, 0, 0, 0, 0, 0);
-            if geometry(
-                d,
-                origin.root,
-                &mut root,
-                &mut x,
-                &mut y,
+                display,
+                root,
+                &mut returned_root,
+                &mut rx,
+                &mut ry,
                 &mut rw,
                 &mut rh,
                 &mut border,
                 &mut depth,
             ) == 0
-                || origin.x < 0
-                || origin.y < 0
-                || origin.x as i64 + w as i64 > rw as i64
-                || origin.y as i64 + h as i64 > rh as i64
+                || x < 0
+                || y < 0
+                || x as i64 + width as i64 > rw as i64
+                || y as i64 + height as i64 > rh as i64
             {
-                return Err("Capture is outside the connected display bounds".into());
+                return Err(bounds_error.into());
             }
             let get: Symbol<
                 unsafe extern "C" fn(
@@ -452,35 +377,87 @@ mod x11 {
                 lib.get(b"XDestroyImage\0").map_err(|e| e.to_string())?;
             let image = OwnedImage::new(
                 get(
-                    d,
-                    origin.root,
-                    origin.x,
-                    origin.y,
-                    w as u32,
-                    h as u32,
+                    display,
+                    root,
+                    x,
+                    y,
+                    width as u32,
+                    height as u32,
                     c_ulong::MAX,
                     2,
                 ),
                 destroy,
-                "Cannot capture the desktop",
+                image_error,
             )?;
-            let masks = image.masks();
+            let masks = [
+                (*image.raw).red_mask,
+                (*image.raw).green_mask,
+                (*image.raw).blue_mask,
+            ];
             if masks.contains(&0) {
-                return Err("Desktop capture requires a TrueColor visual".into());
+                return Err(visual_error.into());
             }
-            for y in 0..h {
-                for x in 0..w {
-                    let value = pixel(image.raw, x, y);
-                    let offset = (y as usize * w as usize + x as usize) * 4;
-                    for (i, mask) in masks.into_iter().enumerate() {
-                        out.rgba[offset + i] = (channel(value, mask)? * 255.).round() as u8;
-                    }
-                    out.rgba[offset + 3] = 255;
+            for y in 0..height {
+                for x in 0..width {
+                    consume(x, y, pixel(image.raw, x, y), masks)?;
                 }
             }
+            Ok(())
         }
-        // Keep SDL-owned ICC bytes out of the X11 unsafe readback region.
-        // The Window adapter copies the profile and frees SDL's allocation.
+    }
+
+    pub fn sample(window: &Window, point: ScreenPoint) -> Result<InkColor, String> {
+        let mut rgb = [0.; 3];
+        read_pixels(
+            window,
+            point.root,
+            [point.x, point.y],
+            [1, 1],
+            "Screen coordinate is out of bounds",
+            "Cannot read the selected desktop pixel",
+            "Screen picking requires a TrueColor visual",
+            |_, _, value, masks| {
+                for (i, mask) in masks.into_iter().enumerate() {
+                    rgb[i] = channel(value, mask)?;
+                }
+                Ok(())
+            },
+        )?;
+        Ok(crate::icc::display_sample_to_srgb(window, rgb))
+    }
+    fn channel(pixel: c_ulong, mask: c_ulong) -> Result<f32, String> {
+        if mask == 0 {
+            return Err("Screen picking requires a TrueColor visual".into());
+        }
+        let shift = mask.trailing_zeros();
+        let max = mask >> shift;
+        Ok(((pixel & mask) >> shift) as f32 / max as f32)
+    }
+    pub fn capture(window: &Window) -> Result<crate::background::Image, String> {
+        let origin = position(window, [0.; 2])?;
+        let [w, h] = window.pixel_size();
+        if w <= 0 || h <= 0 {
+            return Err("Invalid desktop capture dimensions".into());
+        }
+        let mut out = crate::background::Image::buffer(w as u32, h as u32)?;
+        read_pixels(
+            window,
+            origin.root,
+            [origin.x, origin.y],
+            [w, h],
+            "Capture is outside the connected display bounds",
+            "Cannot capture the desktop",
+            "Desktop capture requires a TrueColor visual",
+            |x, y, value, masks| {
+                let offset = (y as usize * w as usize + x as usize) * 4;
+                for (i, mask) in masks.into_iter().enumerate() {
+                    out.rgba[offset + i] = (channel(value, mask)? * 255.).round() as u8;
+                }
+                out.rgba[offset + 3] = 255;
+                Ok(())
+            },
+        )?;
+        // SDL owns its ICC profile allocation; Window copies and frees it.
         if let Some(profile) = window.icc_profile() {
             out.convert_to_srgb(&profile);
         }
