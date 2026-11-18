@@ -560,6 +560,24 @@ impl App {
         })
     }
 
+    /// Compare a delayed pick with the current text state without copying the
+    /// annotation or its editable buffer again when the native picker closes.
+    pub(super) fn matches_text_pick_target(&self, target: &TextPickTarget) -> bool {
+        self.tool.is_text()
+            && !self.pass
+            && !self.hidden
+            && self.input.text.selected == target.selected
+            && self.input.text.editing() == target.editing
+            && self.text_menu_item().is_some_and(|item| item == &target.item)
+            && self
+                .input
+                .text
+                .draft
+                .as_ref()
+                .map(|draft| draft.committed.as_str())
+                == target.committed.as_deref()
+    }
+
     pub(super) fn pick_text_color(&mut self, color: InkColor) -> Option<InkColor> {
         if !self.tool.is_text() || self.pass || self.hidden {
             return None;
@@ -1874,24 +1892,31 @@ mod tests {
         let mut app = app();
         app.use_tool(Tool::Text);
         click(&mut app, pos2(150., 120.));
-        let target = app.text_pick_target().unwrap();
+        let Some(target) = app.text_pick_target() else {
+            panic!("Expected a draft text pick target");
+        };
+        assert!(app.matches_text_pick_target(&target));
         let color = InkColor::from_rgb8([4, 171, 131]);
 
         // A different text draft is not the target captured when picking began.
         set_draft_committed(&mut app, "changed");
+        assert!(!app.matches_text_pick_target(&target));
         assert_ne!(app.text_pick_target(), Some(target));
         assert_eq!(app.pick_text_color(color), Some(color));
         assert_eq!(app.pick_text_color(color), Some(color));
 
         app.pass = true;
+        assert!(!app.matches_text_pick_target(&target));
         assert!(app.text_pick_target().is_none());
         assert!(app.pick_text_color(color).is_none());
         app.pass = false;
         app.hidden = true;
+        assert!(!app.matches_text_pick_target(&target));
         assert!(app.text_pick_target().is_none());
         assert!(app.pick_text_color(color).is_none());
         app.hidden = false;
         app.input.text = TextInput::default();
+        assert!(!app.matches_text_pick_target(&target));
         assert!(app.text_pick_target().is_none());
         assert!(app.pick_text_color(color).is_none());
     }

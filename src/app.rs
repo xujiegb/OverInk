@@ -2231,7 +2231,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 let on_text = origin.as_ref().is_some_and(|(window, output, target)| {
                     *window == canvas.window.id
                         && *output == canvas.output
-                        && app.text_pick_target().as_ref() == Some(target)
+                        && app.matches_text_pick_target(target)
                 });
                 if on_text {
                     app.input.text.refocus();
@@ -2693,20 +2693,18 @@ fn run_inner(options: Options) -> Result<(), String> {
                 && !app.picking
                 && !app.screenshot.active()
                 && !file_dialog.pending()
-                && app.text_pick_target().is_some()
+                && let Some(target) = app.text_pick_target()
             {
                 app.input.text.refocus();
-                if let Some(target) = app.text_pick_target() {
-                    let canvas = &mut canvases[active];
-                    canvas.suspend_text_input();
-                    text_pick = Some((canvas.window.id, canvas.output, target));
-                    app.picking = true;
-                    picker.start(wayland || xwayland);
-                    toolbar_dirty = true;
-                    for canvas in &mut canvases {
-                        canvas.dirty = true;
-                        canvas.guard_dirty = true;
-                    }
+                let canvas = &mut canvases[active];
+                canvas.suspend_text_input();
+                text_pick = Some((canvas.window.id, canvas.output, target));
+                app.picking = true;
+                picker.start(wayland || xwayland);
+                toolbar_dirty = true;
+                for canvas in &mut canvases {
+                    canvas.dirty = true;
+                    canvas.guard_dirty = true;
                 }
             }
             if let Some(action) = app.screenshot.action()
