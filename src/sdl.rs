@@ -1437,7 +1437,7 @@ impl GuiTexture {
                 dimensions: [w, h],
             };
             check(SDL_SetTextureBlendMode(raw, SDL_BLENDMODE_BLEND))?;
-            SDL_SetTextureScaleMode(raw, SDL_SCALEMODE_LINEAR);
+            check(SDL_SetTextureScaleMode(raw, SDL_SCALEMODE_LINEAR))?;
             Ok(texture)
         }
     }
