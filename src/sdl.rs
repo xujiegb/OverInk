@@ -1130,7 +1130,7 @@ impl Window {
                         pixels.as_mut_ptr().cast(),
                         pitch,
                     );
-                    if let Some(surface) = OwnedSurface::from_native(surface) {
+                    if let Some(surface) = OwnedSurface::from_native(NonNull::new(surface)) {
                         SDL_SetWindowIcon(self.raw, surface.as_ptr());
                     }
                     Ok(())
@@ -1140,11 +1140,11 @@ impl Window {
                     let Some(regions) = opaque_regions else {
                         return check(SDL_SetWindowShape(self.raw, ptr::null_mut()));
                     };
-                    let surface = OwnedSurface::from_native(SDL_CreateSurface(
+                    let surface = OwnedSurface::from_native(NonNull::new(SDL_CreateSurface(
                         size[0],
                         size[1],
                         SDL_PIXELFORMAT_RGBA32,
-                    ))
+                    )))
                     .ok_or_else(error)?;
                     let opaque = SDL_MapSurfaceRGBA(surface.as_ptr(), 255, 255, 255, 255);
                     let transparent = SDL_MapSurfaceRGBA(surface.as_ptr(), 0, 0, 0, 0);
@@ -1605,8 +1605,8 @@ impl OwnedSurface {
     /// # Safety
     /// `raw` must be null or a uniquely owned SDL_Surface allocation.
     /// Borrowed surfaces and pointers already owned elsewhere are forbidden.
-    unsafe fn from_native(raw: *mut SDL_Surface) -> Option<Self> {
-        NonNull::new(raw).map(Self)
+    unsafe fn from_native(raw: Option<NonNull<SDL_Surface>>) -> Option<Self> {
+        raw.map(Self)
     }
 
     /// Acquire one of the known SDL-created surfaces and copy its dimensions
@@ -1625,7 +1625,7 @@ impl OwnedSurface {
                     SDL_CreateSurface(width, height, SDL_PIXELFORMAT_RGBA32)
                 }
             };
-            let surface = Self::from_native(raw).ok_or_else(error)?;
+            let surface = Self::from_native(NonNull::new(raw)).ok_or_else(error)?;
             let dimensions = [(*surface.as_ptr()).w, (*surface.as_ptr()).h];
             if dimensions[0] <= 0 || dimensions[1] <= 0 {
                 return Err("SDL returned invalid surface dimensions".into());
@@ -1663,8 +1663,8 @@ impl OwnedTexture {
     /// # Safety
     /// `raw` must be null or a unique SDL-created texture whose ownership
     /// transfers to this guard; it must not be released anywhere else.
-    unsafe fn from_native(raw: *mut SDL_Texture) -> Option<Self> {
-        NonNull::new(raw).map(Self)
+    unsafe fn from_native(raw: Option<NonNull<SDL_Texture>>) -> Option<Self> {
+        raw.map(Self)
     }
 
     fn create(
@@ -1862,7 +1862,7 @@ impl SnapshotTexture {
             };
             // SAFETY: Both branches create a new caller-owned SDL texture,
             // and this guard uniquely releases it on any later error.
-            let texture = Self(OwnedTexture::from_native(raw).ok_or_else(error)?);
+            let texture = Self(OwnedTexture::from_native(NonNull::new(raw)).ok_or_else(error)?);
             check(SDL_UpdateTexture(
                 texture.0.as_ptr(),
                 ptr::null(),

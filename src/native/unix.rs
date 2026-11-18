@@ -54,8 +54,8 @@ impl OwnedWaylandHandle {
     /// # Safety
     /// `raw` must be null or a newly owned Wayland object, and `destroy`
     /// must be the matching destructor from a library that outlives the guard.
-    unsafe fn from_native(raw: *mut c_void, destroy: Destroy) -> Option<Self> {
-        NonNull::new(raw).map(|raw| Self { raw, destroy })
+    unsafe fn from_native(raw: Option<NonNull<c_void>>, destroy: Destroy) -> Option<Self> {
+        raw.map(|raw| Self { raw, destroy })
     }
 
     fn as_ptr(&self) -> *mut c_void {
@@ -84,8 +84,12 @@ impl OwnedWaylandRegion {
     /// # Safety
     /// The pointer must be null or a newly owned wl_region, and both function
     /// pointers must remain loaded until the region guard is destroyed.
-    unsafe fn from_native(raw: *mut c_void, marshal: Marshal, version: Version) -> Option<Self> {
-        NonNull::new(raw).map(|raw| Self {
+    unsafe fn from_native(
+        raw: Option<NonNull<c_void>>,
+        marshal: Marshal,
+        version: Version,
+    ) -> Option<Self> {
+        raw.map(|raw| Self {
             raw,
             marshal,
             version,
@@ -216,11 +220,11 @@ impl Wayland {
             let display = w.wayland_display().ok_or("No Wayland display")?.as_ptr();
             // Every created resource is guarded immediately. An error or
             // unwind runs the correct native destructor before unloading lib.
-            let queue = OwnedWaylandHandle::from_native(create_queue(display), queue_destroy)
+            let queue = OwnedWaylandHandle::from_native(NonNull::new(create_queue(display)), queue_destroy)
                 .ok_or("Cannot create Wayland event queue")?;
             let registry_raw = {
                 let wrapper =
-                    OwnedWaylandHandle::from_native(create_wrapper(display), wrapper_destroy)
+                    OwnedWaylandHandle::from_native(NonNull::new(create_wrapper(display)), wrapper_destroy)
                         .ok_or("Cannot wrap Wayland display")?;
                 set_queue(wrapper.as_ptr(), queue.as_ptr());
                 marshal(
@@ -232,7 +236,7 @@ impl Wayland {
                     ptr::null_mut::<c_void>(),
                 )
             };
-            let registry = OwnedWaylandHandle::from_native(registry_raw, destroy)
+            let registry = OwnedWaylandHandle::from_native(NonNull::new(registry_raw), destroy)
                 .ok_or("No Wayland registry")?;
             let mut globals = Box::new(Globals::default());
             if add_listener(
@@ -260,7 +264,7 @@ impl Wayland {
             );
             // No further registry dispatch can see the boxed callback data.
             drop(registry);
-            let compositor = OwnedWaylandHandle::from_native(compositor_raw, destroy)
+            let compositor = OwnedWaylandHandle::from_native(NonNull::new(compositor_raw), destroy)
                 .ok_or("Cannot bind Wayland compositor")?;
             Ok(Self {
                 compositor,
@@ -311,7 +315,7 @@ impl Wayland {
                 );
                 // SAFETY: wl_compositor.create_region returns an owned
                 // wl_region, released by this guard after the surface commit.
-                let region = OwnedWaylandRegion::from_native(p, self.marshal, self.version)
+                let region = OwnedWaylandRegion::from_native(NonNull::new(p), self.marshal, self.version)
                     .ok_or("Cannot create input region")?;
                 if let Some(hole) = hole {
                     // wl_region.add = opcode 1; wl_region.subtract = opcode 2.
@@ -605,15 +609,14 @@ mod tests {
         let raw = Box::into_raw(Box::new(DropCounter(Arc::clone(&releases)))).cast();
         // SAFETY: The newly allocated Box is uniquely owned and matched with
         // its exact destructor while the function remains available.
-        let owned = unsafe { OwnedWaylandHandle::from_native(raw, release_test_handle) }
+        let owned = unsafe { OwnedWaylandHandle::from_native(NonNull::new(raw), release_test_handle) }
             .ok_or("New Wayland handle was unexpectedly null")?;
         assert_eq!(releases.load(Ordering::SeqCst), 0);
         drop(owned);
         assert_eq!(releases.load(Ordering::SeqCst), 1);
 
         // SAFETY: A null native resource transfers no ownership.
-        let empty =
-            unsafe { OwnedWaylandHandle::from_native(std::ptr::null_mut(), release_test_handle) };
+        let empty = unsafe { OwnedWaylandHandle::from_native(None, release_test_handle) };
         assert!(empty.is_none());
         assert_eq!(releases.load(Ordering::SeqCst), 1);
         Ok(())

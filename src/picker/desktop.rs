@@ -270,11 +270,11 @@ mod x11 {
         /// and `destroy` must be the corresponding live XDestroyImage symbol.
         /// The caller must keep the X11 library loaded through the guard.
         unsafe fn new(
-            raw: *mut Image,
+            raw: Option<NonNull<Image>>,
             destroy: Symbol<'lib, unsafe extern "C" fn(*mut Image) -> c_int>,
             message: &'static str,
         ) -> Result<Self, String> {
-            let raw = NonNull::new(raw).ok_or(message)?;
+            let raw = raw.ok_or(message)?;
             Ok(Self { raw, destroy })
         }
     }
@@ -363,7 +363,7 @@ mod x11 {
             let destroy: Symbol<unsafe extern "C" fn(*mut Image) -> c_int> =
                 lib.get(b"XDestroyImage\0").map_err(|e| e.to_string())?;
             let image = OwnedImage::new(
-                get(
+                NonNull::new(get(
                     display.as_ptr(),
                     root,
                     x,
@@ -372,7 +372,7 @@ mod x11 {
                     height as u32,
                     c_ulong::MAX,
                     2,
-                ),
+                )),
                 destroy,
                 image_error,
             )?;

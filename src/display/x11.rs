@@ -45,8 +45,11 @@ impl<T> OwnedRandr<T> {
     /// # Safety
     /// `raw` must be either null or an owned pointer produced by the XRandR
     /// function corresponding to `free`; the library must outlive this guard.
-    unsafe fn from_native(raw: *mut T, free: unsafe extern "C" fn(*mut T)) -> Option<Self> {
-        NonNull::new(raw).map(|raw| Self { raw, free })
+    unsafe fn from_native(
+        raw: Option<NonNull<T>>,
+        free: unsafe extern "C" fn(*mut T),
+    ) -> Option<Self> {
+        raw.map(|raw| Self { raw, free })
     }
 
     fn data(&self) -> &T {
@@ -115,7 +118,7 @@ impl Randr {
             }
             for screen in 0..screen_count {
                 let Some(list) = OwnedRandr::from_native(
-                    resources(display, root(display, screen)),
+                    NonNull::new(resources(display, root(display, screen))),
                     *free_resources,
                 ) else {
                     failed = true;
@@ -138,9 +141,10 @@ impl Randr {
                     // outlives the borrowed slice and every CRTC query.
                     let ids = std::slice::from_raw_parts(list.data().crtcs, crtc_count);
                     for &id in ids {
-                        let Some(info) =
-                            OwnedRandr::from_native(crtc(display, list.as_ptr(), id), *free_crtc)
-                        else {
+                        let Some(info) = OwnedRandr::from_native(
+                            NonNull::new(crtc(display, list.as_ptr(), id)),
+                            *free_crtc,
+                        ) else {
                             failed = true;
                             continue;
                         };
@@ -199,15 +203,13 @@ mod tests {
         let raw = Box::into_raw(Box::new(CountDrop(freed.clone())));
         // SAFETY: raw is from Box::into_raw and its matching destructor
         // reconstructs that same Box exactly once.
-        let owned = unsafe { OwnedRandr::from_native(raw, free_test_resource) }
+        let owned = unsafe { OwnedRandr::from_native(NonNull::new(raw), free_test_resource) }
             .ok_or("New XRandR handle was unexpectedly null")?;
         drop(owned);
         assert_eq!(freed.load(Ordering::SeqCst), 1);
 
         // SAFETY: No native allocation is transferred for a null pointer.
-        let empty = unsafe {
-            OwnedRandr::<CountDrop>::from_native(std::ptr::null_mut(), free_test_resource)
-        };
+        let empty = unsafe { OwnedRandr::<CountDrop>::from_native(None, free_test_resource) };
         assert!(empty.is_none());
         assert_eq!(freed.load(Ordering::SeqCst), 1);
         Ok(())
