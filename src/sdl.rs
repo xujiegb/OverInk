@@ -631,6 +631,13 @@ enum WindowCommand<'a> {
     SetParent(Option<&'a Window>),
 }
 
+/// Closed SDL window constructors, retaining borrowed title and parent
+/// references only until native creation completes.
+enum WindowCreation<'a> {
+    Main(&'a CStr, i32, i32, bool),
+    Tooltip(&'a Window, [i32; 4]),
+}
+
 pub struct Window {
     pub raw: *mut SDL_Window,
     pub id: SDL_WindowID,
@@ -853,25 +860,47 @@ impl Window {
         }
     }
 
-    pub fn new(title: &str, w: i32, h: i32, overlay: bool) -> Result<Self, String> {
+    /// Create either kind of SDL window at one native ownership boundary.
+    /// Only this function receives the newly allocated native pointer.
+    fn construct(kind: WindowCreation<'_>) -> Result<Self, String> {
+        // SAFETY: Both SDL constructors return a newly owned window. The
+        // pointer is checked before querying its ID, and is destroyed if
+        // SDL fails to assign an ID. A valid pointer is owned only by Self.
         unsafe {
-            let title = cstring(title);
-            let mut flags = SDL_WINDOW_HIDDEN
-                | SDL_WINDOW_HIGH_PIXEL_DENSITY
-                | SDL_WINDOW_ALWAYS_ON_TOP
-                | SDL_WINDOW_RESIZABLE;
-            if overlay {
-                flags |= SDL_WINDOW_BORDERLESS | SDL_WINDOW_TRANSPARENT;
-            }
-            SDL_ClearError();
-            let raw = SDL_CreateWindow(title.as_ptr(), w, h, flags);
+            let raw = match &kind {
+                WindowCreation::Main(title, w, h, overlay) => {
+                    let mut flags = SDL_WINDOW_HIDDEN
+                        | SDL_WINDOW_HIGH_PIXEL_DENSITY
+                        | SDL_WINDOW_ALWAYS_ON_TOP
+                        | SDL_WINDOW_RESIZABLE;
+                    if *overlay {
+                        flags |= SDL_WINDOW_BORDERLESS | SDL_WINDOW_TRANSPARENT;
+                    }
+                    SDL_ClearError();
+                    SDL_CreateWindow(title.as_ptr(), *w, *h, flags)
+                }
+                WindowCreation::Tooltip(parent, [x, y, w, h]) => SDL_CreatePopupWindow(
+                    parent.raw,
+                    *x,
+                    *y,
+                    *w,
+                    *h,
+                    SDL_WINDOW_TOOLTIP
+                        | SDL_WINDOW_HIDDEN
+                        | SDL_WINDOW_HIGH_PIXEL_DENSITY
+                        | SDL_WINDOW_NOT_FOCUSABLE,
+                ),
+            };
             if raw.is_null() {
                 let detail = error();
-                return Err(format!(
-                    "Creating {} on {} failed ({detail})",
-                    title.to_string_lossy(),
-                    driver()
-                ));
+                return Err(match kind {
+                    WindowCreation::Main(title, ..) => format!(
+                        "Creating {} on {} failed ({detail})",
+                        title.to_string_lossy(),
+                        driver()
+                    ),
+                    WindowCreation::Tooltip(..) => detail,
+                });
             }
             let id = SDL_GetWindowID(raw);
             if id.0 == 0 {
@@ -882,30 +911,14 @@ impl Window {
             Ok(Self { raw, id })
         }
     }
+
+    pub fn new(title: &str, w: i32, h: i32, overlay: bool) -> Result<Self, String> {
+        let title = cstring(title);
+        Self::construct(WindowCreation::Main(&title, w, h, overlay))
+    }
+
     pub fn tooltip(parent: &Self, x: i32, y: i32, w: i32, h: i32) -> Result<Self, String> {
-        unsafe {
-            let raw = SDL_CreatePopupWindow(
-                parent.raw,
-                x,
-                y,
-                w,
-                h,
-                SDL_WINDOW_TOOLTIP
-                    | SDL_WINDOW_HIDDEN
-                    | SDL_WINDOW_HIGH_PIXEL_DENSITY
-                    | SDL_WINDOW_NOT_FOCUSABLE,
-            );
-            if raw.is_null() {
-                return Err(error());
-            }
-            let id = SDL_GetWindowID(raw);
-            if id.0 == 0 {
-                let message = error();
-                SDL_DestroyWindow(raw);
-                return Err(format!("SDL did not assign a window ID: {message}"));
-            }
-            Ok(Self { raw, id })
-        }
+        Self::construct(WindowCreation::Tooltip(parent, [x, y, w, h]))
     }
     /// Read either window geometry in one audited FFI boundary. Each call
     /// performs exactly one SDL query, preserving the rendering fast path.
