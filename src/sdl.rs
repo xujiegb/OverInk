@@ -439,21 +439,54 @@ pub fn clipboard_text() -> Option<String> {
     clipboard_action(ClipboardAction::Read)
 }
 
-/// Return text input while the SDL event's native text pointer remains valid.
-pub fn text_input_data(event: &SDL_Event, window: SDL_WindowID) -> Option<(String, u64)> {
-    if event_type(event) != SDL_EVENT_TEXT_INPUT {
+/// The two SDL text event types share a single validated native string
+/// extraction boundary. Null input text is ignored; null IME text means empty.
+enum EventTextKind {
+    Input,
+    Editing,
+}
+
+fn event_text(
+    event: &SDL_Event,
+    window: SDL_WindowID,
+    kind: EventTextKind,
+) -> Option<(String, u64, i32, i32)> {
+    let (pointer, timestamp, start, length, null_is_empty) = match kind {
+        EventTextKind::Input => {
+            let input = tagged_event!(event, text, SDL_EVENT_TEXT_INPUT)?;
+            if input.windowID != window {
+                return None;
+            }
+            (input.text, input.timestamp, 0, 0, false)
+        }
+        EventTextKind::Editing => {
+            let edit = tagged_event!(event, edit, SDL_EVENT_TEXT_EDITING)?;
+            if edit.windowID != window {
+                return None;
+            }
+            (edit.text, edit.timestamp, edit.start, edit.length, true)
+        }
+    };
+    if pointer.is_null() && !null_is_empty {
         return None;
     }
-    unsafe {
-        let text = event.text;
-        if text.windowID != window || text.text.is_null() {
-            return None;
-        }
-        Some((
-            CStr::from_ptr(text.text).to_string_lossy().into_owned(),
-            text.timestamp,
-        ))
-    }
+    let text = if pointer.is_null() {
+        String::new()
+    } else {
+        // SAFETY: The tagged accessor verified the active SDL event union
+        // member. SDL owns the NUL-terminated text until this event is freed;
+        // the string is copied before the event borrow ends.
+        unsafe { CStr::from_ptr(pointer) }
+            .to_string_lossy()
+            .into_owned()
+    };
+    Some((text, timestamp, start, length))
+}
+
+/// Return text input while the SDL event's native text pointer remains valid.
+pub fn text_input_data(event: &SDL_Event, window: SDL_WindowID) -> Option<(String, u64)> {
+    let (text, timestamp, _, _) = event_text(event, window, EventTextKind::Input)?;
+    Some((text, timestamp))
 }
 
 /// Owned IME composition update; event-owned pointers never escape this API.
@@ -465,26 +498,13 @@ pub struct TextEditingData {
 }
 
 pub fn text_editing_data(event: &SDL_Event, window: SDL_WindowID) -> Option<TextEditingData> {
-    if event_type(event) != SDL_EVENT_TEXT_EDITING {
-        return None;
-    }
-    unsafe {
-        let edit = event.edit;
-        if edit.windowID != window {
-            return None;
-        }
-        let text = if edit.text.is_null() {
-            String::new()
-        } else {
-            CStr::from_ptr(edit.text).to_string_lossy().into_owned()
-        };
-        Some(TextEditingData {
-            timestamp: edit.timestamp,
-            text,
-            start: edit.start,
-            length: edit.length,
-        })
-    }
+    let (text, timestamp, start, length) = event_text(event, window, EventTextKind::Editing)?;
+    Some(TextEditingData {
+        timestamp,
+        text,
+        start,
+        length,
+    })
 }
 
 pub fn mouse_button_event(event: &SDL_Event) -> Option<SDL_MouseButtonEvent> {
@@ -2384,6 +2404,20 @@ mod tests {
         event.r#type = SDL_EVENT_KEY_DOWN.0;
         assert!(key_event(&event).is_some());
         assert!(pen_motion_event(&event).is_none());
+    }
+
+    #[test]
+    fn null_text_event_semantics_remain_distinct() {
+        let mut event = SDL_Event::default();
+        event.r#type = SDL_EVENT_TEXT_EDITING.0;
+        let edit = text_editing_data(&event, SDL_WindowID(0)).unwrap();
+        assert!(edit.text.is_empty());
+        assert_eq!(edit.start, 0);
+        assert_eq!(edit.length, 0);
+
+        event.r#type = SDL_EVENT_TEXT_INPUT.0;
+        assert!(text_input_data(&event, SDL_WindowID(0)).is_none());
+        assert!(text_editing_data(&event, SDL_WindowID(0)).is_none());
     }
 
     #[test]
