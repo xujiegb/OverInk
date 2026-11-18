@@ -2013,14 +2013,19 @@ impl Renderer {
     pub fn clear(&self, color: [f32; 4]) -> Result<(), String> {
         self.run_command(RenderCommand::Clear(color))
     }
+    /// Borrow the entire render target for the duration of the draw.
+    /// A caller cannot supply an arbitrary or previously destroyed pointer.
     pub fn with_target(
         &self,
-        target: *mut SDL_Texture,
+        target: &InkTexture,
         draw: impl FnOnce() -> Result<(), String>,
     ) -> Result<(), String> {
+        // SAFETY: InkTexture owns the SDL texture while the callback runs,
+        // and this renderer is live on the SDL thread. The previous target
+        // is restored before the borrow of the new target ends.
         unsafe {
             let previous = SDL_GetRenderTarget(self.raw);
-            check(SDL_SetRenderTarget(self.raw, target))?;
+            check(SDL_SetRenderTarget(self.raw, target.raw.as_ptr()))?;
             let mut unwind_restore = RestoreOnDrop::new(|| {
                 let _ = SDL_SetRenderTarget(self.raw, previous);
             });
