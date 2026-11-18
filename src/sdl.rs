@@ -25,6 +25,14 @@ unsafe extern "C" {
     safe fn native_mod_state() -> SDL_Keymod;
     #[link_name = "SDL_GetSystemTheme"]
     safe fn native_system_theme() -> SDL_SystemTheme;
+    // SDL_WasInit is not thread safe; the only caller checks the SDL
+    // main thread. All three functions take and return scalar ABI values.
+    #[link_name = "SDL_WasInit"]
+    safe fn native_was_init(flags: SDL_InitFlags) -> SDL_InitFlags;
+    #[link_name = "SDL_GetTouchDeviceType"]
+    safe fn native_touch_device_type(device: SDL_TouchID) -> SDL_TouchDeviceType;
+    #[link_name = "SDL_CaptureMouse"]
+    safe fn native_capture_mouse(enable: bool) -> bool;
     #[link_name = "SDL_DelayPrecise"]
     safe fn native_delay_precise(nanoseconds: u64);
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -340,13 +348,14 @@ pub fn event_window(event: &SDL_Event, ty: SDL_EventType) -> Option<SDL_WindowID
 
 /// Query indirect touch device capability via SDL's native input API.
 pub fn indirect_touch_device(device: SDL_TouchID) -> bool {
-    unsafe {
-        SDL_WasInit(SDL_INIT_VIDEO) != 0
-            && matches!(
-                SDL_GetTouchDeviceType(device),
-                SDL_TOUCH_DEVICE_INDIRECT_ABSOLUTE | SDL_TOUCH_DEVICE_INDIRECT_RELATIVE
-            )
-    }
+    // SDL_WasInit is not thread safe. Check SDL's main thread before
+    // querying either video subsystem state or a native touch device.
+    native_is_main_thread()
+        && native_was_init(SDL_INIT_VIDEO) != 0
+        && matches!(
+            native_touch_device_type(device),
+            SDL_TOUCH_DEVICE_INDIRECT_ABSOLUTE | SDL_TOUCH_DEVICE_INDIRECT_RELATIVE
+        )
 }
 
 /// Sleep with SDL's precise delay without exposing raw native calls to users.
@@ -622,9 +631,9 @@ pub fn capture_mouse(enable: bool) -> bool {
     if !native_is_main_thread() {
         return false;
     }
-    // SAFETY: SDL_CaptureMouse is only valid on SDL's main thread.
-    // The main-thread check above enforces that precondition.
-    unsafe { SDL_CaptureMouse(enable) }
+    // The SDL entry point has only a boolean argument. Its main-thread
+    // precondition is enforced before calling the private safe ABI binding.
+    native_capture_mouse(enable)
 }
 
 /// Keep the cursor allocation owned and restore the default on drop.
