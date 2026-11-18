@@ -1939,7 +1939,9 @@ enum RenderCommand<'a> {
 }
 
 pub struct Renderer {
-    pub raw: *mut SDL_Renderer,
+    // Only the SDL adapter may create, use or destroy this native handle.
+    // Callers draw through checked, borrowed APIs rather than raw pointers.
+    raw: *mut SDL_Renderer,
     pub extended: bool,
     pub name: String,
 }
