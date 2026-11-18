@@ -90,7 +90,9 @@ unsafe extern "C" {
         displays: &mut u32,
         count: &mut u32,
     ) -> i32;
-    fn CGDisplayCreateImage(display: u32) -> *const c_void;
+    // CGDisplayCreateImage takes only a scalar display ID. It returns an
+    // owned (+1) image reference or null, without borrowing Rust memory.
+    safe fn CGDisplayCreateImage(display: u32) -> Option<NonNull<c_void>>;
     // Both APIs take and return scalar values and do not borrow or retain
     // Rust memory. The UI-thread permission flow remains in capture_permission.
     safe fn CGPreflightScreenCaptureAccess() -> bool;
@@ -493,12 +495,8 @@ fn sdr_capture(bounds: [i32; 4], cancelled: &AtomicBool) -> CaptureResult {
     // /usr/sbin/screencapture, which could trigger a different TCC identity.
     let id = display_id(bounds)?;
     let image = Data(
-        NonNull::new(
-            // SAFETY: Core Graphics returns a +1 retained CGImageRef or null,
-            // and Data takes ownership only of a non-null result.
-            unsafe { CGDisplayCreateImage(id) }.cast_mut(),
-        )
-        .ok_or("Core Graphics could not capture the display. Check Screen Recording permission.")?,
+        CGDisplayCreateImage(id)
+            .ok_or("Core Graphics could not capture the display. Check Screen Recording permission.")?,
     );
     if cancelled.load(Ordering::Relaxed) {
         return Ok(None);
