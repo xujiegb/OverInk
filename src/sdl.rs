@@ -1385,6 +1385,23 @@ impl Drop for SnapshotTexture {
     }
 }
 
+/// Validate an egui upload without dereferencing any native SDL texture.
+/// The SDL backend is allowed to read only the advertised source rectangle.
+fn gui_upload_valid(texture: [i32; 2], source: [i32; 2], rect: Option<&SDL_Rect>) -> bool {
+    match rect {
+        None => source == texture,
+        Some(area) => {
+            area.x >= 0
+                && area.y >= 0
+                && area.w > 0
+                && area.h > 0
+                && [area.w, area.h] == source
+                && area.x.checked_add(area.w).is_some_and(|end| end <= texture[0])
+                && area.y.checked_add(area.h).is_some_and(|end| end <= texture[1])
+        }
+    }
+}
+
 /// Owned SDL texture backing egui's font atlas and custom UI images.
 pub struct GuiTexture {
     raw: *mut SDL_Texture,
@@ -1441,28 +1458,8 @@ impl GuiTexture {
             i32::try_from(width).map_err(|_| "egui texture width exceeds i32")?,
             i32::try_from(height).map_err(|_| "egui texture height exceeds i32")?,
         ];
-        match rect {
-            None if dimensions != self.dimensions => {
-                return Err("egui full texture upload dimensions mismatch".into());
-            }
-            Some(area)
-                if area.x < 0
-                    || area.y < 0
-                    || area.w <= 0
-                    || area.h <= 0
-                    || [area.w, area.h] != dimensions
-                    || area
-                        .x
-                        .checked_add(area.w)
-                        .is_none_or(|end| end > self.dimensions[0])
-                    || area
-                        .y
-                        .checked_add(area.h)
-                        .is_none_or(|end| end > self.dimensions[1]) =>
-            {
-                return Err("egui partial texture upload is out of bounds".into());
-            }
-            _ => {}
+        if !gui_upload_valid(self.dimensions, dimensions, rect) {
+            return Err("egui texture upload has invalid dimensions or bounds".into());
         }
         // SAFETY: The validated upload covers exactly the specified SDL
         // region, with a row stride matching its width and live RGBA bytes.
@@ -1919,6 +1916,32 @@ impl TestSurface {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gui_upload_rejects_invalid_full_and_partial_regions() {
+        let texture = [64, 32];
+        assert!(gui_upload_valid(texture, texture, None));
+        assert!(!gui_upload_valid(texture, [32, 32], None));
+
+        let valid = SDL_Rect {
+            x: 56,
+            y: 28,
+            w: 8,
+            h: 4,
+        };
+        assert!(gui_upload_valid(texture, [8, 4], Some(&valid)));
+        assert!(!gui_upload_valid(texture, [8, 5], Some(&valid)));
+
+        let outside = SDL_Rect { x: 57, ..valid };
+        assert!(!gui_upload_valid(texture, [8, 4], Some(&outside)));
+        let negative = SDL_Rect { x: -1, ..valid };
+        assert!(!gui_upload_valid(texture, [8, 4], Some(&negative)));
+        let overflowing = SDL_Rect {
+            x: i32::MAX,
+            ..valid
+        };
+        assert!(!gui_upload_valid(texture, [8, 4], Some(&overflowing)));
+    }
 
     #[test]
     fn restore_guard_runs_on_unwind_and_disarms_on_success() {
