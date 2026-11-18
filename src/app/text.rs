@@ -1902,7 +1902,7 @@ mod tests {
         // A different text draft is not the target captured when picking began.
         set_draft_committed(&mut app, "changed");
         assert!(!app.matches_text_pick_target(&target));
-        assert_ne!(app.text_pick_target(), Some(target));
+        assert_ne!(app.text_pick_target().as_ref(), Some(&target));
         assert_eq!(app.pick_text_color(color), Some(color));
         assert_eq!(app.pick_text_color(color), Some(color));
 
