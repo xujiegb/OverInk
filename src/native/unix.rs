@@ -644,9 +644,8 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(resource);
         // SAFETY: The test registry keeps the allocation stable and owns it
         // until the matching destructor takes and drops its Box.
-        let owned =
-            unsafe { OwnedWaylandHandle::from_native(Some(raw), release_test_handle) }
-                .ok_or("New Wayland handle was unexpectedly null")?;
+        let owned = unsafe { OwnedWaylandHandle::from_native(Some(raw), release_test_handle) }
+            .ok_or("New Wayland handle was unexpectedly null")?;
         assert_eq!(releases.load(Ordering::SeqCst), 0);
         drop(owned);
         assert_eq!(releases.load(Ordering::SeqCst), 1);
