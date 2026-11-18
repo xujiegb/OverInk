@@ -1509,8 +1509,6 @@ impl<F: FnOnce()> Drop for RestoreOnDrop<F> {
     }
 }
 
-/// Closed set of SDL renderer commands; callers cannot supply native function
-/// pointers or arbitrary memory for the renderer to access.
 /// A borrow of a live, adapter-owned texture, not an arbitrary SDL handle.
 enum OwnedTextureRef<'a> {
     Ink(&'a InkTexture),
@@ -1526,6 +1524,8 @@ impl OwnedTextureRef<'_> {
     }
 }
 
+/// Closed set of SDL renderer commands; callers cannot supply native function
+/// pointers or arbitrary memory for the renderer to access.
 enum RenderCommand<'a> {
     Clear([f32; 4]),
     Clip(Option<&'a SDL_Rect>),
