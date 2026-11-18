@@ -655,54 +655,54 @@ impl StrokePainter {
                 renderer.with_target(
                     self.marker_mask.as_ref().ok_or("Missing marker mask")?,
                     || {
-                    renderer.set_render_scale([1., 1.])?;
-                    renderer.clear([1., 1., 1., 0.])?;
-                    let visible = |a, b| {
-                        region.is_none_or(|region| {
-                            region.intersects(Bounds::between(a, b).padded(margin))
-                        })
-                    };
-                    for range in geometry::mesh_ranges(&self.samples, MESH_SEGMENTS, visible) {
-                        self.mesh
-                            .update(stroke, &self.samples, range, frame.aa, false);
-                        set_vertices(
-                            &self.mesh,
-                            &mut self.vertices,
-                            [1.; 3],
-                            1.,
-                            frame.scale,
-                            [x, y],
-                            false,
-                        );
-                        let indices = if tiled {
-                            self.tile_indices.clear();
-                            for triangle in self.mesh.indices.as_chunks::<3>().0 {
-                                let p = triangle.map(|i| self.vertices[i as usize].position);
-                                if p.iter().any(|p| p.x >= 0.)
-                                    && p.iter().any(|p| p.x < width)
-                                    && p.iter().any(|p| p.y >= 0.)
-                                    && p.iter().any(|p| p.y < height)
-                                {
-                                    self.tile_indices.extend(triangle);
-                                }
-                            }
-                            self.tile_indices.as_slice()
-                        } else {
-                            self.mesh.indices.as_slice()
+                        renderer.set_render_scale([1., 1.])?;
+                        renderer.clear([1., 1., 1., 0.])?;
+                        let visible = |a, b| {
+                            region.is_none_or(|region| {
+                                region.intersects(Bounds::between(a, b).padded(margin))
+                            })
                         };
-                        #[cfg(test)]
-                        {
-                            self.submitted_indices += indices.len();
+                        for range in geometry::mesh_ranges(&self.samples, MESH_SEGMENTS, visible) {
+                            self.mesh
+                                .update(stroke, &self.samples, range, frame.aa, false);
+                            set_vertices(
+                                &self.mesh,
+                                &mut self.vertices,
+                                [1.; 3],
+                                1.,
+                                frame.scale,
+                                [x, y],
+                                false,
+                            );
+                            let indices = if tiled {
+                                self.tile_indices.clear();
+                                for triangle in self.mesh.indices.as_chunks::<3>().0 {
+                                    let p = triangle.map(|i| self.vertices[i as usize].position);
+                                    if p.iter().any(|p| p.x >= 0.)
+                                        && p.iter().any(|p| p.x < width)
+                                        && p.iter().any(|p| p.y >= 0.)
+                                        && p.iter().any(|p| p.y < height)
+                                    {
+                                        self.tile_indices.extend(triangle);
+                                    }
+                                }
+                                self.tile_indices.as_slice()
+                            } else {
+                                self.mesh.indices.as_slice()
+                            };
+                            #[cfg(test)]
+                            {
+                                self.submitted_indices += indices.len();
+                            }
+                            submit(
+                                renderer,
+                                ptr::null_mut(),
+                                &self.vertices,
+                                indices,
+                                &mut self.queued,
+                            )?;
                         }
-                        submit(
-                            renderer,
-                            ptr::null_mut(),
-                            &self.vertices,
-                            indices,
-                            &mut self.queued,
-                        )?;
-                    }
-                    Ok(())
+                        Ok(())
                     },
                 )?;
                 self.queued = 0;
