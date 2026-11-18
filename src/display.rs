@@ -395,6 +395,26 @@ mod tests {
     };
 
     #[test]
+    fn unique_page_extraction_preserves_ambiguous_matches() {
+        let mut docs = BTreeMap::new();
+        for (index, name) in ["Left", "Right", "Right"].into_iter().enumerate() {
+            docs.insert(
+                DisplayKey {
+                    name: name.into(),
+                    origin: [index as i32 * 800, 0],
+                    slot: 0,
+                },
+                Document::default(),
+            );
+        }
+        assert!(take_unique_page(&mut docs, |key, _| key.name == "Right").is_none());
+        assert_eq!(docs.len(), 3);
+        assert!(take_unique_page(&mut docs, |key, _| key.name == "Left").is_some());
+        assert_eq!(docs.len(), 2);
+        assert!(take_unique_page(&mut docs, |key, _| key.name == "Left").is_none());
+    }
+
+    #[test]
     fn opening_legacy_page_discards_parked_and_unmatched_pages() {
         let path = std::env::temp_dir().join(format!(
             "overink-legacy-replace-{}.json",
