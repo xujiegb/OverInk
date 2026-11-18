@@ -1391,9 +1391,12 @@ mod tests {
             assert_eq!(app.history.can_undo(), has_prior_box);
             app.change_history(HistoryAction::Redo);
             assert_eq!(
-            app.history.text_boxes().last().map(|item| item.text.as_str()),
-            Some("重要批注")
-        );
+                app.history
+                    .text_boxes()
+                    .last()
+                    .map(|item| item.text.as_str()),
+                Some("重要批注")
+            );
         }
     }
 
