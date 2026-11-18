@@ -3837,13 +3837,12 @@ mod touch_tests {
     }
 
     #[test]
-    fn disabling_session_recovery_discards_the_cache_and_keeps_manual_saves() {
+    fn disabling_session_recovery_discards_the_cache_and_keeps_manual_saves() -> Result<(), Box<dyn std::error::Error>> {
         let state = std::env::temp_dir().join(format!(
             "overink-session-test-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .duration_since(std::time::UNIX_EPOCH)?
                 .as_nanos(),
         ));
         let displays = vec![screen(10, 0, 60.0), screen(20, 1920, 120.0)];
@@ -3852,7 +3851,7 @@ mod touch_tests {
         a.select_page(20);
         add_ink(&mut a, &[440.]);
         a.save();
-        a.finish_session().unwrap();
+        a.finish_session()?;
         assert!(a.save_path.is_file());
         assert!(Path::new(&a.path).is_file());
 
@@ -3862,8 +3861,7 @@ mod touch_tests {
             restore_session: false,
             ..Preferences::default()
         }
-        .save(&state.join("ui.json"))
-        .unwrap();
+        .save(&state.join("ui.json"))?;
         let mut private = App::new(
             true,
             1,
@@ -3873,15 +3871,16 @@ mod touch_tests {
         );
         assert!(private.history.strokes().is_empty());
         add_ink(&mut private, &[640.]);
-        private.finish_session().unwrap();
+        private.finish_session()?;
         assert!(!private.save_path.exists());
         assert!(Path::new(&private.path).is_file());
         private.load();
         assert_eq!(private.history.strokes()[0].points[0].x, 440.);
-        std::fs::remove_dir_all(state).unwrap();
+        std::fs::remove_dir_all(state)?;
+        Ok(())
     }
     #[test]
-    fn svg_export_creates_the_default_directory_on_first_launch() {
+    fn svg_export_creates_the_default_directory_on_first_launch() -> Result<(), Box<dyn std::error::Error>> {
         let state = std::env::temp_dir().join(format!("overink-svg-export-{}", std::process::id()));
         let mut app = App::new(
             true,
@@ -3896,10 +3895,11 @@ mod touch_tests {
         assert!(!state.exists());
         add_ink(&mut app, &[20., 40.]);
         app.export();
-        let svg = std::fs::read_to_string(Path::new(&app.path).with_extension("svg")).unwrap();
+        let svg = std::fs::read_to_string(Path::new(&app.path).with_extension("svg"))?;
         assert!(svg.starts_with("<svg"));
         assert!(svg.contains("<path"));
-        std::fs::remove_dir_all(state).unwrap();
+        std::fs::remove_dir_all(state)?;
+        Ok(())
     }
     #[test]
     fn finger_stroke_is_saved_in_logical_units_without_fake_pen_pressure() {
