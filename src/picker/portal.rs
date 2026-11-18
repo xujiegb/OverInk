@@ -405,7 +405,7 @@ mod tests {
     #[zbus::interface(name = "org.freedesktop.portal.Request")]
     impl MockRequest {
         fn close(&self) {
-            self.0.send(()).unwrap();
+            let _ = self.0.send(());
         }
     }
 
@@ -422,8 +422,13 @@ mod tests {
             #[zbus(header)] header: zbus::message::Header<'_>,
             #[zbus(connection)] connection: &zbus::Connection,
         ) -> zbus::fdo::Result<OwnedObjectPath> {
-            let token = <&str>::try_from(options.get("handle_token").unwrap()).unwrap();
-            let sender = header.sender().unwrap();
+            let token = options
+                .get("handle_token")
+                .and_then(|value| <&str>::try_from(value).ok())
+                .ok_or_else(|| zbus::fdo::Error::InvalidArgs("Missing handle token".into()))?;
+            let sender = header
+                .sender()
+                .ok_or_else(|| zbus::fdo::Error::Failed("Missing D-Bus sender".into()))?;
             let path = format!(
                 "/org/freedesktop/portal/desktop/request/{}/{}",
                 sender.as_str().trim_start_matches(':').replace('.', "_"),
@@ -434,12 +439,15 @@ mod tests {
                     .object_server()
                     .at(path.as_str(), MockRequest(self.closed.clone()))
                     .await?;
-                self.pending.send(()).unwrap();
-                return Ok(OwnedObjectPath::try_from(path).unwrap());
+                self.pending
+                    .send(())
+                    .map_err(|error| zbus::fdo::Error::Failed(error.to_string()))?;
+                return OwnedObjectPath::try_from(path)
+                    .map_err(|error| zbus::fdo::Error::Failed(error.to_string()));
             }
             let color =
                 OwnedVariant::try_from(Structure::from((18. / 255., 171. / 255., 239. / 255.)))
-                    .unwrap();
+                    .map_err(|error| zbus::fdo::Error::Failed(error.to_string()))?;
             let values = HashMap::from([("color", color)]);
             // Intentionally respond before the method reply to exercise the subscription race.
             connection
@@ -451,12 +459,14 @@ mod tests {
                     &(0u32, values),
                 )
                 .await?;
-            Ok(OwnedObjectPath::try_from(path).unwrap())
+            OwnedObjectPath::try_from(path)
+                .map_err(|error| zbus::fdo::Error::Failed(error.to_string()))
         }
     }
     #[test]
     #[ignore = "requires an isolated session bus: dbus-run-session cargo test portal_response -- --ignored"]
-    fn portal_response_before_method_reply_and_cancellation() {
+    fn portal_response_before_method_reply_and_cancellation()
+    -> Result<(), Box<dyn std::error::Error>> {
         let (pending, requested) = mpsc::channel();
         let (closed, acknowledged) = mpsc::channel();
         let _service = zbus::block_on(async {
@@ -472,38 +482,29 @@ mod tests {
                 )
                 .build()
                 .await
-                .unwrap()
-        });
+        })?;
         let timeout = Duration::from_secs(5);
-        let job = SystemJob::start().unwrap();
+        let job = SystemJob::start()?;
         let color = job
             .receiver
-            .recv_timeout(timeout)
-            .unwrap()
-            .unwrap()
-            .unwrap();
+            .recv_timeout(timeout)??
+            .ok_or("Expected a portal color")?;
         assert_eq!(color.srgb8(), [0x12, 0xab, 0xef]);
         assert_eq!(color.space, Space::Srgb);
 
-        let screenshot = SystemJob::screenshot(true, Ok).unwrap();
+        let screenshot = SystemJob::screenshot(true, Ok)?;
         let error = screenshot
             .receiver
-            .recv_timeout(timeout)
-            .unwrap()
+            .recv_timeout(timeout)?
             .err()
-            .unwrap();
+            .ok_or("Expected rejection of unavailable screen targeting")?;
         assert!(error.contains("cannot request the entire desktop explicitly"));
 
-        let job = SystemJob::start().unwrap();
-        requested.recv_timeout(timeout).unwrap();
+        let job = SystemJob::start()?;
+        requested.recv_timeout(timeout)?;
         job.cancel();
-        acknowledged.recv_timeout(timeout).unwrap();
-        assert!(
-            job.receiver
-                .recv_timeout(timeout)
-                .unwrap()
-                .unwrap()
-                .is_none()
-        );
+        acknowledged.recv_timeout(timeout)?;
+        assert!(job.receiver.recv_timeout(timeout)??.is_none());
+        Ok(())
     }
 }
