@@ -44,7 +44,11 @@ fn sdl_string(get: unsafe extern "C" fn() -> *const std::ffi::c_char) -> Option<
     // The bytes are copied before returning from this FFI boundary.
     unsafe {
         let text = get();
-        (!text.is_null()).then(|| CStr::from_ptr(text).to_string_lossy().into_owned())
+        if text.is_null() {
+            None
+        } else {
+            Some(CStr::from_ptr(text).to_string_lossy().into_owned())
+        }
     }
 }
 
@@ -1748,12 +1752,9 @@ impl TestSurface {
         // SAFETY: SDL_CreateSurface transfers ownership of its new surface
         // to the caller; the existing OwnedSurface guard releases it once.
         unsafe {
-            let surface = OwnedSurface::from_native(SDL_CreateSurface(
-                width,
-                height,
-                SDL_PIXELFORMAT_RGBA32,
-            ))
-            .ok_or_else(error)?;
+            let surface =
+                OwnedSurface::from_native(SDL_CreateSurface(width, height, SDL_PIXELFORMAT_RGBA32))
+                    .ok_or_else(error)?;
             Ok(Self {
                 surface,
                 dimensions: [width, height],
@@ -1785,11 +1786,9 @@ impl TestSurface {
         // SAFETY: SDL_RenderReadPixels returns a new caller-owned surface.
         // Read the dimensions while it is live, and let OwnedSurface drop it.
         unsafe {
-            let surface = OwnedSurface::from_native(SDL_RenderReadPixels(
-                renderer.raw,
-                ptr::null(),
-            ))
-            .ok_or_else(error)?;
+            let surface =
+                OwnedSurface::from_native(SDL_RenderReadPixels(renderer.raw, ptr::null()))
+                    .ok_or_else(error)?;
             let dimensions = [(*surface.as_ptr()).w, (*surface.as_ptr()).h];
             if dimensions[0] <= 0 || dimensions[1] <= 0 {
                 return Err("SDL readback returned invalid surface dimensions".into());
@@ -1810,7 +1809,13 @@ impl TestSurface {
         // whether the requested pixel lies inside the surface.
         unsafe {
             check(SDL_ReadSurfacePixel(
-                self.surface.as_ptr(), x, y, &mut r, &mut g, &mut b, &mut a,
+                self.surface.as_ptr(),
+                x,
+                y,
+                &mut r,
+                &mut g,
+                &mut b,
+                &mut a,
             ))?;
         }
         Ok([r, g, b, a])
