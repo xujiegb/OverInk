@@ -2,9 +2,7 @@
 //! No native CMS handles, handwritten FFI, raw pointers, or unsafe code.
 #![forbid(unsafe_code)]
 
-use moxcms::{
-    ColorProfile, InPlaceTransformExecutor, Layout, RenderingIntent, TransformOptions,
-};
+use moxcms::{ColorProfile, InPlaceTransformExecutor, Layout, RenderingIntent, TransformOptions};
 use std::sync::Arc;
 
 const MAX_PROFILE_BYTES: usize = 16 * 1024 * 1024;
@@ -74,8 +72,7 @@ impl Transform {
 
     pub fn from_srgb_to_display(bytes: &[u8]) -> Result<Self, DisplayError> {
         let destination = open_profile(bytes).ok_or(DisplayError::InvalidProfile)?;
-        Self::rgb(&ColorProfile::new_srgb(), &destination)
-            .ok_or(DisplayError::ConversionFailed)
+        Self::rgb(&ColorProfile::new_srgb(), &destination).ok_or(DisplayError::ConversionFailed)
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
