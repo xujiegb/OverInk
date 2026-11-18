@@ -1921,7 +1921,7 @@ fn run_inner(options: Options) -> Result<(), String> {
             if !running {
                 let active = canvas::active_index(&canvases, app.pages.active);
                 canvases[active].flush_text_events(&mut app, gui.ctx.theme())?;
-                break;
+                return Ok(());
             }
 
             if let Some((kind, result)) = file_dialog.poll() {
@@ -2362,7 +2362,8 @@ fn run_inner(options: Options) -> Result<(), String> {
                 output = Some(frame);
             }
             if cmd.quit {
-                break;
+                running = false;
+                return Ok(());
             }
             mode_changed |= cmd.mode;
             if cmd.choose_font && !file_dialog.pending() {
