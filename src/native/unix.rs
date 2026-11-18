@@ -144,31 +144,42 @@ struct Globals {
 impl Wayland {
     fn new(w: &Window) -> Result<Self, String> {
         extern "C" fn global(
-            data: *mut c_void,
-            _registry: *mut c_void,
+            data: Option<NonNull<Globals>>,
+            _registry: Option<NonNull<c_void>>,
             name: u32,
-            interface: *const c_char,
+            interface: Option<NonNull<c_char>>,
             version: u32,
         ) {
-            if data.is_null() || interface.is_null() {
+            let (Some(mut data), Some(interface)) = (data, interface) else {
                 return;
-            }
-            // SAFETY: The listener checks both pointers above. The Wayland
-            // roundtrip dispatches it synchronously while its boxed Globals
-            // and the protocol-owned interface C string are both live.
+            };
+            // SAFETY: The listener checks both nullable inputs above. The
+            // roundtrip synchronously dispatches callbacks while the Box
+            // holding Globals and the Wayland-owned interface name are live.
             unsafe {
-                if CStr::from_ptr(interface) == c"wl_compositor" {
-                    let globals = &mut *data.cast::<Globals>();
+                if CStr::from_ptr(interface.as_ptr()) == c"wl_compositor" {
+                    let globals = data.as_mut();
                     globals.compositor = name;
                     globals.version = version.min(4);
                 }
             }
         }
-        extern "C" fn removed(_data: *mut c_void, _registry: *mut c_void, _name: u32) {}
+        extern "C" fn removed(
+            _data: Option<NonNull<Globals>>,
+            _registry: Option<NonNull<c_void>>,
+            _name: u32,
+        ) {
+        }
         #[repr(C)]
         struct Listener {
-            global: extern "C" fn(*mut c_void, *mut c_void, u32, *const c_char, u32),
-            removed: extern "C" fn(*mut c_void, *mut c_void, u32),
+            global: extern "C" fn(
+                Option<NonNull<Globals>>,
+                Option<NonNull<c_void>>,
+                u32,
+                Option<NonNull<c_char>>,
+                u32,
+            ),
+            removed: extern "C" fn(Option<NonNull<Globals>>, Option<NonNull<c_void>>, u32),
         }
         static LISTENER: Listener = Listener { global, removed };
 
@@ -184,26 +195,33 @@ impl Wayland {
             let queue_destroy: Destroy = *lib
                 .get(b"wl_event_queue_destroy\0")
                 .map_err(|e| e.to_string())?;
-            let create_queue: unsafe extern "C" fn(*mut c_void) -> *mut c_void = *lib
+            let create_queue: unsafe extern "C" fn(
+                NonNull<c_void>,
+            ) -> Option<NonNull<c_void>> = *lib
                 .get(b"wl_display_create_queue\0")
                 .map_err(|e| e.to_string())?;
-            let create_wrapper: unsafe extern "C" fn(*mut c_void) -> *mut c_void = *lib
+            let create_wrapper: unsafe extern "C" fn(
+                NonNull<c_void>,
+            ) -> Option<NonNull<c_void>> = *lib
                 .get(b"wl_proxy_create_wrapper\0")
                 .map_err(|e| e.to_string())?;
             let wrapper_destroy: Destroy = *lib
                 .get(b"wl_proxy_wrapper_destroy\0")
                 .map_err(|e| e.to_string())?;
-            let set_queue: unsafe extern "C" fn(*mut c_void, *mut c_void) = *lib
+            let set_queue: unsafe extern "C" fn(NonNull<c_void>, NonNull<c_void>) = *lib
                 .get(b"wl_proxy_set_queue\0")
                 .map_err(|e| e.to_string())?;
+            // Wayland retains the listener table and user data until the
+            // registry proxy is destroyed. LISTENER is static and Globals is
+            // pinned by its Box across the synchronous registry roundtrip.
             let add_listener: unsafe extern "C" fn(
-                *mut c_void,
-                *const c_void,
-                *mut c_void,
+                NonNull<c_void>,
+                &'static Listener,
+                NonNull<Globals>,
             ) -> c_int = *lib
                 .get(b"wl_proxy_add_listener\0")
                 .map_err(|e| e.to_string())?;
-            let roundtrip: unsafe extern "C" fn(*mut c_void, *mut c_void) -> c_int = *lib
+            let roundtrip: unsafe extern "C" fn(NonNull<c_void>, NonNull<c_void>) -> c_int = *lib
                 .get(b"wl_display_roundtrip_queue\0")
                 .map_err(|e| e.to_string())?;
             let registry_interface: *const c_void = *lib
@@ -217,19 +235,19 @@ impl Wayland {
                     .map_err(|e| e.to_string())?,
             )
             .ok_or("No Wayland region interface")?;
-            let display = w.wayland_display().ok_or("No Wayland display")?.as_ptr();
+            let display = w.wayland_display().ok_or("No Wayland display")?.as_non_null();
             // Every created resource is guarded immediately. An error or
             // unwind runs the correct native destructor before unloading lib.
             let queue =
-                OwnedWaylandHandle::from_native(NonNull::new(create_queue(display)), queue_destroy)
+                OwnedWaylandHandle::from_native(create_queue(display), queue_destroy)
                     .ok_or("Cannot create Wayland event queue")?;
             let registry_raw = {
                 let wrapper = OwnedWaylandHandle::from_native(
-                    NonNull::new(create_wrapper(display)),
+                    create_wrapper(display),
                     wrapper_destroy,
                 )
                 .ok_or("Cannot wrap Wayland display")?;
-                set_queue(wrapper.as_ptr(), queue.as_ptr());
+                set_queue(wrapper.raw, queue.raw);
                 marshal(
                     wrapper.as_ptr(),
                     1,
@@ -242,12 +260,8 @@ impl Wayland {
             let registry = OwnedWaylandHandle::from_native(NonNull::new(registry_raw), destroy)
                 .ok_or("No Wayland registry")?;
             let mut globals = Box::new(Globals::default());
-            if add_listener(
-                registry.as_ptr(),
-                (&LISTENER as *const Listener).cast(),
-                (&mut *globals as *mut Globals).cast(),
-            ) != 0
-                || roundtrip(display, queue.as_ptr()) < 0
+            if add_listener(registry.raw, &LISTENER, NonNull::from(globals.as_mut())) != 0
+                || roundtrip(display, queue.raw) < 0
                 || globals.compositor == 0
             {
                 // Never destroy the callback's userdata before its registry.
