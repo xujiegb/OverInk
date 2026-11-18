@@ -392,6 +392,8 @@ mod tests {
         model::{Point, Stroke, Tool},
     };
 
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
     #[test]
     fn unique_page_extraction_preserves_ambiguous_matches() {
         let mut docs = BTreeMap::new();
@@ -413,7 +415,7 @@ mod tests {
     }
 
     #[test]
-    fn opening_legacy_page_discards_parked_and_unmatched_pages() {
+    fn opening_legacy_page_discards_parked_and_unmatched_pages() -> TestResult {
         let path = std::env::temp_dir().join(format!(
             "overink-legacy-replace-{}.json",
             std::process::id()
@@ -438,31 +440,33 @@ mod tests {
         );
         let mut legacy = History::default();
         draw(&mut legacy, 99.);
-        fs::write(&path, serde_json::to_vec(legacy.document()).unwrap()).unwrap();
+        fs::write(&path, serde_json::to_vec(legacy.document())?)?;
 
-        assert_eq!(pages.load(&mut history, &path, false).unwrap(), 0);
+        assert_eq!(pages.load(&mut history, &path, false)?, 0);
         assert!(pages.parked.is_empty());
         assert!(pages.unmatched.is_empty());
         assert_eq!(history.strokes()[0].points[0].x, 99.);
-        fs::remove_file(path).unwrap();
+        fs::remove_file(path)?;
+        Ok(())
     }
 
     #[test]
-    fn session_writer_enforces_its_limit_when_flushed() {
+    fn session_writer_enforces_its_limit_when_flushed() -> TestResult {
         let mut bytes = Vec::new();
         let mut writer = BufWriter::new(SessionWriter {
             writer: &mut bytes,
             remaining: 6,
         });
-        serde_json::to_writer(&mut writer, "ink").unwrap();
-        writer.flush().unwrap();
-        writer.write_all(b"  ").unwrap();
+        serde_json::to_writer(&mut writer, "ink")?;
+        writer.flush()?;
+        writer.write_all(b"  ")?;
         assert_eq!(
             writer.flush().unwrap_err().to_string(),
             "Session exceeds 64 MiB"
         );
         drop(writer);
         assert_eq!(bytes, b"\"ink\"");
+        Ok(())
     }
 
     fn draw(history: &mut History, x: f32) {
@@ -487,7 +491,7 @@ mod tests {
         }
     }
     #[test]
-    fn saved_session_restores_parked_pages_and_forgets_unplugged_displays() {
+    fn saved_session_restores_parked_pages_and_forgets_unplugged_displays() -> TestResult {
         let path = std::env::temp_dir().join(format!("overink-pages-{}.json", std::process::id()));
         let mut pages = Pages::new(Some(10));
         let mut history = History::default();
@@ -499,11 +503,11 @@ mod tests {
         pages.switch(&mut history, 20);
         assert!(history.strokes().is_empty());
         assert!(pages.needs_save(&history));
-        pages.save(&history, &path).unwrap();
+        pages.save(&history, &path)?;
         pages.mark_saved(&mut history);
         assert!(!pages.needs_save(&history));
         draw(&mut history, 22.);
-        pages.save(&history, &path).unwrap();
+        pages.save(&history, &path)?;
 
         // SDL display IDs and list order can differ after a restart.
         let right = screen(31, "Right", 800);
@@ -511,7 +515,7 @@ mod tests {
         let mut restored = Pages::new(Some(right.id));
         let mut history = History::default();
         restored.sync(&mut history, &[right.clone(), left.clone()]);
-        restored.load(&mut history, &path, true).unwrap();
+        restored.load(&mut history, &path, true)?;
         assert_eq!(history.strokes()[0].points[0].x, 22.);
         restored.switch(&mut history, left.id);
         assert_eq!(history.strokes()[0].points[0].x, 11.);
@@ -520,57 +524,60 @@ mod tests {
         assert!(!restored.needs_save(&history));
         restored.sync(&mut history, std::slice::from_ref(&left));
         assert!(restored.needs_save(&history));
-        restored.save(&history, &path).unwrap();
+        restored.save(&history, &path)?;
         restored.mark_saved(&mut history);
         restored.sync(&mut history, &[left, right.clone()]);
         restored.switch(&mut history, right.id);
         assert!(history.strokes().is_empty());
-        restored.load(&mut history, &path, true).unwrap();
+        restored.load(&mut history, &path, true)?;
         assert!(history.strokes().is_empty());
-        fs::remove_file(&path).unwrap();
+        fs::remove_file(&path)?;
+        Ok(())
     }
     #[test]
-    fn legacy_session_startup_has_no_undo_or_dirty_document() {
+    fn legacy_session_startup_has_no_undo_or_dirty_document() -> TestResult {
         let path = std::env::temp_dir().join(format!("overink-legacy-{}.json", std::process::id()));
         let mut legacy = History::default();
         draw(&mut legacy, 15.);
-        fs::write(&path, serde_json::to_vec(legacy.document()).unwrap()).unwrap();
+        fs::write(&path, serde_json::to_vec(legacy.document())?)?;
         let mut restored = Pages::new(Some(20));
         let mut history = History::default();
         restored.sync(&mut history, &[screen(20, "Right", 800)]);
-        restored.load(&mut history, &path, true).unwrap();
+        restored.load(&mut history, &path, true)?;
         assert!(!history.changed);
         history.undo();
         assert_eq!(history.strokes()[0].points[0].x, 15.);
         assert!(restored.needs_save(&history));
-        restored.save(&history, &path).unwrap();
+        restored.save(&history, &path)?;
         let file: Session<DisplayKey, Document> =
-            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            serde_json::from_slice(&fs::read(&path)?)?;
         assert_eq!(file.version, SESSION_VERSION);
         assert_eq!(file.pages[0].0.name, "Right");
-        fs::remove_file(&path).unwrap();
+        fs::remove_file(&path)?;
+        Ok(())
     }
     #[test]
-    fn single_screen_restore_accepts_a_new_display_name_and_origin() {
+    fn single_screen_restore_accepts_a_new_display_name_and_origin() -> TestResult {
         let path =
             std::env::temp_dir().join(format!("overink-renamed-{}.json", std::process::id()));
         let mut source = Pages::new(Some(10));
         let mut history = History::default();
         source.sync(&mut history, &[screen(10, "eDP-1", 0)]);
         draw(&mut history, 25.);
-        source.save(&history, &path).unwrap();
+        source.save(&history, &path)?;
 
         let mut restored = Pages::new(Some(20));
         let mut history = History::default();
         restored.sync(&mut history, &[screen(20, "BOE Panel", 300)]);
-        assert_eq!(restored.load(&mut history, &path, true).unwrap(), 0);
+        assert_eq!(restored.load(&mut history, &path, true)?, 0);
         history.undo();
         assert_eq!(history.strokes()[0].points[0].x, 25.);
         assert!(restored.needs_save(&history));
-        fs::remove_file(path).unwrap();
+        fs::remove_file(path)?;
+        Ok(())
     }
     #[test]
-    fn manual_open_imports_the_only_ink_page_onto_the_active_screen() {
+    fn manual_open_imports_the_only_ink_page_onto_the_active_screen() -> TestResult {
         let path = std::env::temp_dir().join(format!("overink-import-{}.json", std::process::id()));
         let mut source = Pages::new(Some(20));
         let mut history = History::default();
@@ -579,20 +586,21 @@ mod tests {
             &[screen(10, "Blank", 0), screen(20, "Saved", 800)],
         );
         draw(&mut history, 22.);
-        source.save(&history, &path).unwrap();
+        source.save(&history, &path)?;
 
         let mut restored = Pages::new(Some(30));
         let mut history = History::default();
         restored.sync(&mut history, &[screen(30, "Laptop", 0)]);
         draw(&mut history, 33.);
-        assert_eq!(restored.load(&mut history, &path, false).unwrap(), 0);
+        assert_eq!(restored.load(&mut history, &path, false)?, 0);
         assert_eq!(history.strokes()[0].points[0].x, 22.);
         history.undo();
         assert_eq!(history.strokes()[0].points[0].x, 33.);
-        fs::remove_file(path).unwrap();
+        fs::remove_file(path)?;
+        Ok(())
     }
     #[test]
-    fn renamed_layout_uses_origins_and_unassigned_pages_can_reconnect_by_name() {
+    fn renamed_layout_uses_origins_and_unassigned_pages_can_reconnect_by_name() -> TestResult {
         let path =
             std::env::temp_dir().join(format!("overink-pending-{}.json", std::process::id()));
         let mut source = Pages::new(Some(10));
@@ -604,7 +612,7 @@ mod tests {
         draw(&mut history, 11.);
         source.switch(&mut history, 20);
         draw(&mut history, 22.);
-        source.save(&history, &path).unwrap();
+        source.save(&history, &path)?;
 
         let mut restored = Pages::new(Some(40));
         let mut history = History::default();
@@ -612,7 +620,7 @@ mod tests {
             &mut history,
             &[screen(30, "Display A", 0), screen(40, "Display B", 800)],
         );
-        assert_eq!(restored.load(&mut history, &path, true).unwrap(), 0);
+        assert_eq!(restored.load(&mut history, &path, true)?, 0);
         assert_eq!(history.strokes()[0].points[0].x, 22.);
         restored.switch(&mut history, 30);
         assert_eq!(history.strokes()[0].points[0].x, 11.);
@@ -622,13 +630,14 @@ mod tests {
         let laptop = screen(50, "Laptop", 0);
         imported.sync(&mut history, std::slice::from_ref(&laptop));
         draw(&mut history, 55.);
-        assert_eq!(imported.load(&mut history, &path, false).unwrap(), 2);
+        assert_eq!(imported.load(&mut history, &path, false)?, 2);
         assert_eq!(history.strokes()[0].points[0].x, 55.);
         imported.sync(&mut history, &[laptop, screen(60, "Right", 1200)]);
         assert_eq!(imported.unmatched.len(), 1);
         imported.switch(&mut history, 60);
         assert_eq!(history.strokes()[0].points[0].x, 22.);
-        fs::remove_file(path).unwrap();
+        fs::remove_file(path)?;
+        Ok(())
     }
     #[test]
     fn switching_screens_keeps_separate_ink_and_undo() {

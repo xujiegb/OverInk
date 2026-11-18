@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! One pressure ribbon per stroke. No series of overlapping translucent stamps.
 use crate::model::{Point, PointSpan, Stroke, Tool};
 use std::ops::RangeInclusive;
@@ -364,7 +366,7 @@ mod tests {
         }
     }
     #[test]
-    fn pencil_density_is_stable_and_tilt_changes_its_width() {
+    fn pencil_density_is_stable_and_tilt_changes_its_width() -> Result<(), serde_json::Error> {
         let mut stroke = Stroke {
             tool: Tool::Pencil,
             color: InkColor::default(),
@@ -399,11 +401,9 @@ mod tests {
                 .iter()
                 .all(|v| v.coverage.is_finite() && (0.0..=1.0).contains(&v.coverage))
         );
-        assert_eq!(
-            serde_json::from_str::<Stroke>(&serde_json::to_string(&stroke).unwrap())
-                .unwrap()
-                .tool,
-            Tool::Pencil
-        );
+        let encoded = serde_json::to_string(&stroke)?;
+        let decoded: Stroke = serde_json::from_str(&encoded)?;
+        assert_eq!(decoded.tool, Tool::Pencil);
+        Ok(())
     }
 }

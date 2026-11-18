@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use egui::{
     Color32, FontData, FontDefinitions, FontFamily, FontId, Ui,
     text::{Galley, LayoutJob, TextFormat},

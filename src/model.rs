@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use crate::color::InkColor;
 use serde::{Deserialize, Serialize};
 use std::{

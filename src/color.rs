@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! Scene colors are tagged. Hex presets are always sRGB, regardless of monitor gamut.
 use serde::{Deserialize, Serialize};
 

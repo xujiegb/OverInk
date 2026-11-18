@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 mod canvas;
 mod ink;
 mod panel;
@@ -3340,12 +3342,14 @@ mod touch_tests {
         assert_eq!(strokes.len(), 3);
         assert_eq!(a.history.point_count(), 6);
         assert_eq!(strokes[0].points[0].x, 10.);
-        assert_eq!(strokes[2].points.last().unwrap().x, 700.);
+        assert_eq!(strokes[2].points.last().map(|point| point.x), Some(700.));
         for (left, right, x) in [
             (&strokes[0], &strokes[1], 80.),
             (&strokes[1], &strokes[2], 480.),
         ] {
-            assert!(left.points.last().unwrap().x < x && right.points[0].x > x);
+            assert!(
+                left.points.last().is_some_and(|point| point.x < x) && right.points[0].x > x
+            );
         }
         a.history.undo();
         assert_eq!(a.history.strokes().len(), 2);
@@ -3394,7 +3398,10 @@ mod touch_tests {
             id,
             size,
         );
-        let points = &a.history.active.as_ref().unwrap().points;
+        let Some(active) = a.history.active.as_ref() else {
+            panic!("Expected an active stroke after the pen-axis event");
+        };
+        let points = &active.points;
         assert_eq!(points.len(), 2);
         assert!(points.iter().all(|p| p.pressure == 0.5));
         a.use_tool(Tool::Pencil);
@@ -3588,7 +3595,10 @@ mod touch_tests {
             a.motion(source, p(65.));
             a.motion(source, p(230.));
             assert!(a.input.contact.is_none());
-            assert_eq!(a.history.strokes()[0].points.last().unwrap().x, 65.);
+            assert_eq!(
+                a.history.strokes()[0].points.last().map(|point| point.x),
+                Some(65.)
+            );
 
             let far_side = Stroke {
                 points: vec![p(175.), p(215.)],
@@ -3719,7 +3729,9 @@ mod touch_tests {
         finger(&mut a, SDL_EVENT_FINGER_MOTION, 1, 1, 0.2, 0.25);
         finger(&mut a, SDL_EVENT_FINGER_MOTION, 1, 1, 0.45, 0.25);
         finger(&mut a, SDL_EVENT_FINGER_UP, 1, 1, 0.5, 0.25);
-        let trail = a.input.laser.values().next().unwrap();
+        let Some(trail) = a.input.laser.values().next() else {
+            panic!("Expected the fading laser trail");
+        };
         assert_eq!(trail.len(), 4);
         assert!(trail[0].starts_segment && !trail[1].starts_segment);
         assert!(trail[2].starts_segment && !trail[3].starts_segment);

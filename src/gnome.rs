@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 // SPDX-License-Identifier: BSD-3-Clause
 mod dialog;
 

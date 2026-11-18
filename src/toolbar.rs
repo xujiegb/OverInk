@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use crate::{appearance::Language, model::Tool};
 use egui::{Color32, Pos2, Rect, Response, Sense, Stroke, Ui, Vec2, vec2};
 
