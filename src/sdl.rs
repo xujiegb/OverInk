@@ -2267,8 +2267,10 @@ impl Renderer {
                 CStr::from_ptr(name).to_string_lossy().into_owned()
             };
             #[cfg(target_os = "macos")]
-            if name == "metal" {
-                crate::native::macos::configure_metal(raw, extended);
+            if name == "metal"
+                && let Some(renderer) = NonNull::new(raw)
+            {
+                crate::native::macos::configure_metal(renderer, extended);
             }
             SDL_SetRenderDrawBlendMode(raw, SDL_BLENDMODE_BLEND);
             // One shared frame clock paces both windows. Two blocking presents
