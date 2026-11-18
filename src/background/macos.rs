@@ -453,8 +453,7 @@ fn copy_sdr_screenshot(image: *const c_void) -> Result<Image, String> {
             space.0.as_ptr(),
             0x4001,
         );
-        let context =
-            Data(NonNull::new(context).ok_or("Cannot create the SDR screenshot bitmap")?);
+        let context = Data(NonNull::new(context).ok_or("Cannot create the SDR screenshot bitmap")?);
         // The bitmap context stores top-to-bottom RGBA rows. The Core
         // Graphics user-space convention already maps the image into them.
         // Flipping the CTM here would invert the output scanlines.
@@ -486,9 +485,7 @@ fn sdr_capture(bounds: [i32; 4], cancelled: &AtomicBool) -> CaptureResult {
             // and Data takes ownership only of a non-null result.
             unsafe { CGDisplayCreateImage(id) }.cast_mut(),
         )
-        .ok_or(
-            "Core Graphics could not capture the display. Check Screen Recording permission.",
-        )?,
+        .ok_or("Core Graphics could not capture the display. Check Screen Recording permission.")?,
     );
     if cancelled.load(Ordering::Relaxed) {
         return Ok(None);
