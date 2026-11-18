@@ -266,11 +266,10 @@ impl Canvas {
             // Apply input and upload texture deltas before a toolbar action changes the draft.
             // The next canvas frame will paint the resulting document.
             output.shapes.clear();
-            self.text
-                .as_mut()
-                .unwrap()
-                .paint(&self.render, &self.window, &self.color, output)?;
-            self.dirty = true;
+            if let Some(gui) = self.text.as_mut() {
+                gui.paint(&self.render, &self.window, &self.color, output)?;
+                self.dirty = true;
+            }
         }
         Ok(())
     }
@@ -390,13 +389,10 @@ impl Canvas {
                         extended_ink_budget,
                     )?
                 };
-                if let Some(output) = self.text_frame(page, theme, keep_editor_open) {
-                    self.text.as_mut().unwrap().paint(
-                        &self.render,
-                        &self.window,
-                        &self.color,
-                        output,
-                    )?;
+                if let Some(output) = self.text_frame(page, theme, keep_editor_open)
+                    && let Some(gui) = self.text.as_mut()
+                {
+                    gui.paint(&self.render, &self.window, &self.color, output)?;
                 }
                 if page.hidden {
                     self.render.present()?;
