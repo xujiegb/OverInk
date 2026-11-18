@@ -701,7 +701,12 @@ enum WindowCommand<'a> {
     SyncWindow(bool),
     Maximize,
     CenterOnDisplay(u32),
-    SetGeometry { x: i32, y: i32, w: i32, h: i32 },
+    SetGeometry {
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+    },
     AlwaysOnTop(bool),
     RaiseIfCurrent,
     Show(bool),
