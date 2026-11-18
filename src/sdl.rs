@@ -29,10 +29,10 @@ unsafe extern "C" {
     // SDL copies the resulting value into a caller-owned initialized
     // SDL_Time / SDL_DateTime; these typed mutable borrows cannot be null.
     #[link_name = "SDL_GetCurrentTime"]
-    safe fn native_current_time(ticks: &mut sdl3_sys::time::SDL_Time) -> bool;
+    safe fn native_current_time(ticks: &mut SDL_Time) -> bool;
     #[link_name = "SDL_TimeToDateTime"]
     safe fn native_time_to_date_time(
-        ticks: sdl3_sys::time::SDL_Time,
+        ticks: SDL_Time,
         out: &mut sdl3_sys::time::SDL_DateTime,
         local: bool,
     ) -> bool;
