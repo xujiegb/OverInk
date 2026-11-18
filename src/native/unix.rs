@@ -499,3 +499,49 @@ impl Passthrough {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::OwnedWaylandHandle;
+    use std::{
+        ffi::c_void,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+
+    struct DropCounter(Arc<AtomicUsize>);
+
+    impl Drop for DropCounter {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    unsafe extern "C" fn release_test_handle(raw: *mut c_void) {
+        // SAFETY: The test hands its unique Box allocation to the native
+        // guard, and this simulated destructor reconstructs it exactly once.
+        unsafe { drop(Box::from_raw(raw.cast::<DropCounter>())) };
+    }
+
+    #[test]
+    fn owned_wayland_handle_releases_exactly_once_and_rejects_null() {
+        let releases = Arc::new(AtomicUsize::new(0));
+        let raw = Box::into_raw(Box::new(DropCounter(Arc::clone(&releases)))).cast();
+        // SAFETY: The newly allocated Box is uniquely owned and matched with
+        // its exact destructor while the function remains available.
+        let owned = unsafe { OwnedWaylandHandle::from_native(raw, release_test_handle) }
+            .expect("live native handle");
+        assert_eq!(releases.load(Ordering::SeqCst), 0);
+        drop(owned);
+        assert_eq!(releases.load(Ordering::SeqCst), 1);
+
+        // SAFETY: A null native resource transfers no ownership.
+        assert!(unsafe {
+            OwnedWaylandHandle::from_native(std::ptr::null_mut(), release_test_handle)
+        }
+        .is_none());
+        assert_eq!(releases.load(Ordering::SeqCst), 1);
+    }
+}
