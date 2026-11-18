@@ -1495,6 +1495,31 @@ impl Drop for Window {
         }
     }
 }
+/// SDL properties have unique caller ownership and must be destroyed even
+/// when renderer or texture construction returns early or unwinds.
+struct OwnedProperties(SDL_PropertiesID);
+
+impl OwnedProperties {
+    fn new() -> Result<Self, String> {
+        // SAFETY: SDL creates a new, uniquely owned property list. A
+        // nonzero ID is released exactly once by this guard's destructor.
+        let id = unsafe { SDL_CreateProperties() };
+        (id.0 != 0).then_some(Self(id)).ok_or_else(error)
+    }
+
+    fn id(&self) -> SDL_PropertiesID {
+        self.0
+    }
+}
+
+impl Drop for OwnedProperties {
+    fn drop(&mut self) {
+        // SAFETY: This guard uniquely owns the nonzero SDL property ID
+        // obtained from SDL_CreateProperties.
+        unsafe { SDL_DestroyProperties(self.0) };
+    }
+}
+
 /// Release an SDL-owned surface at one native FFI boundary.
 fn destroy_owned_surface(raw: *mut SDL_Surface) {
     if raw.is_null() {
@@ -1742,41 +1767,34 @@ impl SnapshotTexture {
         }
         unsafe {
             let raw = if linear {
-                let props = SDL_CreateProperties();
-                if props.0 == 0 {
-                    return Err(error());
-                }
-                let result = (|| {
-                    check(SDL_SetNumberProperty(
-                        props,
+                let props = OwnedProperties::new()?;
+                check(SDL_SetNumberProperty(
+                    props.id(),
                         SDL_PROP_TEXTURE_CREATE_FORMAT_NUMBER,
                         SDL_PIXELFORMAT_RGBA64_FLOAT.0 as i64,
                     ))?;
-                    check(SDL_SetNumberProperty(
-                        props,
+                check(SDL_SetNumberProperty(
+                    props.id(),
                         SDL_PROP_TEXTURE_CREATE_COLORSPACE_NUMBER,
                         SDL_COLORSPACE_SRGB_LINEAR.0 as i64,
                     ))?;
-                    check(SDL_SetNumberProperty(
-                        props,
+                check(SDL_SetNumberProperty(
+                    props.id(),
                         SDL_PROP_TEXTURE_CREATE_WIDTH_NUMBER,
                         width as i64,
                     ))?;
-                    check(SDL_SetNumberProperty(
-                        props,
+                check(SDL_SetNumberProperty(
+                    props.id(),
                         SDL_PROP_TEXTURE_CREATE_HEIGHT_NUMBER,
                         height as i64,
                     ))?;
                     // A display snapshot is already mapped. Do not tone-map it again.
-                    check(SDL_SetFloatProperty(
-                        props,
+                check(SDL_SetFloatProperty(
+                    props.id(),
                         SDL_PROP_TEXTURE_CREATE_HDR_HEADROOM_FLOAT,
                         0.,
                     ))?;
-                    Ok::<_, String>(SDL_CreateTextureWithProperties(renderer.raw, props))
-                })();
-                SDL_DestroyProperties(props);
-                result?
+                SDL_CreateTextureWithProperties(renderer.raw, props.id())
             } else {
                 SDL_CreateTexture(
                     renderer.raw,
@@ -2131,17 +2149,13 @@ impl Renderer {
     }
     fn create(window: &Window, force_sdr: bool, driver: Option<&CStr>) -> Result<Self, String> {
         unsafe {
-            let props = SDL_CreateProperties();
-            if props.0 == 0 {
-                return Err(error());
-            }
+            let props = OwnedProperties::new()?;
             if !SDL_SetPointerProperty(
                 props,
                 SDL_PROP_RENDERER_CREATE_WINDOW_POINTER,
                 window.raw.cast(),
             ) {
                 let message = error();
-                SDL_DestroyProperties(props);
                 return Err(message);
             }
             if let Some(driver) = driver {
@@ -2155,12 +2169,12 @@ impl Renderer {
                 cfg!(target_os = "macos") || (cfg!(target_os = "windows") && !transparent);
             if !force_sdr && extended_output {
                 SDL_SetNumberProperty(
-                    props,
+                    props.id(),
                     SDL_PROP_RENDERER_CREATE_OUTPUT_COLORSPACE_NUMBER,
                     SDL_COLORSPACE_SRGB_LINEAR.0 as i64,
                 );
                 SDL_ClearError();
-                raw = SDL_CreateRendererWithProperties(props);
+                raw = SDL_CreateRendererWithProperties(props.id());
                 #[cfg(target_os = "macos")]
                 if raw.is_null() {
                     crate::native::macos::remove_metal_view(window);
@@ -2168,15 +2182,15 @@ impl Renderer {
             }
             if raw.is_null() {
                 SDL_SetNumberProperty(
-                    props,
+                    props.id(),
                     SDL_PROP_RENDERER_CREATE_OUTPUT_COLORSPACE_NUMBER,
                     SDL_COLORSPACE_SRGB.0 as i64,
                 );
                 SDL_ClearError();
-                raw = SDL_CreateRendererWithProperties(props);
+                raw = SDL_CreateRendererWithProperties(props.id());
             }
             let failure = raw.is_null().then(error);
-            SDL_DestroyProperties(props);
+            drop(props);
             if let Some(error) = failure {
                 return Err(error);
             }
