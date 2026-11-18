@@ -42,23 +42,21 @@ fn scaled_pixels(
 
 #[cfg(target_os = "windows")]
 pub fn position(window: &Window, local: [f32; 2]) -> Result<ScreenPoint, String> {
-    #[repr(C)]
-    struct Point {
-        x: i32,
-        y: i32,
-    }
-    #[link(name = "user32")]
-    // SAFETY: The declarations below use the Win32 system ABI and
-    // match the user32 exports; callers must uphold the pointer contracts.
-    unsafe extern "system" {
-        fn ClientToScreen(window: *mut std::ffi::c_void, point: *mut Point) -> i32;
-    }
+    use windows::Win32::{
+        Foundation::{HWND, POINT},
+        Graphics::Gdi::ClientToScreen,
+    };
     let [x, y] = local_pixels(window, local)?;
-    let mut point = Point { x, y };
-    let hwnd = window.win32_hwnd().ok_or("No Win32 window handle")?;
-    // SAFETY: The HWND is borrowed from the still-live SDL window, and the
-    // output POINT is valid and writable for the duration of this call.
-    if unsafe { ClientToScreen(hwnd.as_ptr(), &mut point) } == 0 {
+    let mut point = POINT { x, y };
+    let hwnd = HWND(
+        window
+            .win32_hwnd()
+            .ok_or("No Win32 window handle")?
+            .as_ptr(),
+    );
+    // SAFETY: SDL owns this live HWND and POINT is a writable Win32 value.
+    // The generated windows binding enforces the correct system ABI.
+    if !unsafe { ClientToScreen(hwnd, &mut point) }.as_bool() {
         return Err(std::io::Error::last_os_error().to_string());
     }
     Ok(ScreenPoint {
@@ -71,24 +69,7 @@ pub fn position(window: &Window, local: [f32; 2]) -> Result<ScreenPoint, String>
 mod win32_capture {
     #![deny(clippy::undocumented_unsafe_blocks)]
 
-    use std::{
-        ffi::c_void,
-        ptr::{self, NonNull},
-    };
-
-    #[link(name = "user32")]
-    // SAFETY: The declarations below use the Win32 system ABI and
-    // match the user32 exports; callers must uphold the pointer contracts.
-    unsafe extern "system" {
-        fn GetDC(window: *mut c_void) -> *mut c_void;
-        fn ReleaseDC(window: *mut c_void, dc: *mut c_void) -> i32;
-    }
-    #[link(name = "gdi32")]
-    // SAFETY: The declarations below use the Win32 system ABI and
-    // match the gdi32 exports; callers must uphold the pointer contracts.
-    unsafe extern "system" {
-        fn GetPixel(dc: *mut c_void, x: i32, y: i32) -> u32;
-    }
+    use windows::Win32::Graphics::Gdi::{GetDC, GetPixel, HDC, ReleaseDC};
     #[link(name = "dwmapi")]
     // SAFETY: The declaration matches the Win32 system ABI. DwmFlush has
     // no input pointers or caller-side memory invariants, so Rust 2024
@@ -99,20 +80,21 @@ mod win32_capture {
 
     /// The screen DC is tied to a null HWND and must be released with the same
     /// null HWND. The non-null handle is exclusively owned by this guard.
-    struct ScreenDc(NonNull<c_void>);
+    struct ScreenDc(HDC);
 
     impl ScreenDc {
         fn acquire() -> Result<Self, String> {
-            // SAFETY: A null HWND requests the desktop device context. The
-            // returned handle is validated before it is stored in ScreenDc.
-            NonNull::new(unsafe { GetDC(ptr::null_mut()) })
-                .map(Self)
+            // SAFETY: None requests the desktop DC; only a non-null HDC is
+            // retained and Drop releases it against the same null HWND.
+            let dc = unsafe { GetDC(None) };
+            (!dc.is_invalid())
+                .then_some(Self(dc))
                 .ok_or_else(|| "Cannot read the desktop".into())
         }
 
         fn sample(&self, [x, y]: [i32; 2]) -> Result<[u8; 3], String> {
-            // SAFETY: ScreenDc holds a live desktop DC until Drop.
-            let pixel = unsafe { GetPixel(self.0.as_ptr(), x, y) };
+            // SAFETY: ScreenDc owns a live desktop DC until Drop.
+            let pixel = unsafe { GetPixel(self.0, x, y) }.0;
             if pixel == u32::MAX {
                 return Err("The desktop pixel is unavailable".into());
             }
@@ -122,10 +104,10 @@ mod win32_capture {
 
     impl Drop for ScreenDc {
         fn drop(&mut self) {
-            // SAFETY: This is the non-null desktop DC returned by GetDC(null),
-            // and the owning ScreenDc is never cloned or copied.
+            // SAFETY: GetDC(None) returned this non-null DC; it is released
+            // exactly once with the same None window argument.
             unsafe {
-                ReleaseDC(ptr::null_mut(), self.0.as_ptr());
+                ReleaseDC(None, self.0);
             }
         }
     }
