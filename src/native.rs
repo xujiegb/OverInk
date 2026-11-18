@@ -87,102 +87,69 @@ pub fn set_controller_region(
 #[deny(clippy::undocumented_unsafe_blocks)]
 impl Passthrough {
     pub fn set(&mut self, window: &Window, pass: bool) -> Result<(), String> {
-        // SAFETY: The Win32 HWND is borrowed from a live SDL window. The
-        // imported User32 functions use their system calling conventions,
-        // and all style changes are checked via GetLastError.
+        use windows::Win32::{
+            Foundation::{ERROR_SUCCESS, GetLastError, HWND, SetLastError},
+            UI::WindowsAndMessaging::{
+                GWL_EXSTYLE, GetWindowLongW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+                SWP_NOSIZE, SWP_NOZORDER, SetWindowLongW, SetWindowPos, WS_EX_LAYERED,
+                WS_EX_TRANSPARENT,
+            },
+        };
+        #[cfg(target_pointer_width = "64")]
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetWindowLongPtrW, SetWindowLongPtrW,
+        };
+
+        let raw = window
+            .win32_hwnd()
+            .ok_or("No Win32 window handle")?
+            .as_ptr();
+        if self.applied == Some((raw, pass)) {
+            return Ok(());
+        }
+        self.invalidate();
+        let hwnd = HWND(raw);
+        // SAFETY: The HWND is borrowed from the live SDL window; the typed
+        // windows bindings preserve the system ABI. Clearing last-error
+        // distinguishes a valid zero style from an API failure.
         unsafe {
-            #[link(name = "user32")]
-            // SAFETY: The declarations below use the Win32 system ABI and
-            // match the user32 exports; callers must uphold the pointer contracts.
-            unsafe extern "system" {
-                fn SetWindowPos(
-                    h: *mut c_void,
-                    a: *mut c_void,
-                    x: i32,
-                    y: i32,
-                    cx: i32,
-                    cy: i32,
-                    f: u32,
-                ) -> i32;
-            }
-            #[cfg(target_pointer_width = "64")]
-            #[link(name = "user32")]
-            // SAFETY: The declarations below use the Win32 system ABI and
-            // match the user32 exports; callers must uphold the pointer contracts.
-            unsafe extern "system" {
-                fn GetWindowLongPtrW(h: *mut c_void, i: i32) -> isize;
-                fn SetWindowLongPtrW(h: *mut c_void, i: i32, v: isize) -> isize;
-            }
-            #[cfg(target_pointer_width = "32")]
-            #[link(name = "user32")]
-            // SAFETY: The declarations below use the Win32 system ABI and
-            // match the user32 exports; callers must uphold the pointer contracts.
-            unsafe extern "system" {
-                fn GetWindowLongW(h: *mut c_void, i: i32) -> i32;
-                fn SetWindowLongW(h: *mut c_void, i: i32, v: i32) -> i32;
-            }
-            #[link(name = "kernel32")]
-            // SAFETY: The declarations below use the Win32 system ABI and
-            // match the kernel32 exports; callers must uphold the pointer contracts.
-            unsafe extern "system" {
-                fn SetLastError(e: u32);
-                fn GetLastError() -> u32;
-            }
-            let hwnd = window
-                .win32_hwnd()
-                .ok_or("No Win32 window handle")?
-                .as_ptr();
-            if self.applied == Some((hwnd, pass)) {
-                return Ok(());
-            }
-            self.invalidate();
-            const GWL_EXSTYLE: i32 = -20;
-            const WS_EX_TRANSPARENT: isize = 0x20;
-            const WS_EX_LAYERED: isize = 0x80000;
-            SetLastError(0);
+            SetLastError(ERROR_SUCCESS);
             #[cfg(target_pointer_width = "64")]
             let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
             #[cfg(target_pointer_width = "32")]
             let style = GetWindowLongW(hwnd, GWL_EXSTYLE) as isize;
-            if style == 0 && GetLastError() != 0 {
+            if style == 0 && GetLastError() != ERROR_SUCCESS {
                 return Err(std::io::Error::last_os_error().to_string());
             }
             let desired = if pass {
-                style | WS_EX_TRANSPARENT | WS_EX_LAYERED
+                style | WS_EX_TRANSPARENT.0 as isize | WS_EX_LAYERED.0 as isize
             } else {
-                style & !WS_EX_TRANSPARENT
+                style & !(WS_EX_TRANSPARENT.0 as isize)
             };
             if desired != style {
-                SetLastError(0);
+                SetLastError(ERROR_SUCCESS);
                 #[cfg(target_pointer_width = "64")]
                 let prev = SetWindowLongPtrW(hwnd, GWL_EXSTYLE, desired);
                 #[cfg(target_pointer_width = "32")]
                 let prev = SetWindowLongW(hwnd, GWL_EXSTYLE, desired as i32) as isize;
-                if prev == 0 && GetLastError() != 0 {
+                if prev == 0 && GetLastError() != ERROR_SUCCESS {
                     return Err(std::io::Error::last_os_error().to_string());
                 }
             }
             // Refresh the style without raising the canvas over the toolbar.
-            const SWP_NOSIZE: u32 = 0x1;
-            const SWP_NOMOVE: u32 = 0x2;
-            const SWP_NOZORDER: u32 = 0x4;
-            const SWP_NOACTIVATE: u32 = 0x10;
-            const SWP_FRAMECHANGED: u32 = 0x20;
-            if SetWindowPos(
+            SetWindowPos(
                 hwnd,
-                std::ptr::null_mut(),
+                None,
                 0,
                 0,
                 0,
                 0,
                 SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-            ) == 0
-            {
-                return Err(std::io::Error::last_os_error().to_string());
-            }
-            self.applied = Some((hwnd, pass));
-            Ok(())
+            )
+            .map_err(|error| error.to_string())?;
         }
+        self.applied = Some((raw, pass));
+        Ok(())
     }
 }
 #[cfg(target_os = "macos")]
@@ -246,38 +213,28 @@ impl Passthrough {
 pub fn keep_controller_above(canvas: &Window, controller: &Window, _native: &Passthrough) {
     let _ = canvas;
     #[cfg(target_os = "windows")]
-    // SAFETY: The HWND is borrowed from a live SDL window, and SetWindowPos
-    // is called with the documented HWND_TOPMOST pseudo-handle and flags.
-    unsafe {
-        #[link(name = "user32")]
-        // SAFETY: The declarations below use the Win32 system ABI and
-        // match the user32 exports; callers must uphold the pointer contracts.
-        unsafe extern "system" {
-            fn SetWindowPos(
-                h: *mut c_void,
-                after: *mut c_void,
-                x: i32,
-                y: i32,
-                w: i32,
-                hgt: i32,
-                flags: u32,
-            ) -> i32;
-        }
-        let hwnd = controller
-            .win32_hwnd()
-            .map_or(std::ptr::null_mut(), |handle| handle.as_ptr());
-        if !hwnd.is_null() {
-            // Keep drawing focus on the canvas; raising the controller must not
-            // interrupt a pen stroke or activate the window beneath it.
-            SetWindowPos(
-                hwnd,
-                (-1isize) as *mut c_void,
-                0,
-                0,
-                0,
-                0,
-                0x1 | 0x2 | 0x10 | 0x200,
-            );
+    {
+        use windows::Win32::{
+            Foundation::HWND,
+            UI::WindowsAndMessaging::{
+                HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+                SetWindowPos,
+            },
+        };
+        if let Some(handle) = controller.win32_hwnd() {
+            // SAFETY: The HWND is owned by the live SDL controller. The typed
+            // Win32 API receives the documented topmost pseudo-handle and flags.
+            let _ = unsafe {
+                SetWindowPos(
+                    HWND(handle.as_ptr()),
+                    Some(HWND_TOPMOST),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                )
+            };
         }
     }
     #[cfg(target_os = "macos")]
@@ -320,55 +277,41 @@ pub fn show_canvas(canvas: &Window, controller: &Window, shown: bool) -> Result<
 #[deny(clippy::undocumented_unsafe_blocks)]
 pub fn controller_bounds(canvas: &Window, controller: &Window) -> Option<[f32; 4]> {
     #[cfg(target_os = "windows")]
-    // SAFETY: Both HWNDs are validated before invoking User32. The output
-    // structs have the C layout of RECT and POINT and remain valid for calls.
-    unsafe {
-        #[repr(C)]
-        struct Rect {
-            left: i32,
-            top: i32,
-            right: i32,
-            bottom: i32,
-        }
-        #[repr(C)]
-        struct Point {
-            x: i32,
-            y: i32,
-        }
-        #[link(name = "user32")]
-        // SAFETY: The declarations below use the Win32 system ABI and
-        // match the user32 exports; callers must uphold the pointer contracts.
-        unsafe extern "system" {
-            fn GetWindowRect(w: *mut c_void, rect: *mut Rect) -> i32;
-            fn ScreenToClient(w: *mut c_void, point: *mut Point) -> i32;
-        }
-        let window = controller.win32_hwnd()?.as_ptr();
-        let surface = canvas.win32_hwnd()?.as_ptr();
-        let mut rect = Rect {
-            left: 0,
-            top: 0,
-            right: 0,
-            bottom: 0,
+    {
+        use windows::Win32::{
+            Foundation::{HWND, POINT, RECT},
+            Graphics::Gdi::ScreenToClient,
+            UI::WindowsAndMessaging::GetWindowRect,
         };
-        if GetWindowRect(window, &mut rect) == 0 {
-            return None;
+        let window = HWND(controller.win32_hwnd()?.as_ptr());
+        let surface = HWND(canvas.win32_hwnd()?.as_ptr());
+        let mut rect = RECT::default();
+        // SAFETY: Both HWNDs belong to live SDL windows. RECT and POINT are
+        // initialized, writable Win32 values. Typed bindings check the ABI.
+        unsafe {
+            if GetWindowRect(window, &mut rect).is_err() {
+                return None;
+            }
+            let mut point = POINT {
+                x: rect.left,
+                y: rect.top,
+            };
+            if !ScreenToClient(surface, &mut point).as_bool() {
+                return None;
+            }
+            let logical = canvas.size();
+            let pixels = canvas.pixel_size();
+            if pixels[0] <= 0 || pixels[1] <= 0 {
+                return None;
+            }
+            let scale = [logical[0] / pixels[0] as f32, logical[1] / pixels[1] as f32];
+            Some([
+                point.x as f32 * scale[0],
+                point.y as f32 * scale[1],
+                (rect.right - rect.left) as f32 * scale[0],
+                (rect.bottom - rect.top) as f32 * scale[1],
+            ])
         }
-        let mut point = Point {
-            x: rect.left,
-            y: rect.top,
-        };
-        if ScreenToClient(surface, &mut point) == 0 {
-            return None;
-        }
-        let logical = canvas.size();
-        let pixels = canvas.pixel_size();
-        let scale = [logical[0] / pixels[0] as f32, logical[1] / pixels[1] as f32];
-        Some([
-            point.x as f32 * scale[0],
-            point.y as f32 * scale[1],
-            (rect.right - rect.left) as f32 * scale[0],
-            (rect.bottom - rect.top) as f32 * scale[1],
-        ])
     }
     #[cfg(not(target_os = "windows"))]
     {
