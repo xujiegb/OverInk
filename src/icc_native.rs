@@ -201,6 +201,28 @@ mod tests {
     }
 
     #[test]
+    fn encoded_display_p3_profile_round_trips_through_srgb() -> Result<(), &'static str> {
+        // Exercise the actual ICC byte parser and both RGB conversion
+        // directions, not only synthetic in-memory sRGB profile objects.
+        let display = ColorProfile::new_display_p3();
+        let bytes = display.encode().map_err(|_| "Cannot encode a Display P3 ICC profile")?;
+        let forward = Transform::from_srgb_to_display(&bytes)
+            .map_err(|_| "Cannot parse or create Display P3 output transform")?;
+        let decoded = open_profile(&bytes).ok_or("Cannot decode Display P3 ICC bytes")?;
+        let inverse = Transform::rgb(&decoded, &ColorProfile::new_srgb())
+            .ok_or("Cannot create Display P3 input transform")?;
+        let initial = [0.3, 0.5, 0.7];
+        let restored = inverse.map_rgb(forward.map_rgb(initial));
+        for (actual, expected) in restored.into_iter().zip(initial) {
+            assert!(
+                (actual - expected).abs() < 0.05,
+                "Display P3 conversion exceeded round-trip tolerance"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn incomplete_rgba8_buffer_is_unchanged() {
         let mut pixels = [11, 22, 33];
         convert_rgba8_to_srgb(&mut pixels, b"");
