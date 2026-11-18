@@ -49,10 +49,7 @@ impl FileDialog {
             return None;
         }
         let mut callbacks = callbacks();
-        let id = callbacks
-            .last_id
-            .checked_add(1)
-            .expect("File dialog IDs exhausted");
+        let id = callbacks.last_id.checked_add(1)?;
         callbacks.last_id = id;
         callbacks.results.insert(id, None);
         self.0 = Some((id, kind));
