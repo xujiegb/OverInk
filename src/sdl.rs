@@ -464,8 +464,7 @@ fn bounded_sdl_count(count: i32, maximum: usize) -> Option<usize> {
 pub fn preferred_locales() -> Vec<(String, String)> {
     unsafe {
         let mut count = 0;
-        let Some(locales) =
-            NonNull::new(SDL_GetPreferredLocales(&mut count)).map(SdlAllocation)
+        let Some(locales) = NonNull::new(SDL_GetPreferredLocales(&mut count)).map(SdlAllocation)
         else {
             return Vec::new();
         };
@@ -1513,8 +1512,8 @@ impl Window {
     pub fn icc_profile(&self) -> Option<Vec<u8>> {
         unsafe {
             let mut size = 0;
-            let Some(profile) = NonNull::new(SDL_GetWindowICCProfile(self.raw, &mut size))
-                .map(SdlAllocation)
+            let Some(profile) =
+                NonNull::new(SDL_GetWindowICCProfile(self.raw, &mut size)).map(SdlAllocation)
             else {
                 // A missing ICC profile is normal; avoid leaving a stale SDL error.
                 SDL_ClearError();
