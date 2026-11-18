@@ -112,7 +112,9 @@ fn ribbon(m: &mut Mesh, p: &[Point], range: RangeInclusive<usize>, stroke: &Stro
     }
     let a = p[0];
     let b = p[1];
-    let end = *p.last().unwrap();
+    let Some(&end) = p.last() else {
+        return;
+    };
     let prev = p[p.len() - 2];
     if first == 0 {
         fan(
@@ -191,7 +193,9 @@ pub fn prepare_samples(
         // Preserve grain in SVG and on renderers without a repeating
         // texture. Limit subdivisions while retaining the whole path.
         let max_steps = (100_000 / count).clamp(1, 32);
-        let mut previous = points.next().unwrap();
+        let Some(mut previous) = points.next() else {
+            return;
+        };
         samples.push(previous);
         for point in points {
             let steps = ((previous.dist(point) / 2.0).ceil() as usize).clamp(1, max_steps);
