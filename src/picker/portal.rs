@@ -165,7 +165,8 @@ impl SystemJob<Image> {
                     if cancelled.is_closed() {
                         return Ok(None);
                     }
-                    let fallback = portal_fallback.ok_or("GNOME capture fallback is unavailable")?;
+                    let fallback =
+                        portal_fallback.ok_or("GNOME capture fallback is unavailable")?;
                     let image = fallback(image).map_err(|error| {
                         format!(
                             "{error}. Enable OverInk Overlay (revision 6) in GNOME Wayland for reliable compositor capture."
