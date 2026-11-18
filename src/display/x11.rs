@@ -69,18 +69,12 @@ impl Randr {
         API.get_or_init(Self::new).as_ref()
     }
     fn new() -> Option<Self> {
-        // SAFETY: These are the standard X11/XRandR shared-library sonames.
-        // Both libraries remain owned by Randr for the duration of queries.
-        unsafe {
-            Some(Self {
-                x11: Library::new("libX11.so.6")
-                    .or_else(|_| Library::new("libX11.so"))
-                    .ok()?,
-                randr: Library::new("libXrandr.so.2")
-                    .or_else(|_| Library::new("libXrandr.so"))
-                    .ok()?,
-            })
-        }
+        // Loading is the native adapter's only library-initialization FFI;
+        // this guard owns both libraries for the full lifetime of the symbols.
+        Some(Self {
+            x11: crate::native::native_library(&["libX11.so.6", "libX11.so"]).ok()?,
+            randr: crate::native::native_library(&["libXrandr.so.2", "libXrandr.so"]).ok()?,
+        })
     }
     pub fn active_areas(&self, window: &Window) -> Option<Vec<[i32; 4]>> {
         // SAFETY: Xlib/XRandR symbols retain their loaded libraries through
