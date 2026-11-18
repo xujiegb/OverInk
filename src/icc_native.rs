@@ -126,12 +126,17 @@ impl Transform {
     /// Only matching native pixel layouts reach cmsDoTransform. All size
     /// checks and count conversions happen before crossing the FFI boundary.
     fn apply(&self, pixels: PixelBuffer<'_>) {
-        let (data, count): (*mut std::ffi::c_void, u32) = match (self.layout, pixels) {
+        let (data, count) = match (self.layout, pixels) {
             (PixelLayout::RgbFloat, PixelBuffer::Rgb(colors)) => {
                 let Ok(count) = u32::try_from(colors.len()) else {
                     return;
                 };
-                (colors.as_mut_ptr().cast(), count)
+                let Some(data) =
+                    std::ptr::NonNull::<std::ffi::c_void>::new(colors.as_mut_ptr().cast())
+                else {
+                    return;
+                };
+                (data, count)
             }
             #[cfg(any(target_os = "linux", target_os = "freebsd", test))]
             (PixelLayout::Rgba8, PixelBuffer::Rgba8(colors)) => {
@@ -141,7 +146,12 @@ impl Transform {
                 let Ok(count) = u32::try_from(colors.len() / 4) else {
                     return;
                 };
-                (colors.as_mut_ptr().cast(), count)
+                let Some(data) =
+                    std::ptr::NonNull::<std::ffi::c_void>::new(colors.as_mut_ptr().cast())
+                else {
+                    return;
+                };
+                (data, count)
             }
             #[cfg(any(target_os = "linux", target_os = "freebsd", test))]
             _ => return,
@@ -153,7 +163,7 @@ impl Transform {
         // buffer. Its native allocation remains valid through this call;
         // Little CMS supports these exact in-place pixel transforms.
         unsafe {
-            cms::cmsDoTransform(self.raw, data.cast_const(), data, count);
+            cms::cmsDoTransform(self.raw, data.as_ptr().cast_const(), data.as_ptr(), count);
         }
     }
 
