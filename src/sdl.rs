@@ -632,9 +632,7 @@ impl Window {
                 WindowBooleanQuery::InputFocused => {
                     SDL_GetWindowFlags(self.raw) & SDL_WINDOW_INPUT_FOCUS != 0
                 }
-                WindowBooleanQuery::Hidden => {
-                    SDL_GetWindowFlags(self.raw) & SDL_WINDOW_HIDDEN != 0
-                }
+                WindowBooleanQuery::Hidden => SDL_GetWindowFlags(self.raw) & SDL_WINDOW_HIDDEN != 0,
                 WindowBooleanQuery::Transparent => {
                     SDL_GetWindowFlags(self.raw) & SDL_WINDOW_TRANSPARENT != 0
                 }
@@ -645,11 +643,12 @@ impl Window {
                         false,
                     ) || {
                         let display = SDL_GetDisplayForWindow(self.raw);
-                        display.0 != 0 && SDL_GetBooleanProperty(
-                            SDL_GetDisplayProperties(display),
-                            SDL_PROP_DISPLAY_HDR_ENABLED_BOOLEAN,
-                            false,
-                        )
+                        display.0 != 0
+                            && SDL_GetBooleanProperty(
+                                SDL_GetDisplayProperties(display),
+                                SDL_PROP_DISPLAY_HDR_ENABLED_BOOLEAN,
+                                false,
+                            )
                     }
                 }
             }
