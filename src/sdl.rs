@@ -1635,14 +1635,11 @@ impl Drop for OwnedSurface {
 
 /// Consume one uniquely owned SDL texture on the SDL-owning thread.
 /// Ink, snapshot and UI textures share this native destruction boundary.
-fn destroy_owned_texture(raw: *mut SDL_Texture) {
-    if raw.is_null() {
-        return;
-    }
+fn destroy_owned_texture(raw: NonNull<SDL_Texture>) {
     // SAFETY: Every caller transfers the sole SDL_CreateTexture handle from
     // an owned texture's Drop. The renderer is still live and SDL is confined
     // to the main thread; no caller may use the pointer after this call.
-    unsafe { SDL_DestroyTexture(raw) };
+    unsafe { SDL_DestroyTexture(raw.as_ptr()) };
 }
 
 /// Uniquely owned, non-null SDL texture shared by the ink and GUI layers.
@@ -1693,7 +1690,7 @@ impl OwnedTexture {
 
 impl Drop for OwnedTexture {
     fn drop(&mut self) {
-        destroy_owned_texture(self.as_ptr());
+        destroy_owned_texture(self.0);
     }
 }
 
