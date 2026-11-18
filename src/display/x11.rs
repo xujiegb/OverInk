@@ -204,7 +204,7 @@ mod tests {
             .is_some_and(|resource| NonNull::from(resource.as_mut()) == raw)
         {
             // The matching Box remains owned by Rust until this destructor.
-            slot.take();
+            drop(slot.take());
         }
     }
 
