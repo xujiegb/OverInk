@@ -105,6 +105,24 @@ unsafe extern "C" {
         width: &mut i32,
         height: &mut i32,
     ) -> bool;
+    // These synchronous SDL window queries write initialized integer
+    // outputs without retaining their addresses. The private call site
+    // validates the live SDL window and checks the SDL main thread.
+    #[link_name = "SDL_GetWindowPosition"]
+    safe fn native_window_position(
+        window: NonNull<SDL_Window>,
+        x: &mut i32,
+        y: &mut i32,
+    ) -> bool;
+    #[cfg(not(target_os = "windows"))]
+    #[link_name = "SDL_GetWindowBordersSize"]
+    safe fn native_window_borders_size(
+        window: NonNull<SDL_Window>,
+        top: &mut i32,
+        left: &mut i32,
+        bottom: &mut i32,
+        right: &mut i32,
+    ) -> bool;
     #[cfg(target_os = "linux")]
     #[link_name = "SDL_FlushEvent"]
     safe fn native_flush_event(event_type: u32);
@@ -980,29 +998,29 @@ impl Window {
 
     /// Copy SDL's initialized output coordinates before returning to Rust.
     fn query_coordinates(&self, query: WindowCoordinateQuery) -> Result<[i32; 4], String> {
-        // SAFETY: Each output pointer references initialized, writable
-        // stack storage for the duration of the synchronous SDL query.
-        unsafe {
-            match query {
-                WindowCoordinateQuery::Position => {
-                    let (mut x, mut y) = (0, 0);
-                    check(SDL_GetWindowPosition(self.raw, &mut x, &mut y))?;
-                    Ok([x, y, 0, 0])
-                }
-                #[cfg(not(target_os = "windows"))]
-                WindowCoordinateQuery::Borders => {
-                    let (mut top, mut left, mut bottom, mut right) = (0, 0, 0, 0);
-                    // Decoration support is optional: preserve the
-                    // native output and zero defaults even on failure.
-                    SDL_GetWindowBordersSize(
-                        self.raw,
-                        &mut top,
-                        &mut left,
-                        &mut bottom,
-                        &mut right,
-                    );
-                    Ok([top, left, bottom, right])
-                }
+        if !native_is_main_thread() {
+            return Err("SDL window position query requires the main thread".into());
+        }
+        let window = NonNull::new(self.raw).ok_or("SDL window is unavailable")?;
+        match query {
+            WindowCoordinateQuery::Position => {
+                let (mut x, mut y) = (0, 0);
+                check(native_window_position(window, &mut x, &mut y))?;
+                Ok([x, y, 0, 0])
+            }
+            #[cfg(not(target_os = "windows"))]
+            WindowCoordinateQuery::Borders => {
+                let (mut top, mut left, mut bottom, mut right) = (0, 0, 0, 0);
+                // Decoration support is optional: preserve the native
+                // output and zero defaults even on failure.
+                let _ = native_window_borders_size(
+                    window,
+                    &mut top,
+                    &mut left,
+                    &mut bottom,
+                    &mut right,
+                );
+                Ok([top, left, bottom, right])
             }
         }
     }
