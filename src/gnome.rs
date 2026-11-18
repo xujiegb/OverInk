@@ -311,9 +311,7 @@ fn extension_state(info: &ExtensionInfo) -> Option<f64> {
 async fn inspect(shell: &Proxy<'_>) -> zbus::Result<Option<Guide>> {
     let info = extension_info(shell).await?;
     let state = extension_state(&info);
-    let bundled_revision = bundled_metadata()["version"]
-        .as_f64()
-        .expect("bundled GNOME version");
+    let bundled_revision = bundled_metadata()["version"].as_f64().unwrap_or(0.);
     let old_bundle = matches!(state, Some(ACTIVE | INACTIVE | INITIALIZED))
         && extension_version(&info) < bundled_revision;
     if state == Some(OUT_OF_DATE) || old_bundle {
@@ -436,7 +434,12 @@ fn bundled_supports(shell_version: &str) -> bool {
 
 fn bundled_metadata() -> &'static serde_json::Value {
     static BUNDLE: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
-    BUNDLE.get_or_init(|| serde_json::from_str(METADATA).expect("bundled GNOME metadata"))
+    BUNDLE.get_or_init(|| {
+        serde_json::from_str(METADATA).unwrap_or_else(|error| {
+            eprintln!("OverInk: invalid bundled GNOME extension metadata: {error}");
+            serde_json::Value::Null
+        })
+    })
 }
 
 fn user_data() -> Option<PathBuf> {
