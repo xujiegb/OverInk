@@ -570,14 +570,14 @@ impl Sweep {
         };
         let margin = stroke.max_radius() * 2. + 0.1;
         if points.len() == 1 {
-            let dot = points.at(0);
+            let dot = points.at(0)?;
             return (segment_distance(dot, self.from, self.to) < self.radius + radius(dot))
                 .then(|| fragment.bounds.path.padded(margin));
         }
         let mut previous_radius = None;
         let mut cuts = (0..points.len().saturating_sub(1)).filter_map(|index| {
-            let a = points.at(index);
-            let b = points.at(index + 1);
+            let a = points.at(index)?;
+            let b = points.at(index + 1)?;
             if !bounds.intersects(Bounds::between(a, b)) {
                 previous_radius = None;
                 return None;
@@ -598,7 +598,7 @@ impl Sweep {
             } else {
                 let discarded = tail
                     .into_iter()
-                    .chain((next..end).map(|i| points.at(i)))
+                    .chain((next..end).filter_map(|i| points.at(i)))
                     .chain(head);
                 if let Some(bounds) = Bounds::points(discarded) {
                     Bounds::include(damage, bounds);
@@ -606,17 +606,21 @@ impl Sweep {
             }
         };
         for (index, [enter, exit]) in std::iter::once(first).chain(cuts) {
-            let a = points.at(index);
-            let b = points.at(index + 1);
+            let a = points.at(index)?;
+            let b = points.at(index + 1)?;
             let head = (enter > 0.).then(|| a.interpolate(b, enter));
             let start = head.unwrap_or(a);
             // Replacing a segment changes its adjacent joins and round caps.
             Bounds::include(&mut damage, Bounds::between(a, b));
-            if index > 0 {
-                Bounds::include(&mut damage, Bounds::between(points.at(index - 1), start));
+            if index > 0
+                && let Some(previous) = points.at(index - 1)
+            {
+                Bounds::include(&mut damage, Bounds::between(previous, start));
             }
-            if index + 2 < points.len() {
-                Bounds::include(&mut damage, Bounds::between(b, points.at(index + 2)));
+            if index + 2 < points.len()
+                && let Some(next_point) = points.at(index + 2)
+            {
+                Bounds::include(&mut damage, Bounds::between(b, next_point));
             }
             if enter > 0. || tail.is_some() || next < index {
                 run_end(next, index + 1, tail, head, &mut damage);
