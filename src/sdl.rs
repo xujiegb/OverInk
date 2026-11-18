@@ -604,6 +604,8 @@ enum WindowCommand<'a> {
     },
     AlwaysOnTop(bool),
     RaiseIfCurrent,
+    Show(bool),
+    SetParent(Option<&'a Window>),
 }
 
 pub struct Window {
@@ -677,6 +679,21 @@ impl Window {
                         SDL_RaiseWindow(window);
                     }
                     Ok(())
+                }
+                WindowCommand::Show(show) => {
+                    SDL_ClearError();
+                    check(if show {
+                        SDL_ShowWindow(self.raw)
+                    } else {
+                        SDL_HideWindow(self.raw)
+                    })
+                }
+                WindowCommand::SetParent(parent) => {
+                    let raw = parent.map_or(ptr::null_mut(), |window| window.raw);
+                    if SDL_GetWindowParent(self.raw) == raw {
+                        return Ok(());
+                    }
+                    check(SDL_SetWindowParent(self.raw, raw))
                 }
             }
         }
@@ -951,16 +968,9 @@ impl Window {
             Ok(())
         }
     }
-    /// Query the current X11/desktop position without exposing an unsafe FFI call.
     /// Maintain an SDL Wayland transient parent only when it actually changes.
     pub fn set_parent(&self, parent: Option<&Window>) -> Result<(), String> {
-        unsafe {
-            let raw = parent.map_or(ptr::null_mut(), |window| window.raw);
-            if SDL_GetWindowParent(self.raw) == raw {
-                return Ok(());
-            }
-            check(SDL_SetWindowParent(self.raw, raw))
-        }
+        self.run_command(WindowCommand::SetParent(parent))
     }
 
     /// SDL's border query can fail on window managers without server-side
@@ -1000,14 +1010,7 @@ impl Window {
         self.scale() / self.pixel_density()
     }
     pub fn show(&self, show: bool) -> Result<(), String> {
-        unsafe {
-            SDL_ClearError();
-            check(if show {
-                SDL_ShowWindow(self.raw)
-            } else {
-                SDL_HideWindow(self.raw)
-            })
-        }
+        self.run_command(WindowCommand::Show(show))
     }
     pub fn display_id(&self) -> Option<u32> {
         let id = unsafe { SDL_GetDisplayForWindow(self.raw) }.0;
@@ -1151,25 +1154,27 @@ impl Window {
         }
     }
     pub fn recover_on_display(&self, id: u32) -> Result<(), String> {
-        unsafe {
-            if driver() == "wayland" {
-                return Ok(());
-            }
-            let mut bounds = SDL_Rect::default();
-            check(SDL_GetDisplayUsableBounds(SDL_DisplayID(id), &mut bounds))?;
-            let (mut x, mut y) = (0, 0);
-            check(SDL_GetWindowPosition(self.raw, &mut x, &mut y))?;
-            let size = self.size();
-            let center = [x + (size[0] * 0.5) as i32, y + (size[1] * 0.5) as i32];
-            if center[0] < bounds.x
-                || center[0] >= bounds.x + bounds.w
-                || center[1] < bounds.y
-                || center[1] >= bounds.y + bounds.h
-            {
-                self.place_on_display(id, false)?;
-            }
-            Ok(())
+        if driver() == "wayland" {
+            return Ok(());
         }
+        // The display bounds and window position already have safe SDL
+        // adapters. Compare in i64 to avoid overflow on unusual virtual
+        // desktop layouts, without another raw FFI call here.
+        let [left, top, width, height] = usable_display_bounds(id).ok_or_else(error)?;
+        let [x, y] = self.position()?;
+        let size = self.size();
+        let center_x = i64::from(x) + (size[0] * 0.5) as i64;
+        let center_y = i64::from(y) + (size[1] * 0.5) as i64;
+        let right = i64::from(left) + i64::from(width);
+        let bottom = i64::from(top) + i64::from(height);
+        if center_x < i64::from(left)
+            || center_x >= right
+            || center_y < i64::from(top)
+            || center_y >= bottom
+        {
+            self.place_on_display(id, false)?;
+        }
+        Ok(())
     }
 }
 impl Drop for Window {
