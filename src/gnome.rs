@@ -540,7 +540,7 @@ mod tests {
     }
 
     #[test]
-    fn declining_the_startup_guide_persists_wayland_off() {
+    fn declining_the_startup_guide_persists_wayland_off() -> Result<(), Box<dyn std::error::Error>> {
         let dir = env::temp_dir().join(format!("overink-gnome-preferences-{}", std::process::id()));
         let path = dir.join("ui.json");
         let mut preferences = Preferences {
@@ -553,7 +553,7 @@ mod tests {
             restore_session: false,
             ..preferences.clone()
         };
-        saved.save(&path).unwrap();
+        saved.save(&path)?;
         assert!(matches!(
             Guide::Install.act(Action::Cancel),
             Some(Decision::XWayland)
@@ -567,7 +567,8 @@ mod tests {
             }
         );
         assert_eq!(Preferences::load(&path), preferences);
-        fs::remove_dir_all(dir).unwrap();
+        fs::remove_dir_all(dir)?;
+        Ok(())
     }
 
     struct MockShell {
@@ -582,7 +583,7 @@ mod tests {
         version: &'static str,
         states: &'static [Option<f64>],
         bundle_version: f64,
-    ) -> Proxy<'static> {
+    ) -> Result<Proxy<'static>, zbus::Error> {
         zbus::block_on(async {
             let service = Builder::session()
                 .name(name)
@@ -596,11 +597,9 @@ mod tests {
                     },
                 )
                 .build()
-                .await
-                .unwrap();
+                .await?;
             Proxy::new_owned(service, name.to_owned(), SHELL_PATH, SHELL_EXTENSIONS)
                 .await
-                .unwrap()
         })
     }
 
@@ -619,12 +618,17 @@ mod tests {
         fn get_extension_info(&self, uuid: &str) -> ExtensionInfo {
             assert_eq!(uuid, UUID);
             let index = self.next.fetch_add(1, Ordering::Relaxed);
-            self.states[index.min(self.states.len() - 1)].map_or_else(HashMap::new, |state| {
-                HashMap::from([
-                    ("state".into(), state.into()),
-                    ("version".into(), self.bundle_version.into()),
-                ])
-            })
+            self.states
+                .get(index)
+                .or_else(|| self.states.last())
+                .copied()
+                .flatten()
+                .map_or_else(HashMap::new, |state| {
+                    HashMap::from([
+                        ("state".into(), state.into()),
+                        ("version".into(), self.bundle_version.into()),
+                    ])
+                })
         }
 
         fn enable_extension(&self, uuid: &str) -> bool {
@@ -634,28 +638,29 @@ mod tests {
 
     #[test]
     #[ignore = "requires an isolated session bus: dbus-run-session cargo test shell_activation -- --ignored"]
-    fn shell_activation_waits_for_the_extension_to_be_active() {
+    fn shell_activation_waits_for_the_extension_to_be_active() -> Result<(), Box<dyn std::error::Error>> {
         let proxy = mock_shell(
             SHELL_BUS,
             "48.7",
             &[None, Some(INITIALIZED), Some(8.), Some(ACTIVE)],
-            bundled_metadata()["version"].as_f64().unwrap(),
+            bundled_metadata()["version"].as_f64().ok_or("Missing bundled GNOME extension version")?,
         );
         assert!(matches!(
-            zbus::block_on(inspect(&proxy)).unwrap(),
+            zbus::block_on(inspect(&proxy))?,
             Some(Guide::Install | Guide::Relogin)
         ));
         assert!(matches!(
-            zbus::block_on(inspect(&proxy)).unwrap(),
+            zbus::block_on(inspect(&proxy))?,
             Some(Guide::Enable)
         ));
-        enable_extension(&proxy).unwrap();
-        assert!(zbus::block_on(inspect(&proxy)).unwrap().is_none());
+        enable_extension(&proxy)?;
+        assert!(zbus::block_on(inspect(&proxy))?.is_none());
+        Ok(())
     }
 
     #[test]
     #[ignore = "requires an isolated session bus: dbus-run-session cargo test outdated_extension -- --ignored"]
-    fn outdated_extension_can_be_updated_when_the_bundle_supports_shell() {
+    fn outdated_extension_can_be_updated_when_the_bundle_supports_shell() -> Result<(), Box<dyn std::error::Error>> {
         let expected = if installed_bundle(&HashMap::new()) {
             Guide::Relogin
         } else {
@@ -667,7 +672,7 @@ mod tests {
             &[Some(OUT_OF_DATE)],
             0.,
         );
-        let guide = zbus::block_on(inspect(&supported)).unwrap().unwrap();
+        let guide = zbus::block_on(inspect(&supported))?.ok_or("Expected a GNOME Shell guide")?;
         assert_eq!(
             std::mem::discriminant(&guide),
             std::mem::discriminant(&expected)
@@ -679,14 +684,15 @@ mod tests {
             0.,
         );
         assert!(matches!(
-            zbus::block_on(inspect(&unsupported)).unwrap(),
+            zbus::block_on(inspect(&unsupported))?,
             Some(Guide::Unavailable(_))
         ));
         let active = mock_shell("org.gnome.Shell.TestOldActive", "49.2", &[Some(ACTIVE)], 0.);
-        let guide = zbus::block_on(inspect(&active)).unwrap().unwrap();
+        let guide = zbus::block_on(inspect(&active))?.ok_or("Expected a GNOME Shell guide")?;
         assert_eq!(
             std::mem::discriminant(&guide),
             std::mem::discriminant(&expected)
         );
+        Ok(())
     }
 }
