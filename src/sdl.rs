@@ -26,6 +26,16 @@ unsafe extern "C" {
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     #[link_name = "SDL_RegisterEvents"]
     safe fn native_register_events(count: i32) -> u32;
+    // SDL copies the resulting value into a caller-owned initialized
+    // SDL_Time / SDL_DateTime; these typed mutable borrows cannot be null.
+    #[link_name = "SDL_GetCurrentTime"]
+    safe fn native_current_time(ticks: &mut sdl3_sys::time::SDL_Time) -> bool;
+    #[link_name = "SDL_TimeToDateTime"]
+    safe fn native_time_to_date_time(
+        ticks: sdl3_sys::time::SDL_Time,
+        out: &mut sdl3_sys::time::SDL_DateTime,
+        local: bool,
+    ) -> bool;
 }
 
 /// Known SDL window property keys, with no arbitrary raw C-string input.
@@ -620,10 +630,10 @@ impl Drop for SystemCursor {
 
 /// Local timestamp for screenshot filenames, using SDL's platform clock.
 pub fn screenshot_file_stem() -> String {
-    use sdl3_sys::time::{SDL_DateTime, SDL_GetCurrentTime, SDL_TimeToDateTime};
+    use sdl3_sys::time::SDL_DateTime;
     let mut time = 0;
     let mut date = SDL_DateTime::default();
-    if unsafe { SDL_GetCurrentTime(&mut time) && SDL_TimeToDateTime(time, &mut date, true) } {
+    if native_current_time(&mut time) && native_time_to_date_time(time, &mut date, true) {
         format!(
             "OverInk-{:04}-{:02}-{:02}_{:02}-{:02}-{:02}",
             date.year, date.month, date.day, date.hour, date.minute, date.second
