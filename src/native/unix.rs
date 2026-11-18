@@ -304,6 +304,12 @@ struct X11 {
     applied: Option<InputRegion>,
 }
 
+/// Only known X11 window actions may cross the dynamic Xlib FFI boundary.
+enum X11Command<'a> {
+    Shape(Option<&'a [Rectangle]>),
+    Raise,
+}
+
 fn x11_window(w: &Window) -> Result<(*mut c_void, c_ulong), String> {
     let display = w.x11_display().ok_or("No X11 window")?.as_ptr();
     let window = w.x11_window_number();
@@ -314,6 +320,46 @@ fn x11_window(w: &Window) -> Result<(*mut c_void, c_ulong), String> {
 }
 
 impl X11 {
+    /// Execute a native X11 operation without exposing function pointers.
+    /// Rectangles stay borrowed and live through XShape's synchronous call.
+    fn dispatch(
+        &self,
+        display: *mut c_void,
+        window: c_ulong,
+        command: X11Command<'_>,
+    ) -> Result<(), String> {
+        let count = match &command {
+            X11Command::Shape(Some(rectangles)) => {
+                c_int::try_from(rectangles.len()).map_err(|_| "Too many X11 shape rectangles")?
+            }
+            _ => 0,
+        };
+        // SAFETY: Both native handles came from a live SDL X11 Window. The
+        // Xlib/Xext libraries are retained in the static LIBRARIES cell;
+        // borrowed rectangle storage remains alive until the call returns.
+        unsafe {
+            match command {
+                X11Command::Shape(Some(rectangles)) => {
+                    let data = if rectangles.is_empty() {
+                        ptr::null()
+                    } else {
+                        rectangles.as_ptr()
+                    };
+                    (self.rectangles)(display, window, 2, 0, 0, data, count, 0, 0);
+                }
+                X11Command::Shape(None) => {
+                    (self.mask)(display, window, 2, 0, 0, 0, 0);
+                }
+                X11Command::Raise => {
+                    // Do not transfer keyboard focus away from the canvas.
+                    (self.raise)(display, window);
+                }
+            }
+            (self.flush)(display);
+        }
+        Ok(())
+    }
+
     fn new(w: &Window) -> Result<Self, String> {
         unsafe {
             // XShape adds hooks to SDL's X Display. Keep their code loaded
@@ -384,32 +430,7 @@ impl X11 {
         } else {
             None
         };
-        // SAFETY: The SDL window and X11 Display remain live throughout the
-        // calls. Native XRectangle arguments are checked and the borrowed
-        // buffer remains alive until XShapeCombineRectangles returns.
-        unsafe {
-            if let Some(rectangles) = rectangles.as_ref() {
-                let data = if rectangles.is_empty() {
-                    ptr::null()
-                } else {
-                    rectangles.as_ptr()
-                };
-                (self.rectangles)(
-                    display,
-                    window,
-                    2,
-                    0,
-                    0,
-                    data,
-                    rectangles.len() as c_int,
-                    0,
-                    0,
-                );
-            } else {
-                (self.mask)(display, window, 2, 0, 0, 0, 0);
-            }
-            (self.flush)(display);
-        }
+        self.dispatch(display, window, X11Command::Shape(rectangles.as_deref()))?;
         self.applied = Some(region);
         Ok(())
     }
@@ -459,11 +480,7 @@ impl Passthrough {
         if let Backend::X11(x11) = &self.backend
             && let Ok((display, window)) = x11_window(w)
         {
-            unsafe {
-                // Do not transfer keyboard focus away from an active canvas.
-                (x11.raise)(display, window);
-                (x11.flush)(display);
-            }
+            let _ = x11.dispatch(display, window, X11Command::Raise);
         }
     }
 }
