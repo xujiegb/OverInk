@@ -50,10 +50,7 @@ unsafe extern "C" {
     // name. NonNull uses the same pointer ABI as the native C parameter.
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     #[link_name = "SDL_GetHintBoolean"]
-    safe fn native_get_hint_boolean(
-        name: NonNull<std::ffi::c_char>,
-        default_value: bool,
-    ) -> bool;
+    safe fn native_get_hint_boolean(name: NonNull<std::ffi::c_char>, default_value: bool) -> bool;
     #[link_name = "SDL_GetModState"]
     safe fn native_mod_state() -> SDL_Keymod;
     #[link_name = "SDL_GetSystemTheme"]
