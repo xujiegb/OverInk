@@ -86,6 +86,7 @@ pub struct NativeWindowHandle<'a> {
 
 impl NativeWindowHandle<'_> {
     /// Keep non-null identity when caching a borrowed native handle.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     pub fn as_non_null(&self) -> NonNull<c_void> {
         self.raw
     }
