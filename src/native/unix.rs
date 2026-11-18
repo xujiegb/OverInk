@@ -75,7 +75,7 @@ struct Wayland {
     // Rust drops fields in declaration order. Destroy the compositor before
     // its event queue, and unload the library only after both native handles.
     compositor: OwnedWaylandHandle,
-    queue: OwnedWaylandHandle,
+    _queue: OwnedWaylandHandle,
     region_interface: *const c_void,
     applied: Option<(*mut c_void, bool, Option<Rect>, [i32; 2])>,
     marshal: Marshal,
@@ -212,7 +212,7 @@ impl Wayland {
                 .ok_or("Cannot bind Wayland compositor")?;
             Ok(Self {
                 compositor,
-                queue,
+                _queue: queue,
                 region_interface,
                 applied: None,
                 marshal,
