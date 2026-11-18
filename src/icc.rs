@@ -73,9 +73,9 @@ impl ColorManager {
             Ok(transform) => {
                 self.transform = Some(transform);
                 self.status = text(
-                    "X11 display ICC / Little CMS",
-                    "X11 显示器 ICC / Little CMS",
-                    "X11 顯示器 ICC / Little CMS",
+                    "X11 display ICC / moxcms",
+                    "X11 显示器 ICC / moxcms",
+                    "X11 顯示器 ICC / moxcms",
                 );
             }
             Err(DisplayError::InvalidProfile) => {
