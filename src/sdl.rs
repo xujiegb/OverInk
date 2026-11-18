@@ -4,7 +4,7 @@ mod dialog_native;
 pub use sdl3_sys::{
     blendmode::*, clipboard::*, error::*, events::*, hints::*, init::*, keyboard::*, keycode::*,
     locale::*, mouse::*, pen::*, pixels::*, properties::*, rect::*, render::*, stdinc::*,
-    surface::*, timer::*, touch::*, video::*,
+    surface::*, touch::*, video::*,
 };
 use std::{
     ffi::{CStr, CString, c_void},
