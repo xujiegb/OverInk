@@ -1246,14 +1246,7 @@ impl InkTexture {
         source: Option<&SDL_FRect>,
         destination: Option<&SDL_FRect>,
     ) -> Result<(), String> {
-        unsafe {
-            check(SDL_RenderTexture(
-                renderer.raw,
-                self.raw,
-                source.map_or(ptr::null(), |rect| rect),
-                destination.map_or(ptr::null(), |rect| rect),
-            ))
-        }
+        renderer.draw_owned_texture(OwnedTextureRef::Ink(self), source, destination)
     }
 }
 
@@ -1358,13 +1351,8 @@ impl SnapshotTexture {
         destination: &SDL_FRect,
         linear: bool,
     ) -> Result<(), String> {
-        let draw = || unsafe {
-            check(SDL_RenderTexture(
-                renderer.raw,
-                self.0,
-                ptr::null(),
-                destination,
-            ))
+        let draw = || {
+            renderer.draw_owned_texture(OwnedTextureRef::Snapshot(self), None, Some(destination))
         };
         if !linear {
             return draw();
@@ -1523,6 +1511,21 @@ impl<F: FnOnce()> Drop for RestoreOnDrop<F> {
 
 /// Closed set of SDL renderer commands; callers cannot supply native function
 /// pointers or arbitrary memory for the renderer to access.
+/// A borrow of a live, adapter-owned texture, not an arbitrary SDL handle.
+enum OwnedTextureRef<'a> {
+    Ink(&'a InkTexture),
+    Snapshot(&'a SnapshotTexture),
+}
+
+impl OwnedTextureRef<'_> {
+    fn raw(&self) -> *mut SDL_Texture {
+        match self {
+            Self::Ink(texture) => texture.raw,
+            Self::Snapshot(texture) => texture.0,
+        }
+    }
+}
+
 enum RenderCommand<'a> {
     Clear([f32; 4]),
     Clip(Option<&'a SDL_Rect>),
@@ -1537,6 +1540,26 @@ pub struct Renderer {
     pub name: String,
 }
 impl Renderer {
+    /// Render an adapter-owned texture. The enum keeps the native pointer
+    /// tied to an active Rust borrow, including across color-scale callbacks.
+    fn draw_owned_texture(
+        &self,
+        texture: OwnedTextureRef<'_>,
+        source: Option<&SDL_FRect>,
+        destination: Option<&SDL_FRect>,
+    ) -> Result<(), String> {
+        // SAFETY: Both the renderer and selected texture are live while the
+        // synchronous SDL call reads the borrowed source/destination bounds.
+        unsafe {
+            check(SDL_RenderTexture(
+                self.raw,
+                texture.raw(),
+                source.map_or(ptr::null(), |rect| rect),
+                destination.map_or(ptr::null(), |rect| rect),
+            ))
+        }
+    }
+
     /// The only FFI dispatch for ordinary clear, clip, scale, flush and
     /// presentation commands. Borrowed rectangles remain live through each
     /// synchronous call; the renderer is owned by this adapter.
