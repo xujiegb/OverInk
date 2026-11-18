@@ -8,6 +8,7 @@ pub use sdl3_sys::{
 };
 use std::{
     ffi::{CStr, CString, c_void},
+    marker::PhantomData,
     ptr::{self, NonNull},
 };
 
@@ -39,6 +40,22 @@ unsafe extern "C" {
         out: &mut sdl3_sys::time::SDL_DateTime,
         local: bool,
     ) -> bool;
+}
+
+/// A borrowed native backend handle whose lifetime is tied to the SDL
+/// Window that owns the underlying system object. This also inherits the
+/// Window's thread-safety restrictions rather than returning a free-floating
+/// NonNull pointer to safe callers.
+pub struct NativeWindowHandle<'a> {
+    raw: NonNull<c_void>,
+    _window: PhantomData<&'a Window>,
+}
+
+impl NativeWindowHandle<'_> {
+    /// Extract the foreign pointer only at the native FFI boundary.
+    pub fn as_ptr(&self) -> *mut c_void {
+        self.raw.as_ptr()
+    }
 }
 
 /// Known SDL window property keys, with no arbitrary raw C-string input.
@@ -1325,30 +1342,37 @@ impl Window {
         (id != 0).then_some(id)
     }
     /// Borrow a native backend handle from the window property list.
-    /// The returned pointer remains owned by SDL; callers must not use it
-    /// after the corresponding Window has been destroyed.
-    fn native_pointer_property(&self, property: NativeWindowProperty) -> Option<NonNull<c_void>> {
+    /// The returned handle cannot outlive this Window in safe Rust.
+    fn native_pointer_property(
+        &self,
+        property: NativeWindowProperty,
+    ) -> Option<NativeWindowHandle<'_>> {
         // SAFETY: SDL owns the window and its property list; the property
-        // value is borrowed and checked for null before it escapes.
+        // value is borrowed and checked for null. PhantomData ties the native
+        // handle to this SDL Window's lifetime and thread restrictions.
         unsafe {
             NonNull::new(SDL_GetPointerProperty(
                 SDL_GetWindowProperties(self.raw),
                 property.key(),
                 ptr::null_mut(),
             ))
+            .map(|raw| NativeWindowHandle {
+                raw,
+                _window: PhantomData,
+            })
         }
     }
 
     /// Borrow the Win32 HWND backing this live SDL window.
     #[cfg(target_os = "windows")]
-    pub fn win32_hwnd(&self) -> Option<std::ptr::NonNull<c_void>> {
+    pub fn win32_hwnd(&self) -> Option<NativeWindowHandle<'_>> {
         self.native_pointer_property(NativeWindowProperty::Win32Hwnd)
     }
 
     /// Borrow the Cocoa NSWindow for this live SDL window without exposing
     /// property-list FFI to the platform input-routing code.
     #[cfg(target_os = "macos")]
-    pub fn cocoa_window(&self) -> Option<std::ptr::NonNull<c_void>> {
+    pub fn cocoa_window(&self) -> Option<NativeWindowHandle<'_>> {
         self.native_pointer_property(NativeWindowProperty::CocoaWindow)
     }
 
@@ -1363,19 +1387,19 @@ impl Window {
 
     /// Borrow the native X11 Display for the lifetime of the SDL window.
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    pub fn x11_display(&self) -> Option<std::ptr::NonNull<c_void>> {
+    pub fn x11_display(&self) -> Option<NativeWindowHandle<'_>> {
         self.native_pointer_property(NativeWindowProperty::X11Display)
     }
 
     /// Borrow the Wayland wl_surface from SDL for the lifetime of this window.
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    pub fn wayland_surface(&self) -> Option<std::ptr::NonNull<c_void>> {
+    pub fn wayland_surface(&self) -> Option<NativeWindowHandle<'_>> {
         self.native_pointer_property(NativeWindowProperty::WaylandSurface)
     }
 
     /// Borrow SDL's Wayland display connection while the window remains live.
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    pub fn wayland_display(&self) -> Option<NonNull<c_void>> {
+    pub fn wayland_display(&self) -> Option<NativeWindowHandle<'_>> {
         self.native_pointer_property(NativeWindowProperty::WaylandDisplay)
     }
 
