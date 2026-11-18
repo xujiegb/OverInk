@@ -122,14 +122,7 @@ impl Wayland {
             let region_interface = *lib
                 .get(b"wl_region_interface\0")
                 .map_err(|e| e.to_string())?;
-            let display = SDL_GetPointerProperty(
-                SDL_GetWindowProperties(w.raw),
-                SDL_PROP_WINDOW_WAYLAND_DISPLAY_POINTER,
-                ptr::null_mut(),
-            );
-            if display.is_null() {
-                return Err("No Wayland display".into());
-            }
+            let display = w.wayland_display().ok_or("No Wayland display")?.as_ptr();
             let queue = create_queue(display);
             if queue.is_null() {
                 return Err("Cannot create Wayland event queue".into());
