@@ -1451,8 +1451,14 @@ impl GuiTexture {
                     || area.w <= 0
                     || area.h <= 0
                     || [area.w, area.h] != dimensions
-                    || area.x.checked_add(area.w).is_none_or(|end| end > self.dimensions[0])
-                    || area.y.checked_add(area.h).is_none_or(|end| end > self.dimensions[1]) =>
+                    || area
+                        .x
+                        .checked_add(area.w)
+                        .is_none_or(|end| end > self.dimensions[0])
+                    || area
+                        .y
+                        .checked_add(area.h)
+                        .is_none_or(|end| end > self.dimensions[1]) =>
             {
                 return Err("egui partial texture upload is out of bounds".into());
             }
