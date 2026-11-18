@@ -131,8 +131,12 @@ impl Randr {
                 };
                 if crtc_count > 0 {
                     queried = true;
-                    for i in 0..crtc_count {
-                        let id = *list.data().crtcs.add(i);
+                    // SAFETY: XRandR returned a live resources allocation.
+                    // checked_crtc_count established a non-null pointer and
+                    // bounded native element count. The owned resources guard
+                    // outlives the borrowed slice and every CRTC query.
+                    let ids = std::slice::from_raw_parts(list.data().crtcs, crtc_count);
+                    for &id in ids {
                         let Some(info) =
                             OwnedRandr::from_native(crtc(display, list.as_ptr(), id), *free_crtc)
                         else {
