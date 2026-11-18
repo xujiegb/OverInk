@@ -78,8 +78,11 @@ pub enum Icon {
 
 pub fn image() -> image::RgbaImage {
     image::load_from_memory(include_bytes!("../assets/overink.png"))
-        .expect("valid bundled OverInk icon")
-        .into_rgba8()
+        .map(|image| image.into_rgba8())
+        .unwrap_or_else(|error| {
+            eprintln!("OverInk: invalid bundled toolbar icon: {error}");
+            image::RgbaImage::new(1, 1)
+        })
 }
 
 pub fn brand(ctx: &egui::Context) -> egui::TextureHandle {
