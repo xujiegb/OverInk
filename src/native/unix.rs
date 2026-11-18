@@ -220,12 +220,15 @@ impl Wayland {
             let display = w.wayland_display().ok_or("No Wayland display")?.as_ptr();
             // Every created resource is guarded immediately. An error or
             // unwind runs the correct native destructor before unloading lib.
-            let queue = OwnedWaylandHandle::from_native(NonNull::new(create_queue(display)), queue_destroy)
-                .ok_or("Cannot create Wayland event queue")?;
+            let queue =
+                OwnedWaylandHandle::from_native(NonNull::new(create_queue(display)), queue_destroy)
+                    .ok_or("Cannot create Wayland event queue")?;
             let registry_raw = {
-                let wrapper =
-                    OwnedWaylandHandle::from_native(NonNull::new(create_wrapper(display)), wrapper_destroy)
-                        .ok_or("Cannot wrap Wayland display")?;
+                let wrapper = OwnedWaylandHandle::from_native(
+                    NonNull::new(create_wrapper(display)),
+                    wrapper_destroy,
+                )
+                .ok_or("Cannot wrap Wayland display")?;
                 set_queue(wrapper.as_ptr(), queue.as_ptr());
                 marshal(
                     wrapper.as_ptr(),
@@ -315,8 +318,9 @@ impl Wayland {
                 );
                 // SAFETY: wl_compositor.create_region returns an owned
                 // wl_region, released by this guard after the surface commit.
-                let region = OwnedWaylandRegion::from_native(NonNull::new(p), self.marshal, self.version)
-                    .ok_or("Cannot create input region")?;
+                let region =
+                    OwnedWaylandRegion::from_native(NonNull::new(p), self.marshal, self.version)
+                        .ok_or("Cannot create input region")?;
                 if let Some(hole) = hole {
                     // wl_region.add = opcode 1; wl_region.subtract = opcode 2.
                     (self.marshal)(
@@ -609,8 +613,9 @@ mod tests {
         let raw = Box::into_raw(Box::new(DropCounter(Arc::clone(&releases)))).cast();
         // SAFETY: The newly allocated Box is uniquely owned and matched with
         // its exact destructor while the function remains available.
-        let owned = unsafe { OwnedWaylandHandle::from_native(NonNull::new(raw), release_test_handle) }
-            .ok_or("New Wayland handle was unexpectedly null")?;
+        let owned =
+            unsafe { OwnedWaylandHandle::from_native(NonNull::new(raw), release_test_handle) }
+                .ok_or("New Wayland handle was unexpectedly null")?;
         assert_eq!(releases.load(Ordering::SeqCst), 0);
         drop(owned);
         assert_eq!(releases.load(Ordering::SeqCst), 1);
