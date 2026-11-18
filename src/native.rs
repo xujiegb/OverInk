@@ -37,6 +37,12 @@ pub fn set_controller_region(
         Foundation::HWND,
         Graphics::Gdi::{CombineRgn, CreateRectRgn, DeleteObject, HGDIOBJ, RGN_DIFF, SetWindowRgn},
     };
+    // Calculate a bounded GDI subtraction before any native calls. The
+    // rectangle's right/bottom edges are now guaranteed not to overflow i32.
+    if size[0] <= 0 || size[1] <= 0 {
+        return Err("Invalid Win32 region dimensions".into());
+    }
+    let hole = hole.and_then(|hole| hole.clipped(size));
     // SAFETY: The window remains live, and GDI region handles are checked
     // before use. This function destroys regions on failure and transfers
     // ownership to Windows only after SetWindowRgn succeeds.
