@@ -141,10 +141,9 @@ mod x11 {
         crate::native::native_library(crate::native::NativeLibrary::X11)
             .map_err(|_| "X11 screen capture is unavailable".into())
     }
-    fn display(window: &Window) -> Result<*mut c_void, String> {
+    fn display(window: &Window) -> Result<NativeWindowHandle<'_>, String> {
         window
             .x11_display()
-            .map(|display| display.as_ptr())
             .ok_or_else(|| "No X11 display for screen picking".into())
     }
     pub fn is_xwayland(window: &Window) -> bool {
@@ -171,7 +170,7 @@ mod x11 {
             let (mut opcode, mut event, mut error) = (0, 0, 0);
             query.is_ok_and(|query| {
                 query(
-                    display,
+                    display.as_ptr(),
                     c"XWAYLAND".as_ptr(),
                     &mut opcode,
                     &mut event,
@@ -205,7 +204,7 @@ mod x11 {
             let (mut root, mut x, mut y, mut width, mut height, mut border, mut depth) =
                 (0, 0, 0, 0, 0, 0, 0);
             if geometry(
-                d,
+                d.as_ptr(),
                 id,
                 &mut root,
                 &mut x,
@@ -234,7 +233,7 @@ mod x11 {
                 .map_err(|e| e.to_string())?;
             let [px, py] = local_pixels(window, local)?;
             let mut child = 0;
-            if translate(d, id, root, px, py, &mut x, &mut y, &mut child) == 0 {
+            if translate(d.as_ptr(), id, root, px, py, &mut x, &mut y, &mut child) == 0 {
                 return Err("Cannot convert the selected screen coordinate".into());
             }
             Ok(ScreenPoint { x, y, root })
@@ -330,7 +329,7 @@ mod x11 {
             let (mut returned_root, mut rx, mut ry, mut rw, mut rh, mut border, mut depth) =
                 (0, 0, 0, 0, 0, 0, 0);
             if geometry(
-                display,
+                display.as_ptr(),
                 root,
                 &mut returned_root,
                 &mut rx,
@@ -365,7 +364,7 @@ mod x11 {
                 lib.get(b"XDestroyImage\0").map_err(|e| e.to_string())?;
             let image = OwnedImage::new(
                 get(
-                    display,
+                    display.as_ptr(),
                     root,
                     x,
                     y,
