@@ -205,7 +205,7 @@ fn path_source<'a>(
     is_head: bool,
 ) -> &'a [Point] {
     if is_head {
-        head.as_ref().map_or(&stroke.points, |points| points.as_slice())
+        head.as_ref().map_or(stroke.points.as_slice(), |points| points.as_slice())
     } else {
         outline.as_deref().unwrap_or(&stroke.points)
     }
