@@ -11,7 +11,7 @@ use crate::{
     model::{Bounds, Erasure, Point, PointSpan, Stroke, Tool},
     sdl::*,
 };
-use std::{ptr, time::Instant};
+use std::time::Instant;
 
 const PAPER_SIZE: i32 = 64;
 const MARKER_TILE: i32 = 1024;
@@ -499,12 +499,8 @@ impl StrokePainter {
             return Ok(());
         }
         let renderer = frame.renderer;
-        let paper = if stroke.tool == Tool::Pencil {
-            self.paper_texture(renderer)
-        } else {
-            ptr::null_mut()
-        };
-        let vertex_grain = paper.is_null();
+        let use_paper = stroke.tool == Tool::Pencil && self.ensure_paper_texture(renderer);
+        let vertex_grain = !use_paper;
         geometry::prepare_samples(stroke, points, vertex_grain, &mut self.samples);
         let rgb = frame.color.map(stroke.color.output_rgb(renderer.extended));
         if stroke.tool == Tool::Marker && self.ensure_marker_texture(renderer) {
@@ -541,7 +537,7 @@ impl StrokePainter {
                 }
                 submit(
                     renderer,
-                    paper,
+                    if use_paper { self.paper.as_ref() } else { None },
                     &self.vertices,
                     &self.mesh.indices,
                     &mut self.queued,
@@ -551,7 +547,7 @@ impl StrokePainter {
         })
     }
 
-    fn paper_texture(&mut self, renderer: &Renderer) -> *mut SDL_Texture {
+    fn ensure_paper_texture(&mut self, renderer: &Renderer) -> bool {
         if self.paper.is_none() && !self.paper_unavailable && renderer.name != "software" {
             let create = || -> Result<Texture, String> {
                 let texture = Texture::new(
@@ -577,9 +573,7 @@ impl StrokePainter {
             self.paper = create().ok();
             self.paper_unavailable = self.paper.is_none();
         }
-        self.paper
-            .as_ref()
-            .map_or(ptr::null_mut(), |texture| texture.raw())
+        self.paper.is_some()
     }
 
     fn ensure_marker_texture(&mut self, renderer: &Renderer) -> bool {
@@ -696,7 +690,7 @@ impl StrokePainter {
                             }
                             submit(
                                 renderer,
-                                ptr::null_mut(),
+                                None,
                                 &self.vertices,
                                 indices,
                                 &mut self.queued,
@@ -774,7 +768,7 @@ fn set_vertices(
 
 fn submit(
     renderer: &Renderer,
-    texture: *mut SDL_Texture,
+    texture: Option<&Texture>,
     vertices: &[SDL_Vertex],
     indices: &[u32],
     queued: &mut usize,
@@ -784,7 +778,11 @@ fn submit(
             renderer.flush()?;
             *queued = 0;
         }
-        renderer.geometry(texture, vertices, batch)?;
+        renderer.geometry(
+            texture.map_or(GeometryTexture::Solid, GeometryTexture::Ink),
+            vertices,
+            batch,
+        )?;
         *queued += batch.len();
     }
     Ok(())
