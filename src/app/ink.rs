@@ -688,13 +688,7 @@ impl StrokePainter {
                             {
                                 self.submitted_indices += indices.len();
                             }
-                            submit(
-                                renderer,
-                                None,
-                                &self.vertices,
-                                indices,
-                                &mut self.queued,
-                            )?;
+                            submit(renderer, None, &self.vertices, indices, &mut self.queued)?;
                         }
                         Ok(())
                     },
