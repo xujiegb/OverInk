@@ -1565,6 +1565,35 @@ mod tests {
     }
 
     #[test]
+    fn repeated_drag_motion_uses_absolute_offset_and_preserves_text() -> Result<(), &'static str> {
+        let mut app = app();
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::from(SIZE));
+        let mut item = TextBox::new(pos2(150., 120.), screen, InkColor::default(), 1.);
+        item.text = "中文 👩🏽‍🎨".into();
+        let index = app.history.set_text_box(None, item).ok_or("Cannot add text box")?;
+        app.input.text.press = Some(Press {
+            origin: pos2(150., 120.),
+            target: Some((index, Handle::Move)),
+            preview: None,
+            moved: false,
+        });
+
+        app.move_text_pointer(pos2(180., 150.), screen);
+        app.move_text_pointer(pos2(200., 160.), screen);
+        let preview = app
+            .input
+            .text
+            .press
+            .as_ref()
+            .and_then(|press| press.preview.as_ref())
+            .ok_or("Missing drag preview")?;
+        assert_eq!(preview.origin, [200., 160.]);
+        assert_eq!(preview.text, "中文 👩🏽‍🎨");
+        assert_eq!(app.history.text_boxes()[index].origin, [150., 120.]);
+        Ok(())
+    }
+
+    #[test]
     fn moving_resizing_and_deleting_text_boxes_are_undoable() {
         let mut app = app();
         app.use_tool(Tool::Text);
