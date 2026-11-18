@@ -1346,11 +1346,56 @@ fn destroy_owned_texture(raw: *mut SDL_Texture) {
     unsafe { SDL_DestroyTexture(raw) };
 }
 
+/// Uniquely owned, non-null SDL texture shared by the ink and GUI layers.
+/// Texture configuration is transactional: on error, the guard destroys the
+/// newly created native texture before returning to the caller.
+struct OwnedTexture(NonNull<SDL_Texture>);
+
+impl OwnedTexture {
+    fn create(
+        renderer: &Renderer,
+        format: SDL_PixelFormat,
+        access: SDL_TextureAccess,
+        size: [i32; 2],
+        blend: SDL_BlendMode,
+        scale: SDL_ScaleMode,
+    ) -> Result<Self, String> {
+        let [width, height] = size;
+        // SAFETY: SDL_CreateTexture yields a unique, caller-owned handle on
+        // the SDL thread. The NonNull guard releases it if configuration
+        // fails, and only one OwnedTexture takes ownership on success.
+        unsafe {
+            let raw = NonNull::new(SDL_CreateTexture(
+                renderer.raw,
+                format,
+                access,
+                width,
+                height,
+            ))
+            .ok_or_else(error)?;
+            let texture = Self(raw);
+            check(SDL_SetTextureBlendMode(texture.as_ptr(), blend))?;
+            check(SDL_SetTextureScaleMode(texture.as_ptr(), scale))?;
+            Ok(texture)
+        }
+    }
+
+    fn as_ptr(&self) -> *mut SDL_Texture {
+        self.0.as_ptr()
+    }
+}
+
+impl Drop for OwnedTexture {
+    fn drop(&mut self) {
+        destroy_owned_texture(self.as_ptr());
+    }
+}
+
 /// Owned SDL texture used by the ink renderer. Native calls and its
 /// destructor stay in this adapter; live textures are dropped normally
 /// before their renderer is recreated.
 pub struct InkTexture {
-    raw: *mut SDL_Texture,
+    raw: OwnedTexture,
     dimensions: [i32; 2],
 }
 
@@ -1374,23 +1419,22 @@ impl InkTexture {
         if width <= 0 || height <= 0 {
             return Err("Ink texture dimensions must be positive".into());
         }
-        unsafe {
-            let raw = SDL_CreateTexture(renderer.raw, format, access, width, height);
-            if raw.is_null() {
-                return Err(error());
-            }
-            let texture = Self {
-                raw,
-                dimensions: [width, height],
-            };
-            check(SDL_SetTextureBlendMode(raw, blend))?;
-            check(SDL_SetTextureScaleMode(raw, SDL_SCALEMODE_NEAREST))?;
-            Ok(texture)
-        }
+        let raw = OwnedTexture::create(
+            renderer,
+            format,
+            access,
+            [width, height],
+            blend,
+            SDL_SCALEMODE_NEAREST,
+        )?;
+        Ok(Self {
+            raw,
+            dimensions: [width, height],
+        })
     }
 
     pub fn raw(&self) -> *mut SDL_Texture {
-        self.raw
+        self.raw.as_ptr()
     }
 
     pub fn update_rgba8(&self, pixels: &[u8]) -> Result<(), String> {
@@ -1409,7 +1453,7 @@ impl InkTexture {
         }
         unsafe {
             check(SDL_UpdateTexture(
-                self.raw,
+                self.raw.as_ptr(),
                 ptr::null(),
                 pixels.as_ptr().cast(),
                 pitch,
@@ -1420,9 +1464,9 @@ impl InkTexture {
     pub fn set_modulation(&self, rgb: [f32; 3], alpha: f32) -> Result<(), String> {
         unsafe {
             check(SDL_SetTextureColorModFloat(
-                self.raw, rgb[0], rgb[1], rgb[2],
+                self.raw.as_ptr(), rgb[0], rgb[1], rgb[2],
             ))?;
-            check(SDL_SetTextureAlphaModFloat(self.raw, alpha))
+            check(SDL_SetTextureAlphaModFloat(self.raw.as_ptr(), alpha))
         }
     }
 
@@ -1433,12 +1477,6 @@ impl InkTexture {
         destination: Option<&SDL_FRect>,
     ) -> Result<(), String> {
         renderer.draw_owned_texture(OwnedTextureRef::Ink(self), source, destination)
-    }
-}
-
-impl Drop for InkTexture {
-    fn drop(&mut self) {
-        destroy_owned_texture(self.raw);
     }
 }
 
@@ -1584,7 +1622,7 @@ fn gui_upload_valid(texture: [i32; 2], source: [i32; 2], rect: Option<&SDL_Rect>
 
 /// Owned SDL texture backing egui's font atlas and custom UI images.
 pub struct GuiTexture {
-    raw: *mut SDL_Texture,
+    raw: OwnedTexture,
     dimensions: [i32; 2],
 }
 
@@ -1595,25 +1633,18 @@ impl GuiTexture {
         if w <= 0 || h <= 0 {
             return Err("egui texture dimensions must be positive".into());
         }
-        unsafe {
-            let raw = SDL_CreateTexture(
-                renderer.raw,
-                SDL_PIXELFORMAT_RGBA32,
-                SDL_TEXTUREACCESS_STATIC,
-                w,
-                h,
-            );
-            if raw.is_null() {
-                return Err(error());
-            }
-            let texture = Self {
-                raw,
-                dimensions: [w, h],
-            };
-            check(SDL_SetTextureBlendMode(raw, SDL_BLENDMODE_BLEND))?;
-            check(SDL_SetTextureScaleMode(raw, SDL_SCALEMODE_LINEAR))?;
-            Ok(texture)
-        }
+        let raw = OwnedTexture::create(
+            renderer,
+            SDL_PIXELFORMAT_RGBA32,
+            SDL_TEXTUREACCESS_STATIC,
+            [w, h],
+            SDL_BLENDMODE_BLEND,
+            SDL_SCALEMODE_LINEAR,
+        )?;
+        Ok(Self {
+            raw,
+            dimensions: [w, h],
+        })
     }
 
     pub fn update(
@@ -1645,7 +1676,7 @@ impl GuiTexture {
         // region, with a row stride matching its width and live RGBA bytes.
         unsafe {
             check(SDL_UpdateTexture(
-                self.raw,
+                self.raw.as_ptr(),
                 rect.map_or(ptr::null(), |area| area),
                 rgba.as_ptr().cast(),
                 pitch,
@@ -1659,15 +1690,10 @@ impl GuiTexture {
         vertices: &[SDL_Vertex],
         indices: &[u32],
     ) -> Result<(), String> {
-        renderer.geometry(self.raw, vertices, indices)
+        renderer.geometry(self.raw.as_ptr(), vertices, indices)
     }
 }
 
-impl Drop for GuiTexture {
-    fn drop(&mut self) {
-        destroy_owned_texture(self.raw);
-    }
-}
 
 /// Run a cleanup action if a rendering callback unwinds. Normal paths
 /// explicitly restore and disarm it so SDL failures can still be reported.
@@ -1704,7 +1730,7 @@ enum OwnedTextureRef<'a> {
 impl OwnedTextureRef<'_> {
     fn raw(&self) -> *mut SDL_Texture {
         match self {
-            Self::Ink(texture) => texture.raw,
+            Self::Ink(texture) => texture.raw.as_ptr(),
             Self::Snapshot(texture) => texture.0,
         }
     }
