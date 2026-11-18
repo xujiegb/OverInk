@@ -78,6 +78,20 @@ unsafe extern "C" {
         out: &mut sdl3_sys::time::SDL_DateTime,
         local: bool,
     ) -> bool;
+    // SDL copies event values into/out of a borrowed Rust SDL_Event. The
+    // nullable wait result is expressed by Option rather than a raw pointer.
+    // Polling, waiting and flushing are restricted to the SDL main thread
+    // in event_queue_action. SDL_PushEvent explicitly supports other threads
+    // and copies the provided event before returning.
+    #[link_name = "SDL_PollEvent"]
+    safe fn native_poll_event(event: &mut SDL_Event) -> bool;
+    #[link_name = "SDL_WaitEventTimeout"]
+    safe fn native_wait_event_timeout(event: Option<&mut SDL_Event>, timeout_ms: i32) -> bool;
+    #[link_name = "SDL_PushEvent"]
+    safe fn native_push_event(event: &mut SDL_Event) -> bool;
+    #[cfg(target_os = "linux")]
+    #[link_name = "SDL_FlushEvent"]
+    safe fn native_flush_event(event_type: u32);
 }
 
 /// A borrowed native backend handle whose lifetime is tied to the SDL
@@ -750,29 +764,28 @@ enum EventQueueAction<'a> {
 }
 
 fn event_queue_action(action: EventQueueAction<'_>) -> bool {
-    // SAFETY: The event output is a live mutable Rust SDL_Event; SDL owns
-    // the queue on its main thread. The wait API explicitly accepts a null
-    // event pointer, and the flush event type is a fixed SDL constant.
-    unsafe {
-        match action {
-            EventQueueAction::Poll(event) => SDL_PollEvent(event),
-            EventQueueAction::Wait(timeout_ms) => SDL_WaitEventTimeout(ptr::null_mut(), timeout_ms),
-            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-            EventQueueAction::PushUser(ty) => {
-                if !(SDL_EVENT_USER.0..SDL_EVENT_LAST.0).contains(&ty) {
-                    return false;
-                }
-                // Only the SDL-defined type field is set. The rest of the
-                // union stays zeroed and carries no borrowed native data.
-                let mut event = SDL_Event::default();
-                event.r#type = ty;
-                SDL_PushEvent(&mut event)
+    match action {
+        EventQueueAction::Poll(event) => native_is_main_thread() && native_poll_event(event),
+        EventQueueAction::Wait(timeout_ms) => {
+            native_is_main_thread() && native_wait_event_timeout(None, timeout_ms)
+        }
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        EventQueueAction::PushUser(ty) => {
+            if !(SDL_EVENT_USER.0..SDL_EVENT_LAST.0).contains(&ty) {
+                return false;
             }
-            #[cfg(target_os = "linux")]
-            EventQueueAction::FlushQuit => {
-                SDL_FlushEvent(SDL_EVENT_QUIT.0);
-                false
+            // Only the SDL-defined type field is set. The rest of the
+            // union stays zeroed and carries no borrowed native data.
+            let mut event = SDL_Event::default();
+            event.r#type = ty;
+            native_push_event(&mut event)
+        }
+        #[cfg(target_os = "linux")]
+        EventQueueAction::FlushQuit => {
+            if native_is_main_thread() {
+                native_flush_event(SDL_EVENT_QUIT.0);
             }
+            false
         }
     }
 }
