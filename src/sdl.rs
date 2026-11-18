@@ -85,6 +85,11 @@ pub struct NativeWindowHandle<'a> {
 }
 
 impl NativeWindowHandle<'_> {
+    /// Keep non-null identity when caching a borrowed native handle.
+    pub fn as_non_null(&self) -> NonNull<c_void> {
+        self.raw
+    }
+
     /// Extract the foreign pointer only at the native FFI boundary.
     pub fn as_ptr(&self) -> *mut c_void {
         self.raw.as_ptr()
