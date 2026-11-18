@@ -1915,6 +1915,14 @@ enum RendererPropertyQuery {
     SdrWhitePoint,
 }
 
+/// Renderer target changes only borrow an owned ink target or restore the
+/// previous native target returned by SDL; no higher-level caller can pass
+/// an arbitrary texture pointer.
+enum RenderTarget<'a> {
+    Ink(&'a InkTexture),
+    Previous(*mut SDL_Texture),
+}
+
 /// Closed set of SDL renderer commands; callers cannot supply native function
 /// pointers or arbitrary memory for the renderer to access.
 enum RenderCommand<'a> {
@@ -1924,6 +1932,8 @@ enum RenderCommand<'a> {
     Scale([f32; 2]),
     GetColorScale(&'a mut f32),
     SetColorScale(f32),
+    ReadTarget(&'a mut *mut SDL_Texture),
+    SetTarget(RenderTarget<'a>),
     Flush,
     Present,
 }
@@ -2004,6 +2014,17 @@ impl Renderer {
                 }
                 RenderCommand::SetColorScale(scale) => {
                     check(SDL_SetRenderColorScale(self.raw, scale))
+                }
+                RenderCommand::ReadTarget(previous) => {
+                    *previous = SDL_GetRenderTarget(self.raw);
+                    Ok(())
+                }
+                RenderCommand::SetTarget(target) => {
+                    let raw = match target {
+                        RenderTarget::Ink(texture) => texture.raw.as_ptr(),
+                        RenderTarget::Previous(previous) => previous,
+                    };
+                    check(SDL_SetRenderTarget(self.raw, raw))
                 }
                 RenderCommand::Flush => check(SDL_FlushRenderer(self.raw)),
                 RenderCommand::Present => check(SDL_RenderPresent(self.raw)),
@@ -2148,20 +2169,18 @@ impl Renderer {
         target: &InkTexture,
         draw: impl FnOnce() -> Result<(), String>,
     ) -> Result<(), String> {
-        // SAFETY: InkTexture owns the SDL texture while the callback runs,
-        // and this renderer is live on the SDL thread. The previous target
-        // is restored before the borrow of the new target ends.
-        unsafe {
-            let previous = SDL_GetRenderTarget(self.raw);
-            check(SDL_SetRenderTarget(self.raw, target.raw.as_ptr()))?;
-            let mut unwind_restore = RestoreOnDrop::new(|| {
-                let _ = SDL_SetRenderTarget(self.raw, previous);
-            });
-            let result = draw();
-            let restore = check(SDL_SetRenderTarget(self.raw, previous));
-            unwind_restore.disarm();
-            result.and(restore)
-        }
+        // The SDL command boundary copies the previous native target.
+        // Draw and panic-safe restoration now happen entirely in safe Rust.
+        let mut previous = ptr::null_mut();
+        self.run_command(RenderCommand::ReadTarget(&mut previous))?;
+        self.run_command(RenderCommand::SetTarget(RenderTarget::Ink(target)))?;
+        let mut unwind_restore = RestoreOnDrop::new(|| {
+            let _ = self.run_command(RenderCommand::SetTarget(RenderTarget::Previous(previous)));
+        });
+        let result = draw();
+        let restore = self.run_command(RenderCommand::SetTarget(RenderTarget::Previous(previous)));
+        unwind_restore.disarm();
+        result.and(restore)
     }
     pub fn set_clip_rect(&self, clip: Option<&SDL_Rect>) {
         let _ = self.run_command(RenderCommand::Clip(clip));
