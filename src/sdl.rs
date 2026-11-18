@@ -209,16 +209,13 @@ impl<T> SdlAllocation<T> {
         raw.map(Self)
     }
 
-    fn as_ptr(&self) -> *mut T {
-        self.0.as_ptr()
-    }
 }
 
 impl<T> Drop for SdlAllocation<T> {
     fn drop(&mut self) {
         // SAFETY: Only caller-owned SDL allocations are wrapped; SDL_free is
         // their matching allocator, and each allocation has a single owner.
-        unsafe { SDL_free(self.as_ptr().cast()) };
+        unsafe { SDL_free(self.0.as_ptr().cast()) };
     }
 }
 
@@ -497,7 +494,7 @@ pub fn preferred_locales() -> Vec<(String, String)> {
         };
         // SDL allocated the returned pointer array, and the count is now
         // bounded before any pointer arithmetic or slice construction.
-        let entries = std::slice::from_raw_parts(locales.as_ptr(), count);
+        let entries = std::slice::from_raw_parts(locales.0.as_ptr(), count);
         let name = |ptr: Option<NonNull<std::ffi::c_char>>| {
             if let Some(ptr) = ptr {
                 CStr::from_ptr(ptr.as_ptr())
@@ -572,7 +569,7 @@ pub fn display_info() -> Result<Vec<DisplayInfo>, String> {
             .ok_or_else(|| "SDL returned an invalid display count".to_owned())?;
         // Keep the owned SDL allocation alive while iterating a bounded
         // borrowed slice; Rust performs subsequent indexing safely.
-        let displays = std::slice::from_raw_parts(list.as_ptr(), count);
+        let displays = std::slice::from_raw_parts(list.0.as_ptr(), count);
         displays
             .iter()
             .copied()
@@ -639,7 +636,7 @@ fn clipboard_action(action: ClipboardAction<'_>) -> Option<String> {
             }
             ClipboardAction::Read => {
                 let text = SdlAllocation::from_native(NonNull::new(SDL_GetClipboardText()))?;
-                Some(CStr::from_ptr(text.as_ptr()).to_string_lossy().into_owned())
+                Some(CStr::from_ptr(text.0.as_ptr()).to_string_lossy().into_owned())
             }
         }
     }
@@ -1537,7 +1534,7 @@ impl Window {
                 return None;
             };
             if size > 0 && size <= 16 * 1024 * 1024 {
-                Some(std::slice::from_raw_parts(profile.as_ptr().cast::<u8>(), size).to_vec())
+                Some(std::slice::from_raw_parts(profile.0.as_ptr().cast::<u8>(), size).to_vec())
             } else {
                 None
             }
