@@ -1,46 +1,22 @@
-//! Native Little CMS ownership and conversion boundary.
+//! Safe Little CMS ownership and conversion boundary.
 //!
-//! All raw profile and transform handles stay here. Public callers receive
-//! owned resources and work only with Rust slices or fixed-size RGB values.
-#![deny(clippy::undocumented_unsafe_blocks)]
-use lcms2_sys as cms;
-use std::ptr::NonNull;
+//! lcms2 owns every profile and transform, releasing the underlying C handles
+//! through its RAII guards. Callers only provide validated Rust pixel slices.
+#![forbid(unsafe_code)]
 
-// Creating the standard sRGB profile accepts no pointer or memory owned by
-// Rust. A non-null result is transferred to Profile and freed in Drop.
-unsafe extern "C" {
-    #[link_name = "cmsCreate_sRGBProfile"]
-    safe fn native_create_srgb_profile() -> cms::HPROFILE;
-}
+use lcms2::{
+    Flags, Intent, PixelFormat, Profile, Transform as LcmsTransform,
+};
 
 const MAX_PROFILE_BYTES: usize = 16 * 1024 * 1024;
 
-struct Profile(NonNull<cms::_HPROFILE>);
-
-impl Profile {
-    fn open(bytes: &[u8]) -> Option<Self> {
-        if bytes.is_empty() || bytes.len() > MAX_PROFILE_BYTES {
-            return None;
-        }
-        let len = u32::try_from(bytes.len()).ok()?;
-        // SAFETY: Little CMS borrows this byte slice only during this call.
-        let raw = unsafe { cms::cmsOpenProfileFromMem(bytes.as_ptr().cast(), len) };
-        NonNull::new(raw).map(Self)
+fn open_profile(bytes: &[u8]) -> Option<Profile> {
+    if bytes.is_empty() || bytes.len() > MAX_PROFILE_BYTES {
+        return None;
     }
-
-    fn srgb() -> Option<Self> {
-        // The parameter-free Little CMS constructor transfers ownership
-        // only on success. Profile::drop remains the native release point.
-        let raw = native_create_srgb_profile();
-        NonNull::new(raw).map(Self)
-    }
-}
-
-impl Drop for Profile {
-    fn drop(&mut self) {
-        // SAFETY: Profile exclusively owns a non-null Little CMS profile.
-        unsafe { cms::cmsCloseProfile(self.0.as_ptr()) };
-    }
+    // Little CMS uses a 32-bit profile-buffer length.
+    u32::try_from(bytes.len()).ok()?;
+    Profile::new_icc(bytes).ok()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,18 +25,16 @@ pub enum DisplayError {
     ConversionFailed,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PixelLayout {
-    RgbFloat,
+/// Different native pixel formats are represented by different Rust types:
+/// a floating RGB transform cannot receive a four-channel byte buffer.
+enum PixelTransform {
+    Rgb(LcmsTransform<[f32; 3], [f32; 3]>),
     #[cfg(any(target_os = "linux", target_os = "freebsd", test))]
-    Rgba8,
+    Rgba8(LcmsTransform<[u8; 4], [u8; 4]>),
 }
 
-/// Keep the native transform's pixel layout attached to its handle so
-/// safe callers cannot invoke Little CMS with an incompatible buffer.
 pub struct Transform {
-    raw: NonNull<cms::_HTRANSFORM>,
-    layout: PixelLayout,
+    inner: PixelTransform,
 }
 
 enum PixelBuffer<'a> {
@@ -70,106 +44,81 @@ enum PixelBuffer<'a> {
 }
 
 impl Transform {
-    fn create(input: &Profile, output: &Profile, layout: PixelLayout) -> Option<Self> {
-        let (format, flags) = match layout {
-            PixelLayout::RgbFloat => (cms::PixelFormat::RGB_FLT, cms::FLAGS_BLACKPOINTCOMPENSATION),
-            #[cfg(any(target_os = "linux", target_os = "freebsd", test))]
-            PixelLayout::Rgba8 => (
-                cms::PixelFormat::RGBA_8,
-                cms::FLAGS_COPY_ALPHA | cms::FLAGS_BLACKPOINTCOMPENSATION,
-            ),
-        };
-        // SAFETY: Both profiles remain live during creation. Little CMS
-        // takes its own transform ownership, paired with Transform::drop.
-        let raw = unsafe {
-            cms::cmsCreateTransform(
-                input.0.as_ptr(),
-                format,
-                output.0.as_ptr(),
-                format,
-                cms::Intent::RelativeColorimetric,
-                flags,
-            )
-        };
-        NonNull::new(raw).map(|raw| Self { raw, layout })
-    }
-
     fn rgb(input: &Profile, output: &Profile) -> Option<Self> {
-        Self::create(input, output, PixelLayout::RgbFloat)
+        LcmsTransform::<[f32; 3], [f32; 3]>::new_flags(
+            input,
+            PixelFormat::RGB_FLT,
+            output,
+            PixelFormat::RGB_FLT,
+            Intent::RelativeColorimetric,
+            Flags::BLACKPOINT_COMPENSATION,
+        )
+        .ok()
+        .map(|transform| Self {
+            inner: PixelTransform::Rgb(transform),
+        })
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd", test))]
     fn rgba8(input: &Profile, output: &Profile) -> Option<Self> {
-        Self::create(input, output, PixelLayout::Rgba8)
+        LcmsTransform::<[u8; 4], [u8; 4]>::new_flags(
+            input,
+            PixelFormat::RGBA_8,
+            output,
+            PixelFormat::RGBA_8,
+            Intent::RelativeColorimetric,
+            Flags::BLACKPOINT_COMPENSATION | Flags::COPY_ALPHA,
+        )
+        .ok()
+        .map(|transform| Self {
+            inner: PixelTransform::Rgba8(transform),
+        })
     }
 
     pub fn from_srgb_to_display(bytes: &[u8]) -> Result<Self, DisplayError> {
-        let output = Profile::open(bytes).ok_or(DisplayError::InvalidProfile)?;
-        let input = Profile::srgb().ok_or(DisplayError::ConversionFailed)?;
-        Self::rgb(&input, &output).ok_or(DisplayError::ConversionFailed)
+        let output = open_profile(bytes).ok_or(DisplayError::InvalidProfile)?;
+        Self::rgb(&Profile::new_srgb(), &output).ok_or(DisplayError::ConversionFailed)
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     pub fn from_display_to_srgb(bytes: &[u8]) -> Option<Self> {
-        let input = Profile::open(bytes)?;
-        let output = Profile::srgb()?;
-        Self::rgb(&input, &output)
+        let input = open_profile(bytes)?;
+        Self::rgb(&input, &Profile::new_srgb())
     }
 
     pub fn map_rgb(&self, input: [f32; 3]) -> [f32; 3] {
-        // The batch method already owns the audited Little CMS call and
-        // supports in-place RGB_FLT transforms, including a single pixel.
         let mut pixel = [input];
         self.map_rgb_batch(&mut pixel);
         pixel[0]
     }
 
-    /// Only matching native pixel layouts reach cmsDoTransform. All size
-    /// checks and count conversions happen before crossing the FFI boundary.
     fn apply(&self, pixels: PixelBuffer<'_>) {
-        let (data, count) = match (self.layout, pixels) {
-            (PixelLayout::RgbFloat, PixelBuffer::Rgb(colors)) => {
-                let Ok(count) = u32::try_from(colors.len()) else {
-                    return;
-                };
-                let Some(data) =
-                    std::ptr::NonNull::<std::ffi::c_void>::new(colors.as_mut_ptr().cast())
-                else {
-                    return;
-                };
-                (data, count)
-            }
-            #[cfg(any(target_os = "linux", target_os = "freebsd", test))]
-            (PixelLayout::Rgba8, PixelBuffer::Rgba8(colors)) => {
-                if !colors.len().is_multiple_of(4) {
+        match (&self.inner, pixels) {
+            (PixelTransform::Rgb(transform), PixelBuffer::Rgb(colors)) => {
+                if colors.is_empty() {
                     return;
                 }
-                let Ok(count) = u32::try_from(colors.len() / 4) else {
-                    return;
-                };
-                let Some(data) =
-                    std::ptr::NonNull::<std::ffi::c_void>::new(colors.as_mut_ptr().cast())
-                else {
-                    return;
-                };
-                (data, count)
+                // The safe wrapper handles a bounded pixel count. Each chunk
+                // remains an ordinary mutable slice with a fixed RGB layout.
+                for chunk in colors.chunks_mut(u32::MAX as usize) {
+                    transform.transform_in_place(chunk);
+                }
             }
             #[cfg(any(target_os = "linux", target_os = "freebsd", test))]
-            _ => return,
-        };
-        if count == 0 {
-            return;
-        }
-        // SAFETY: The stored layout matches the checked borrowed pixel
-        // buffer. Its native allocation remains valid through this call;
-        // Little CMS supports these exact in-place pixel transforms.
-        unsafe {
-            cms::cmsDoTransform(
-                self.raw.as_ptr(),
-                data.as_ptr().cast_const(),
-                data.as_ptr(),
-                count,
-            );
+            (PixelTransform::Rgba8(transform), PixelBuffer::Rgba8(bytes)) => {
+                if bytes.is_empty() || !bytes.len().is_multiple_of(4) {
+                    return;
+                }
+                let (pixels, remainder) = bytes.as_chunks_mut::<4>();
+                if !remainder.is_empty() {
+                    return;
+                }
+                for chunk in pixels.chunks_mut(u32::MAX as usize) {
+                    transform.transform_in_place(chunk);
+                }
+            }
+            #[cfg(any(target_os = "linux", target_os = "freebsd", test))]
+            _ => {}
         }
     }
 
@@ -178,27 +127,17 @@ impl Transform {
     }
 }
 
-impl Drop for Transform {
-    fn drop(&mut self) {
-        // SAFETY: Transform exclusively owns the non-null native handle.
-        unsafe { cms::cmsDeleteTransform(self.raw.as_ptr()) };
-    }
-}
-
-/// Convert a packed RGBA8 image from its embedded profile into sRGB while
-/// preserving the alpha channel. Invalid profiles leave the pixels unchanged.
+/// Convert packed RGBA8 to sRGB while preserving alpha. Invalid ICC profiles
+/// and incomplete pixel buffers leave their input untouched.
 #[cfg(any(target_os = "linux", target_os = "freebsd", test))]
 pub fn convert_rgba8_to_srgb(pixels: &mut [u8], profile: &[u8]) {
     if pixels.is_empty() || !pixels.len().is_multiple_of(4) {
         return;
     }
-    let Some(input) = Profile::open(profile) else {
+    let Some(input) = open_profile(profile) else {
         return;
     };
-    let Some(output) = Profile::srgb() else {
-        return;
-    };
-    let Some(transform) = Transform::rgba8(&input, &output) else {
+    let Some(transform) = Transform::rgba8(&input, &Profile::new_srgb()) else {
         return;
     };
     transform.apply(PixelBuffer::Rgba8(pixels));
@@ -217,8 +156,8 @@ mod tests {
 
     #[test]
     fn owned_srgb_profile_and_transform_round_trip() -> Result<(), &'static str> {
-        let input = Profile::srgb().ok_or("Little CMS sRGB profile unavailable")?;
-        let output = Profile::srgb().ok_or("Little CMS sRGB profile unavailable")?;
+        let input = Profile::new_srgb();
+        let output = Profile::new_srgb();
         let transform =
             Transform::rgb(&input, &output).ok_or("Could not create an sRGB transform")?;
         let rgb = [0.2, 0.5, 0.8];
@@ -234,8 +173,8 @@ mod tests {
 
     #[test]
     fn single_rgb_and_batch_use_identical_transform() -> Result<(), &'static str> {
-        let input = Profile::srgb().ok_or("Little CMS sRGB profile unavailable")?;
-        let output = Profile::srgb().ok_or("Little CMS sRGB profile unavailable")?;
+        let input = Profile::new_srgb();
+        let output = Profile::new_srgb();
         let transform =
             Transform::rgb(&input, &output).ok_or("Could not create an sRGB transform")?;
         let colors = [[0.15, 0.35, 0.8], [0.7, 0.2, 0.1]];
@@ -250,8 +189,8 @@ mod tests {
 
     #[test]
     fn mismatched_pixel_layout_cannot_reach_native_transform() -> Result<(), &'static str> {
-        let input = Profile::srgb().ok_or("Little CMS sRGB profile unavailable")?;
-        let output = Profile::srgb().ok_or("Little CMS sRGB profile unavailable")?;
+        let input = Profile::new_srgb();
+        let output = Profile::new_srgb();
         let rgba =
             Transform::rgba8(&input, &output).ok_or("Could not create an RGBA8 transform")?;
         let rgb = Transform::rgb(&input, &output).ok_or("Could not create an RGB transform")?;
@@ -261,6 +200,18 @@ mod tests {
         rgb.apply(PixelBuffer::Rgba8(&mut bytes));
         assert_eq!(floats, [[0.2, 0.5, 0.8]]);
         assert_eq!(bytes, [20, 60, 90, 210]);
+        Ok(())
+    }
+
+    #[test]
+    fn rgba8_identity_preserves_alpha_channel() -> Result<(), &'static str> {
+        let profile = Profile::new_srgb();
+        let transform = Transform::rgba8(&profile, &profile)
+            .ok_or("Could not create an RGBA8 transform")?;
+        let mut bytes = [40, 80, 120, 17, 200, 150, 100, 231];
+        transform.apply(PixelBuffer::Rgba8(&mut bytes));
+        assert_eq!(bytes[3], 17);
+        assert_eq!(bytes[7], 231);
         Ok(())
     }
 
