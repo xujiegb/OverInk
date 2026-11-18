@@ -56,8 +56,7 @@ impl SystemJob<Image> {
             prepare(Image::load(&path)?).map(Some)
         })
     }
-}
-impl SystemJob<Image> {
+
     /// GNOME Shell captures OverInk's selected rectangle, not a Shell picker.
     /// The same D-Bus connection sends CancelCapture when the UI is cancelled.
     #[cfg(target_os = "linux")]
