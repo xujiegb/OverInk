@@ -334,12 +334,8 @@ fn x11_window(w: &Window) -> Result<(*mut c_void, c_ulong), String> {
 impl X11 {
     /// Execute a native X11 operation without exposing function pointers.
     /// Rectangles stay borrowed and live through XShape's synchronous call.
-    fn dispatch(
-        &self,
-        display: *mut c_void,
-        window: c_ulong,
-        command: X11Command<'_>,
-    ) -> Result<(), String> {
+    fn dispatch(&self, w: &Window, command: X11Command<'_>) -> Result<(), String> {
+        let (display, window) = x11_window(w)?;
         let count = match &command {
             X11Command::Shape(Some(rectangles)) => {
                 c_int::try_from(rectangles.len()).map_err(|_| "Too many X11 shape rectangles")?
@@ -437,7 +433,7 @@ impl X11 {
         } else {
             None
         };
-        self.dispatch(display, window, X11Command::Shape(rectangles.as_deref()))?;
+        self.dispatch(w, X11Command::Shape(rectangles.as_deref()))?;
         self.applied = Some(region);
         Ok(())
     }
@@ -484,10 +480,8 @@ impl Passthrough {
         }
     }
     pub fn raise_controller(&self, w: &Window) {
-        if let Backend::X11(x11) = &self.backend
-            && let Ok((display, window)) = x11_window(w)
-        {
-            let _ = x11.dispatch(display, window, X11Command::Raise);
+        if let Backend::X11(x11) = &self.backend {
+            let _ = x11.dispatch(w, X11Command::Raise);
         }
     }
 }
