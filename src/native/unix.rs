@@ -66,7 +66,6 @@ impl OwnedWaylandHandle {
     unsafe fn from_native(raw: Option<NonNull<c_void>>, destroy: Destroy) -> Option<Self> {
         raw.map(|raw| Self { raw, destroy })
     }
-
 }
 
 impl Drop for OwnedWaylandHandle {
@@ -101,7 +100,6 @@ impl OwnedWaylandRegion {
             version,
         })
     }
-
 }
 
 impl Drop for OwnedWaylandRegion {
@@ -109,13 +107,7 @@ impl Drop for OwnedWaylandRegion {
         // SAFETY: The owned region is live. Opcode 0 is wl_region.destroy
         // and the destroy flag causes libwayland to release the proxy.
         unsafe {
-            (self.marshal)(
-                self.raw,
-                0,
-                None,
-                (self.version)(self.raw),
-                1,
-            );
+            (self.marshal)(self.raw, 0, None, (self.version)(self.raw), 1);
         }
     }
 }
@@ -198,16 +190,12 @@ impl Wayland {
             let queue_destroy: Destroy = *lib
                 .get(b"wl_event_queue_destroy\0")
                 .map_err(|e| e.to_string())?;
-            let create_queue: unsafe extern "C" fn(
-                NonNull<c_void>,
-            ) -> Option<NonNull<c_void>> = *lib
-                .get(b"wl_display_create_queue\0")
-                .map_err(|e| e.to_string())?;
-            let create_wrapper: unsafe extern "C" fn(
-                NonNull<c_void>,
-            ) -> Option<NonNull<c_void>> = *lib
-                .get(b"wl_proxy_create_wrapper\0")
-                .map_err(|e| e.to_string())?;
+            let create_queue: unsafe extern "C" fn(NonNull<c_void>) -> Option<NonNull<c_void>> =
+                *lib.get(b"wl_display_create_queue\0")
+                    .map_err(|e| e.to_string())?;
+            let create_wrapper: unsafe extern "C" fn(NonNull<c_void>) -> Option<NonNull<c_void>> =
+                *lib.get(b"wl_proxy_create_wrapper\0")
+                    .map_err(|e| e.to_string())?;
             let wrapper_destroy: Destroy = *lib
                 .get(b"wl_proxy_wrapper_destroy\0")
                 .map_err(|e| e.to_string())?;
@@ -242,18 +230,18 @@ impl Wayland {
                     .map_err(|e| e.to_string())?,
             )
             .ok_or("No Wayland region interface")?;
-            let display = w.wayland_display().ok_or("No Wayland display")?.as_non_null();
+            let display = w
+                .wayland_display()
+                .ok_or("No Wayland display")?
+                .as_non_null();
             // Every created resource is guarded immediately. An error or
             // unwind runs the correct native destructor before unloading lib.
-            let queue =
-                OwnedWaylandHandle::from_native(create_queue(display), queue_destroy)
-                    .ok_or("Cannot create Wayland event queue")?;
+            let queue = OwnedWaylandHandle::from_native(create_queue(display), queue_destroy)
+                .ok_or("Cannot create Wayland event queue")?;
             let registry_raw = {
-                let wrapper = OwnedWaylandHandle::from_native(
-                    create_wrapper(display),
-                    wrapper_destroy,
-                )
-                .ok_or("Cannot wrap Wayland display")?;
+                let wrapper =
+                    OwnedWaylandHandle::from_native(create_wrapper(display), wrapper_destroy)
+                        .ok_or("Cannot wrap Wayland display")?;
                 set_queue(wrapper.raw, queue.raw);
                 marshal(
                     wrapper.raw,
@@ -339,9 +327,8 @@ impl Wayland {
                 );
                 // SAFETY: wl_compositor.create_region returns an owned
                 // wl_region, released by this guard after the surface commit.
-                let region =
-                    OwnedWaylandRegion::from_native(p, self.marshal, self.version)
-                        .ok_or("Cannot create input region")?;
+                let region = OwnedWaylandRegion::from_native(p, self.marshal, self.version)
+                    .ok_or("Cannot create input region")?;
                 if let Some(hole) = hole {
                     // wl_region.add = opcode 1; wl_region.subtract = opcode 2.
                     (self.marshal)(
@@ -504,9 +491,9 @@ impl X11 {
                 .as_ref()
                 .map_err(Clone::clone)?;
             let (display, _) = x11_window(w)?;
-            let query: unsafe extern "C" fn(NonNull<c_void>, &mut c_int, &mut c_int) -> c_int = *ext
-                .get(b"XShapeQueryExtension\0")
-                .map_err(|e| e.to_string())?;
+            let query: unsafe extern "C" fn(NonNull<c_void>, &mut c_int, &mut c_int) -> c_int =
+                *ext.get(b"XShapeQueryExtension\0")
+                    .map_err(|e| e.to_string())?;
             let (mut event, mut error) = (0, 0);
             if query(display.as_non_null(), &mut event, &mut error) == 0 {
                 return Err("X11 Shape extension unavailable".into());
