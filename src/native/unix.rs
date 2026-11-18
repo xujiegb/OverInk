@@ -71,6 +71,48 @@ impl Drop for OwnedWaylandHandle {
     }
 }
 
+/// A protocol-owned wl_region. Unlike a generic Wayland proxy, this must
+/// send wl_region.destroy (opcode 0 with the destroy flag), not merely
+/// call wl_proxy_destroy. Keep the region alive through the surface commit.
+struct OwnedWaylandRegion {
+    raw: NonNull<c_void>,
+    marshal: Marshal,
+    version: Version,
+}
+
+impl OwnedWaylandRegion {
+    /// # Safety
+    /// The pointer must be null or a newly owned wl_region, and both function
+    /// pointers must remain loaded until the region guard is destroyed.
+    unsafe fn from_native(raw: *mut c_void, marshal: Marshal, version: Version) -> Option<Self> {
+        NonNull::new(raw).map(|raw| Self {
+            raw,
+            marshal,
+            version,
+        })
+    }
+
+    fn as_ptr(&self) -> *mut c_void {
+        self.raw.as_ptr()
+    }
+}
+
+impl Drop for OwnedWaylandRegion {
+    fn drop(&mut self) {
+        // SAFETY: The owned region is live. Opcode 0 is wl_region.destroy
+        // and the destroy flag causes libwayland to release the proxy.
+        unsafe {
+            (self.marshal)(
+                self.raw.as_ptr(),
+                0,
+                ptr::null(),
+                (self.version)(self.raw.as_ptr()),
+                1,
+            );
+        }
+    }
+}
+
 struct Wayland {
     // Rust drops fields in declaration order. Destroy the compositor before
     // its event queue, and unload the library only after both native handles.
@@ -251,16 +293,17 @@ impl Wayland {
                     0,
                     ptr::null_mut::<c_void>(),
                 );
-                if p.is_null() {
-                    return Err("Cannot create input region".into());
-                }
+                // SAFETY: wl_compositor.create_region returns an owned
+                // wl_region, released by this guard after the surface commit.
+                let region = OwnedWaylandRegion::from_native(p, self.marshal, self.version)
+                    .ok_or("Cannot create input region")?;
                 if let Some(hole) = hole {
                     // wl_region.add = opcode 1; wl_region.subtract = opcode 2.
                     (self.marshal)(
-                        p,
+                        region.as_ptr(),
                         1,
                         ptr::null(),
-                        (self.version)(p),
+                        (self.version)(region.as_ptr()),
                         0,
                         0_i32,
                         0_i32,
@@ -268,10 +311,10 @@ impl Wayland {
                         size[1],
                     );
                     (self.marshal)(
-                        p,
+                        region.as_ptr(),
                         2,
                         ptr::null(),
-                        (self.version)(p),
+                        (self.version)(region.as_ptr()),
                         0,
                         hole.x,
                         hole.y,
@@ -279,15 +322,15 @@ impl Wayland {
                         hole.h,
                     );
                 }
-                p
+                Some(region)
             } else {
-                ptr::null_mut()
+                None
             };
-            (self.marshal)(surface, 5, ptr::null(), (self.version)(surface), 0, region); // wl_surface.set_input_region
+            let region_ptr = region.as_ref().map_or(ptr::null_mut(), |region| region.as_ptr());
+            (self.marshal)(surface, 5, ptr::null(), (self.version)(surface), 0, region_ptr); // wl_surface.set_input_region
             (self.marshal)(surface, 6, ptr::null(), (self.version)(surface), 0); // wl_surface.commit
-            if !region.is_null() {
-                (self.marshal)(region, 0, ptr::null(), (self.version)(region), 1);
-            }
+            // The region is destroyed through RAII, even if a Rust unwind
+            // occurs between creation and the surface commit.
         }
         self.applied = Some((surface, pass, hole, size));
         Ok(())
