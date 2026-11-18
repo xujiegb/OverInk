@@ -248,35 +248,47 @@ pub fn finger_event(event: &SDL_Event) -> Option<SDL_TouchFingerEvent> {
     )
 }
 
-/// Returns the owning SDL window for an event after checking its union tag.
+/// Returns the owning SDL window without reading an unchecked union
+/// field. Every typed accessor verifies the event's *actual* tag.
 pub fn event_window(event: &SDL_Event, ty: SDL_EventType) -> Option<SDL_WindowID> {
-    // Never use a caller-supplied tag to read a different SDL union member.
+    // Never trust a caller-supplied tag as proof of a union's active field.
     if event_type(event) != ty {
         return None;
     }
-    unsafe {
-        let window = match ty {
-            SDL_EVENT_MOUSE_BUTTON_DOWN | SDL_EVENT_MOUSE_BUTTON_UP => event.button.windowID,
-            SDL_EVENT_MOUSE_MOTION => event.motion.windowID,
-            SDL_EVENT_MOUSE_WHEEL => event.wheel.windowID,
-            SDL_EVENT_FINGER_DOWN
-            | SDL_EVENT_FINGER_MOTION
-            | SDL_EVENT_FINGER_UP
-            | SDL_EVENT_FINGER_CANCELED => event.tfinger.windowID,
-            SDL_EVENT_PEN_PROXIMITY_IN | SDL_EVENT_PEN_PROXIMITY_OUT => event.pproximity.windowID,
-            SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP => event.ptouch.windowID,
-            SDL_EVENT_PEN_MOTION => event.pmotion.windowID,
-            SDL_EVENT_PEN_AXIS => event.paxis.windowID,
-            SDL_EVENT_KEY_DOWN | SDL_EVENT_KEY_UP => event.key.windowID,
-            SDL_EVENT_WINDOW_FOCUS_GAINED
-            | SDL_EVENT_WINDOW_FOCUS_LOST
-            | SDL_EVENT_WINDOW_MOUSE_LEAVE => event.window.windowID,
-            SDL_EVENT_TEXT_INPUT => event.text.windowID,
-            SDL_EVENT_TEXT_EDITING => event.edit.windowID,
-            _ => return None,
-        };
-        (window.0 != 0).then_some(window)
-    }
+    let window = match ty {
+        SDL_EVENT_MOUSE_BUTTON_DOWN | SDL_EVENT_MOUSE_BUTTON_UP => {
+            mouse_button_event(event)?.windowID
+        }
+        SDL_EVENT_MOUSE_MOTION => mouse_motion_event(event)?.windowID,
+        SDL_EVENT_MOUSE_WHEEL => mouse_wheel_event(event)?.windowID,
+        SDL_EVENT_FINGER_DOWN
+        | SDL_EVENT_FINGER_MOTION
+        | SDL_EVENT_FINGER_UP
+        | SDL_EVENT_FINGER_CANCELED => finger_event(event)?.windowID,
+        SDL_EVENT_PEN_PROXIMITY_IN | SDL_EVENT_PEN_PROXIMITY_OUT => {
+            pen_proximity_event(event)?.windowID
+        }
+        SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP => pen_touch_event(event)?.windowID,
+        SDL_EVENT_PEN_MOTION => pen_motion_event(event)?.windowID,
+        SDL_EVENT_PEN_AXIS => pen_axis_event(event)?.windowID,
+        SDL_EVENT_KEY_DOWN | SDL_EVENT_KEY_UP => key_event(event)?.windowID,
+        SDL_EVENT_WINDOW_FOCUS_GAINED
+        | SDL_EVENT_WINDOW_FOCUS_LOST
+        | SDL_EVENT_WINDOW_MOUSE_LEAVE => {
+            tagged_event!(
+                event,
+                window,
+                SDL_EVENT_WINDOW_FOCUS_GAINED
+                    | SDL_EVENT_WINDOW_FOCUS_LOST
+                    | SDL_EVENT_WINDOW_MOUSE_LEAVE
+            )?
+            .windowID
+        }
+        SDL_EVENT_TEXT_INPUT => tagged_event!(event, text, SDL_EVENT_TEXT_INPUT)?.windowID,
+        SDL_EVENT_TEXT_EDITING => tagged_event!(event, edit, SDL_EVENT_TEXT_EDITING)?.windowID,
+        _ => return None,
+    };
+    (window.0 != 0).then_some(window)
 }
 
 /// Query indirect touch device capability via SDL's native input API.
