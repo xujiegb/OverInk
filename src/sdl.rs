@@ -2201,10 +2201,22 @@ impl Renderer {
                     check(SDL_RenderClear(renderer.as_ptr()))
                 }
                 RenderCommand::TransparentRect(rect) => {
-                    check(SDL_SetRenderDrawColorFloat(renderer.as_ptr(), 0., 0., 0., 0.))?;
-                    check(SDL_SetRenderDrawBlendMode(renderer.as_ptr(), SDL_BLENDMODE_NONE))?;
+                    check(SDL_SetRenderDrawColorFloat(
+                        renderer.as_ptr(),
+                        0.,
+                        0.,
+                        0.,
+                        0.,
+                    ))?;
+                    check(SDL_SetRenderDrawBlendMode(
+                        renderer.as_ptr(),
+                        SDL_BLENDMODE_NONE,
+                    ))?;
                     let draw = check(SDL_RenderFillRect(renderer.as_ptr(), rect));
-                    let restore = check(SDL_SetRenderDrawBlendMode(renderer.as_ptr(), SDL_BLENDMODE_BLEND));
+                    let restore = check(SDL_SetRenderDrawBlendMode(
+                        renderer.as_ptr(),
+                        SDL_BLENDMODE_BLEND,
+                    ));
                     draw.and(restore)
                 }
                 RenderCommand::Clip(clip) => check(SDL_SetRenderClipRect(
@@ -2616,6 +2628,21 @@ impl TestSurface {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn destroyed_renderer_is_idempotent_and_rejects_commands() {
+        let mut renderer = Renderer {
+            raw: None,
+            extended: false,
+            name: String::new(),
+        };
+        renderer.destroy_native();
+        renderer.destroy_native();
+        assert_eq!(renderer.hdr(), (false, 1.));
+        assert!(renderer.clear([0.; 4]).is_err());
+        assert!(renderer.flush().is_err());
+        assert!(renderer.present().is_err());
+    }
 
     #[test]
     fn rejects_invalid_native_array_counts() {
