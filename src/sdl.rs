@@ -89,6 +89,21 @@ unsafe extern "C" {
     safe fn native_wait_event_timeout(event: Option<&mut SDL_Event>, timeout_ms: i32) -> bool;
     #[link_name = "SDL_PushEvent"]
     safe fn native_push_event(event: &mut SDL_Event) -> bool;
+    // Both geometry queries write exactly two initialized integers and never
+    // retain their output references. Window handles originate from SDL and
+    // are validated before entering this private main-thread-only boundary.
+    #[link_name = "SDL_GetWindowSize"]
+    safe fn native_window_size(
+        window: NonNull<SDL_Window>,
+        width: &mut i32,
+        height: &mut i32,
+    ) -> bool;
+    #[link_name = "SDL_GetWindowSizeInPixels"]
+    safe fn native_window_size_in_pixels(
+        window: NonNull<SDL_Window>,
+        width: &mut i32,
+        height: &mut i32,
+    ) -> bool;
     #[cfg(target_os = "linux")]
     #[link_name = "SDL_FlushEvent"]
     safe fn native_flush_event(event_type: u32);
@@ -1308,15 +1323,15 @@ impl Window {
     /// Read either window geometry in one audited FFI boundary. Each call
     /// performs exactly one SDL query, preserving the rendering fast path.
     fn query_size(&self, in_pixels: bool) -> Option<[i32; 2]> {
+        if !native_is_main_thread() {
+            return None;
+        }
+        let window = NonNull::new(self.raw)?;
         let (mut width, mut height) = (0, 0);
-        // SAFETY: The window is live on SDL's owning thread and both output
-        // integers are valid writable storage for the synchronous call.
-        let ok = unsafe {
-            if in_pixels {
-                SDL_GetWindowSizeInPixels(self.raw, &mut width, &mut height)
-            } else {
-                SDL_GetWindowSize(self.raw, &mut width, &mut height)
-            }
+        let ok = if in_pixels {
+            native_window_size_in_pixels(window, &mut width, &mut height)
+        } else {
+            native_window_size(window, &mut width, &mut height)
         };
         ok.then_some([width, height])
     }
