@@ -81,11 +81,13 @@ fn take_unique_page(
     predicate: impl Fn(&DisplayKey, &Document) -> bool,
 ) -> Option<Document> {
     let mut matches = docs.iter().filter(|(key, doc)| predicate(key, doc));
-    let key = matches.next()?.0.clone();
+    matches.next()?;
     if matches.next().is_some() {
         return None;
     }
-    docs.remove(&key)
+    docs.extract_if(.., |key, doc| predicate(key, doc))
+        .next()
+        .map(|(_, doc)| doc)
 }
 
 fn take_named_page(
