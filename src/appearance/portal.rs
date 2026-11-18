@@ -122,9 +122,7 @@ fn publish(update: &Mutex<Option<u32>>, wake: u32, value: u32) {
     {
         *current = value;
         if wake != 0 {
-            let mut event = SDL_Event::default();
-            event.r#type = wake;
-            crate::sdl::push_event(&mut event);
+            crate::sdl::push_user_event(wake);
         }
     }
 }

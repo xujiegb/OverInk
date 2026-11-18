@@ -21,6 +21,21 @@ use std::{
 unsafe extern "C" {
     #[link_name = "SDL_IsMainThread"]
     safe fn native_is_main_thread() -> bool;
+    // SDL only writes the caller's borrowed, initialized rectangle. It
+    // neither retains the pointer nor transfers allocation ownership.
+    #[link_name = "SDL_GetDisplayBounds"]
+    safe fn native_display_bounds(id: SDL_DisplayID, bounds: &mut SDL_Rect) -> bool;
+    #[link_name = "SDL_GetDisplayUsableBounds"]
+    safe fn native_display_usable_bounds(id: SDL_DisplayID, bounds: &mut SDL_Rect) -> bool;
+    // The mouse getters synchronously copy optional float coordinates. Use
+    // real exclusive Rust borrows rather than arbitrary nullable pointers.
+    #[link_name = "SDL_GetMouseState"]
+    safe fn native_mouse_state(x: &mut f32, y: &mut f32) -> SDL_MouseButtonFlags;
+    #[link_name = "SDL_GetGlobalMouseState"]
+    safe fn native_global_mouse_state(x: &mut f32, y: &mut f32) -> SDL_MouseButtonFlags;
+    // A fresh SDL property list is identified by a scalar, not a pointer.
+    #[link_name = "SDL_CreateProperties"]
+    safe fn native_create_properties() -> SDL_PropertiesID;
     #[link_name = "SDL_GetModState"]
     safe fn native_mod_state() -> SDL_Keymod;
     #[link_name = "SDL_GetSystemTheme"]
@@ -252,13 +267,15 @@ enum DisplayBoundsKind {
 
 fn query_display_bounds(id: u32, kind: DisplayBoundsKind) -> Result<[i32; 4], String> {
     let mut bounds = SDL_Rect::default();
-    // SAFETY: The output rectangle is initialized, writable Rust storage and
-    // SDL copies the selected display's bounds before returning.
-    let ok = unsafe {
-        match kind {
-            DisplayBoundsKind::Full => SDL_GetDisplayBounds(SDL_DisplayID(id), &mut bounds),
-            DisplayBoundsKind::Usable => SDL_GetDisplayUsableBounds(SDL_DisplayID(id), &mut bounds),
-        }
+    // SDL's video queries run on the main thread. Each native function
+    // copies a rectangle into the exclusive, initialized Rust borrow.
+    if !native_is_main_thread() {
+        return Err("SDL display query requires the main thread".into());
+    }
+    let display = SDL_DisplayID(id);
+    let ok = match kind {
+        DisplayBoundsKind::Full => native_display_bounds(display, &mut bounds),
+        DisplayBoundsKind::Usable => native_display_usable_bounds(display, &mut bounds),
     };
     check(ok)?;
     Ok([bounds.x, bounds.y, bounds.w, bounds.h])
@@ -416,10 +433,11 @@ pub fn register_user_event() -> u32 {
     native_register_events(1)
 }
 
-/// Push a copied SDL event into its queue.
+/// Only registered SDL user event types may be used to wake the portal
+/// monitor; safe callers can no longer enqueue an arbitrary SDL union.
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-pub fn push_event(event: &mut SDL_Event) -> bool {
-    unsafe { SDL_PushEvent(event) }
+pub fn push_user_event(ty: u32) -> bool {
+    event_queue_action(EventQueueAction::PushUser(ty))
 }
 
 /// Owned display metadata, copied from SDL before its native allocation is freed.
@@ -688,6 +706,8 @@ pub fn screenshot_file_stem() -> String {
 enum EventQueueAction<'a> {
     Poll(&'a mut SDL_Event),
     Wait(i32),
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    PushUser(u32),
     #[cfg(target_os = "linux")]
     FlushQuit,
 }
@@ -700,6 +720,17 @@ fn event_queue_action(action: EventQueueAction<'_>) -> bool {
         match action {
             EventQueueAction::Poll(event) => SDL_PollEvent(event),
             EventQueueAction::Wait(timeout_ms) => SDL_WaitEventTimeout(ptr::null_mut(), timeout_ms),
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            EventQueueAction::PushUser(ty) => {
+                if !(SDL_EVENT_USER.0..SDL_EVENT_LAST.0).contains(&ty) {
+                    return false;
+                }
+                // Only the SDL-defined type field is set. The rest of the
+                // union stays zeroed and carries no borrowed native data.
+                let mut event = SDL_Event::default();
+                event.r#type = ty;
+                SDL_PushEvent(&mut event)
+            }
             #[cfg(target_os = "linux")]
             EventQueueAction::FlushQuit => {
                 SDL_FlushEvent(SDL_EVENT_QUIT.0);
@@ -746,19 +777,17 @@ pub fn render_reset_window_id(event: &SDL_Event) -> Option<SDL_WindowID> {
 
 /// Check physical buttons on macOS, and SDL's per-window state elsewhere.
 pub fn mouse_buttons_released() -> bool {
-    // SAFETY: Both SDL mouse-state getters accept null optional position
-    // outputs and return an owned button-mask value. macOS intentionally
-    // checks global state rather than only the active SDL window.
-    unsafe {
-        #[cfg(target_os = "macos")]
-        {
-            SDL_GetGlobalMouseState(ptr::null_mut(), ptr::null_mut()).0 == 0
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            SDL_GetMouseState(ptr::null_mut(), ptr::null_mut()).0 == 0
-        }
+    // Use initialized, exclusively borrowed output coordinates in place
+    // of nullable native pointers. macOS still checks global buttons.
+    if !native_is_main_thread() {
+        return false;
     }
+    let (mut x, mut y) = (0.0, 0.0);
+    #[cfg(target_os = "macos")]
+    let buttons = native_global_mouse_state(&mut x, &mut y);
+    #[cfg(not(target_os = "macos"))]
+    let buttons = native_mouse_state(&mut x, &mut y);
+    buttons.0 == 0
 }
 
 /// Wait without dequeuing the SDL event, preserving the polling loop's order.
@@ -1501,9 +1530,9 @@ struct OwnedProperties(SDL_PropertiesID);
 
 impl OwnedProperties {
     fn new() -> Result<Self, String> {
-        // SAFETY: SDL creates a new, uniquely owned property list. A
-        // nonzero ID is released exactly once by this guard's destructor.
-        let id = unsafe { SDL_CreateProperties() };
+        // SDL_CreateProperties takes no pointers or borrowed resources.
+        // Drop remains the sole native destruction boundary for this ID.
+        let id = native_create_properties();
         (id.0 != 0).then(|| Self(id)).ok_or_else(error)
     }
 
