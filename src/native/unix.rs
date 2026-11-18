@@ -587,6 +587,7 @@ mod tests {
     use super::OwnedWaylandHandle;
     use std::{
         ffi::c_void,
+        ptr::NonNull,
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},

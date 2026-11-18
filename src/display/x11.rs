@@ -170,6 +170,7 @@ impl Randr {
 #[cfg(test)]
 mod tests {
     use super::{OwnedRandr, checked_crtc_count};
+    use std::ptr::NonNull;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
