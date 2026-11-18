@@ -2284,7 +2284,7 @@ impl Renderer {
                     driver.as_ptr(),
                 );
             }
-            let mut raw = ptr::null_mut();
+            let mut raw = None;
             // SDL's transparent Win32 swap chain uses the DXGI bitblt model.
             // Submit sRGB ink to that path so DWM composites it as SDR.
             let transparent = SDL_GetWindowFlags(window.raw.as_ptr()) & SDL_WINDOW_TRANSPARENT != 0;
@@ -2297,47 +2297,45 @@ impl Renderer {
                     SDL_COLORSPACE_SRGB_LINEAR.0 as i64,
                 );
                 SDL_ClearError();
-                raw = SDL_CreateRendererWithProperties(props.id());
+                raw = NonNull::new(SDL_CreateRendererWithProperties(props.id()));
                 #[cfg(target_os = "macos")]
-                if raw.is_null() {
+                if raw.is_none() {
                     crate::native::macos::remove_metal_view(window);
                 }
             }
-            if raw.is_null() {
+            if raw.is_none() {
                 SDL_SetNumberProperty(
                     props.id(),
                     SDL_PROP_RENDERER_CREATE_OUTPUT_COLORSPACE_NUMBER,
                     SDL_COLORSPACE_SRGB.0 as i64,
                 );
                 SDL_ClearError();
-                raw = SDL_CreateRendererWithProperties(props.id());
+                raw = NonNull::new(SDL_CreateRendererWithProperties(props.id()));
             }
-            let failure = raw.is_null().then(error);
+            let Some(raw) = raw else {
+                let message = error();
+                return Err(message);
+            };
             drop(props);
-            if let Some(error) = failure {
-                return Err(error);
-            }
-            let p = SDL_GetRendererProperties(raw);
+            let p = SDL_GetRendererProperties(raw.as_ptr());
             let extended = SDL_GetNumberProperty(p, SDL_PROP_RENDERER_OUTPUT_COLORSPACE_NUMBER, 0)
                 == SDL_COLORSPACE_SRGB_LINEAR.0 as i64;
-            let name = SDL_GetRendererName(raw);
+            let name = SDL_GetRendererName(raw.as_ptr());
             let name = if name.is_null() {
                 "unknown".into()
             } else {
                 CStr::from_ptr(name).to_string_lossy().into_owned()
             };
             #[cfg(target_os = "macos")]
-            if name == "metal"
-                && let Some(renderer) = NonNull::new(raw)
-            {
-                crate::native::macos::configure_metal(renderer, extended);
+            if name == "metal" {
+                crate::native::macos::configure_metal(raw, extended);
             }
-            SDL_SetRenderDrawBlendMode(raw, SDL_BLENDMODE_BLEND);
+            SDL_SetRenderDrawBlendMode(raw.as_ptr(), SDL_BLENDMODE_BLEND);
             // One shared frame clock paces both windows. Two blocking presents
             // would halve the requested rate on some desktop drivers.
-            SDL_SetRenderVSync(raw, 0);
+            SDL_SetRenderVSync(raw.as_ptr(), 0);
             Ok(Self {
-                raw: Some(NonNull::new(raw).ok_or_else(error)?),
+                raw: Some(raw),
                 extended,
                 name,
             })
