@@ -949,7 +949,8 @@ extern "C" fn toolbar_hit_test(
 }
 
 pub struct Window {
-    pub raw: NonNull<SDL_Window>,
+    // Only the SDL adapter may use or destroy this owned native handle.
+    raw: NonNull<SDL_Window>,
     pub id: SDL_WindowID,
 }
 impl Window {
