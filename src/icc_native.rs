@@ -90,13 +90,11 @@ impl Transform {
     }
 
     pub fn map_rgb(&self, input: [f32; 3]) -> [f32; 3] {
-        let mut output = [0.0_f32; 3];
-        // SAFETY: Both arrays hold exactly one RGB_FLT pixel. Little CMS
-        // writes only the three output channels of this one pixel.
-        unsafe {
-            cms::cmsDoTransform(self.0, input.as_ptr().cast(), output.as_mut_ptr().cast(), 1);
-        }
-        output
+        // The batch method already owns the audited Little CMS call and
+        // supports in-place RGB_FLT transforms, including a single pixel.
+        let mut pixel = [input];
+        self.map_rgb_batch(&mut pixel);
+        pixel[0]
     }
 
     pub fn map_rgb_batch(&self, colors: &mut [[f32; 3]]) {
@@ -174,6 +172,20 @@ mod tests {
                 (actual - expected).abs() < 0.02,
                 "sRGB identity transform changed a channel: {actual} != {expected}"
             );
+        }
+    }
+
+    #[test]
+    fn single_rgb_and_batch_use_identical_transform() {
+        let input = Profile::srgb().expect("Little CMS sRGB profile");
+        let output = Profile::srgb().expect("Little CMS sRGB profile");
+        let transform = Transform::rgb(&input, &output).expect("sRGB transform");
+        let colors = [[0.15, 0.35, 0.8], [0.7, 0.2, 0.1]];
+        let single = colors.map(|color| transform.map_rgb(color));
+        let mut batch = colors;
+        transform.map_rgb_batch(&mut batch);
+        for (one, many) in single.into_iter().zip(batch) {
+            assert_eq!(one, many);
         }
     }
 
