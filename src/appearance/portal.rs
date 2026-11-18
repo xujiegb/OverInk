@@ -1,6 +1,5 @@
 #![forbid(unsafe_code)]
 
-use crate::sdl::*;
 use egui::Theme;
 use futures_lite::{StreamExt, future};
 use std::{
