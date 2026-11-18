@@ -82,7 +82,7 @@ impl Transform {
                 flags,
             )
         };
-        (!raw.is_null()).then_some(Self { raw, layout })
+        (!raw.is_null()).then(|| Self { raw, layout })
     }
 
     fn rgb(input: &Profile, output: &Profile) -> Option<Self> {

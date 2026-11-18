@@ -1504,7 +1504,7 @@ impl OwnedProperties {
         // SAFETY: SDL creates a new, uniquely owned property list. A
         // nonzero ID is released exactly once by this guard's destructor.
         let id = unsafe { SDL_CreateProperties() };
-        (id.0 != 0).then_some(Self(id)).ok_or_else(error)
+        (id.0 != 0).then(|| Self(id)).ok_or_else(error)
     }
 
     fn id(&self) -> SDL_PropertiesID {
