@@ -1682,10 +1682,10 @@ impl Renderer {
         if vertices.is_empty() || indices.is_empty() {
             return Ok(());
         }
-        let vertex_count = i32::try_from(vertices.len())
-            .map_err(|_| "SDL geometry vertex count exceeds i32")?;
-        let index_count = i32::try_from(indices.len())
-            .map_err(|_| "SDL geometry index count exceeds i32")?;
+        let vertex_count =
+            i32::try_from(vertices.len()).map_err(|_| "SDL geometry vertex count exceeds i32")?;
+        let index_count =
+            i32::try_from(indices.len()).map_err(|_| "SDL geometry index count exceeds i32")?;
         if indices.iter().any(|&index| index >= vertex_count as u32) {
             return Err("SDL geometry index refers outside the vertex buffer".into());
         }
