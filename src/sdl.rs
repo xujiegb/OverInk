@@ -1171,7 +1171,7 @@ impl Window {
                         pitch,
                     );
                     if let Some(surface) = NonNull::new(surface).map(OwnedSurface) {
-                        SDL_SetWindowIcon(self.raw, surface.as_ptr());
+                        SDL_SetWindowIcon(self.raw, surface.as_non_null().as_ptr());
                     }
                     Ok(())
                 }
@@ -1188,17 +1188,17 @@ impl Window {
                         ))
                         .ok_or_else(error)?,
                     );
-                    let opaque = SDL_MapSurfaceRGBA(surface.as_ptr(), 255, 255, 255, 255);
-                    let transparent = SDL_MapSurfaceRGBA(surface.as_ptr(), 0, 0, 0, 0);
+                    let opaque = SDL_MapSurfaceRGBA(surface.as_non_null().as_ptr(), 255, 255, 255, 255);
+                    let transparent = SDL_MapSurfaceRGBA(surface.as_non_null().as_ptr(), 0, 0, 0, 0);
                     check(SDL_FillSurfaceRect(
-                        surface.as_ptr(),
+                        surface.as_non_null().as_ptr(),
                         ptr::null(),
                         transparent,
                     ))?;
                     for region in regions {
-                        check(SDL_FillSurfaceRect(surface.as_ptr(), region, opaque))?;
+                        check(SDL_FillSurfaceRect(surface.as_non_null().as_ptr(), region, opaque))?;
                     }
-                    check(SDL_SetWindowShape(self.raw, surface.as_ptr()))
+                    check(SDL_SetWindowShape(self.raw, surface.as_non_null().as_ptr()))
                 }
             }
         }
@@ -1662,7 +1662,7 @@ impl OwnedSurface {
                 }
             };
             let surface = Self(NonNull::new(raw).ok_or_else(error)?);
-            let dimensions = [(*surface.as_ptr()).w, (*surface.as_ptr()).h];
+            let dimensions = [(*surface.as_non_null().as_ptr()).w, (*surface.as_non_null().as_ptr()).h];
             if dimensions[0] <= 0 || dimensions[1] <= 0 {
                 return Err("SDL returned invalid surface dimensions".into());
             }
@@ -1670,8 +1670,8 @@ impl OwnedSurface {
         }
     }
 
-    fn as_ptr(&self) -> *mut SDL_Surface {
-        self.0.as_ptr()
+    fn as_non_null(&self) -> NonNull<SDL_Surface> {
+        self.0
     }
 }
 
@@ -1718,14 +1718,14 @@ impl OwnedTexture {
             ))
             .ok_or_else(error)?;
             let texture = Self(raw);
-            check(SDL_SetTextureBlendMode(texture.as_ptr(), blend))?;
-            check(SDL_SetTextureScaleMode(texture.as_ptr(), scale))?;
+            check(SDL_SetTextureBlendMode(texture.as_non_null().as_ptr(), blend))?;
+            check(SDL_SetTextureScaleMode(texture.as_non_null().as_ptr(), scale))?;
             Ok(texture)
         }
     }
 
-    fn as_ptr(&self) -> *mut SDL_Texture {
-        self.0.as_ptr()
+    fn as_non_null(&self) -> NonNull<SDL_Texture> {
+        self.0
     }
 }
 
@@ -1793,7 +1793,7 @@ impl InkTexture {
         }
         unsafe {
             check(SDL_UpdateTexture(
-                self.raw.as_ptr(),
+                self.raw.as_non_null().as_ptr(),
                 ptr::null(),
                 pixels.as_ptr().cast(),
                 pitch,
@@ -1804,12 +1804,12 @@ impl InkTexture {
     pub fn set_modulation(&self, rgb: [f32; 3], alpha: f32) -> Result<(), String> {
         unsafe {
             check(SDL_SetTextureColorModFloat(
-                self.raw.as_ptr(),
+                self.raw.as_non_null().as_ptr(),
                 rgb[0],
                 rgb[1],
                 rgb[2],
             ))?;
-            check(SDL_SetTextureAlphaModFloat(self.raw.as_ptr(), alpha))
+            check(SDL_SetTextureAlphaModFloat(self.raw.as_non_null().as_ptr(), alpha))
         }
     }
 
@@ -1893,17 +1893,17 @@ impl SnapshotTexture {
             // and this guard uniquely releases it on any later error.
             let texture = Self(OwnedTexture(NonNull::new(raw).ok_or_else(error)?));
             check(SDL_UpdateTexture(
-                texture.0.as_ptr(),
+                texture.0.as_non_null().as_ptr(),
                 ptr::null(),
                 pixels.as_ptr().cast(),
                 pitch,
             ))?;
             check(SDL_SetTextureBlendMode(
-                texture.0.as_ptr(),
+                texture.0.as_non_null().as_ptr(),
                 SDL_BLENDMODE_NONE,
             ))?;
             check(SDL_SetTextureScaleMode(
-                texture.0.as_ptr(),
+                texture.0.as_non_null().as_ptr(),
                 SDL_SCALEMODE_LINEAR,
             ))?;
             Ok(texture)
@@ -2011,7 +2011,7 @@ impl GuiTexture {
         // region, with a row stride matching its width and live RGBA bytes.
         unsafe {
             check(SDL_UpdateTexture(
-                self.raw.as_ptr(),
+                self.raw.as_non_null().as_ptr(),
                 rect.map_or(ptr::null(), |area| area),
                 rgba.as_ptr().cast(),
                 pitch,
@@ -2329,7 +2329,7 @@ impl Renderer {
         let name = cstring(&path.to_string_lossy());
         // SAFETY: The surface and NUL-terminated path remain live during
         // SDL's synchronous BMP write. The owned surface is then dropped.
-        unsafe { check(SDL_SaveBMP(surface.as_ptr(), name.as_ptr())) }
+        unsafe { check(SDL_SaveBMP(surface.as_non_null().as_ptr(), name.as_ptr())) }
     }
 
     pub fn hdr(&self) -> (bool, f32) {
@@ -2523,7 +2523,7 @@ impl TestSurface {
         // TestRenderer takes ownership of that surface and drops its Renderer
         // first, including when SDL configuration fails during construction.
         unsafe {
-            let raw = SDL_CreateSoftwareRenderer(self.surface.as_ptr());
+            let raw = SDL_CreateSoftwareRenderer(self.surface.as_non_null().as_ptr());
             if raw.is_null() {
                 return Err(error());
             }
@@ -2561,7 +2561,7 @@ impl TestSurface {
         // whether the requested pixel lies inside the surface.
         unsafe {
             check(SDL_ReadSurfacePixel(
-                self.surface.as_ptr(),
+                self.surface.as_non_null().as_ptr(),
                 x,
                 y,
                 &mut r,
