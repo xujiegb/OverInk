@@ -367,7 +367,7 @@ type CombineMask = unsafe extern "C" fn(*mut c_void, c_ulong, c_int, c_int, c_in
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct InputRegion {
-    display: *mut c_void,
+    display: NonNull<c_void>,
     window: c_ulong,
     size: [i32; 2],
     pass: bool,
@@ -388,8 +388,8 @@ enum X11Command<'a> {
     Raise,
 }
 
-fn x11_window(w: &Window) -> Result<(*mut c_void, c_ulong), String> {
-    let display = w.x11_display().ok_or("No X11 window")?.as_ptr();
+fn x11_window(w: &Window) -> Result<(NativeWindowHandle<'_>, c_ulong), String> {
+    let display = w.x11_display().ok_or("No X11 window")?;
     let window = w.x11_window_number();
     if window == 0 {
         return Err("No X11 window".into());
@@ -419,17 +419,17 @@ impl X11 {
                     } else {
                         rectangles.as_ptr()
                     };
-                    (self.rectangles)(display, window, 2, 0, 0, data, count, 0, 0);
+                    (self.rectangles)(display.as_ptr(), window, 2, 0, 0, data, count, 0, 0);
                 }
                 X11Command::Shape(None) => {
-                    (self.mask)(display, window, 2, 0, 0, 0, 0);
+                    (self.mask)(display.as_ptr(), window, 2, 0, 0, 0, 0);
                 }
                 X11Command::Raise => {
                     // Do not transfer keyboard focus away from the canvas.
-                    (self.raise)(display, window);
+                    (self.raise)(display.as_ptr(), window);
                 }
             }
-            (self.flush)(display);
+            (self.flush)(display.as_ptr());
         }
         Ok(())
     }
@@ -448,7 +448,7 @@ impl X11 {
                 .get(b"XShapeQueryExtension\0")
                 .map_err(|e| e.to_string())?;
             let (mut event, mut error) = (0, 0);
-            if query(display, &mut event, &mut error) == 0 {
+            if query(display.as_ptr(), &mut event, &mut error) == 0 {
                 return Err("X11 Shape extension unavailable".into());
             }
             Ok(Self {
@@ -472,7 +472,7 @@ impl X11 {
             hole.and_then(|hole| hole.pixels(w).clipped(size))
         };
         let region = InputRegion {
-            display,
+            display: display.as_non_null(),
             window,
             size,
             pass,
