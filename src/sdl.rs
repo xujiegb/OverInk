@@ -2064,11 +2064,11 @@ pub enum GeometryTexture<'a> {
 }
 
 impl GeometryTexture<'_> {
-    fn raw(&self) -> *mut SDL_Texture {
+    fn raw(&self) -> Option<NonNull<SDL_Texture>> {
         match self {
-            Self::Solid => ptr::null_mut(),
-            Self::Ink(texture) => texture.raw.as_ptr(),
-            Self::Gui(texture) => texture.raw.as_ptr(),
+            Self::Solid => None,
+            Self::Ink(texture) => Some(texture.raw.0),
+            Self::Gui(texture) => Some(texture.raw.0),
         }
     }
 }
@@ -2080,10 +2080,10 @@ enum OwnedTextureRef<'a> {
 }
 
 impl OwnedTextureRef<'_> {
-    fn raw(&self) -> *mut SDL_Texture {
+    fn raw(&self) -> NonNull<SDL_Texture> {
         match self {
-            Self::Ink(texture) => texture.raw.as_ptr(),
-            Self::Snapshot(texture) => texture.0.as_ptr(),
+            Self::Ink(texture) => texture.raw.0,
+            Self::Snapshot(texture) => texture.0.0,
         }
     }
 }
@@ -2158,7 +2158,7 @@ impl Renderer {
         unsafe {
             check(SDL_RenderTexture(
                 self.raw,
-                texture.raw(),
+                texture.raw().as_ptr(),
                 source.map_or(ptr::null(), |rect| rect),
                 destination.map_or(ptr::null(), |rect| rect),
             ))
@@ -2460,7 +2460,7 @@ impl Renderer {
         unsafe {
             check(SDL_RenderGeometry(
                 self.raw,
-                texture.raw(),
+                texture.raw().map_or(ptr::null_mut(), NonNull::as_ptr),
                 vertices.as_ptr(),
                 vertex_count,
                 indices.as_ptr().cast(),
