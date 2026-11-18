@@ -226,10 +226,9 @@ impl Stroke {
         self.width * scale * tilt * 0.5
     }
     pub fn polyline(&self) -> Cow<'_, [Point]> {
-        let Some(a) = self.points.first() else {
+        let Some((a, b)) = self.points.first().zip(self.points.last()) else {
             return Cow::Borrowed(&self.points);
         };
-        let b = self.points.last().unwrap();
         let point = |x, y| Point::new(x, y, 1., [0.; 2]);
         Cow::Owned(match self.tool {
             Tool::Line | Tool::Arrow => vec![*a, *b],
@@ -285,8 +284,11 @@ impl StrokeBounds {
     fn new(stroke: &Stroke) -> Option<Self> {
         let points = stroke.polyline();
         let mut bounds = Self::measure(points.iter().copied())?;
-        if let Some(head) = stroke.arrow_head() {
-            bounds.path = bounds.path.union(Bounds::points(head.into_iter()).unwrap());
+        if let Some([left, tip, right]) = stroke.arrow_head() {
+            bounds.path = bounds
+                .path
+                .union(Bounds::between(left, tip))
+                .union(Bounds::between(right, right));
         }
         Some(bounds)
     }
