@@ -10,6 +10,7 @@ use crate::{
 };
 use egui::{Color32, Pos2, Rect, Stroke, StrokeKind, Ui, UiBuilder, Vec2, pos2, vec2};
 use std::{
+    borrow::Cow,
     io::{self, BufWriter, Write},
     path::{Path, PathBuf},
     sync::{
@@ -564,7 +565,7 @@ impl Screenshot {
         preferences: &Preferences,
     ) {
         let folder = if self.error.is_some() {
-            downloads_folder()
+            downloads_folder().map(Cow::Owned)
         } else {
             default_folder(preferences)
         };
@@ -652,11 +653,12 @@ fn shade(ui: &Ui, screen: Rect, region: Option<Rect>, units: f32) {
     }
 }
 
-pub fn default_folder(preferences: &Preferences) -> Option<PathBuf> {
+pub fn default_folder(preferences: &Preferences) -> Option<Cow<'_, Path>> {
     preferences
         .screenshot_folder
-        .clone()
-        .or_else(downloads_folder)
+        .as_deref()
+        .map(Cow::Borrowed)
+        .or_else(|| downloads_folder().map(Cow::Owned))
 }
 
 fn downloads_folder() -> Option<PathBuf> {

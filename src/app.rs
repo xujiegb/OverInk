@@ -2731,7 +2731,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                     MenuAction::Save => {
                         let directory = screenshot::default_folder(&app.preferences);
                         if let Some(path) = directory {
-                            if let Err(error) = app.screenshot.save(Destination::Folder(path)) {
+                            if let Err(error) = app.screenshot.save(Destination::Folder(path.into_owned())) {
                                 app.screenshot.show_error(error);
                                 open_save_as = true;
                             }
