@@ -51,7 +51,7 @@ pub fn set_controller_region(
             window
                 .win32_hwnd()
                 .ok_or("No Win32 window handle")?
-                .as_ptr(),
+                .as_non_null().as_ptr(),
         );
         let region = if let Some(hole) = hole {
             let full = CreateRectRgn(0, 0, size[0], size[1]);
@@ -102,7 +102,7 @@ impl Passthrough {
         let raw = window
             .win32_hwnd()
             .ok_or("No Win32 window handle")?
-            .as_ptr();
+            .as_non_null().as_ptr();
         let identity = std::ptr::NonNull::new(raw).ok_or("No Win32 window handle")?;
         if self.applied == Some((identity, pass)) {
             return Ok(());
@@ -167,7 +167,7 @@ impl Passthrough {
             let ns = window
                 .cocoa_window()
                 .ok_or("No Cocoa window handle")?
-                .as_ptr();
+                .as_non_null().as_ptr();
             let identity = std::ptr::NonNull::new(ns).ok_or("No Cocoa window handle")?;
             let cocoa = ns.cast::<AnyObject>();
             if self.applied != Some((identity, pass)) {
@@ -227,7 +227,7 @@ pub fn keep_controller_above(canvas: &Window, controller: &Window, _native: &Pas
             // Win32 API receives the documented topmost pseudo-handle and flags.
             let _ = unsafe {
                 SetWindowPos(
-                    HWND(handle.as_ptr()),
+                    HWND(handle.as_non_null().as_ptr()),
                     Some(HWND_TOPMOST),
                     0,
                     0,
@@ -249,8 +249,8 @@ pub fn keep_controller_above(canvas: &Window, controller: &Window, _native: &Pas
             // selectors have these NSInteger/void signatures on macOS.
             // objc2 performs typed sends, avoiding untyped objc_msgSend casts.
             unsafe {
-                let window = window.as_ptr().cast::<AnyObject>();
-                let under = under.as_ptr().cast::<AnyObject>();
+                let window = window.as_non_null().as_ptr().cast::<AnyObject>();
+                let under = under.as_non_null().as_ptr().cast::<AnyObject>();
                 let canvas_level: isize = msg_send![under, level];
                 let level = canvas_level.saturating_add(1);
                 let current_level: isize = msg_send![window, level];
@@ -284,8 +284,8 @@ pub fn controller_bounds(canvas: &Window, controller: &Window) -> Option<[f32; 4
             Graphics::Gdi::ScreenToClient,
             UI::WindowsAndMessaging::GetWindowRect,
         };
-        let window = HWND(controller.win32_hwnd()?.as_ptr());
-        let surface = HWND(canvas.win32_hwnd()?.as_ptr());
+        let window = HWND(controller.win32_hwnd()?.as_non_null().as_ptr());
+        let surface = HWND(canvas.win32_hwnd()?.as_non_null().as_ptr());
         let mut rect = RECT::default();
         // SAFETY: Both HWNDs belong to live SDL windows. RECT and POINT are
         // initialized, writable Win32 values. Typed bindings check the ABI.
