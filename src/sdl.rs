@@ -1410,6 +1410,32 @@ impl Drop for GuiTexture {
     }
 }
 
+/// Run a cleanup action if a rendering callback unwinds. Normal paths
+/// explicitly restore and disarm it so SDL failures can still be reported.
+struct RestoreOnDrop<F: FnOnce()> {
+    cleanup: Option<F>,
+}
+
+impl<F: FnOnce()> RestoreOnDrop<F> {
+    fn new(cleanup: F) -> Self {
+        Self {
+            cleanup: Some(cleanup),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.cleanup = None;
+    }
+}
+
+impl<F: FnOnce()> Drop for RestoreOnDrop<F> {
+    fn drop(&mut self) {
+        if let Some(cleanup) = self.cleanup.take() {
+            cleanup();
+        }
+    }
+}
+
 pub struct Renderer {
     pub raw: *mut SDL_Renderer,
     pub extended: bool,
@@ -1565,8 +1591,13 @@ impl Renderer {
     ) -> Result<(), String> {
         unsafe {
             let previous = SDL_GetRenderTarget(self.raw);
-            let result = check(SDL_SetRenderTarget(self.raw, target)).and_then(|()| draw());
+            check(SDL_SetRenderTarget(self.raw, target))?;
+            let mut unwind_restore = RestoreOnDrop::new(|| {
+                let _ = SDL_SetRenderTarget(self.raw, previous);
+            });
+            let result = draw();
             let restore = check(SDL_SetRenderTarget(self.raw, previous));
+            unwind_restore.disarm();
             result.and(restore)
         }
     }
@@ -1648,8 +1679,12 @@ impl Renderer {
             check(SDL_GetRenderColorScale(self.raw, &mut previous))?;
             let target = if relative { previous * scale } else { scale };
             check(SDL_SetRenderColorScale(self.raw, target))?;
+            let mut unwind_restore = RestoreOnDrop::new(|| {
+                let _ = SDL_SetRenderColorScale(self.raw, previous);
+            });
             let result = draw();
             let restore = check(SDL_SetRenderColorScale(self.raw, previous));
+            unwind_restore.disarm();
             result.and(restore)
         }
     }
@@ -1790,6 +1825,26 @@ impl Drop for TestSurface {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restore_guard_runs_on_unwind_and_disarms_on_success() {
+        use std::cell::Cell;
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        let calls = Cell::new(0);
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let _restore = RestoreOnDrop::new(|| calls.set(calls.get() + 1));
+            panic!("simulated rendering callback failure");
+        }));
+        assert!(result.is_err());
+        assert_eq!(calls.get(), 1);
+
+        {
+            let mut restore = RestoreOnDrop::new(|| calls.set(calls.get() + 1));
+            restore.disarm();
+        }
+        assert_eq!(calls.get(), 1);
+    }
 
     #[test]
     fn tagged_event_accessors_reject_other_union_members() {
