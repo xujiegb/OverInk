@@ -186,7 +186,7 @@ pub fn event_type(event: &SDL_Event) -> SDL_EventType {
     unsafe { SDL_EventType(event.r#type) }
 }
 pub fn cstring(v: &str) -> CString {
-    CString::new(v.replace('\0', "")).unwrap()
+    CString::new(v.replace('\0', "")).unwrap_or_default()
 }
 pub fn is_wayland_session() -> bool {
     std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland")
