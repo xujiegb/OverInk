@@ -1396,8 +1396,14 @@ fn gui_upload_valid(texture: [i32; 2], source: [i32; 2], rect: Option<&SDL_Rect>
                 && area.w > 0
                 && area.h > 0
                 && [area.w, area.h] == source
-                && area.x.checked_add(area.w).is_some_and(|end| end <= texture[0])
-                && area.y.checked_add(area.h).is_some_and(|end| end <= texture[1])
+                && area
+                    .x
+                    .checked_add(area.w)
+                    .is_some_and(|end| end <= texture[0])
+                && area
+                    .y
+                    .checked_add(area.h)
+                    .is_some_and(|end| end <= texture[1])
         }
     }
 }
