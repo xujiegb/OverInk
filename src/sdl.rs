@@ -562,15 +562,43 @@ pub fn screenshot_file_stem() -> String {
     }
 }
 
+/// Known event-queue operations, with borrowed event storage and no
+/// caller-supplied native pointers or event type values.
+enum EventQueueAction<'a> {
+    Poll(&'a mut SDL_Event),
+    Wait(i32),
+    #[cfg(target_os = "linux")]
+    FlushQuit,
+}
+
+fn event_queue_action(action: EventQueueAction<'_>) -> bool {
+    // SAFETY: The event output is a live mutable Rust SDL_Event; SDL owns
+    // the queue on its main thread. The wait API explicitly accepts a null
+    // event pointer, and the flush event type is a fixed SDL constant.
+    unsafe {
+        match action {
+            EventQueueAction::Poll(event) => SDL_PollEvent(event),
+            EventQueueAction::Wait(timeout_ms) => {
+                SDL_WaitEventTimeout(ptr::null_mut(), timeout_ms)
+            }
+            #[cfg(target_os = "linux")]
+            EventQueueAction::FlushQuit => {
+                SDL_FlushEvent(SDL_EVENT_QUIT.0);
+                false
+            }
+        }
+    }
+}
+
 /// Take the next queued SDL event on the SDL-owning thread.
 pub fn poll_event(event: &mut SDL_Event) -> bool {
-    unsafe { SDL_PollEvent(event) }
+    event_queue_action(EventQueueAction::Poll(event))
 }
 
 /// Remove the leftover SDL quit event when dismissing a temporary guide.
 #[cfg(target_os = "linux")]
 pub fn flush_quit_event() {
-    unsafe { SDL_FlushEvent(SDL_EVENT_QUIT.0) };
+    let _ = event_queue_action(EventQueueAction::FlushQuit);
 }
 
 /// Read an SDL display-removal event only after checking its union tag.
@@ -616,9 +644,7 @@ pub fn mouse_buttons_released() -> bool {
 
 /// Wait without dequeuing the SDL event, preserving the polling loop's order.
 pub fn wait_for_event(timeout_ms: i32) {
-    unsafe {
-        SDL_WaitEventTimeout(ptr::null_mut(), timeout_ms);
-    }
+    let _ = event_queue_action(EventQueueAction::Wait(timeout_ms));
 }
 
 /// Boolean window queries return owned scalars rather than native flags.
