@@ -195,7 +195,9 @@ pub fn is_wayland_session() -> bool {
             .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
 }
 /// SDL's video lifetime is confined to its creating main thread.
-pub struct Runtime(PhantomData<std::rc::Rc<()>>);
+pub struct Runtime {
+    _main_thread: PhantomData<std::rc::Rc<()>>,
+}
 impl Runtime {
     pub fn new(x11: bool, wayland: bool, smoke: bool) -> Result<Self, String> {
         if !native_is_main_thread() {
@@ -241,7 +243,9 @@ impl Runtime {
                 let name = backend.map_or_else(|| "SDL".into(), CStr::to_string_lossy);
                 format!("Initializing {name} video failed ({error})")
             })?;
-            Ok(Self(PhantomData))
+            Ok(Self {
+                _main_thread: PhantomData,
+            })
         }
     }
 }
