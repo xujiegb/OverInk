@@ -1922,6 +1922,8 @@ enum RenderCommand<'a> {
     TransparentRect(&'a SDL_FRect),
     Clip(Option<&'a SDL_Rect>),
     Scale([f32; 2]),
+    GetColorScale(&'a mut f32),
+    SetColorScale(f32),
     Flush,
     Present,
 }
@@ -1997,6 +1999,12 @@ impl Renderer {
                     clip.map_or(ptr::null(), |rect| rect),
                 )),
                 RenderCommand::Scale([x, y]) => check(SDL_SetRenderScale(self.raw, x, y)),
+                RenderCommand::GetColorScale(previous) => {
+                    check(SDL_GetRenderColorScale(self.raw, previous))
+                }
+                RenderCommand::SetColorScale(scale) => {
+                    check(SDL_SetRenderColorScale(self.raw, scale))
+                }
                 RenderCommand::Flush => check(SDL_FlushRenderer(self.raw)),
                 RenderCommand::Present => check(SDL_RenderPresent(self.raw)),
             }
@@ -2207,22 +2215,19 @@ impl Renderer {
         relative: bool,
         draw: impl FnOnce() -> Result<(), String>,
     ) -> Result<(), String> {
-        // SAFETY: This renderer is live, and the SDL-owned scale output is
-        // copied into initialized Rust storage. Both variants restore the
-        // previous value after the drawing callback returns.
-        unsafe {
-            let mut previous = 1.;
-            check(SDL_GetRenderColorScale(self.raw, &mut previous))?;
-            let target = if relative { previous * scale } else { scale };
-            check(SDL_SetRenderColorScale(self.raw, target))?;
-            let mut unwind_restore = RestoreOnDrop::new(|| {
-                let _ = SDL_SetRenderColorScale(self.raw, previous);
-            });
-            let result = draw();
-            let restore = check(SDL_SetRenderColorScale(self.raw, previous));
-            unwind_restore.disarm();
-            result.and(restore)
-        }
+        // The renderer command adapter copies the native color-scale value.
+        // The drawing callback and RAII restoration now run in safe Rust.
+        let mut previous = 1.;
+        self.run_command(RenderCommand::GetColorScale(&mut previous))?;
+        let target = if relative { previous * scale } else { scale };
+        self.run_command(RenderCommand::SetColorScale(target))?;
+        let mut unwind_restore = RestoreOnDrop::new(|| {
+            let _ = self.run_command(RenderCommand::SetColorScale(previous));
+        });
+        let result = draw();
+        let restore = self.run_command(RenderCommand::SetColorScale(previous));
+        unwind_restore.disarm();
+        result.and(restore)
     }
 
     pub fn flush(&self) -> Result<(), String> {
