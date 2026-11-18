@@ -106,9 +106,17 @@ impl Randr {
                     failed = true;
                     continue;
                 };
-                if list.data().count > 0 && !list.data().crtcs.is_null() {
+                // A positive CRTC count must have a backing array. Without
+                // this check another screen could hide a malformed response
+                // and make the incomplete result look authoritative.
+                let crtc_count = list.data().count;
+                if crtc_count < 0 || (crtc_count > 0 && list.data().crtcs.is_null()) {
+                    failed = true;
+                    continue;
+                }
+                if crtc_count > 0 {
                     queried = true;
-                    for i in 0..list.data().count as usize {
+                    for i in 0..crtc_count as usize {
                         let id = *list.data().crtcs.add(i);
                         let Some(info) =
                             OwnedRandr::from_native(crtc(display, list.as_ptr(), id), *free_crtc)
