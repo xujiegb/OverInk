@@ -425,7 +425,9 @@ fn bounded_sdl_count(count: i32, maximum: usize) -> Option<usize> {
 pub fn preferred_locales() -> Vec<(String, String)> {
     unsafe {
         let mut count = 0;
-        let Some(locales) = SdlAllocation::from_native(NonNull::new(SDL_GetPreferredLocales(&mut count))) else {
+        let Some(locales) =
+            SdlAllocation::from_native(NonNull::new(SDL_GetPreferredLocales(&mut count)))
+        else {
             return Vec::new();
         };
         let Some(count) = bounded_sdl_count(count, 256) else {
@@ -487,7 +489,8 @@ pub struct DisplayInfo {
 pub fn display_info() -> Result<Vec<DisplayInfo>, String> {
     unsafe {
         let mut count = 0;
-        let list = SdlAllocation::from_native(NonNull::new(SDL_GetDisplays(&mut count))).ok_or_else(error)?;
+        let list = SdlAllocation::from_native(NonNull::new(SDL_GetDisplays(&mut count)))
+            .ok_or_else(error)?;
         let count = bounded_sdl_count(count, 256)
             .ok_or_else(|| "SDL returned an invalid display count".to_owned())?;
         // Keep the owned SDL allocation alive while iterating a bounded
@@ -1484,9 +1487,9 @@ impl Window {
     pub fn icc_profile(&self) -> Option<Vec<u8>> {
         unsafe {
             let mut size = 0;
-            let Some(profile) =
-                SdlAllocation::from_native(NonNull::new(SDL_GetWindowICCProfile(self.raw, &mut size)))
-            else {
+            let Some(profile) = SdlAllocation::from_native(NonNull::new(SDL_GetWindowICCProfile(
+                self.raw, &mut size,
+            ))) else {
                 // A missing ICC profile is normal; avoid leaving a stale SDL error.
                 SDL_ClearError();
                 return None;
