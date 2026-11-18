@@ -1352,6 +1352,13 @@ fn destroy_owned_texture(raw: *mut SDL_Texture) {
 struct OwnedTexture(NonNull<SDL_Texture>);
 
 impl OwnedTexture {
+    /// # Safety
+    /// `raw` must be null or a unique SDL-created texture whose ownership
+    /// transfers to this guard; it must not be released anywhere else.
+    unsafe fn from_native(raw: *mut SDL_Texture) -> Option<Self> {
+        NonNull::new(raw).map(Self)
+    }
+
     fn create(
         renderer: &Renderer,
         format: SDL_PixelFormat,
@@ -1484,7 +1491,7 @@ impl InkTexture {
 }
 
 /// Owned background snapshot texture, including HDR linear-sRGB textures.
-pub struct SnapshotTexture(*mut SDL_Texture);
+pub struct SnapshotTexture(OwnedTexture);
 
 impl SnapshotTexture {
     pub fn new(
@@ -1556,18 +1563,17 @@ impl SnapshotTexture {
                     h,
                 )
             };
-            if raw.is_null() {
-                return Err(error());
-            }
-            let texture = Self(raw);
+            // SAFETY: Both branches create a new caller-owned SDL texture,
+            // and this guard uniquely releases it on any later error.
+            let texture = Self(OwnedTexture::from_native(raw).ok_or_else(error)?);
             check(SDL_UpdateTexture(
-                raw,
+                texture.0.as_ptr(),
                 ptr::null(),
                 pixels.as_ptr().cast(),
                 pitch,
             ))?;
-            check(SDL_SetTextureBlendMode(raw, SDL_BLENDMODE_NONE))?;
-            check(SDL_SetTextureScaleMode(raw, SDL_SCALEMODE_LINEAR))?;
+            check(SDL_SetTextureBlendMode(texture.0.as_ptr(), SDL_BLENDMODE_NONE))?;
+            check(SDL_SetTextureScaleMode(texture.0.as_ptr(), SDL_SCALEMODE_LINEAR))?;
             Ok(texture)
         }
     }
@@ -1591,12 +1597,6 @@ impl SnapshotTexture {
         // SDL applies the SDR reference white to draws of linear snapshots.
         // Cancel only that multiplier without changing the caller's color scale.
         renderer.with_absolute_color_scale(1. / white, draw)
-    }
-}
-
-impl Drop for SnapshotTexture {
-    fn drop(&mut self) {
-        destroy_owned_texture(self.0);
     }
 }
 
@@ -1733,7 +1733,7 @@ impl OwnedTextureRef<'_> {
     fn raw(&self) -> *mut SDL_Texture {
         match self {
             Self::Ink(texture) => texture.raw.as_ptr(),
-            Self::Snapshot(texture) => texture.0,
+            Self::Snapshot(texture) => texture.0.as_ptr(),
         }
     }
 }
