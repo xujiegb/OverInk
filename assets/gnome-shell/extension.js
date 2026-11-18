@@ -9,6 +9,7 @@ import * as ModalDialog from 'resource:///org/gnome/shell/ui/modalDialog.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
 const APP_ID = 'org.overink.OverInk';
+const MAX_TRUST_KEY_LENGTH = 2048;
 const CANVAS = 'OverInk - canvas';
 const TOOLBAR = 'OverInk';
 const BUS_NAME = 'org.overink.Overlay';
@@ -103,7 +104,7 @@ class CaptureBridge {
             if (!Array.isArray(entries))
                 return new Set();
             return new Set(entries.filter(entry =>
-                typeof entry === 'string' && entry.length <= 1024).slice(-32));
+                typeof entry === 'string' && entry.length <= MAX_TRUST_KEY_LENGTH).slice(-32));
         } catch (error) {
             // Missing or corrupt permission state must fail closed: re-prompt.
             return new Set();
@@ -111,9 +112,9 @@ class CaptureBridge {
     }
 
     _rememberTrusted(key) {
-        // Keep the writer consistent with _loadTrusted's 1024-code-unit limit.
+        // The writer and reader share the same JavaScript string-length limit.
         // The normal caller already checks this before offering persistence.
-        if (typeof key !== 'string' || key.length > 1024)
+        if (typeof key !== 'string' || key.length > MAX_TRUST_KEY_LENGTH)
             throw new Error('Screenshot permission identity is too long');
         const folder = GLib.path_get_dirname(TRUST_PATH);
         if (GLib.mkdir_with_parents(folder, 0o700) !== 0)
@@ -173,7 +174,7 @@ class CaptureBridge {
             const identity = `${executable}:${binary}`;
             // A key we cannot reload is never eligible for permanent consent.
             // Such installations can still request per-process approval.
-            return identity.length <= 1024 ? identity : null;
+            return identity.length <= MAX_TRUST_KEY_LENGTH ? identity : null;
         } catch (error) {
             return null;
         }
