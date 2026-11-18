@@ -2333,6 +2333,7 @@ fn run_inner(options: Options) -> Result<(), String> {
             // Capturing the whole preferences object every event-loop tick
             // copies the optional screenshot path even when the toolbar is
             // idle. Only UI processing can mutate settings this iteration.
+            #[cfg(target_os = "linux")]
             let previous_wayland = app.preferences.wayland;
             let mut previous_preferences = None;
             let was_board = app.board;
