@@ -1776,7 +1776,7 @@ impl GuiTexture {
         vertices: &[SDL_Vertex],
         indices: &[u32],
     ) -> Result<(), String> {
-        renderer.geometry(self.raw.as_ptr(), vertices, indices)
+        renderer.geometry(GeometryTexture::Gui(self), vertices, indices)
     }
 }
 
@@ -1802,6 +1802,24 @@ impl<F: FnOnce()> Drop for RestoreOnDrop<F> {
     fn drop(&mut self) {
         if let Some(cleanup) = self.cleanup.take() {
             cleanup();
+        }
+    }
+}
+
+/// One of the only legal sources for a geometry texture. The native pointer
+/// cannot outlive the borrowed Rust texture.
+pub enum GeometryTexture<'a> {
+    Solid,
+    Ink(&'a InkTexture),
+    Gui(&'a GuiTexture),
+}
+
+impl GeometryTexture<'_> {
+    fn raw(&self) -> *mut SDL_Texture {
+        match self {
+            Self::Solid => ptr::null_mut(),
+            Self::Ink(texture) => texture.raw.as_ptr(),
+            Self::Gui(texture) => texture.raw.as_ptr(),
         }
     }
 }
@@ -2143,7 +2161,7 @@ impl Renderer {
 
     pub fn geometry(
         &self,
-        texture: *mut SDL_Texture,
+        texture: GeometryTexture<'_>,
         vertices: &[SDL_Vertex],
         indices: &[u32],
     ) -> Result<(), String> {
@@ -2163,7 +2181,7 @@ impl Renderer {
         unsafe {
             check(SDL_RenderGeometry(
                 self.raw,
-                texture,
+                texture.raw(),
                 vertices.as_ptr(),
                 vertex_count,
                 indices.as_ptr().cast(),
