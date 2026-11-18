@@ -579,13 +579,18 @@ pub fn render_reset_window_id(event: &SDL_Event) -> Option<SDL_WindowID> {
 
 /// Check physical buttons on macOS, and SDL's per-window state elsewhere.
 pub fn mouse_buttons_released() -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        unsafe { SDL_GetGlobalMouseState(ptr::null_mut(), ptr::null_mut()).0 == 0 }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        unsafe { SDL_GetMouseState(ptr::null_mut(), ptr::null_mut()).0 == 0 }
+    // SAFETY: Both SDL mouse-state getters accept null optional position
+    // outputs and return an owned button-mask value. macOS intentionally
+    // checks global state rather than only the active SDL window.
+    unsafe {
+        #[cfg(target_os = "macos")]
+        {
+            SDL_GetGlobalMouseState(ptr::null_mut(), ptr::null_mut()).0 == 0
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            SDL_GetMouseState(ptr::null_mut(), ptr::null_mut()).0 == 0
+        }
     }
 }
 
@@ -1028,12 +1033,16 @@ impl Window {
             if window.is_null() {
                 return SDL_HITTEST_NORMAL;
             }
-            // SDL supplies the live window and a point borrowed for this hit test.
-            let Some(point) = (unsafe { point.as_ref() }) else {
-                return SDL_HITTEST_NORMAL;
-            };
-            let scale = unsafe {
-                SDL_GetWindowDisplayScale(window) / SDL_GetWindowPixelDensity(window).max(0.1)
+            // SAFETY: SDL invokes this callback with a valid live window
+            // and a point borrowed for the duration of the call. The null
+            // check protects against malformed callback inputs.
+            let (point, scale) = unsafe {
+                let Some(point) = point.as_ref() else {
+                    return SDL_HITTEST_NORMAL;
+                };
+                let scale =
+                    SDL_GetWindowDisplayScale(window) / SDL_GetWindowPixelDensity(window).max(0.1);
+                (point, scale)
             };
             if point.x >= 0
                 && (point.x as f32) < crate::toolbar::WIDTH * scale
