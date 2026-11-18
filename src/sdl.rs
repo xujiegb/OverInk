@@ -2064,7 +2064,7 @@ enum RendererPropertyQuery {
 /// an arbitrary texture pointer.
 enum RenderTarget<'a> {
     Ink(&'a InkTexture),
-    Previous(*mut SDL_Texture),
+    Previous(Option<NonNull<SDL_Texture>>),
 }
 
 /// Closed set of SDL renderer commands; callers cannot supply native function
@@ -2076,7 +2076,7 @@ enum RenderCommand<'a> {
     Scale([f32; 2]),
     GetColorScale(&'a mut f32),
     SetColorScale(f32),
-    ReadTarget(&'a mut *mut SDL_Texture),
+    ReadTarget(&'a mut Option<NonNull<SDL_Texture>>),
     SetTarget(RenderTarget<'a>),
     Flush,
     Present,
@@ -2162,13 +2162,15 @@ impl Renderer {
                     check(SDL_SetRenderColorScale(self.raw, scale))
                 }
                 RenderCommand::ReadTarget(previous) => {
-                    *previous = SDL_GetRenderTarget(self.raw);
+                    *previous = NonNull::new(SDL_GetRenderTarget(self.raw));
                     Ok(())
                 }
                 RenderCommand::SetTarget(target) => {
                     let raw = match target {
                         RenderTarget::Ink(texture) => texture.raw.as_ptr(),
-                        RenderTarget::Previous(previous) => previous,
+                        RenderTarget::Previous(previous) => {
+                            previous.map_or(ptr::null_mut(), NonNull::as_ptr)
+                        },
                     };
                     check(SDL_SetRenderTarget(self.raw, raw))
                 }
@@ -2317,7 +2319,7 @@ impl Renderer {
     ) -> Result<(), String> {
         // The SDL command boundary copies the previous native target.
         // Draw and panic-safe restoration now happen entirely in safe Rust.
-        let mut previous = ptr::null_mut();
+        let mut previous = None;
         self.run_command(RenderCommand::ReadTarget(&mut previous))?;
         self.run_command(RenderCommand::SetTarget(RenderTarget::Ink(target)))?;
         let mut unwind_restore = RestoreOnDrop::new(|| {
