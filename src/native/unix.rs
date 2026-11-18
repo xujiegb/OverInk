@@ -374,12 +374,7 @@ impl X11 {
             // until after SDL has closed that connection.
             static LIBRARIES: OnceLock<Result<(Library, Library), String>> = OnceLock::new();
             let (x11, ext) = LIBRARIES
-                .get_or_init(|| {
-                    Ok((
-                        library(NativeLibrary::X11)?,
-                        library(NativeLibrary::Xext)?,
-                    ))
-                })
+                .get_or_init(|| Ok((library(NativeLibrary::X11)?, library(NativeLibrary::Xext)?)))
                 .as_ref()
                 .map_err(Clone::clone)?;
             let (display, _) = x11_window(w)?;
