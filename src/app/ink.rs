@@ -453,7 +453,8 @@ impl StrokePainter {
                     .and_then(|bounds| bounds.get(index))
                     .is_some_and(|entry| {
                         entry.as_ref().is_none_or(|bounds| {
-                            !region.intersects(bounds.path.padded(stroke.max_radius() * 2. + frame.aa))
+                            !region
+                                .intersects(bounds.path.padded(stroke.max_radius() * 2. + frame.aa))
                         })
                     })
             {
