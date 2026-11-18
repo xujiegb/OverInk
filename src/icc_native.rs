@@ -211,16 +211,15 @@ mod tests {
     #[test]
     fn invalid_profile_does_not_modify_pixels() {
         let mut pixels = vec![11, 22, 33, 44, 55, 66, 77, 88];
-        let before = pixels.clone();
         convert_rgba8_to_srgb(&mut pixels, b"not an ICC profile");
-        assert_eq!(pixels, before);
+        assert_eq!(pixels, [11, 22, 33, 44, 55, 66, 77, 88]);
     }
 
     #[test]
-    fn owned_srgb_profile_and_transform_round_trip() {
-        let input = Profile::srgb().expect("Little CMS sRGB profile");
-        let output = Profile::srgb().expect("Little CMS sRGB profile");
-        let transform = Transform::rgb(&input, &output).expect("sRGB transform");
+    fn owned_srgb_profile_and_transform_round_trip() -> Result<(), &'static str> {
+        let input = Profile::srgb().ok_or("Little CMS sRGB profile unavailable")?;
+        let output = Profile::srgb().ok_or("Little CMS sRGB profile unavailable")?;
+        let transform = Transform::rgb(&input, &output).ok_or("Could not create an sRGB transform")?;
         let rgb = [0.2, 0.5, 0.8];
         let mapped = transform.map_rgb(rgb);
         for (actual, expected) in mapped.into_iter().zip(rgb) {
@@ -229,13 +228,14 @@ mod tests {
                 "sRGB identity transform changed a channel: {actual} != {expected}"
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn single_rgb_and_batch_use_identical_transform() {
-        let input = Profile::srgb().expect("Little CMS sRGB profile");
-        let output = Profile::srgb().expect("Little CMS sRGB profile");
-        let transform = Transform::rgb(&input, &output).expect("sRGB transform");
+    fn single_rgb_and_batch_use_identical_transform() -> Result<(), &'static str> {
+        let input = Profile::srgb().ok_or("Little CMS sRGB profile unavailable")?;
+        let output = Profile::srgb().ok_or("Little CMS sRGB profile unavailable")?;
+        let transform = Transform::rgb(&input, &output).ok_or("Could not create an sRGB transform")?;
         let colors = [[0.15, 0.35, 0.8], [0.7, 0.2, 0.1]];
         let single = colors.map(|color| transform.map_rgb(color));
         let mut batch = colors;
@@ -243,20 +243,22 @@ mod tests {
         for (one, many) in single.into_iter().zip(batch) {
             assert_eq!(one, many);
         }
+        Ok(())
     }
 
     #[test]
-    fn mismatched_pixel_layout_cannot_reach_native_transform() {
-        let input = Profile::srgb().unwrap();
-        let output = Profile::srgb().unwrap();
-        let rgba = Transform::rgba8(&input, &output).unwrap();
-        let rgb = Transform::rgb(&input, &output).unwrap();
+    fn mismatched_pixel_layout_cannot_reach_native_transform() -> Result<(), &'static str> {
+        let input = Profile::srgb().ok_or("Little CMS sRGB profile unavailable")?;
+        let output = Profile::srgb().ok_or("Little CMS sRGB profile unavailable")?;
+        let rgba = Transform::rgba8(&input, &output).ok_or("Could not create an RGBA8 transform")?;
+        let rgb = Transform::rgb(&input, &output).ok_or("Could not create an RGB transform")?;
         let mut floats = [[0.2, 0.5, 0.8]];
         let mut bytes = [20, 60, 90, 210];
         rgba.map_rgb_batch(&mut floats);
         rgb.apply(PixelBuffer::Rgba8(&mut bytes));
         assert_eq!(floats, [[0.2, 0.5, 0.8]]);
         assert_eq!(bytes, [20, 60, 90, 210]);
+        Ok(())
     }
 
     #[test]
