@@ -568,15 +568,9 @@ impl Screenshot {
         } else {
             default_folder(preferences)
         };
-        let location = self
-            .replace
-            .clone()
-            .or_else(|| folder.map(|folder| folder.join(format!("{}.png", file_stem()))));
-        self.save_dialog |= dialog.open(
-            dialog::DialogKind::ScreenshotFile,
-            window,
-            location.as_deref(),
-        );
+        let suggested = folder.map(|folder| folder.join(format!("{}.png", file_stem())));
+        let location = self.replace.as_deref().or(suggested.as_deref());
+        self.save_dialog |= dialog.open(dialog::DialogKind::ScreenshotFile, window, location);
     }
 
     pub fn close_save_as(&mut self) {
