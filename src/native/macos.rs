@@ -14,11 +14,11 @@ pub fn configure_metal(raw: NonNull<SDL_Renderer>, extended: bool) {
     #[link(name = "CoreGraphics", kind = "framework")]
     unsafe extern "C" {
         static kCGColorSpaceSRGB: *const c_void;
-        fn CGColorSpaceCreateWithName(name: *const c_void) -> *const c_void;
+        fn CGColorSpaceCreateWithName(name: NonNull<c_void>) -> Option<NonNull<c_void>>;
     }
     #[link(name = "CoreFoundation", kind = "framework")]
     unsafe extern "C" {
-        fn CFRelease(value: *const c_void);
+        fn CFRelease(value: NonNull<c_void>);
     }
     unsafe {
         let layer = SDL_GetRenderMetalLayer(raw.as_ptr()).cast::<AnyObject>();
@@ -26,12 +26,12 @@ pub fn configure_metal(raw: NonNull<SDL_Renderer>, extended: bool) {
             return;
         }
         let _: () = msg_send![layer, setMaximumDrawableCount: 2_usize];
-        if !extended {
-            let srgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-            if !srgb.is_null() {
-                let _: () = msg_send![layer, setColorspace: srgb.cast::<ColorSpace>()];
-                CFRelease(srgb);
-            }
+        if !extended
+            && let Some(name) = NonNull::new(kCGColorSpaceSRGB.cast_mut())
+            && let Some(srgb) = CGColorSpaceCreateWithName(name)
+        {
+            let _: () = msg_send![layer, setColorspace: srgb.as_ptr().cast::<ColorSpace>()];
+            CFRelease(srgb);
         }
     }
 }
