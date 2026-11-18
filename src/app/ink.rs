@@ -788,17 +788,18 @@ mod tests {
     use crate::app::touch_tests::app;
 
     struct TestCanvas {
-        renderer: Renderer,
-        _surface: TestSurface,
+        renderer: TestRenderer,
+        pixels: [i32; 2],
         color: ColorManager,
     }
     impl TestCanvas {
         fn new([width, height]: [i32; 2]) -> Self {
             let surface = TestSurface::new([width, height]).unwrap();
+            let pixels = surface.size();
             let renderer = surface.software_renderer().unwrap();
             Self {
                 renderer,
-                _surface: surface,
+                pixels,
                 color: ColorManager::default(),
             }
         }
@@ -806,7 +807,7 @@ mod tests {
             Frame {
                 renderer: &self.renderer,
                 color: &self.color,
-                pixels: self._surface.size(),
+                pixels: self.pixels,
                 scale: [1.; 2],
                 aa: 0.8,
                 extended_budget: MAX_EXTENDED_INK_TEXTURE_BYTES,

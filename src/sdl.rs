@@ -2269,12 +2269,31 @@ impl Drop for Renderer {
     }
 }
 
-/// Test-only owned surface for SDL's software renderer. The test harness
-/// must drop the renderer before this backing surface.
+/// Test-only backing surface for an SDL software renderer. The surface is
+/// transferred into TestRenderer, so it cannot be dropped while SDL still
+/// owns a renderer that reads or writes its pixel buffer.
 #[cfg(test)]
 pub struct TestSurface {
     surface: OwnedSurface,
     dimensions: [i32; 2],
+}
+
+/// The SDL software renderer and its backing surface are one RAII value.
+/// Field declaration order is intentional: the renderer is dropped before
+/// the surface it borrows. No Renderer can escape by value.
+#[cfg(test)]
+pub struct TestRenderer {
+    renderer: Renderer,
+    _surface: TestSurface,
+}
+
+#[cfg(test)]
+impl std::ops::Deref for TestRenderer {
+    type Target = Renderer;
+
+    fn deref(&self) -> &Self::Target {
+        &self.renderer
+    }
 }
 
 #[cfg(test)]
@@ -2290,7 +2309,10 @@ impl TestSurface {
         })
     }
 
-    pub fn software_renderer(&self) -> Result<Renderer, String> {
+    pub fn software_renderer(self) -> Result<TestRenderer, String> {
+        // SAFETY: SDL receives a pointer into the live surface owned by self.
+        // TestRenderer takes ownership of that surface and drops its Renderer
+        // first, including when SDL configuration fails during construction.
         unsafe {
             let raw = SDL_CreateSoftwareRenderer(self.surface.as_ptr());
             if raw.is_null() {
@@ -2302,7 +2324,10 @@ impl TestSurface {
                 name: "software".into(),
             };
             check(SDL_SetRenderDrawBlendMode(raw, SDL_BLENDMODE_BLEND))?;
-            Ok(renderer)
+            Ok(TestRenderer {
+                renderer,
+                _surface: self,
+            })
         }
     }
 
