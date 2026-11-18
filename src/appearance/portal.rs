@@ -143,15 +143,16 @@ mod tests {
 
     #[zbus::interface(name = "org.freedesktop.portal.Settings")]
     impl LegacySettings {
-        fn read(&self, namespace: &str, key: &str) -> OwnedVariant {
+        fn read(&self, namespace: &str, key: &str) -> zbus::fdo::Result<OwnedVariant> {
             assert_eq!((namespace, key), (APPEARANCE, COLOR_SCHEME));
-            OwnedVariant::try_from(Variant::Variant(Box::new(Variant::U32(1)))).unwrap()
+            OwnedVariant::try_from(Variant::Variant(Box::new(Variant::U32(1))))
+                .map_err(|error| zbus::fdo::Error::Failed(error.to_string()))
         }
     }
 
     #[test]
     #[ignore = "requires an isolated session bus: dbus-run-session cargo test portal_response -- --ignored"]
-    fn portal_response_falls_back_to_legacy_settings_read() {
+    fn portal_response_falls_back_to_legacy_settings_read() -> zbus::Result<()> {
         zbus::block_on(async {
             let name = "org.freedesktop.portal.LegacySettingsTest";
             let path = "/org/freedesktop/portal/desktop";
@@ -159,12 +160,11 @@ mod tests {
                 .name(name)
                 .serve_at(path, LegacySettings)
                 .build()
-                .await
-                .unwrap();
+                .await?;
             let proxy = Proxy::new(&service, name, path, "org.freedesktop.portal.Settings")
-                .await
-                .unwrap();
-            assert_eq!(read_scheme(&proxy).await.unwrap(), 1);
-        });
+                .await?;
+            assert_eq!(read_scheme(&proxy).await?, 1);
+            Ok(())
+        })
     }
 }
