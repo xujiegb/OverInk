@@ -580,6 +580,15 @@ pub fn wait_for_event(timeout_ms: i32) {
     }
 }
 
+/// Boolean window queries return owned scalars rather than native flags.
+enum WindowBooleanQuery {
+    TextInputActive,
+    InputFocused,
+    Hidden,
+    Transparent,
+    HdrEnabled,
+}
+
 /// Window floating-point metrics are read using one constrained SDL boundary.
 enum WindowFloatQuery {
     SdrWhiteLevel,
@@ -613,6 +622,40 @@ pub struct Window {
     pub id: SDL_WindowID,
 }
 impl Window {
+    /// Read a known window property or state through one native boundary.
+    fn query_bool(&self, query: WindowBooleanQuery) -> bool {
+        // SAFETY: Window owns the live SDL window on the SDL thread.
+        // Each branch reads only scalar flags or boolean SDL properties.
+        unsafe {
+            match query {
+                WindowBooleanQuery::TextInputActive => SDL_TextInputActive(self.raw),
+                WindowBooleanQuery::InputFocused => {
+                    SDL_GetWindowFlags(self.raw) & SDL_WINDOW_INPUT_FOCUS != 0
+                }
+                WindowBooleanQuery::Hidden => {
+                    SDL_GetWindowFlags(self.raw) & SDL_WINDOW_HIDDEN != 0
+                }
+                WindowBooleanQuery::Transparent => {
+                    SDL_GetWindowFlags(self.raw) & SDL_WINDOW_TRANSPARENT != 0
+                }
+                WindowBooleanQuery::HdrEnabled => {
+                    SDL_GetBooleanProperty(
+                        SDL_GetWindowProperties(self.raw),
+                        SDL_PROP_WINDOW_HDR_ENABLED_BOOLEAN,
+                        false,
+                    ) || {
+                        let display = SDL_GetDisplayForWindow(self.raw);
+                        display.0 != 0 && SDL_GetBooleanProperty(
+                            SDL_GetDisplayProperties(display),
+                            SDL_PROP_DISPLAY_HDR_ENABLED_BOOLEAN,
+                            false,
+                        )
+                    }
+                }
+            }
+        }
+    }
+
     /// Read one SDL-owned window metric without exporting native handles.
     fn query_float(&self, query: WindowFloatQuery) -> f32 {
         // SAFETY: The SDL window belongs to this live Window instance.
@@ -701,7 +744,7 @@ impl Window {
 
     /// Query whether this window currently accepts text input.
     pub fn text_input_active(&self) -> bool {
-        unsafe { SDL_TextInputActive(self.raw) }
+        self.query_bool(WindowBooleanQuery::TextInputActive)
     }
 
     pub fn set_text_input_area(&self, area: &SDL_Rect) {
@@ -742,16 +785,16 @@ impl Window {
     }
 
     pub fn input_focused(&self) -> bool {
-        self.flags() & SDL_WINDOW_INPUT_FOCUS != 0
+        self.query_bool(WindowBooleanQuery::InputFocused)
     }
 
     pub fn hidden(&self) -> bool {
-        self.flags() & SDL_WINDOW_HIDDEN != 0
+        self.query_bool(WindowBooleanQuery::Hidden)
     }
 
     /// Read the actual SDL window transparency flag.
     pub fn transparent(&self) -> bool {
-        self.flags() & SDL_WINDOW_TRANSPARENT != 0
+        self.query_bool(WindowBooleanQuery::Transparent)
     }
 
     /// Apply an RGBA shape mask, or clear it when no regions are supplied.
@@ -784,10 +827,6 @@ impl Window {
             }
             check(SDL_SetWindowShape(self.raw, surface.as_ptr()))
         }
-    }
-
-    fn flags(&self) -> SDL_WindowFlags {
-        unsafe { SDL_GetWindowFlags(self.raw) }
     }
 
     pub fn new(title: &str, w: i32, h: i32, overlay: bool) -> Result<Self, String> {
@@ -1111,19 +1150,7 @@ impl Window {
     }
 
     pub fn hdr_enabled(&self) -> bool {
-        unsafe {
-            SDL_GetBooleanProperty(
-                SDL_GetWindowProperties(self.raw),
-                SDL_PROP_WINDOW_HDR_ENABLED_BOOLEAN,
-                false,
-            ) || self.display_id().is_some_and(|id| {
-                SDL_GetBooleanProperty(
-                    SDL_GetDisplayProperties(SDL_DisplayID(id)),
-                    SDL_PROP_DISPLAY_HDR_ENABLED_BOOLEAN,
-                    false,
-                )
-            })
-        }
+        self.query_bool(WindowBooleanQuery::HdrEnabled)
     }
     pub fn place_on_display(&self, id: u32, overlay: bool) -> Result<(), String> {
         unsafe {
