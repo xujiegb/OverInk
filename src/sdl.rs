@@ -11,12 +11,15 @@ use std::{
     ptr::{self, NonNull},
 };
 
-// The generated sdl3-sys ABI conservatively marks every native function
-// unsafe. These three exact SDL functions take no pointers, borrow no memory
-// and transfer no resources. Rust 2024 supports declaring such foreign
-// functions safe, without exposing the declaration outside this adapter.
-// The signatures and calling convention match the SDL3 C declarations.
+// The generated sdl3-sys ABI conservatively marks every foreign function
+// unsafe. This adapter uses safe Rust 2024 imports only for SDL's scalar
+// queries, timer/event functions, and synchronous time conversions with
+// exclusive typed output borrows. None retains caller-owned memory.
+// SDL_GetSystemTheme additionally requires the main thread: enforce it in
+// the public wrapper. Signatures match the documented SDL3 C declarations.
 unsafe extern "C" {
+    #[link_name = "SDL_IsMainThread"]
+    safe fn native_is_main_thread() -> bool;
     #[link_name = "SDL_GetModState"]
     safe fn native_mod_state() -> SDL_Keymod;
     #[link_name = "SDL_GetSystemTheme"]
@@ -370,7 +373,13 @@ pub fn preferred_locales() -> Vec<(String, String)> {
 
 /// Query the operating system's theme through SDL.
 pub fn system_theme() -> SDL_SystemTheme {
-    native_system_theme()
+    // SDL's video/theme query must run on the main thread. Avoid querying
+    // shared video state from arbitrary safe Rust worker threads.
+    if native_is_main_thread() {
+        native_system_theme()
+    } else {
+        SDL_SYSTEM_THEME_UNKNOWN
+    }
 }
 
 /// Reserve a single SDL user event type, returning zero on failure.
@@ -593,6 +602,11 @@ pub fn key_event(event: &SDL_Event) -> Option<SDL_KeyboardEvent> {
 }
 
 pub fn capture_mouse(enable: bool) -> bool {
+    if !native_is_main_thread() {
+        return false;
+    }
+    // SAFETY: SDL_CaptureMouse is only valid on SDL's main thread.
+    // The main-thread check above enforces that precondition.
     unsafe { SDL_CaptureMouse(enable) }
 }
 
