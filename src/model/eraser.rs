@@ -484,8 +484,12 @@ impl Erasure {
             if !replaced {
                 self.insert_remapped(range.start, &history.doc.strokes[range.start], edit);
             } else {
-                for index in range.start..range.end {
-                    let stroke = &history.doc.strokes[index];
+                let Some(strokes) = history.doc.strokes.get(range.start..range.end) else {
+                    self.reject(EraseError::Preview, true);
+                    return;
+                };
+                for (offset, stroke) in strokes.iter().enumerate() {
+                    let index = range.start + offset;
                     let Some(stroke_bounds) = bounds.get(index).copied().flatten() else {
                         self.reject(EraseError::Preview, true);
                         return;
