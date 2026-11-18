@@ -578,9 +578,7 @@ fn event_queue_action(action: EventQueueAction<'_>) -> bool {
     unsafe {
         match action {
             EventQueueAction::Poll(event) => SDL_PollEvent(event),
-            EventQueueAction::Wait(timeout_ms) => {
-                SDL_WaitEventTimeout(ptr::null_mut(), timeout_ms)
-            }
+            EventQueueAction::Wait(timeout_ms) => SDL_WaitEventTimeout(ptr::null_mut(), timeout_ms),
             #[cfg(target_os = "linux")]
             EventQueueAction::FlushQuit => {
                 SDL_FlushEvent(SDL_EVENT_QUIT.0);
