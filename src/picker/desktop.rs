@@ -11,7 +11,10 @@ pub struct ScreenPoint {
 
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
 fn local_pixels(window: &Window, local: [f32; 2]) -> Result<[i32; 2], String> {
-    scaled_pixels(local, window.size(), window.pixel_size())
+    let (logical, physical) = window
+        .capture_coordinate_sizes()
+        .ok_or("Cannot pick from a zero-sized or unavailable window")?;
+    scaled_pixels(local, logical, physical)
 }
 
 /// Reject zero-sized/minimized windows and out-of-range coordinates before
