@@ -80,9 +80,9 @@ unsafe extern "C" {
     ) -> bool;
     // SDL copies event values into/out of a borrowed Rust SDL_Event. The
     // nullable wait result is expressed by Option rather than a raw pointer.
-    // Polling, waiting and flushing are restricted to the SDL main thread
-    // in event_queue_action. SDL_PushEvent explicitly supports other threads
-    // and copies the provided event before returning.
+    // The event wrappers restrict polling, waiting and flushing to SDL's
+    // main thread. SDL_PushEvent also supports other threads and copies the
+    // provided event before returning.
     #[link_name = "SDL_PollEvent"]
     safe fn native_poll_event(event: &mut SDL_Event) -> bool;
     #[link_name = "SDL_WaitEventTimeout"]
