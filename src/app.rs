@@ -1439,7 +1439,7 @@ impl App {
     fn update_gnome_guide(
         &mut self,
         commands: &mut Commands,
-        previous: &Preferences,
+        previous_wayland: bool,
         smoke: bool,
     ) -> bool {
         use crate::gnome::{Decision, Guide};
@@ -1459,7 +1459,7 @@ impl App {
         }
         if commands.preferences
             && self.preferences.wayland
-            && !previous.wayland
+            && !previous_wayland
             && !smoke
             && crate::gnome::in_wayland_session()
             && let Some(guide) = Guide::check()
@@ -2330,7 +2330,11 @@ fn run_inner(options: Options) -> Result<(), String> {
                     canvas.dirty = true;
                 }
             }
-            let previous_preferences = app.preferences.clone();
+            // Capturing the whole preferences object every event-loop tick
+            // copies the optional screenshot path even when the toolbar is
+            // idle. Only UI processing can mutate settings this iteration.
+            let previous_wayland = app.preferences.wayland;
+            let mut previous_preferences = None;
             let was_board = app.board;
             app.frozen = canvases[active].background.frozen;
             let mut cmd = Commands::default();
@@ -2340,6 +2344,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                     || !gui.raw.events.is_empty()
                     || toolbar_repaint_at.is_some_and(|at| Instant::now() >= at))
             {
+                previous_preferences = Some(app.preferences.clone());
                 toolbar_dirty = false;
                 if app.input.text.editing()
                     && (toolbar.input_focused()
@@ -2441,10 +2446,12 @@ fn run_inner(options: Options) -> Result<(), String> {
                 toolbar_dirty = true;
             }
             #[cfg(target_os = "linux")]
-            let relogin = app.update_gnome_guide(&mut cmd, &previous_preferences, options.smoke);
+            let relogin = app.update_gnome_guide(&mut cmd, previous_wayland, options.smoke);
             if cmd.preferences {
                 toolbar_dirty = true;
-                if app.preferences != previous_preferences {
+                if let Some(previous_preferences) = previous_preferences
+                    && app.preferences != previous_preferences
+                {
                     topology_dirty |= update_preferences(
                         &mut app,
                         previous_preferences,
