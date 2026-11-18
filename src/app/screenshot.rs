@@ -245,6 +245,9 @@ impl Screenshot {
             1.
         };
         self.stage = Stage::Selecting(None);
+        // Release the old cursor before creating its replacement: the old
+        // guard's Drop must not reset the newly selected crosshair.
+        self.cursor = None;
         self.cursor = SystemCursor::crosshair();
         self.error = None;
         self.cancel_blocked = false;
