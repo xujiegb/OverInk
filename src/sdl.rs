@@ -1592,8 +1592,14 @@ impl SnapshotTexture {
                 pixels.as_ptr().cast(),
                 pitch,
             ))?;
-            check(SDL_SetTextureBlendMode(texture.0.as_ptr(), SDL_BLENDMODE_NONE))?;
-            check(SDL_SetTextureScaleMode(texture.0.as_ptr(), SDL_SCALEMODE_LINEAR))?;
+            check(SDL_SetTextureBlendMode(
+                texture.0.as_ptr(),
+                SDL_BLENDMODE_NONE,
+            ))?;
+            check(SDL_SetTextureScaleMode(
+                texture.0.as_ptr(),
+                SDL_SCALEMODE_LINEAR,
+            ))?;
             Ok(texture)
         }
     }
