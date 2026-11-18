@@ -819,8 +819,13 @@ impl App {
             {
                 let points = std::mem::take(&mut stroke.points);
                 finger.fragments.push(Stroke {
+                    tool: stroke.tool,
+                    color: stroke.color,
+                    width: stroke.width,
+                    opacity: stroke.opacity,
+                    pressure_curve: stroke.pressure_curve,
+                    pressure_enabled: stroke.pressure_enabled,
                     points,
-                    ..stroke.clone()
                 });
             }
             finger.last = None;
