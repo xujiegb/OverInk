@@ -540,7 +540,8 @@ mod tests {
     }
 
     #[test]
-    fn declining_the_startup_guide_persists_wayland_off() -> Result<(), Box<dyn std::error::Error>> {
+    fn declining_the_startup_guide_persists_wayland_off() -> Result<(), Box<dyn std::error::Error>>
+    {
         let dir = env::temp_dir().join(format!("overink-gnome-preferences-{}", std::process::id()));
         let path = dir.join("ui.json");
         let mut preferences = Preferences {
@@ -598,8 +599,7 @@ mod tests {
                 )
                 .build()
                 .await?;
-            Proxy::new_owned(service, name.to_owned(), SHELL_PATH, SHELL_EXTENSIONS)
-                .await
+            Proxy::new_owned(service, name.to_owned(), SHELL_PATH, SHELL_EXTENSIONS).await
         })
     }
 
@@ -638,12 +638,15 @@ mod tests {
 
     #[test]
     #[ignore = "requires an isolated session bus: dbus-run-session cargo test shell_activation -- --ignored"]
-    fn shell_activation_waits_for_the_extension_to_be_active() -> Result<(), Box<dyn std::error::Error>> {
+    fn shell_activation_waits_for_the_extension_to_be_active()
+    -> Result<(), Box<dyn std::error::Error>> {
         let proxy = mock_shell(
             SHELL_BUS,
             "48.7",
             &[None, Some(INITIALIZED), Some(8.), Some(ACTIVE)],
-            bundled_metadata()["version"].as_f64().ok_or("Missing bundled GNOME extension version")?,
+            bundled_metadata()["version"]
+                .as_f64()
+                .ok_or("Missing bundled GNOME extension version")?,
         );
         assert!(matches!(
             zbus::block_on(inspect(&proxy))?,
@@ -660,7 +663,8 @@ mod tests {
 
     #[test]
     #[ignore = "requires an isolated session bus: dbus-run-session cargo test outdated_extension -- --ignored"]
-    fn outdated_extension_can_be_updated_when_the_bundle_supports_shell() -> Result<(), Box<dyn std::error::Error>> {
+    fn outdated_extension_can_be_updated_when_the_bundle_supports_shell()
+    -> Result<(), Box<dyn std::error::Error>> {
         let expected = if installed_bundle(&HashMap::new()) {
             Guide::Relogin
         } else {

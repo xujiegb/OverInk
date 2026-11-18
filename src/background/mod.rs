@@ -508,8 +508,7 @@ mod tests {
         bg.images.insert(7, Image::buffer(2, 2)?.into());
         bg.display = Some(7);
         bg.frozen = true;
-        bg.display(None, &BTreeSet::new(), SnapshotMode::Sdr, true)
-            ?;
+        bg.display(None, &BTreeSet::new(), SnapshotMode::Sdr, true)?;
         assert!(bg.images.is_empty());
         assert!(!bg.pending());
         bg.freeze();
@@ -523,16 +522,13 @@ mod tests {
     #[test]
     fn frozen_png_decodes_without_modifying_the_source_file() -> TestResult {
         let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            ?
+            .duration_since(std::time::UNIX_EPOCH)?
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
             "overink-png-test-{}-{unique}.png",
             std::process::id()
         ));
-        image::RgbaImage::from_pixel(3, 2, image::Rgba([18, 171, 239, 255]))
-            .save(&path)
-            ?;
+        image::RgbaImage::from_pixel(3, 2, image::Rgba([18, 171, 239, 255])).save(&path)?;
         let image = Image::load(&path)?;
         assert_eq!((image.width, image.height), (3, 2));
         assert!(
@@ -558,16 +554,13 @@ mod tests {
             scale: 1.,
         };
         let connected = BTreeSet::from([7]);
-        bg.display(Some(&screen), &connected, SnapshotMode::Sdr, true)
-            ?;
+        bg.display(Some(&screen), &connected, SnapshotMode::Sdr, true)?;
         bg.freeze();
-        bg.display(Some(&screen), &connected, SnapshotMode::Sdr, false)
-            ?;
+        bg.display(Some(&screen), &connected, SnapshotMode::Sdr, false)?;
         assert!(!bg.pending());
         assert!(bg.frozen);
         bg.images.insert(7, Image::buffer(2, 2)?.into());
-        bg.display(Some(&screen), &connected, SnapshotMode::Sdr, true)
-            ?;
+        bg.display(Some(&screen), &connected, SnapshotMode::Sdr, true)?;
         assert!(!bg.pending());
         assert!(bg.images.contains_key(&7));
         Ok(())
@@ -583,12 +576,10 @@ mod tests {
             scale: 1.,
         };
         let connected = BTreeSet::from([7]);
-        bg.display(Some(&screen), &connected, SnapshotMode::Sdr, true)
-            ?;
+        bg.display(Some(&screen), &connected, SnapshotMode::Sdr, true)?;
         bg.images.insert(7, Image::buffer(2, 2)?.into());
         bg.frozen = true;
-        bg.display(Some(&screen), &connected, SnapshotMode::Linear, true)
-            ?;
+        bg.display(Some(&screen), &connected, SnapshotMode::Linear, true)?;
         assert!(bg.images.is_empty());
         assert!(bg.pending());
         let reason = crate::appearance::text(
@@ -627,11 +618,9 @@ mod tests {
         padded[..2].copy_from_slice(&0x4800_u16.to_ne_bytes()); // 8.0
         padded[2..4].copy_from_slice(&0xb800_u16.to_ne_bytes()); // -0.5
         padded[12..14].copy_from_slice(&0x4000_u16.to_ne_bytes()); // 2.0
-        image
-            .copy_hdr_rows(padded.len(), 12, |offset, row| {
-                row.copy_from_slice(&padded[offset..offset + row.len()]);
-            })
-            ?;
+        image.copy_hdr_rows(padded.len(), 12, |offset, row| {
+            row.copy_from_slice(&padded[offset..offset + row.len()]);
+        })?;
         assert_eq!(&image.rgba[..6], &padded[..6]);
         assert_eq!(&image.rgba[8..14], &padded[12..18]);
         assert_eq!(&image.rgba[6..8], &0x3c00_u16.to_ne_bytes());

@@ -334,16 +334,14 @@ mod tests {
             region: local,
             size: [800., 600.],
         };
-        let (crop, sizes) = selection
-            .for_portal(
-                &right,
-                &[left, right.clone()],
-                [1200, 900],
-                Some(1.5),
-                None,
-                None,
-            )
-            ?;
+        let (crop, sizes) = selection.for_portal(
+            &right,
+            &[left, right.clone()],
+            [1200, 900],
+            Some(1.5),
+            None,
+            None,
+        )?;
         assert_eq!(sizes, [[1600, 800], [2400, 1200], [0, 0]]);
         assert_eq!(crop.region, local.translate(egui::vec2(800., 200.)));
         assert!(!sizes.contains(&[1200, 900]));
@@ -379,16 +377,14 @@ mod tests {
             size: [1440., 866.],
         };
         let usable = Rect::from_min_size(egui::pos2(0., 34.), egui::vec2(1440., 866.));
-        let (crop, _) = selected
-            .for_portal(
-                &display,
-                std::slice::from_ref(&display),
-                [1440, 866],
-                None,
-                Some(usable),
-                None,
-            )
-            ?;
+        let (crop, _) = selected.for_portal(
+            &display,
+            std::slice::from_ref(&display),
+            [1440, 866],
+            None,
+            Some(usable),
+            None,
+        )?;
         assert_eq!(crop.size, [1440., 900.]);
         assert_eq!(crop.region.min, egui::pos2(100., 84.));
         assert_eq!(crop.region.max, egui::pos2(300., 234.));
@@ -424,16 +420,14 @@ mod tests {
         );
         // XWayland can supply the actual global window rectangle.
         let location = Rect::from_min_size(egui::pos2(300., 200.), egui::vec2(600., 450.));
-        let (crop, _) = selection
-            .for_portal(
-                &display,
-                std::slice::from_ref(&display),
-                [1200, 900],
-                None,
-                None,
-                Some(location),
-            )
-            ?;
+        let (crop, _) = selection.for_portal(
+            &display,
+            std::slice::from_ref(&display),
+            [1200, 900],
+            None,
+            None,
+            Some(location),
+        )?;
         assert_eq!(crop.region.min, egui::pos2(400., 300.));
         assert_eq!(crop.region.max, egui::pos2(600., 400.));
         Ok(())
