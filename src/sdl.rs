@@ -677,10 +677,13 @@ impl Window {
                     driver()
                 ));
             }
-            Ok(Self {
-                raw,
-                id: SDL_GetWindowID(raw),
-            })
+            let id = SDL_GetWindowID(raw);
+            if id.0 == 0 {
+                let message = error();
+                SDL_DestroyWindow(raw);
+                return Err(format!("SDL did not assign a window ID: {message}"));
+            }
+            Ok(Self { raw, id })
         }
     }
     pub fn tooltip(parent: &Self, x: i32, y: i32, w: i32, h: i32) -> Result<Self, String> {
@@ -699,10 +702,13 @@ impl Window {
             if raw.is_null() {
                 return Err(error());
             }
-            Ok(Self {
-                raw,
-                id: SDL_GetWindowID(raw),
-            })
+            let id = SDL_GetWindowID(raw);
+            if id.0 == 0 {
+                let message = error();
+                SDL_DestroyWindow(raw);
+                return Err(format!("SDL did not assign a window ID: {message}"));
+            }
+            Ok(Self { raw, id })
         }
     }
     /// Unclamped dimensions for converting local input into screen pixels.
