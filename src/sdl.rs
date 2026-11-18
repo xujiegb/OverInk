@@ -240,11 +240,10 @@ pub fn preferred_locales() -> Vec<(String, String)> {
                 CStr::from_ptr(ptr).to_str().unwrap_or_default().to_owned()
             }
         };
-        let result = (0..count.max(0) as usize)
+        (0..count.max(0) as usize)
             .filter_map(|i| (*locales.as_ptr().add(i)).as_ref())
             .map(|locale| (name(locale.language), name(locale.country)))
-            .collect();
-        result
+            .collect()
     }
 }
 
@@ -278,7 +277,7 @@ pub fn display_info() -> Result<Vec<DisplayInfo>, String> {
     unsafe {
         let mut count = 0;
         let list = SdlAllocation::from_native(SDL_GetDisplays(&mut count)).ok_or_else(error)?;
-        let result = (0..count.max(0) as usize)
+        (0..count.max(0) as usize)
             .map(|i| {
                 let id = *list.as_ptr().add(i);
                 let mut bounds = SDL_Rect::default();
@@ -307,8 +306,7 @@ pub fn display_info() -> Result<Vec<DisplayInfo>, String> {
                     scale: SDL_GetDisplayContentScale(id),
                 })
             })
-            .collect::<Result<Vec<_>, String>>();
-        result
+            .collect::<Result<Vec<_>, String>>()
     }
 }
 
