@@ -1098,6 +1098,14 @@ mod tests {
             .map(|draft| draft.committed.as_str())
     }
 
+    fn set_draft_committed(app: &mut App, text: &str) {
+        let Some(draft) = app.input.text.draft.as_mut() else {
+            panic!("Expected an active text draft");
+        };
+        draft.committed.clear();
+        draft.committed.push_str(text);
+    }
+
     fn render_with_toolbar_focus(app: &mut App, gui: &mut Gui, toolbar_focused: bool) {
         gui.raw.screen_rect = Some(Rect::from_min_size(Pos2::ZERO, Vec2::from(SIZE)));
         let composing = gui.composing();
@@ -1113,7 +1121,9 @@ mod tests {
     }
 
     fn ime_at(gui: &mut Gui, event_type: SDL_EventType, value: &str, timestamp: u64) {
-        let value = CString::new(value).unwrap();
+        let Ok(value) = CString::new(value) else {
+            panic!("IME test strings must not contain NUL bytes");
+        };
         let id = SDL_WindowID(1);
         let event = if event_type == SDL_EVENT_TEXT_EDITING {
             SDL_Event {
@@ -1326,7 +1336,7 @@ mod tests {
         let mut app = app();
         app.use_tool(Tool::Text);
         click(&mut app, pos2(150., 120.));
-        app.input.text.draft.as_mut().unwrap().committed = "原文".into();
+        set_draft_committed(&mut app, "原文");
         app.stop();
         let original = app.history.text_boxes()[0].clone();
         let mut edited = (*original).clone();
@@ -1368,19 +1378,22 @@ mod tests {
             app.use_tool(Tool::Text);
             if has_prior_box {
                 click(&mut app, pos2(20., 20.));
-                app.input.text.draft.as_mut().unwrap().committed = "原批注".into();
+                set_draft_committed(&mut app, "原批注");
                 app.stop();
             }
             let previous = app.history.text_boxes().to_vec();
             click(&mut app, pos2(470., 280.));
-            app.input.text.draft.as_mut().unwrap().committed = "重要批注".into();
+            set_draft_committed(&mut app, "重要批注");
             assert!(app.history_buttons()[0]);
             app.change_history(HistoryAction::Undo);
             assert!(!app.input.text.editing());
             assert_eq!(app.history.text_boxes(), previous);
             assert_eq!(app.history.can_undo(), has_prior_box);
             app.change_history(HistoryAction::Redo);
-            assert_eq!(app.history.text_boxes().last().unwrap().text, "重要批注");
+            assert_eq!(
+            app.history.text_boxes().last().map(|item| item.text.as_str()),
+            Some("重要批注")
+        );
         }
     }
 
@@ -1389,7 +1402,7 @@ mod tests {
         let mut app = app();
         app.use_tool(Tool::Text);
         click(&mut app, pos2(150., 120.));
-        app.input.text.draft.as_mut().unwrap().committed = "首框".into();
+        set_draft_committed(&mut app, "首框");
         app.change_history(HistoryAction::Clear);
         assert!(app.history.document().is_empty());
         assert!(app.history.can_undo());
@@ -1456,7 +1469,7 @@ mod tests {
         let mut app = app();
         app.use_tool(Tool::Text);
         click(&mut app, pos2(150., 120.));
-        app.input.text.draft.as_mut().unwrap().committed = "首行\n\n\n\n\n末行".into();
+        set_draft_committed(&mut app, "首行\n\n\n\n\n末行");
         app.stop();
         assert!(app.text_key(SDLK_RETURN));
         let mut gui = Gui::new();
@@ -1504,7 +1517,7 @@ mod tests {
         app.pages = crate::display::Pages::new(Some(1));
         app.use_tool(Tool::Text);
         click(&mut app, pos2(150., 120.));
-        app.input.text.draft.as_mut().unwrap().committed = "显示器一".into();
+        set_draft_committed(&mut app, "显示器一");
         app.on_page(Some(2), |app| assert!(!app.input.text.editing()));
         assert!(app.input.text.editing());
         app.select_page(2);
@@ -1563,7 +1576,7 @@ mod tests {
         assert!(event(&mut gui, &mut app, SDL_EVENT_FINGER_DOWN, 0.25, 0.25));
         render(&mut app, &mut gui);
         assert!(event(&mut gui, &mut app, SDL_EVENT_FINGER_UP, 0.25, 0.25));
-        app.input.text.draft.as_mut().unwrap().committed = "文字".into();
+        set_draft_committed(&mut app, "文字");
         app.use_tool(Tool::Select);
         let original = app.history.text_boxes()[0].clone();
         assert!(event(&mut gui, &mut app, SDL_EVENT_FINGER_DOWN, 0.3, 0.3));
@@ -1617,7 +1630,7 @@ mod tests {
         let mut app = app();
         app.use_tool(Tool::Text);
         click(&mut app, pos2(150., 120.));
-        app.input.text.draft.as_mut().unwrap().committed = "中文 👩🏽‍🎨".into();
+        set_draft_committed(&mut app, "中文 👩🏽‍🎨");
         app.stop();
         let original = app.history.text_boxes()[0].clone();
         app.use_tool(Tool::Select);
@@ -1806,7 +1819,7 @@ mod tests {
         app.use_tool(Tool::Text);
         let original_brush = app.color;
         click(&mut app, pos2(500., 338.));
-        app.input.text.draft.as_mut().unwrap().committed = "Draft".into();
+        set_draft_committed(&mut app, "Draft");
         app.input.text.refocus();
         let mut gui = Gui::new();
         gui.ctx.set_fonts(app.text_fonts.definitions());
@@ -1862,7 +1875,7 @@ mod tests {
         let color = InkColor::from_rgb8([4, 171, 131]);
 
         // A different text draft is not the target captured when picking began.
-        app.input.text.draft.as_mut().unwrap().committed = "changed".into();
+        set_draft_committed(&mut app, "changed");
         assert_ne!(app.text_pick_target(), Some(target));
         assert_eq!(app.pick_text_color(color), Some(color));
         assert_eq!(app.pick_text_color(color), Some(color));
@@ -1886,7 +1899,7 @@ mod tests {
         app.use_tool(Tool::Text);
         click(&mut app, pos2(150., 120.));
         assert!(app.select_preset(crate::color::PRESETS[1]));
-        app.input.text.draft.as_mut().unwrap().committed = "文字".into();
+        set_draft_committed(&mut app, "文字");
         app.use_tool(Tool::Select);
         let original = app.history.text_boxes()[0].clone();
         assert_eq!(original.color.srgb8(), crate::color::PRESETS[1]);

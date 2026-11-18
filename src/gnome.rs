@@ -552,7 +552,8 @@ mod tests {
             language: Some(Language::Traditional),
             per_display_windows: true,
             restore_session: false,
-            ..preferences.clone()
+            wayland: true,
+            ..Preferences::default()
         };
         saved.save(&path)?;
         assert!(matches!(
