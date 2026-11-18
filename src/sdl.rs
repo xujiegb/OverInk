@@ -605,6 +605,22 @@ enum WindowBooleanQuery {
     HdrEnabled,
 }
 
+/// Numeric SDL property reads must use one of these known keys.
+enum WindowNumberQuery {
+    DisplayId,
+    #[cfg(target_os = "macos")]
+    CocoaMetalViewTag,
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    X11Window,
+}
+
+/// Coordinate outputs share one audited SDL boundary.
+enum WindowCoordinateQuery {
+    Position,
+    #[cfg(not(target_os = "windows"))]
+    Borders,
+}
+
 /// Window floating-point metrics are read using one constrained SDL boundary.
 enum WindowFloatQuery {
     SdrWhiteLevel,
@@ -643,6 +659,59 @@ pub struct Window {
     pub id: SDL_WindowID,
 }
 impl Window {
+    /// Copy only a known numeric SDL window property; never expose a
+    /// property handle or unchecked key to higher-level callers.
+    fn query_number(&self, query: WindowNumberQuery) -> i64 {
+        // SAFETY: SDL owns the still-live window. This only reads a copied
+        // number from the window's native properties or its display ID.
+        unsafe {
+            match query {
+                WindowNumberQuery::DisplayId => SDL_GetDisplayForWindow(self.raw).0 as i64,
+                #[cfg(target_os = "macos")]
+                WindowNumberQuery::CocoaMetalViewTag => SDL_GetNumberProperty(
+                    SDL_GetWindowProperties(self.raw),
+                    SDL_PROP_WINDOW_COCOA_METAL_VIEW_TAG_NUMBER,
+                    0,
+                ),
+                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                WindowNumberQuery::X11Window => SDL_GetNumberProperty(
+                    SDL_GetWindowProperties(self.raw),
+                    SDL_PROP_WINDOW_X11_WINDOW_NUMBER,
+                    0,
+                ),
+            }
+        }
+    }
+
+    /// Copy SDL's initialized output coordinates before returning to Rust.
+    fn query_coordinates(&self, query: WindowCoordinateQuery) -> Result<[i32; 4], String> {
+        // SAFETY: Each output pointer references initialized, writable
+        // stack storage for the duration of the synchronous SDL query.
+        unsafe {
+            match query {
+                WindowCoordinateQuery::Position => {
+                    let (mut x, mut y) = (0, 0);
+                    check(SDL_GetWindowPosition(self.raw, &mut x, &mut y))?;
+                    Ok([x, y, 0, 0])
+                }
+                #[cfg(not(target_os = "windows"))]
+                WindowCoordinateQuery::Borders => {
+                    let (mut top, mut left, mut bottom, mut right) = (0, 0, 0, 0);
+                    // Decoration support is optional: preserve the
+                    // native output and zero defaults even on failure.
+                    SDL_GetWindowBordersSize(
+                        self.raw,
+                        &mut top,
+                        &mut left,
+                        &mut bottom,
+                        &mut right,
+                    );
+                    Ok([top, left, bottom, right])
+                }
+            }
+        }
+    }
+
     /// Read a known window property or state through one native boundary.
     fn query_bool(&self, query: WindowBooleanQuery) -> bool {
         // SAFETY: Window owns the live SDL window on the SDL thread.
@@ -1052,19 +1121,13 @@ impl Window {
     /// decoration. Preserve the undecorated default in that case.
     #[cfg(not(target_os = "windows"))]
     pub fn border_size(&self) -> [i32; 4] {
-        unsafe {
-            let (mut top, mut left, mut bottom, mut right) = (0, 0, 0, 0);
-            SDL_GetWindowBordersSize(self.raw, &mut top, &mut left, &mut bottom, &mut right);
-            [top, left, bottom, right]
-        }
+        self.query_coordinates(WindowCoordinateQuery::Borders)
+            .unwrap_or([0; 4])
     }
 
     pub fn position(&self) -> Result<[i32; 2], String> {
-        unsafe {
-            let (mut x, mut y) = (0, 0);
-            check(SDL_GetWindowPosition(self.raw, &mut x, &mut y))?;
-            Ok([x, y])
-        }
+        let [x, y, _, _] = self.query_coordinates(WindowCoordinateQuery::Position)?;
+        Ok([x, y])
     }
     pub fn pixel_size(&self) -> [i32; 2] {
         let [width, height] = self.query_size(true).unwrap_or([0, 0]);
@@ -1088,7 +1151,7 @@ impl Window {
         self.run_command(WindowCommand::Show(show))
     }
     pub fn display_id(&self) -> Option<u32> {
-        let id = unsafe { SDL_GetDisplayForWindow(self.raw) }.0;
+        let id = self.query_number(WindowNumberQuery::DisplayId) as u32;
         (id != 0).then_some(id)
     }
     /// Borrow a native backend handle from the window property list.
@@ -1122,15 +1185,7 @@ impl Window {
     /// Read the Cocoa Metal view tag without exposing the SDL property handle.
     #[cfg(target_os = "macos")]
     pub fn cocoa_metal_view_tag(&self) -> Option<isize> {
-        // SAFETY: This numeric SDL window property is read-only and its value
-        // does not transfer any native object ownership.
-        let tag = unsafe {
-            SDL_GetNumberProperty(
-                SDL_GetWindowProperties(self.raw),
-                SDL_PROP_WINDOW_COCOA_METAL_VIEW_TAG_NUMBER,
-                0,
-            )
-        };
+        let tag = self.query_number(WindowNumberQuery::CocoaMetalViewTag);
         (tag != 0)
             .then_some(tag)
             .and_then(|tag| tag.try_into().ok())
@@ -1157,14 +1212,7 @@ impl Window {
     /// Return the X11 drawable ID associated with this window.
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     pub fn x11_window_number(&self) -> std::ffi::c_ulong {
-        // SAFETY: Reading a number property does not transfer ownership.
-        unsafe {
-            SDL_GetNumberProperty(
-                SDL_GetWindowProperties(self.raw),
-                SDL_PROP_WINDOW_X11_WINDOW_NUMBER,
-                0,
-            ) as std::ffi::c_ulong
-        }
+        self.query_number(WindowNumberQuery::X11Window) as std::ffi::c_ulong
     }
 
     pub fn icc_profile(&self) -> Option<Vec<u8>> {
