@@ -39,8 +39,17 @@ pub(crate) fn library(which: NativeLibrary) -> Result<Library, String> {
     }
     Err(format!("Missing native library: {}", names[0]))
 }
-type Marshal = unsafe extern "C" fn(*mut c_void, u32, *const c_void, u32, u32, ...) -> *mut c_void;
-type Version = unsafe extern "C" fn(*mut c_void) -> u32;
+// Fixed parameters use checked native handles. Variadic payloads preserve
+// their protocol-specific C representations inside the unsafe FFI boundary.
+type Marshal = unsafe extern "C" fn(
+    NonNull<c_void>,
+    u32,
+    Option<NonNull<c_void>>,
+    u32,
+    u32,
+    ...
+) -> Option<NonNull<c_void>>;
+type Version = unsafe extern "C" fn(NonNull<c_void>) -> u32;
 type Destroy = unsafe extern "C" fn(NonNull<c_void>);
 
 /// A uniquely owned native Wayland proxy or event queue, paired with its
@@ -58,9 +67,6 @@ impl OwnedWaylandHandle {
         raw.map(|raw| Self { raw, destroy })
     }
 
-    fn as_ptr(&self) -> *mut c_void {
-        self.raw.as_ptr()
-    }
 }
 
 impl Drop for OwnedWaylandHandle {
@@ -96,9 +102,6 @@ impl OwnedWaylandRegion {
         })
     }
 
-    fn as_ptr(&self) -> *mut c_void {
-        self.raw.as_ptr()
-    }
 }
 
 impl Drop for OwnedWaylandRegion {
@@ -107,10 +110,10 @@ impl Drop for OwnedWaylandRegion {
         // and the destroy flag causes libwayland to release the proxy.
         unsafe {
             (self.marshal)(
-                self.raw.as_ptr(),
+                self.raw,
                 0,
-                ptr::null(),
-                (self.version)(self.raw.as_ptr()),
+                None,
+                (self.version)(self.raw),
                 1,
             );
         }
@@ -224,12 +227,16 @@ impl Wayland {
             let roundtrip: unsafe extern "C" fn(NonNull<c_void>, NonNull<c_void>) -> c_int = *lib
                 .get(b"wl_display_roundtrip_queue\0")
                 .map_err(|e| e.to_string())?;
-            let registry_interface: *const c_void = *lib
-                .get(b"wl_registry_interface\0")
-                .map_err(|e| e.to_string())?;
-            let compositor_interface: *const c_void = *lib
-                .get(b"wl_compositor_interface\0")
-                .map_err(|e| e.to_string())?;
+            let registry_interface = NonNull::new(
+                *lib.get(b"wl_registry_interface\0")
+                    .map_err(|e| e.to_string())?,
+            )
+            .ok_or("No Wayland registry interface")?;
+            let compositor_interface = NonNull::new(
+                *lib.get(b"wl_compositor_interface\0")
+                    .map_err(|e| e.to_string())?,
+            )
+            .ok_or("No Wayland compositor interface")?;
             let region_interface = NonNull::new(
                 *lib.get(b"wl_region_interface\0")
                     .map_err(|e| e.to_string())?,
@@ -249,15 +256,15 @@ impl Wayland {
                 .ok_or("Cannot wrap Wayland display")?;
                 set_queue(wrapper.raw, queue.raw);
                 marshal(
-                    wrapper.as_ptr(),
+                    wrapper.raw,
                     1,
-                    registry_interface,
+                    Some(registry_interface),
                     1,
                     0,
                     ptr::null_mut::<c_void>(),
                 )
             };
-            let registry = OwnedWaylandHandle::from_native(NonNull::new(registry_raw), destroy)
+            let registry = OwnedWaylandHandle::from_native(registry_raw, destroy)
                 .ok_or("No Wayland registry")?;
             let mut globals = Box::new(Globals::default());
             if add_listener(registry.raw, &LISTENER, NonNull::from(globals.as_mut())) != 0
@@ -269,9 +276,9 @@ impl Wayland {
                 return Err("Cannot bind Wayland compositor".into());
             }
             let compositor_raw = marshal(
-                registry.as_ptr(),
+                registry.raw,
                 0,
-                compositor_interface,
+                Some(compositor_interface),
                 globals.version,
                 0,
                 globals.compositor,
@@ -281,7 +288,7 @@ impl Wayland {
             );
             // No further registry dispatch can see the boxed callback data.
             drop(registry);
-            let compositor = OwnedWaylandHandle::from_native(NonNull::new(compositor_raw), destroy)
+            let compositor = OwnedWaylandHandle::from_native(compositor_raw, destroy)
                 .ok_or("Cannot bind Wayland compositor")?;
             Ok(Self {
                 compositor,
@@ -323,25 +330,25 @@ impl Wayland {
             // and subtract only the protected controller rectangle.
             let region = if pass || hole.is_some() {
                 let p = (self.marshal)(
-                    self.compositor.as_ptr(),
+                    self.compositor.raw,
                     1,
-                    self.region_interface.as_ptr(),
-                    (self.version)(self.compositor.as_ptr()),
+                    Some(self.region_interface),
+                    (self.version)(self.compositor.raw),
                     0,
                     ptr::null_mut::<c_void>(),
                 );
                 // SAFETY: wl_compositor.create_region returns an owned
                 // wl_region, released by this guard after the surface commit.
                 let region =
-                    OwnedWaylandRegion::from_native(NonNull::new(p), self.marshal, self.version)
+                    OwnedWaylandRegion::from_native(p, self.marshal, self.version)
                         .ok_or("Cannot create input region")?;
                 if let Some(hole) = hole {
                     // wl_region.add = opcode 1; wl_region.subtract = opcode 2.
                     (self.marshal)(
-                        region.as_ptr(),
+                        region.raw,
                         1,
-                        ptr::null(),
-                        (self.version)(region.as_ptr()),
+                        None,
+                        (self.version)(region.raw),
                         0,
                         0_i32,
                         0_i32,
@@ -349,10 +356,10 @@ impl Wayland {
                         size[1],
                     );
                     (self.marshal)(
-                        region.as_ptr(),
+                        region.raw,
                         2,
-                        ptr::null(),
-                        (self.version)(region.as_ptr()),
+                        None,
+                        (self.version)(region.raw),
                         0,
                         hole.x,
                         hole.y,
@@ -366,20 +373,20 @@ impl Wayland {
             };
             let region_ptr = region
                 .as_ref()
-                .map_or(ptr::null_mut(), |region| region.as_ptr());
+                .map_or(ptr::null_mut(), |region| region.raw.as_ptr());
             (self.marshal)(
-                surface.as_ptr(),
+                surface.as_non_null(),
                 5,
-                ptr::null(),
-                (self.version)(surface.as_ptr()),
+                None,
+                (self.version)(surface.as_non_null()),
                 0,
                 region_ptr,
             ); // wl_surface.set_input_region
             (self.marshal)(
-                surface.as_ptr(),
+                surface.as_non_null(),
                 6,
-                ptr::null(),
-                (self.version)(surface.as_ptr()),
+                None,
+                (self.version)(surface.as_non_null()),
                 0,
             ); // wl_surface.commit
             // The region is destroyed through RAII, even if a Rust unwind
