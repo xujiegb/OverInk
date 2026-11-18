@@ -111,6 +111,10 @@ class CaptureBridge {
     }
 
     _rememberTrusted(key) {
+        // Keep the writer consistent with _loadTrusted's 1024-code-unit limit.
+        // The normal caller already checks this before offering persistence.
+        if (typeof key !== 'string' || key.length > 1024)
+            throw new Error('Screenshot permission identity is too long');
         const folder = GLib.path_get_dirname(TRUST_PATH);
         if (GLib.mkdir_with_parents(folder, 0o700) !== 0)
             throw new Error('Cannot create OverInk permission directory');
@@ -166,7 +170,10 @@ class CaptureBridge {
                     break;
                 path = GLib.path_get_dirname(path);
             }
-            return `${executable}:${binary}`;
+            const identity = `${executable}:${binary}`;
+            // A key we cannot reload is never eligible for permanent consent.
+            // Such installations can still request per-process approval.
+            return identity.length <= 1024 ? identity : null;
         } catch (error) {
             return null;
         }
@@ -338,7 +345,11 @@ class CaptureBridge {
                     try {
                         this._rememberTrusted(trusted);
                     } catch (error) {
-                        throw new Error(`Could not remember screenshot permission: ${error}`);
+                        // 'Always' also grants this verified process access
+                        // for the current run. A read-only configuration or
+                        // full disk must not turn that consent into a failed
+                        // screenshot; only the persistent grant is lost.
+                        logError(error, 'OverInk could not remember screenshot permission; allowed for this run only');
                     }
                 }
             }
