@@ -1,20 +1,31 @@
-//! Safe Little CMS ownership and conversion boundary.
-//!
-//! lcms2 owns every profile and transform, releasing the underlying C handles
-//! through its RAII guards. Callers only provide validated Rust pixel slices.
+//! Pure-Rust ICC profile parsing and in-place conversion with moxcms.
+//! No native CMS handles, handwritten FFI, raw pointers, or unsafe code.
 #![forbid(unsafe_code)]
 
-use lcms2::{Flags, Intent, PixelFormat, Profile, Transform as LcmsTransform};
+use moxcms::{
+    ColorProfile, InPlaceTransformExecutor, Layout, RenderingIntent, TransformOptions,
+};
+use std::sync::Arc;
 
 const MAX_PROFILE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_RGB_PIXELS_PER_BATCH: usize = (u32::MAX as usize) / 3;
+#[cfg(any(target_os = "linux", target_os = "freebsd", test))]
+const MAX_RGBA_PIXELS_PER_BATCH: usize = (u32::MAX as usize) / 4;
 
-fn open_profile(bytes: &[u8]) -> Option<Profile> {
+fn open_profile(bytes: &[u8]) -> Option<ColorProfile> {
     if bytes.is_empty() || bytes.len() > MAX_PROFILE_BYTES {
         return None;
     }
-    // Little CMS uses a 32-bit profile-buffer length.
-    u32::try_from(bytes.len()).ok()?;
-    Profile::new_icc(bytes).ok()
+    ColorProfile::new_from_slice(bytes).ok()
+}
+
+fn options() -> TransformOptions {
+    TransformOptions {
+        // Keep the old Little CMS relative-colorimetric rendering intent.
+        // moxcms does not expose its black-point compensation flag.
+        rendering_intent: RenderingIntent::RelativeColorimetric,
+        ..TransformOptions::default()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,12 +34,12 @@ pub enum DisplayError {
     ConversionFailed,
 }
 
-/// Different native pixel formats are represented by different Rust types:
-/// a floating RGB transform cannot receive a four-channel byte buffer.
+/// A transform's native channel layout is part of its Rust type. Callers
+/// cannot route packed RGBA8 bytes into the floating-point RGB executor.
 enum PixelTransform {
-    Rgb(LcmsTransform<[f32; 3], [f32; 3]>),
+    Rgb(Arc<dyn InPlaceTransformExecutor<f32> + Send + Sync>),
     #[cfg(any(target_os = "linux", target_os = "freebsd", test))]
-    Rgba8(LcmsTransform<[u8; 4], [u8; 4]>),
+    Rgba8(Arc<dyn InPlaceTransformExecutor<u8> + Send + Sync>),
 }
 
 pub struct Transform {
@@ -42,77 +53,63 @@ enum PixelBuffer<'a> {
 }
 
 impl Transform {
-    fn rgb(input: &Profile, output: &Profile) -> Option<Self> {
-        LcmsTransform::<[f32; 3], [f32; 3]>::new_flags(
-            input,
-            PixelFormat::RGB_FLT,
-            output,
-            PixelFormat::RGB_FLT,
-            Intent::RelativeColorimetric,
-            Flags::BLACKPOINT_COMPENSATION,
-        )
-        .ok()
-        .map(|transform| Self {
-            inner: PixelTransform::Rgb(transform),
-        })
+    fn rgb(input: &ColorProfile, output: &ColorProfile) -> Option<Self> {
+        input
+            .create_in_place_transform_f32(Layout::Rgb, output, options())
+            .ok()
+            .map(|executor| Self {
+                inner: PixelTransform::Rgb(executor),
+            })
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd", test))]
-    fn rgba8(input: &Profile, output: &Profile) -> Option<Self> {
-        LcmsTransform::<[u8; 4], [u8; 4]>::new_flags(
-            input,
-            PixelFormat::RGBA_8,
-            output,
-            PixelFormat::RGBA_8,
-            Intent::RelativeColorimetric,
-            Flags::BLACKPOINT_COMPENSATION | Flags::COPY_ALPHA,
-        )
-        .ok()
-        .map(|transform| Self {
-            inner: PixelTransform::Rgba8(transform),
-        })
+    fn rgba8(input: &ColorProfile, output: &ColorProfile) -> Option<Self> {
+        input
+            .create_in_place_transform_8bit(Layout::Rgba, output, options())
+            .ok()
+            .map(|executor| Self {
+                inner: PixelTransform::Rgba8(executor),
+            })
     }
 
     pub fn from_srgb_to_display(bytes: &[u8]) -> Result<Self, DisplayError> {
-        let output = open_profile(bytes).ok_or(DisplayError::InvalidProfile)?;
-        Self::rgb(&Profile::new_srgb(), &output).ok_or(DisplayError::ConversionFailed)
+        let destination = open_profile(bytes).ok_or(DisplayError::InvalidProfile)?;
+        Self::rgb(&ColorProfile::new_srgb(), &destination)
+            .ok_or(DisplayError::ConversionFailed)
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     pub fn from_display_to_srgb(bytes: &[u8]) -> Option<Self> {
-        let input = open_profile(bytes)?;
-        Self::rgb(&input, &Profile::new_srgb())
+        let source = open_profile(bytes)?;
+        Self::rgb(&source, &ColorProfile::new_srgb())
     }
 
-    pub fn map_rgb(&self, input: [f32; 3]) -> [f32; 3] {
-        let mut pixel = [input];
+    pub fn map_rgb(&self, rgb: [f32; 3]) -> [f32; 3] {
+        let mut pixel = [rgb];
         self.map_rgb_batch(&mut pixel);
         pixel[0]
     }
 
+    /// Convert checked RGB/RGBA buffers without copying pixels or flattening
+    /// through raw pointers. Failure leaves subsequent chunks untouched.
     fn apply(&self, pixels: PixelBuffer<'_>) {
         match (&self.inner, pixels) {
-            (PixelTransform::Rgb(transform), PixelBuffer::Rgb(colors)) => {
-                if colors.is_empty() {
-                    return;
-                }
-                // The safe wrapper handles a bounded pixel count. Each chunk
-                // remains an ordinary mutable slice with a fixed RGB layout.
-                for chunk in colors.chunks_mut(u32::MAX as usize) {
-                    transform.transform_in_place(chunk);
+            (PixelTransform::Rgb(executor), PixelBuffer::Rgb(colors)) => {
+                for chunk in colors.chunks_mut(MAX_RGB_PIXELS_PER_BATCH) {
+                    if executor.transform(chunk.as_flattened_mut()).is_err() {
+                        break;
+                    }
                 }
             }
             #[cfg(any(target_os = "linux", target_os = "freebsd", test))]
-            (PixelTransform::Rgba8(transform), PixelBuffer::Rgba8(bytes)) => {
-                if bytes.is_empty() || !bytes.len().is_multiple_of(4) {
+            (PixelTransform::Rgba8(executor), PixelBuffer::Rgba8(bytes)) => {
+                if !bytes.len().is_multiple_of(4) {
                     return;
                 }
-                let (pixels, remainder) = bytes.as_chunks_mut::<4>();
-                if !remainder.is_empty() {
-                    return;
-                }
-                for chunk in pixels.chunks_mut(u32::MAX as usize) {
-                    transform.transform_in_place(chunk);
+                for chunk in bytes.chunks_mut(MAX_RGBA_PIXELS_PER_BATCH * 4) {
+                    if executor.transform(chunk).is_err() {
+                        break;
+                    }
                 }
             }
             #[cfg(any(target_os = "linux", target_os = "freebsd", test))]
@@ -125,17 +122,17 @@ impl Transform {
     }
 }
 
-/// Convert packed RGBA8 to sRGB while preserving alpha. Invalid ICC profiles
-/// and incomplete pixel buffers leave their input untouched.
+/// Convert packed RGBA8 pixels into sRGB while preserving alpha.
+/// Invalid profiles or incomplete buffers leave their input untouched.
 #[cfg(any(target_os = "linux", target_os = "freebsd", test))]
 pub fn convert_rgba8_to_srgb(pixels: &mut [u8], profile: &[u8]) {
     if pixels.is_empty() || !pixels.len().is_multiple_of(4) {
         return;
     }
-    let Some(input) = open_profile(profile) else {
+    let Some(source) = open_profile(profile) else {
         return;
     };
-    let Some(transform) = Transform::rgba8(&input, &Profile::new_srgb()) else {
+    let Some(transform) = Transform::rgba8(&source, &ColorProfile::new_srgb()) else {
         return;
     };
     transform.apply(PixelBuffer::Rgba8(pixels));
@@ -153,45 +150,40 @@ mod tests {
     }
 
     #[test]
-    fn owned_srgb_profile_and_transform_round_trip() -> Result<(), &'static str> {
-        let input = Profile::new_srgb();
-        let output = Profile::new_srgb();
-        let transform =
-            Transform::rgb(&input, &output).ok_or("Could not create an sRGB transform")?;
-        let rgb = [0.2, 0.5, 0.8];
-        let mapped = transform.map_rgb(rgb);
-        for (actual, expected) in mapped.into_iter().zip(rgb) {
-            assert!(
-                (actual - expected).abs() < 0.02,
-                "sRGB identity transform changed a channel: {actual} != {expected}"
-            );
+    fn srgb_identity_transform_preserves_colors() -> Result<(), &'static str> {
+        let profile = ColorProfile::new_srgb();
+        let transform = Transform::rgb(&profile, &profile).ok_or("sRGB transform unavailable")?;
+        let samples = [[0.2, 0.5, 0.8], [0.7, 0.2, 0.1]];
+        let mut batch = samples;
+        transform.map_rgb_batch(&mut batch);
+        for (actual, expected) in batch.into_iter().zip(samples) {
+            for (actual, expected) in actual.into_iter().zip(expected) {
+                assert!(
+                    (actual - expected).abs() < 0.02,
+                    "sRGB identity transform changed a channel: {actual} != {expected}"
+                );
+            }
         }
         Ok(())
     }
 
     #[test]
-    fn single_rgb_and_batch_use_identical_transform() -> Result<(), &'static str> {
-        let input = Profile::new_srgb();
-        let output = Profile::new_srgb();
-        let transform =
-            Transform::rgb(&input, &output).ok_or("Could not create an sRGB transform")?;
+    fn single_and_batch_use_the_same_transform() -> Result<(), &'static str> {
+        let profile = ColorProfile::new_srgb();
+        let transform = Transform::rgb(&profile, &profile).ok_or("sRGB transform unavailable")?;
         let colors = [[0.15, 0.35, 0.8], [0.7, 0.2, 0.1]];
-        let single = colors.map(|color| transform.map_rgb(color));
+        let singles = colors.map(|color| transform.map_rgb(color));
         let mut batch = colors;
         transform.map_rgb_batch(&mut batch);
-        for (one, many) in single.into_iter().zip(batch) {
-            assert_eq!(one, many);
-        }
+        assert_eq!(singles, batch);
         Ok(())
     }
 
     #[test]
-    fn mismatched_pixel_layout_cannot_reach_native_transform() -> Result<(), &'static str> {
-        let input = Profile::new_srgb();
-        let output = Profile::new_srgb();
-        let rgba =
-            Transform::rgba8(&input, &output).ok_or("Could not create an RGBA8 transform")?;
-        let rgb = Transform::rgb(&input, &output).ok_or("Could not create an RGB transform")?;
+    fn mismatched_pixel_layouts_do_not_modify_buffers() -> Result<(), &'static str> {
+        let profile = ColorProfile::new_srgb();
+        let rgb = Transform::rgb(&profile, &profile).ok_or("RGB transform unavailable")?;
+        let rgba = Transform::rgba8(&profile, &profile).ok_or("RGBA transform unavailable")?;
         let mut floats = [[0.2, 0.5, 0.8]];
         let mut bytes = [20, 60, 90, 210];
         rgba.map_rgb_batch(&mut floats);
@@ -202,20 +194,18 @@ mod tests {
     }
 
     #[test]
-    fn rgba8_identity_preserves_alpha_channel() -> Result<(), &'static str> {
-        let profile = Profile::new_srgb();
-        let transform =
-            Transform::rgba8(&profile, &profile).ok_or("Could not create an RGBA8 transform")?;
-        let mut bytes = [40, 80, 120, 17, 200, 150, 100, 231];
-        transform.apply(PixelBuffer::Rgba8(&mut bytes));
-        assert_eq!(bytes[3], 17);
-        assert_eq!(bytes[7], 231);
+    fn rgba8_identity_preserves_alpha() -> Result<(), &'static str> {
+        let profile = ColorProfile::new_srgb();
+        let transform = Transform::rgba8(&profile, &profile).ok_or("RGBA transform unavailable")?;
+        let mut pixels = [40, 80, 120, 17, 200, 150, 100, 231];
+        transform.apply(PixelBuffer::Rgba8(&mut pixels));
+        assert_eq!([pixels[3], pixels[7]], [17, 231]);
         Ok(())
     }
 
     #[test]
-    fn rejects_incomplete_rgba8_pixels() {
-        let mut pixels = vec![11, 22, 33];
+    fn incomplete_rgba8_buffer_is_unchanged() {
+        let mut pixels = [11, 22, 33];
         convert_rgba8_to_srgb(&mut pixels, b"");
         assert_eq!(pixels, [11, 22, 33]);
     }
