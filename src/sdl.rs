@@ -37,15 +37,21 @@ impl<T> Drop for SdlAllocation<T> {
     }
 }
 
-pub fn error() -> String {
+/// Copy a borrowed SDL C string while its provider's allocation is live.
+fn sdl_string(get: unsafe extern "C" fn() -> *const std::ffi::c_char) -> Option<String> {
+    // SAFETY: Both supported SDL getters return either null or a
+    // NUL-terminated string borrowed until the next SDL mutation.
+    // The bytes are copied before returning from this FFI boundary.
     unsafe {
-        let p = SDL_GetError();
-        if p.is_null() || CStr::from_ptr(p).to_bytes().is_empty() {
-            "SDL did not report an error message".into()
-        } else {
-            CStr::from_ptr(p).to_string_lossy().into_owned()
-        }
+        let text = get();
+        (!text.is_null()).then(|| CStr::from_ptr(text).to_string_lossy().into_owned())
     }
+}
+
+pub fn error() -> String {
+    sdl_string(SDL_GetError)
+        .filter(|message| !message.is_empty())
+        .unwrap_or_else(|| "SDL did not report an error message".into())
 }
 pub fn check(value: bool) -> Result<(), String> {
     if value { Ok(()) } else { Err(error()) }
@@ -130,14 +136,7 @@ impl Drop for Runtime {
     }
 }
 pub fn driver() -> String {
-    unsafe {
-        let p = SDL_GetCurrentVideoDriver();
-        if p.is_null() {
-            "unknown".into()
-        } else {
-            CStr::from_ptr(p).to_string_lossy().into_owned()
-        }
-    }
+    sdl_string(SDL_GetCurrentVideoDriver).unwrap_or_else(|| "unknown".into())
 }
 /// Return the SDL Wayland display scaling hint without raw FFI at call sites.
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -711,25 +710,34 @@ impl Window {
             Ok(Self { raw, id })
         }
     }
+    /// Read either window geometry in one audited FFI boundary. Each call
+    /// performs exactly one SDL query, preserving the rendering fast path.
+    fn query_size(&self, in_pixels: bool) -> Option<[i32; 2]> {
+        let (mut width, mut height) = (0, 0);
+        // SAFETY: The window is live on SDL's owning thread and both output
+        // integers are valid writable storage for the synchronous call.
+        let ok = unsafe {
+            if in_pixels {
+                SDL_GetWindowSizeInPixels(self.raw, &mut width, &mut height)
+            } else {
+                SDL_GetWindowSize(self.raw, &mut width, &mut height)
+            }
+        };
+        ok.then_some([width, height])
+    }
+
     /// Unclamped dimensions for converting local input into screen pixels.
     /// Render sizes may be clamped to one; input picking must reject zero.
     pub fn capture_coordinate_sizes(&self) -> Option<([f32; 2], [i32; 2])> {
-        let (mut w, mut h, mut px, mut py) = (0, 0, 0, 0);
-        // SAFETY: SDL owns this live window, and the four integer outputs
-        // remain writable for these synchronous FFI calls.
-        let valid = unsafe {
-            SDL_GetWindowSize(self.raw, &mut w, &mut h)
-                && SDL_GetWindowSizeInPixels(self.raw, &mut px, &mut py)
-        };
-        (valid && w > 0 && h > 0 && px > 0 && py > 0).then_some(([w as f32, h as f32], [px, py]))
+        let [width, height] = self.query_size(false)?;
+        let [px, py] = self.query_size(true)?;
+        (width > 0 && height > 0 && px > 0 && py > 0)
+            .then_some(([width as f32, height as f32], [px, py]))
     }
 
     pub fn size(&self) -> [f32; 2] {
-        unsafe {
-            let (mut w, mut h) = (0, 0);
-            SDL_GetWindowSize(self.raw, &mut w, &mut h);
-            [w.max(1) as f32, h.max(1) as f32]
-        }
+        let [width, height] = self.query_size(false).unwrap_or([0, 0]);
+        [width.max(1) as f32, height.max(1) as f32]
     }
     pub fn setup_toolbar(&self) {
         extern "C" fn toolbar_hit_test(
@@ -856,11 +864,8 @@ impl Window {
         }
     }
     pub fn pixel_size(&self) -> [i32; 2] {
-        unsafe {
-            let (mut w, mut h) = (0, 0);
-            SDL_GetWindowSizeInPixels(self.raw, &mut w, &mut h);
-            [w.max(1), h.max(1)]
-        }
+        let [width, height] = self.query_size(true).unwrap_or([0, 0]);
+        [width.max(1), height.max(1)]
     }
     pub fn scale(&self) -> f32 {
         unsafe { SDL_GetWindowDisplayScale(self.raw).max(1.) }
@@ -890,35 +895,35 @@ impl Window {
         let id = unsafe { SDL_GetDisplayForWindow(self.raw) }.0;
         (id != 0).then_some(id)
     }
-    /// Copy SDL's optional ICC profile into Rust-owned memory and release
-    /// SDL's native allocation before returning it to the color-management code.
-    /// Borrow the Win32 HWND backing this live SDL window.
-    #[cfg(target_os = "windows")]
-    pub fn win32_hwnd(&self) -> Option<std::ptr::NonNull<c_void>> {
-        // SAFETY: SDL owns this live window and exposes its native handle via
-        // the window property list. The caller must not outlive `self`.
+    /// Borrow a native backend handle from the window property list.
+    /// The returned pointer remains owned by SDL; callers must not use it
+    /// after the corresponding Window has been destroyed.
+    fn native_pointer_property(
+        &self,
+        property: *const std::ffi::c_char,
+    ) -> Option<NonNull<c_void>> {
+        // SAFETY: SDL owns the window and its property list; the property
+        // value is borrowed and checked for null before it escapes.
         unsafe {
-            std::ptr::NonNull::new(SDL_GetPointerProperty(
+            NonNull::new(SDL_GetPointerProperty(
                 SDL_GetWindowProperties(self.raw),
-                SDL_PROP_WINDOW_WIN32_HWND_POINTER,
+                property,
                 ptr::null_mut(),
             ))
         }
+    }
+
+    /// Borrow the Win32 HWND backing this live SDL window.
+    #[cfg(target_os = "windows")]
+    pub fn win32_hwnd(&self) -> Option<std::ptr::NonNull<c_void>> {
+        self.native_pointer_property(SDL_PROP_WINDOW_WIN32_HWND_POINTER)
     }
 
     /// Borrow the Cocoa NSWindow for this live SDL window without exposing
     /// property-list FFI to the platform input-routing code.
     #[cfg(target_os = "macos")]
     pub fn cocoa_window(&self) -> Option<std::ptr::NonNull<c_void>> {
-        // SAFETY: SDL's Cocoa window property is borrowed; the caller is
-        // required to keep this SDL Window alive while using the NSWindow.
-        unsafe {
-            std::ptr::NonNull::new(SDL_GetPointerProperty(
-                SDL_GetWindowProperties(self.raw),
-                SDL_PROP_WINDOW_COCOA_WINDOW_POINTER,
-                ptr::null_mut(),
-            ))
-        }
+        self.native_pointer_property(SDL_PROP_WINDOW_COCOA_WINDOW_POINTER)
     }
 
     /// Read the Cocoa Metal view tag without exposing the SDL property handle.
@@ -941,29 +946,19 @@ impl Window {
     /// Borrow the native X11 Display for the lifetime of the SDL window.
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     pub fn x11_display(&self) -> Option<std::ptr::NonNull<c_void>> {
-        // SAFETY: The X11 display pointer is held by SDL's video driver and
-        // stays valid while the corresponding SDL window remains live.
-        unsafe {
-            std::ptr::NonNull::new(SDL_GetPointerProperty(
-                SDL_GetWindowProperties(self.raw),
-                SDL_PROP_WINDOW_X11_DISPLAY_POINTER,
-                ptr::null_mut(),
-            ))
-        }
+        self.native_pointer_property(SDL_PROP_WINDOW_X11_DISPLAY_POINTER)
     }
 
     /// Borrow the Wayland wl_surface from SDL for the lifetime of this window.
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     pub fn wayland_surface(&self) -> Option<std::ptr::NonNull<c_void>> {
-        // SAFETY: The pointer is owned by the active SDL Wayland backend and
-        // may only be used while the corresponding SDL Window remains live.
-        unsafe {
-            std::ptr::NonNull::new(SDL_GetPointerProperty(
-                SDL_GetWindowProperties(self.raw),
-                SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER,
-                ptr::null_mut(),
-            ))
-        }
+        self.native_pointer_property(SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER)
+    }
+
+    /// Borrow SDL's Wayland display connection while the window remains live.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    pub fn wayland_display(&self) -> Option<NonNull<c_void>> {
+        self.native_pointer_property(SDL_PROP_WINDOW_WAYLAND_DISPLAY_POINTER)
     }
 
     /// Return the X11 drawable ID associated with this window.
