@@ -86,6 +86,8 @@ impl Passthrough {
         // and all style changes are checked via GetLastError.
         unsafe {
             #[link(name = "user32")]
+            // SAFETY: The declarations below use the Win32 system ABI and
+            // match the user32 exports; callers must uphold the pointer contracts.
             unsafe extern "system" {
                 fn SetWindowPos(
                     h: *mut c_void,
@@ -99,17 +101,23 @@ impl Passthrough {
             }
             #[cfg(target_pointer_width = "64")]
             #[link(name = "user32")]
+            // SAFETY: The declarations below use the Win32 system ABI and
+            // match the user32 exports; callers must uphold the pointer contracts.
             unsafe extern "system" {
                 fn GetWindowLongPtrW(h: *mut c_void, i: i32) -> isize;
                 fn SetWindowLongPtrW(h: *mut c_void, i: i32, v: isize) -> isize;
             }
             #[cfg(target_pointer_width = "32")]
             #[link(name = "user32")]
+            // SAFETY: The declarations below use the Win32 system ABI and
+            // match the user32 exports; callers must uphold the pointer contracts.
             unsafe extern "system" {
                 fn GetWindowLongW(h: *mut c_void, i: i32) -> i32;
                 fn SetWindowLongW(h: *mut c_void, i: i32, v: i32) -> i32;
             }
             #[link(name = "kernel32")]
+            // SAFETY: The declarations below use the Win32 system ABI and
+            // match the kernel32 exports; callers must uphold the pointer contracts.
             unsafe extern "system" {
                 fn SetLastError(e: u32);
                 fn GetLastError() -> u32;
@@ -236,6 +244,8 @@ pub fn keep_controller_above(canvas: &Window, controller: &Window, _native: &Pas
     // is called with the documented HWND_TOPMOST pseudo-handle and flags.
     unsafe {
         #[link(name = "user32")]
+        // SAFETY: The declarations below use the Win32 system ABI and
+        // match the user32 exports; callers must uphold the pointer contracts.
         unsafe extern "system" {
             fn SetWindowPos(
                 h: *mut c_void,
@@ -320,6 +330,8 @@ pub fn controller_bounds(canvas: &Window, controller: &Window) -> Option<[f32; 4
             y: i32,
         }
         #[link(name = "user32")]
+        // SAFETY: The declarations below use the Win32 system ABI and
+        // match the user32 exports; callers must uphold the pointer contracts.
         unsafe extern "system" {
             fn GetWindowRect(w: *mut c_void, rect: *mut Rect) -> i32;
             fn ScreenToClient(w: *mut c_void, point: *mut Point) -> i32;
