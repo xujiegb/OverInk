@@ -43,7 +43,11 @@ impl Monitor {
     }
 
     pub fn theme(&self) -> Option<Theme> {
-        match *self.scheme.lock().unwrap_or_else(std::sync::PoisonError::into_inner) {
+        match *self
+            .scheme
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
             Some(1) => Some(Theme::Dark),
             Some(2) => Some(Theme::Light),
             _ => None,
@@ -54,7 +58,10 @@ impl Monitor {
 impl Drop for Monitor {
     fn drop(&mut self) {
         // Serialize the last wake with teardown of the SDL event queue.
-        *self.scheme.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        *self
+            .scheme
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 }
 
@@ -115,7 +122,9 @@ fn scheme(value: &Variant<'_>) -> u32 {
 }
 
 fn publish(update: &Mutex<Option<u32>>, wake: u32, value: u32) {
-    let mut state = update.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut state = update
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(current) = state.as_mut()
         && *current != value
     {
