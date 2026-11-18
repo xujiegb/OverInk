@@ -205,7 +205,9 @@ mod tests {
         // Exercise the actual ICC byte parser and both RGB conversion
         // directions, not only synthetic in-memory sRGB profile objects.
         let display = ColorProfile::new_display_p3();
-        let bytes = display.encode().map_err(|_| "Cannot encode a Display P3 ICC profile")?;
+        let bytes = display
+            .encode()
+            .map_err(|_| "Cannot encode a Display P3 ICC profile")?;
         let forward = Transform::from_srgb_to_display(&bytes)
             .map_err(|_| "Cannot parse or create Display P3 output transform")?;
         let decoded = open_profile(&bytes).ok_or("Cannot decode Display P3 ICC bytes")?;
