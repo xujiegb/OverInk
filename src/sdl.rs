@@ -739,8 +739,7 @@ extern "C" fn toolbar_hit_test(
         let Some(point) = point.as_ref() else {
             return SDL_HITTEST_NORMAL;
         };
-        let scale =
-            SDL_GetWindowDisplayScale(window) / SDL_GetWindowPixelDensity(window).max(0.1);
+        let scale = SDL_GetWindowDisplayScale(window) / SDL_GetWindowPixelDensity(window).max(0.1);
         (point, scale)
     };
     if point.x >= 0
@@ -945,9 +944,7 @@ impl Window {
                     }
                     // The pixel slice remains mutably borrowed until the
                     // surface has been released by the OwnedSurface guard.
-                    let pitch = width
-                        .checked_mul(4)
-                        .ok_or("Invalid toolbar icon pitch")?;
+                    let pitch = width.checked_mul(4).ok_or("Invalid toolbar icon pitch")?;
                     let expected = usize::try_from(height)
                         .ok()
                         .and_then(|h| usize::try_from(pitch).ok().and_then(|p| h.checked_mul(p)))
