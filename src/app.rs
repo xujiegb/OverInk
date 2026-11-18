@@ -3347,9 +3347,7 @@ mod touch_tests {
             (&strokes[0], &strokes[1], 80.),
             (&strokes[1], &strokes[2], 480.),
         ] {
-            assert!(
-                left.points.last().is_some_and(|point| point.x < x) && right.points[0].x > x
-            );
+            assert!(left.points.last().is_some_and(|point| point.x < x) && right.points[0].x > x);
         }
         a.history.undo();
         assert_eq!(a.history.strokes().len(), 2);

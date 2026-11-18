@@ -549,8 +549,7 @@ mod tests {
         assert_eq!(history.strokes()[0].points[0].x, 15.);
         assert!(restored.needs_save(&history));
         restored.save(&history, &path)?;
-        let file: Session<DisplayKey, Document> =
-            serde_json::from_slice(&fs::read(&path)?)?;
+        let file: Session<DisplayKey, Document> = serde_json::from_slice(&fs::read(&path)?)?;
         assert_eq!(file.version, SESSION_VERSION);
         assert_eq!(file.pages[0].0.name, "Right");
         fs::remove_file(&path)?;
