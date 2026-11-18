@@ -40,40 +40,61 @@ pub enum DisplayError {
     ConversionFailed,
 }
 
-pub struct Transform(cms::HTRANSFORM);
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PixelLayout {
+    RgbFloat,
+    #[cfg(any(target_os = "linux", target_os = "freebsd", test))]
+    Rgba8,
+}
+
+/// Keep the native transform's pixel layout attached to its handle so
+/// safe callers cannot invoke Little CMS with an incompatible buffer.
+pub struct Transform {
+    raw: cms::HTRANSFORM,
+    layout: PixelLayout,
+}
+
+enum PixelBuffer<'a> {
+    Rgb(&'a mut [[f32; 3]]),
+    #[cfg(any(target_os = "linux", target_os = "freebsd", test))]
+    Rgba8(&'a mut [u8]),
+}
 
 impl Transform {
-    fn rgb(input: &Profile, output: &Profile) -> Option<Self> {
-        // SAFETY: The profiles remain live during creation. Little CMS owns
-        // the returned transform and allows both profiles to be closed after.
+    fn create(input: &Profile, output: &Profile, layout: PixelLayout) -> Option<Self> {
+        let (format, flags) = match layout {
+            PixelLayout::RgbFloat => (
+                cms::PixelFormat::RGB_FLT,
+                cms::FLAGS_BLACKPOINTCOMPENSATION,
+            ),
+            #[cfg(any(target_os = "linux", target_os = "freebsd", test))]
+            PixelLayout::Rgba8 => (
+                cms::PixelFormat::RGBA_8,
+                cms::FLAGS_COPY_ALPHA | cms::FLAGS_BLACKPOINTCOMPENSATION,
+            ),
+        };
+        // SAFETY: Both profiles remain live during creation. Little CMS
+        // takes its own transform ownership, paired with Transform::drop.
         let raw = unsafe {
             cms::cmsCreateTransform(
                 input.0,
-                cms::PixelFormat::RGB_FLT,
+                format,
                 output.0,
-                cms::PixelFormat::RGB_FLT,
+                format,
                 cms::Intent::RelativeColorimetric,
-                cms::FLAGS_BLACKPOINTCOMPENSATION,
+                flags,
             )
         };
-        (!raw.is_null()).then(|| Self(raw))
+        (!raw.is_null()).then_some(Self { raw, layout })
+    }
+
+    fn rgb(input: &Profile, output: &Profile) -> Option<Self> {
+        Self::create(input, output, PixelLayout::RgbFloat)
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd", test))]
     fn rgba8(input: &Profile, output: &Profile) -> Option<Self> {
-        // SAFETY: The input/output profiles outlive creation, and the created
-        // transform has its own independently managed native lifetime.
-        let raw = unsafe {
-            cms::cmsCreateTransform(
-                input.0,
-                cms::PixelFormat::RGBA_8,
-                output.0,
-                cms::PixelFormat::RGBA_8,
-                cms::Intent::RelativeColorimetric,
-                cms::FLAGS_COPY_ALPHA | cms::FLAGS_BLACKPOINTCOMPENSATION,
-            )
-        };
-        (!raw.is_null()).then(|| Self(raw))
+        Self::create(input, output, PixelLayout::Rgba8)
     }
 
     pub fn from_srgb_to_display(bytes: &[u8]) -> Result<Self, DisplayError> {
@@ -97,27 +118,49 @@ impl Transform {
         pixel[0]
     }
 
-    pub fn map_rgb_batch(&self, colors: &mut [[f32; 3]]) {
-        if colors.is_empty() {
-            return;
-        }
-        let Ok(count) = u32::try_from(colors.len()) else {
-            return;
+    /// Only matching native pixel layouts reach cmsDoTransform. All size
+    /// checks and count conversions happen before crossing the FFI boundary.
+    fn apply(&self, pixels: PixelBuffer<'_>) {
+        let (data, count): (*mut std::ffi::c_void, u32) = match (self.layout, pixels) {
+            (PixelLayout::RgbFloat, PixelBuffer::Rgb(colors)) => {
+                let Ok(count) = u32::try_from(colors.len()) else {
+                    return;
+                };
+                (colors.as_mut_ptr().cast(), count)
+            }
+            #[cfg(any(target_os = "linux", target_os = "freebsd", test))]
+            (PixelLayout::Rgba8, PixelBuffer::Rgba8(colors)) => {
+                if !colors.len().is_multiple_of(4) {
+                    return;
+                }
+                let Ok(count) = u32::try_from(colors.len() / 4) else {
+                    return;
+                };
+                (colors.as_mut_ptr().cast(), count)
+            }
+            #[cfg(any(target_os = "linux", target_os = "freebsd", test))]
+            _ => return,
         };
-        // SAFETY: The transform was created for packed RGB_FLT data, and the
-        // slice stores exactly count contiguous RGB triplets. Little CMS
-        // explicitly supports in-place transformations.
-        unsafe {
-            let ptr = colors.as_mut_ptr();
-            cms::cmsDoTransform(self.0, ptr.cast_const().cast(), ptr.cast(), count);
+        if count == 0 {
+            return;
         }
+        // SAFETY: The stored layout matches the checked borrowed pixel
+        // buffer. Its native allocation remains valid through this call;
+        // Little CMS supports these exact in-place pixel transforms.
+        unsafe {
+            cms::cmsDoTransform(self.raw, data.cast_const(), data, count);
+        }
+    }
+
+    pub fn map_rgb_batch(&self, colors: &mut [[f32; 3]]) {
+        self.apply(PixelBuffer::Rgb(colors));
     }
 }
 
 impl Drop for Transform {
     fn drop(&mut self) {
         // SAFETY: Transform exclusively owns the non-null native handle.
-        unsafe { cms::cmsDeleteTransform(self.0) };
+        unsafe { cms::cmsDeleteTransform(self.raw) };
     }
 }
 
@@ -128,9 +171,6 @@ pub fn convert_rgba8_to_srgb(pixels: &mut [u8], profile: &[u8]) {
     if pixels.is_empty() || !pixels.len().is_multiple_of(4) {
         return;
     }
-    let Ok(count) = u32::try_from(pixels.len() / 4) else {
-        return;
-    };
     let Some(input) = Profile::open(profile) else {
         return;
     };
@@ -140,12 +180,7 @@ pub fn convert_rgba8_to_srgb(pixels: &mut [u8], profile: &[u8]) {
     let Some(transform) = Transform::rgba8(&input, &output) else {
         return;
     };
-    // SAFETY: The transform expects RGBA_8. Pixel length is divisible by four,
-    // count matches that length, and Little CMS supports this in-place alias.
-    unsafe {
-        let ptr = pixels.as_mut_ptr();
-        cms::cmsDoTransform(transform.0, ptr.cast_const().cast(), ptr.cast(), count);
-    }
+    transform.apply(PixelBuffer::Rgba8(pixels));
 }
 
 #[cfg(test)]
@@ -187,6 +222,20 @@ mod tests {
         for (one, many) in single.into_iter().zip(batch) {
             assert_eq!(one, many);
         }
+    }
+
+    #[test]
+    fn mismatched_pixel_layout_cannot_reach_native_transform() {
+        let input = Profile::srgb().unwrap();
+        let output = Profile::srgb().unwrap();
+        let rgba = Transform::rgba8(&input, &output).unwrap();
+        let rgb = Transform::rgb(&input, &output).unwrap();
+        let mut floats = [[0.2, 0.5, 0.8]];
+        let mut bytes = [20, 60, 90, 210];
+        rgba.map_rgb_batch(&mut floats);
+        rgb.apply(PixelBuffer::Rgba8(&mut bytes));
+        assert_eq!(floats, [[0.2, 0.5, 0.8]]);
+        assert_eq!(bytes, [20, 60, 90, 210]);
     }
 
     #[test]
