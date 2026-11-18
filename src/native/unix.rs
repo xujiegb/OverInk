@@ -6,25 +6,33 @@ use std::{
     ptr,
     sync::OnceLock,
 };
-/// Load only the fixed desktop ABI sonames requested by our native backends.
-/// The caller never supplies paths or names from configuration or the network.
-pub(crate) fn library(names: &[&str]) -> Result<Library, String> {
-    for &name in names {
-        if !matches!(
-            name,
-            "libX11.so.6"
-                | "libX11.so"
-                | "libXext.so.6"
-                | "libXext.so"
-                | "libXrandr.so.2"
-                | "libXrandr.so"
-                | "libwayland-client.so.0"
-                | "libwayland-client.so"
-        ) {
-            return Err("Unsupported native library".into());
+/// The only native desktop libraries the application may load.
+/// Callers cannot construct dynamic paths or select an arbitrary soname.
+#[derive(Clone, Copy)]
+pub(crate) enum NativeLibrary {
+    X11,
+    Xext,
+    Xrandr,
+    Wayland,
+}
+
+impl NativeLibrary {
+    fn sonames(self) -> &'static [&'static str] {
+        match self {
+            Self::X11 => &["libX11.so.6", "libX11.so"],
+            Self::Xext => &["libXext.so.6", "libXext.so"],
+            Self::Xrandr => &["libXrandr.so.2", "libXrandr.so"],
+            Self::Wayland => &["libwayland-client.so.0", "libwayland-client.so"],
         }
-        // SAFETY: Only the enumerated desktop library sonames can reach this
-        // loader. Symbols never outlive their owning native library.
+    }
+}
+
+/// Load only known native desktop ABIs; keep the original soname fallback.
+pub(crate) fn library(which: NativeLibrary) -> Result<Library, String> {
+    let names = which.sonames();
+    for &name in names {
+        // SAFETY: The sealed enum fixes the only allowable shared-library
+        // names. The native adapter retains Library while symbols are used.
         if let Ok(lib) = unsafe { Library::new(name) } {
             return Ok(lib);
         }
@@ -82,7 +90,7 @@ impl Wayland {
         static LISTENER: Listener = Listener { global, removed };
 
         unsafe {
-            let lib = library(&["libwayland-client.so.0", "libwayland-client.so"])?;
+            let lib = library(NativeLibrary::Wayland)?;
             let marshal: Marshal = *lib
                 .get(b"wl_proxy_marshal_flags\0")
                 .map_err(|e| e.to_string())?;
@@ -368,8 +376,8 @@ impl X11 {
             let (x11, ext) = LIBRARIES
                 .get_or_init(|| {
                     Ok((
-                        library(&["libX11.so.6", "libX11.so"])?,
-                        library(&["libXext.so.6", "libXext.so"])?,
+                        library(NativeLibrary::X11)?,
+                        library(NativeLibrary::Xext)?,
                     ))
                 })
                 .as_ref()

@@ -9,7 +9,7 @@ mod unix;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub use unix::Passthrough;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-pub(crate) use unix::library as native_library;
+pub(crate) use unix::{NativeLibrary, library as native_library};
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 #[derive(Default)]

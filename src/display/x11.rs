@@ -83,8 +83,8 @@ impl Randr {
         // Loading is the native adapter's only library-initialization FFI;
         // this guard owns both libraries for the full lifetime of the symbols.
         Some(Self {
-            x11: crate::native::native_library(&["libX11.so.6", "libX11.so"]).ok()?,
-            randr: crate::native::native_library(&["libXrandr.so.2", "libXrandr.so"]).ok()?,
+            x11: crate::native::native_library(crate::native::NativeLibrary::X11).ok()?,
+            randr: crate::native::native_library(crate::native::NativeLibrary::Xrandr).ok()?,
         })
     }
     pub fn active_areas(&self, window: &Window) -> Option<Vec<[i32; 4]>> {

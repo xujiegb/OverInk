@@ -156,7 +156,7 @@ mod x11 {
     use std::ffi::{c_char, c_int, c_ulong, c_void};
     use std::ptr::NonNull;
     fn library() -> Result<Library, String> {
-        crate::native::native_library(&["libX11.so.6", "libX11.so"])
+        crate::native::native_library(crate::native::NativeLibrary::X11)
             .map_err(|_| "X11 screen capture is unavailable".into())
     }
     fn display(window: &Window) -> Result<*mut c_void, String> {
