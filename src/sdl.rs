@@ -21,6 +21,10 @@ use std::{
 unsafe extern "C" {
     #[link_name = "SDL_IsMainThread"]
     safe fn native_is_main_thread() -> bool;
+    // SDL_Quit has no parameters, but must be called from SDL's main
+    // thread. Runtime is !Send and checks this invariant before shutdown.
+    #[link_name = "SDL_Quit"]
+    safe fn native_quit();
     // SDL only writes the caller's borrowed, initialized rectangle. It
     // neither retains the pointer nor transfers allocation ownership.
     #[link_name = "SDL_GetDisplayBounds"]
@@ -190,9 +194,13 @@ pub fn is_wayland_session() -> bool {
             .iter()
             .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
 }
-pub struct Runtime;
+/// SDL's video lifetime is confined to its creating main thread.
+pub struct Runtime(PhantomData<std::rc::Rc<()>>);
 impl Runtime {
     pub fn new(x11: bool, wayland: bool, smoke: bool) -> Result<Self, String> {
+        if !native_is_main_thread() {
+            return Err("SDL video must initialize on the main thread".into());
+        }
         let wayland = wayland
             && cfg!(any(target_os = "linux", target_os = "freebsd"))
             && is_wayland_session();
@@ -233,7 +241,7 @@ impl Runtime {
                 let name = backend.map_or_else(|| "SDL".into(), CStr::to_string_lossy);
                 format!("Initializing {name} video failed ({error})")
             })?;
-            Ok(Self)
+            Ok(Self(PhantomData))
         }
     }
 }
@@ -253,7 +261,11 @@ fn startup_driver(x11: bool, smoke: bool, wayland: bool) -> Option<&'static CStr
 }
 impl Drop for Runtime {
     fn drop(&mut self) {
-        unsafe { SDL_Quit() }
+        // The runtime cannot cross threads in safe Rust. Do not shut SDL
+        // down if a foreign callback somehow causes off-main destruction.
+        if native_is_main_thread() {
+            native_quit();
+        }
     }
 }
 pub fn driver() -> String {
