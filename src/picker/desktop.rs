@@ -308,11 +308,10 @@ mod x11 {
         root: c_ulong,
         origin: [i32; 2],
         dimensions: [i32; 2],
-        bounds_error: &'static str,
-        image_error: &'static str,
-        visual_error: &'static str,
+        errors: [&'static str; 3],
         mut consume: impl FnMut(i32, i32, c_ulong, [c_ulong; 3]) -> Result<(), String>,
     ) -> Result<(), String> {
+        let [bounds_error, image_error, visual_error] = errors;
         let [x, y] = origin;
         let [width, height] = dimensions;
         if width <= 0 || height <= 0 {
@@ -412,9 +411,11 @@ mod x11 {
             point.root,
             [point.x, point.y],
             [1, 1],
-            "Screen coordinate is out of bounds",
-            "Cannot read the selected desktop pixel",
-            "Screen picking requires a TrueColor visual",
+            [
+                "Screen coordinate is out of bounds",
+                "Cannot read the selected desktop pixel",
+                "Screen picking requires a TrueColor visual",
+            ],
             |_, _, value, masks| {
                 for (i, mask) in masks.into_iter().enumerate() {
                     rgb[i] = channel(value, mask)?;
@@ -444,9 +445,11 @@ mod x11 {
             origin.root,
             [origin.x, origin.y],
             [w, h],
-            "Capture is outside the connected display bounds",
-            "Cannot capture the desktop",
-            "Desktop capture requires a TrueColor visual",
+            [
+                "Capture is outside the connected display bounds",
+                "Cannot capture the desktop",
+                "Desktop capture requires a TrueColor visual",
+            ],
             |x, y, value, masks| {
                 let offset = (y as usize * w as usize + x as usize) * 4;
                 for (i, mask) in masks.into_iter().enumerate() {
