@@ -181,7 +181,7 @@ mod tests {
     use super::{OwnedRandr, checked_crtc_count};
     use std::ptr::NonNull;
     use std::sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     };
 
@@ -193,9 +193,19 @@ mod tests {
         }
     }
 
-    unsafe extern "C" fn free_test_resource(raw: NonNull<CountDrop>) {
-        // SAFETY: The test transfers its unique Box allocation to the guard.
-        unsafe { drop(Box::from_raw(raw.as_ptr())) };
+    static TEST_RESOURCE: Mutex<Option<Box<CountDrop>>> = Mutex::new(None);
+
+    extern "C" fn free_test_resource(raw: NonNull<CountDrop>) {
+        let mut slot = TEST_RESOURCE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if slot
+            .as_mut()
+            .is_some_and(|resource| NonNull::from(resource.as_mut()) == raw)
+        {
+            // The matching Box remains owned by Rust until this destructor.
+            slot.take();
+        }
     }
 
     #[test]
@@ -210,10 +220,14 @@ mod tests {
     #[test]
     fn owned_resource_drops_exactly_once_and_ignores_null() -> Result<(), &'static str> {
         let freed = Arc::new(AtomicUsize::new(0));
-        let raw = Box::into_raw(Box::new(CountDrop(freed.clone())));
-        // SAFETY: raw is from Box::into_raw and its matching destructor
-        // reconstructs that same Box exactly once.
-        let owned = unsafe { OwnedRandr::from_native(NonNull::new(raw), free_test_resource) }
+        let mut resource = Box::new(CountDrop(Arc::clone(&freed)));
+        let raw = NonNull::from(resource.as_mut());
+        *TEST_RESOURCE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(resource);
+        // SAFETY: The test registry owns the allocation while the guard is
+        // live, and the matching destructor removes its Box exactly once.
+        let owned = unsafe { OwnedRandr::from_native(Some(raw), free_test_resource) }
             .ok_or("New XRandR handle was unexpectedly null")?;
         drop(owned);
         assert_eq!(freed.load(Ordering::SeqCst), 1);

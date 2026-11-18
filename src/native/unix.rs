@@ -606,7 +606,7 @@ mod tests {
         ffi::c_void,
         ptr::NonNull,
         sync::{
-            Arc,
+            Arc, Mutex,
             atomic::{AtomicUsize, Ordering},
         },
     };
@@ -619,20 +619,33 @@ mod tests {
         }
     }
 
-    unsafe extern "C" fn release_test_handle(raw: NonNull<c_void>) {
-        // SAFETY: The test hands its unique Box allocation to the native
-        // guard, and this simulated destructor reconstructs it exactly once.
-        unsafe { drop(Box::from_raw(raw.as_ptr().cast::<DropCounter>())) };
+    static TEST_HANDLE: Mutex<Option<Box<DropCounter>>> = Mutex::new(None);
+
+    extern "C" fn release_test_handle(raw: NonNull<c_void>) {
+        let mut slot = TEST_HANDLE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if slot
+            .as_mut()
+            .is_some_and(|resource| NonNull::from(resource.as_mut()).cast() == raw)
+        {
+            // The matching Rust-owned allocation is released exactly once.
+            slot.take();
+        }
     }
 
     #[test]
     fn owned_wayland_handle_releases_exactly_once_and_rejects_null() -> Result<(), &'static str> {
         let releases = Arc::new(AtomicUsize::new(0));
-        let raw = Box::into_raw(Box::new(DropCounter(Arc::clone(&releases)))).cast();
-        // SAFETY: The newly allocated Box is uniquely owned and matched with
-        // its exact destructor while the function remains available.
+        let mut resource = Box::new(DropCounter(Arc::clone(&releases)));
+        let raw = NonNull::from(resource.as_mut()).cast();
+        *TEST_HANDLE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(resource);
+        // SAFETY: The test registry keeps the allocation stable and owns it
+        // until the matching destructor takes and drops its Box.
         let owned =
-            unsafe { OwnedWaylandHandle::from_native(NonNull::new(raw), release_test_handle) }
+            unsafe { OwnedWaylandHandle::from_native(Some(raw), release_test_handle) }
                 .ok_or("New Wayland handle was unexpectedly null")?;
         assert_eq!(releases.load(Ordering::SeqCst), 0);
         drop(owned);
