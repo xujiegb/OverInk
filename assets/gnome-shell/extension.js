@@ -126,13 +126,18 @@ class CaptureBridge {
         this._trusted = next;
     }
 
-    _persistentIdentity(executable) {
-        // Do not persist approval based on the process basename, window title,
-        // or a user-writable binary. Each ancestor must be root-owned and not
-        // group/world writable, including the executable itself.
+    _persistentIdentity(pid, executable) {
+        // A path alone is not a process identity: in a mount namespace the
+        // same absolute pathname can refer to an entirely different binary.
+        // Resolve the running executable through /proc, then require that it
+        // is the same inode we trust in the Shell's own mount namespace.
         if (!GLib.path_is_absolute(executable) || executable.endsWith(' (deleted)'))
             return null;
         try {
+            const running = Gio.File.new_for_path(`/proc/${pid}/exe`).query_info(
+                'unix::device,unix::inode', Gio.FileQueryInfoFlags.NONE, null);
+            const runningDevice = String(running.get_attribute_uint32('unix::device'));
+            const runningInode = String(running.get_attribute_uint64('unix::inode'));
             let path = executable;
             let binary = null;
             while (true) {
@@ -144,7 +149,9 @@ class CaptureBridge {
                     (mode & 0o022) !== 0)
                     return null;
                 if (path === executable) {
-                    if ((mode & 0o170000) !== 0o100000)
+                    if ((mode & 0o170000) !== 0o100000 ||
+                        String(info.get_attribute_uint32('unix::device')) !== runningDevice ||
+                        String(info.get_attribute_uint64('unix::inode')) !== runningInode)
                         return null;
                     binary = [
                         info.get_attribute_uint32('unix::device'),
@@ -173,7 +180,9 @@ class CaptureBridge {
             const dialog = new ModalDialog.ModalDialog({destroyOnClose: false});
             dialog.contentLayout.add_child(new Dialog.MessageDialogContent({
                 title: 'Allow OverInk screen capture?',
-                description: `A process at ${executable} requests access to screen pixels. Allow screenshots for this running process only? Your OverInk rectangle selection stays unchanged.`,
+                description: canRemember
+                    ? `A process at ${executable} requests screen pixels. Allow this run, or remember this verified installation? Your selected rectangle stays unchanged.`
+                    : `A process at ${executable} requests screen pixels. Allow this running process only? Your selected rectangle stays unchanged.`,
             }));
             let settled = false;
             let closing = false;
@@ -203,7 +212,7 @@ class CaptureBridge {
                     dialog.destroy();
                 }
             };
-            state.dismissDialog = () => close(false);
+            state.dismissDialog = () => close(null);
             dialog.connect('closed', () => {
                 settle();
                 dialog.destroy();
@@ -295,7 +304,11 @@ class CaptureBridge {
             const now = GLib.get_monotonic_time();
             if ((this._deniedUntil.get(processIdentity) ?? 0) > now)
                 throw new Error('Screen capture denied recently; retry in 30 seconds');
-            const trusted = this._persistentIdentity(executable);
+            const trusted = this._persistentIdentity(pid, executable);
+            // Re-read user permissions for each unapproved process. Deleting
+            // capture-trust.json now revokes future approvals immediately.
+            if (!this._approved.has(processIdentity))
+                this._trusted = this._loadTrusted();
             if (!this._approved.has(processIdentity) &&
                 !(trusted && this._trusted.has(trusted))) {
                 const choice = await this._requestPermission(executable, state, !!trusted);
@@ -320,7 +333,7 @@ class CaptureBridge {
                     throw new Error('OverInk changed while authorizing screen capture');
                 if (choice === 'always' && trusted) {
                     // A changed binary during the modal cannot inherit consent.
-                    if (this._persistentIdentity(executable) !== trusted)
+                    if (this._persistentIdentity(pid, executable) !== trusted)
                         throw new Error('OverInk executable changed during approval');
                     try {
                         this._rememberTrusted(trusted);
