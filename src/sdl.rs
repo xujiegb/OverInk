@@ -1652,7 +1652,8 @@ impl OwnedSurface {
         unsafe {
             let raw = match source {
                 SurfaceSource::Readback(renderer) => {
-                    SDL_RenderReadPixels(renderer.raw, ptr::null())
+                    let renderer = renderer.raw.ok_or("Renderer has been destroyed")?;
+                    SDL_RenderReadPixels(renderer.as_ptr(), ptr::null())
                 }
                 #[cfg(test)]
                 SurfaceSource::Test([width, height]) => {
@@ -1706,12 +1707,13 @@ impl OwnedTexture {
         scale: SDL_ScaleMode,
     ) -> Result<Self, String> {
         let [width, height] = size;
+        let renderer = renderer.raw.ok_or("Renderer has been destroyed")?;
         // SAFETY: SDL_CreateTexture yields a unique, caller-owned handle on
         // the SDL thread. The NonNull guard releases it if configuration
         // fails, and only one OwnedTexture takes ownership on success.
         unsafe {
             let raw = NonNull::new(SDL_CreateTexture(
-                renderer.raw,
+                renderer.as_ptr(),
                 format,
                 access,
                 width,
@@ -1860,6 +1862,7 @@ impl SnapshotTexture {
         if linear && !renderer.extended {
             return Err("The renderer cannot display the captured HDR range".into());
         }
+        let renderer = renderer.raw.ok_or("Renderer has been destroyed")?;
         unsafe {
             let raw = if linear {
                 let props = OwnedProperties::new()?;
@@ -1889,10 +1892,10 @@ impl SnapshotTexture {
                     SDL_PROP_TEXTURE_CREATE_HDR_HEADROOM_FLOAT,
                     0.,
                 ))?;
-                SDL_CreateTextureWithProperties(renderer.raw, props.id())
+                SDL_CreateTextureWithProperties(renderer.as_ptr(), props.id())
             } else {
                 SDL_CreateTexture(
-                    renderer.raw,
+                    renderer.as_ptr(),
                     SDL_PIXELFORMAT_RGBA32,
                     SDL_TEXTUREACCESS_STATIC,
                     w,
@@ -2130,7 +2133,7 @@ enum RenderCommand<'a> {
 pub struct Renderer {
     // Only the SDL adapter may create, use or destroy this native handle.
     // Callers draw through checked, borrowed APIs rather than raw pointers.
-    raw: *mut SDL_Renderer,
+    raw: Option<NonNull<SDL_Renderer>>,
     pub extended: bool,
     pub name: String,
 }
@@ -2138,10 +2141,13 @@ impl Renderer {
     /// Read only known SDL renderer color properties at the FFI boundary.
     /// HDR uses both fields from the same property handle.
     fn query_color_property(&self, query: RendererPropertyQuery) -> (bool, f32) {
+        let Some(renderer) = self.raw else {
+            return (false, 1.);
+        };
         // SAFETY: Renderer owns a live SDL renderer. These SDL getters
         // return copied numeric values without exporting native pointers.
         unsafe {
-            let props = SDL_GetRendererProperties(self.raw);
+            let props = SDL_GetRendererProperties(renderer.as_ptr());
             match query {
                 RendererPropertyQuery::HdrState => (
                     SDL_GetBooleanProperty(props, SDL_PROP_RENDERER_HDR_ENABLED_BOOLEAN, false),
@@ -2163,11 +2169,14 @@ impl Renderer {
         source: Option<&SDL_FRect>,
         destination: Option<&SDL_FRect>,
     ) -> Result<(), String> {
+        let Some(renderer) = self.raw else {
+            return Err("Renderer has been destroyed".into());
+        };
         // SAFETY: Both the renderer and selected texture are live while the
         // synchronous SDL call reads the borrowed source/destination bounds.
         unsafe {
             check(SDL_RenderTexture(
-                self.raw,
+                renderer.as_ptr(),
                 texture.raw().as_ptr(),
                 source.map_or(ptr::null(), |rect| rect),
                 destination.map_or(ptr::null(), |rect| rect),
@@ -2179,35 +2188,38 @@ impl Renderer {
     /// presentation commands. Borrowed rectangles remain live through each
     /// synchronous call; the renderer is owned by this adapter.
     fn run_command(&self, command: RenderCommand<'_>) -> Result<(), String> {
+        let Some(renderer) = self.raw else {
+            return Err("Renderer has been destroyed".into());
+        };
         // SAFETY: Renderer owns a live SDL_Renderer on SDL's main thread.
         // Each command passes only initialized scalars or a borrowed SDL_Rect
         // whose lifetime covers the synchronous native call.
         unsafe {
             match command {
                 RenderCommand::Clear([r, g, b, a]) => {
-                    check(SDL_SetRenderDrawColorFloat(self.raw, r, g, b, a))?;
-                    check(SDL_RenderClear(self.raw))
+                    check(SDL_SetRenderDrawColorFloat(renderer.as_ptr(), r, g, b, a))?;
+                    check(SDL_RenderClear(renderer.as_ptr()))
                 }
                 RenderCommand::TransparentRect(rect) => {
-                    check(SDL_SetRenderDrawColorFloat(self.raw, 0., 0., 0., 0.))?;
-                    check(SDL_SetRenderDrawBlendMode(self.raw, SDL_BLENDMODE_NONE))?;
-                    let draw = check(SDL_RenderFillRect(self.raw, rect));
-                    let restore = check(SDL_SetRenderDrawBlendMode(self.raw, SDL_BLENDMODE_BLEND));
+                    check(SDL_SetRenderDrawColorFloat(renderer.as_ptr(), 0., 0., 0., 0.))?;
+                    check(SDL_SetRenderDrawBlendMode(renderer.as_ptr(), SDL_BLENDMODE_NONE))?;
+                    let draw = check(SDL_RenderFillRect(renderer.as_ptr(), rect));
+                    let restore = check(SDL_SetRenderDrawBlendMode(renderer.as_ptr(), SDL_BLENDMODE_BLEND));
                     draw.and(restore)
                 }
                 RenderCommand::Clip(clip) => check(SDL_SetRenderClipRect(
-                    self.raw,
+                    renderer.as_ptr(),
                     clip.map_or(ptr::null(), |rect| rect),
                 )),
-                RenderCommand::Scale([x, y]) => check(SDL_SetRenderScale(self.raw, x, y)),
+                RenderCommand::Scale([x, y]) => check(SDL_SetRenderScale(renderer.as_ptr(), x, y)),
                 RenderCommand::GetColorScale(previous) => {
-                    check(SDL_GetRenderColorScale(self.raw, previous))
+                    check(SDL_GetRenderColorScale(renderer.as_ptr(), previous))
                 }
                 RenderCommand::SetColorScale(scale) => {
-                    check(SDL_SetRenderColorScale(self.raw, scale))
+                    check(SDL_SetRenderColorScale(renderer.as_ptr(), scale))
                 }
                 RenderCommand::ReadTarget(previous) => {
-                    *previous = NonNull::new(SDL_GetRenderTarget(self.raw));
+                    *previous = NonNull::new(SDL_GetRenderTarget(renderer.as_ptr()));
                     Ok(())
                 }
                 RenderCommand::SetTarget(target) => {
@@ -2217,10 +2229,10 @@ impl Renderer {
                             previous.map_or(ptr::null_mut(), NonNull::as_ptr)
                         }
                     };
-                    check(SDL_SetRenderTarget(self.raw, raw))
+                    check(SDL_SetRenderTarget(renderer.as_ptr(), raw))
                 }
-                RenderCommand::Flush => check(SDL_FlushRenderer(self.raw)),
-                RenderCommand::Present => check(SDL_RenderPresent(self.raw)),
+                RenderCommand::Flush => check(SDL_FlushRenderer(renderer.as_ptr())),
+                RenderCommand::Present => check(SDL_RenderPresent(renderer.as_ptr())),
             }
         }
     }
@@ -2228,14 +2240,12 @@ impl Renderer {
     /// Release this renderer once, including when macOS recreates the Metal
     /// output. Drop uses the same path to avoid accidental double-destruction.
     fn destroy_native(&mut self) {
-        if self.raw.is_null() {
+        let Some(raw) = self.raw.take() else {
             return;
-        }
-        // SAFETY: This handle uniquely belongs to Renderer, and SDL calls
-        // happen on the owning main thread. Nulling the handle prevents a
-        // later Drop from releasing the same renderer again.
-        unsafe { SDL_DestroyRenderer(self.raw) };
-        self.raw = ptr::null_mut();
+        };
+        // SAFETY: This handle is uniquely owned. Taking it prevents a
+        // second release; SDL calls run on the owning main thread.
+        unsafe { SDL_DestroyRenderer(raw.as_ptr()) };
     }
 
     pub fn new(window: &Window, force_sdr: bool) -> Result<Self, String> {
@@ -2315,7 +2325,7 @@ impl Renderer {
             // would halve the requested rate on some desktop drivers.
             SDL_SetRenderVSync(raw, 0);
             Ok(Self {
-                raw,
+                raw: Some(NonNull::new(raw).ok_or_else(error)?),
                 extended,
                 name,
             })
@@ -2454,6 +2464,9 @@ impl Renderer {
         vertices: &[SDL_Vertex],
         indices: &[u32],
     ) -> Result<(), String> {
+        let Some(renderer) = self.raw else {
+            return Err("Renderer has been destroyed".into());
+        };
         if vertices.is_empty() || indices.is_empty() {
             return Ok(());
         }
@@ -2469,7 +2482,7 @@ impl Renderer {
         // vertices within the supplied slice.
         unsafe {
             check(SDL_RenderGeometry(
-                self.raw,
+                renderer.as_ptr(),
                 texture.raw().map_or(ptr::null_mut(), NonNull::as_ptr),
                 vertices.as_ptr(),
                 vertex_count,
@@ -2538,7 +2551,7 @@ impl TestSurface {
                 return Err(error());
             }
             let renderer = Renderer {
-                raw,
+                raw: Some(NonNull::new(raw).ok_or_else(error)?),
                 extended: false,
                 name: "software".into(),
             };
