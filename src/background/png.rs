@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use super::{Encoding, Image};
 use ::png::{BitDepth, ColorType, Encoder, Info, SrgbRenderingIntent};
 use std::io::Write;
@@ -106,8 +108,8 @@ mod tests {
     }
 
     #[test]
-    fn hdr_png_tags_pq_and_preserves_values_above_diffuse_white() {
-        let mut image = Image::hdr_buffer(2, 1).unwrap();
+    fn hdr_png_tags_pq_and_preserves_values_above_diffuse_white() -> Result<(), String> {
+        let mut image = Image::hdr_buffer(2, 1)?;
         for (i, sample) in [0x3c00_u16, 0x4400].into_iter().enumerate() {
             for channel in 0..3 {
                 let offset = i * 8 + channel * 2;
@@ -115,23 +117,24 @@ mod tests {
             }
         }
         let mut data = Vec::new();
-        image.write_png(&mut data, true, 1.).unwrap();
+        image.write_png(&mut data, true, 1.)?;
         let mut reader = ::png::Decoder::new(std::io::Cursor::new(data))
             .read_info()
-            .unwrap();
+            .map_err(|error| error.to_string())?;
         assert_eq!(reader.info().bit_depth, BitDepth::Sixteen);
-        assert_eq!(
-            reader
-                .info()
-                .coding_independent_code_points
-                .unwrap()
-                .transfer_function,
-            16
-        );
+        let metadata = reader
+            .info()
+            .coding_independent_code_points
+            .as_ref()
+            .ok_or("PNG is missing cICP metadata")?;
+        assert_eq!(metadata.transfer_function, 16);
         let mut output = [0; 12];
-        reader.next_frame(&mut output).unwrap();
+        reader
+            .next_frame(&mut output)
+            .map_err(|error| error.to_string())?;
         let [white, highlight] = [0, 6].map(|i| u16::from_be_bytes([output[i], output[i + 1]]));
         assert_eq!(white, pq(1.));
         assert!(highlight > white);
+        Ok(())
     }
 }
