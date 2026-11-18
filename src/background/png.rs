@@ -129,9 +129,7 @@ mod tests {
             .ok_or("PNG is missing cICP metadata")?;
         assert_eq!(metadata.transfer_function, 16);
         let mut output = [0; 12];
-        reader
-            .next_frame(&mut output)
-            .map_err(|error| error.to_string())?;
+        reader.next_frame(&mut output).map_err(|error| error.to_string())?;
         let [white, highlight] = [0, 6].map(|i| u16::from_be_bytes([output[i], output[i + 1]]));
         assert_eq!(white, pq(1.));
         assert!(highlight > white);
