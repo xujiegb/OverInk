@@ -1571,13 +1571,10 @@ impl Drop for OwnedProperties {
 }
 
 /// Release an SDL-owned surface at one native FFI boundary.
-fn destroy_owned_surface(raw: *mut SDL_Surface) {
-    if raw.is_null() {
-        return;
-    }
+fn destroy_owned_surface(raw: NonNull<SDL_Surface>) {
     // SAFETY: Each caller owns the SDL_Surface from a create/readback API,
     // and transfers it exactly once while SDL is active on the main thread.
-    unsafe { SDL_DestroySurface(raw) };
+    unsafe { SDL_DestroySurface(raw.as_ptr()) };
 }
 
 /// A limited source of new caller-owned SDL surfaces. No borrowed surfaces
@@ -1590,14 +1587,14 @@ enum SurfaceSource<'a> {
 
 /// Temporary SDL surface whose native allocation is released even when an
 /// operation returns early or unwinds.
-struct OwnedSurface(*mut SDL_Surface);
+struct OwnedSurface(NonNull<SDL_Surface>);
 
 impl OwnedSurface {
     /// # Safety
     /// `raw` must be null or a uniquely owned SDL_Surface allocation.
     /// Borrowed surfaces and pointers already owned elsewhere are forbidden.
     unsafe fn from_native(raw: *mut SDL_Surface) -> Option<Self> {
-        (!raw.is_null()).then(|| Self(raw))
+        NonNull::new(raw).map(Self)
     }
 
     /// Acquire one of the known SDL-created surfaces and copy its dimensions
@@ -1626,7 +1623,7 @@ impl OwnedSurface {
     }
 
     fn as_ptr(&self) -> *mut SDL_Surface {
-        self.0
+        self.0.as_ptr()
     }
 }
 
