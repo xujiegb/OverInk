@@ -48,6 +48,8 @@ pub fn position(window: &Window, local: [f32; 2]) -> Result<ScreenPoint, String>
         y: i32,
     }
     #[link(name = "user32")]
+    // SAFETY: The declarations below use the Win32 system ABI and
+    // match the user32 exports; callers must uphold the pointer contracts.
     unsafe extern "system" {
         fn ClientToScreen(window: *mut std::ffi::c_void, point: *mut Point) -> i32;
     }
@@ -75,15 +77,21 @@ mod win32_capture {
     };
 
     #[link(name = "user32")]
+    // SAFETY: The declarations below use the Win32 system ABI and
+    // match the user32 exports; callers must uphold the pointer contracts.
     unsafe extern "system" {
         fn GetDC(window: *mut c_void) -> *mut c_void;
         fn ReleaseDC(window: *mut c_void, dc: *mut c_void) -> i32;
     }
     #[link(name = "gdi32")]
+    // SAFETY: The declarations below use the Win32 system ABI and
+    // match the gdi32 exports; callers must uphold the pointer contracts.
     unsafe extern "system" {
         fn GetPixel(dc: *mut c_void, x: i32, y: i32) -> u32;
     }
     #[link(name = "dwmapi")]
+    // SAFETY: The declarations below use the Win32 system ABI and
+    // match the dwmapi exports; callers must uphold the pointer contracts.
     unsafe extern "system" {
         fn DwmFlush() -> i32;
     }
