@@ -3,7 +3,7 @@ use crate::controller::Rect;
 use libloading::Library;
 use std::{
     ffi::{CStr, c_char, c_int, c_ulong},
-    ptr,
+    ptr::{self, NonNull},
     sync::OnceLock,
 };
 /// The only native desktop libraries the application may load.
@@ -42,16 +42,45 @@ pub(crate) fn library(which: NativeLibrary) -> Result<Library, String> {
 type Marshal = unsafe extern "C" fn(*mut c_void, u32, *const c_void, u32, u32, ...) -> *mut c_void;
 type Version = unsafe extern "C" fn(*mut c_void) -> u32;
 type Destroy = unsafe extern "C" fn(*mut c_void);
+
+/// A uniquely owned native Wayland proxy or event queue, paired with its
+/// exact C destructor. The library supplying the destructor must outlive it.
+struct OwnedWaylandHandle {
+    raw: NonNull<c_void>,
+    destroy: Destroy,
+}
+
+impl OwnedWaylandHandle {
+    /// # Safety
+    /// `raw` must be null or a newly owned Wayland object, and `destroy`
+    /// must be the matching destructor from a library that outlives the guard.
+    unsafe fn from_native(raw: *mut c_void, destroy: Destroy) -> Option<Self> {
+        NonNull::new(raw).map(|raw| Self { raw, destroy })
+    }
+
+    fn as_ptr(&self) -> *mut c_void {
+        self.raw.as_ptr()
+    }
+}
+
+impl Drop for OwnedWaylandHandle {
+    fn drop(&mut self) {
+        // SAFETY: The guard exclusively owns the non-null native resource,
+        // and Wayland keeps its library loaded until after this destructor.
+        unsafe { (self.destroy)(self.raw.as_ptr()) };
+    }
+}
+
 struct Wayland {
-    _lib: Library,
-    queue: *mut c_void,
-    compositor: *mut c_void,
+    // Rust drops fields in declaration order. Destroy the compositor before
+    // its event queue, and unload the library only after both native handles.
+    compositor: OwnedWaylandHandle,
+    queue: OwnedWaylandHandle,
     region_interface: *const c_void,
     applied: Option<(*mut c_void, bool, Option<Rect>, [i32; 2])>,
     marshal: Marshal,
     version: Version,
-    destroy: Destroy,
-    queue_destroy: Destroy,
+    _lib: Library,
 }
 #[derive(Default)]
 struct Globals {
@@ -133,44 +162,41 @@ impl Wayland {
                 .get(b"wl_region_interface\0")
                 .map_err(|e| e.to_string())?;
             let display = w.wayland_display().ok_or("No Wayland display")?.as_ptr();
-            let queue = create_queue(display);
-            if queue.is_null() {
-                return Err("Cannot create Wayland event queue".into());
-            }
-            let wrapper = create_wrapper(display);
-            if wrapper.is_null() {
-                queue_destroy(queue);
-                return Err("Cannot wrap Wayland display".into());
-            }
-            set_queue(wrapper, queue);
-            let registry = marshal(
-                wrapper,
-                1,
-                registry_interface,
-                1,
-                0,
-                ptr::null_mut::<c_void>(),
-            );
-            wrapper_destroy(wrapper);
-            if registry.is_null() {
-                queue_destroy(queue);
-                return Err("No Wayland registry".into());
-            }
+            // Every created resource is guarded immediately. An error or
+            // unwind runs the correct native destructor before unloading lib.
+            let queue = OwnedWaylandHandle::from_native(create_queue(display), queue_destroy)
+                .ok_or("Cannot create Wayland event queue")?;
+            let registry_raw = {
+                let wrapper =
+                    OwnedWaylandHandle::from_native(create_wrapper(display), wrapper_destroy)
+                        .ok_or("Cannot wrap Wayland display")?;
+                set_queue(wrapper.as_ptr(), queue.as_ptr());
+                marshal(
+                    wrapper.as_ptr(),
+                    1,
+                    registry_interface,
+                    1,
+                    0,
+                    ptr::null_mut::<c_void>(),
+                )
+            };
+            let registry = OwnedWaylandHandle::from_native(registry_raw, destroy)
+                .ok_or("No Wayland registry")?;
             let mut globals = Box::new(Globals::default());
             if add_listener(
-                registry,
+                registry.as_ptr(),
                 (&LISTENER as *const Listener).cast(),
                 (&mut *globals as *mut Globals).cast(),
             ) != 0
-                || roundtrip(display, queue) < 0
+                || roundtrip(display, queue.as_ptr()) < 0
                 || globals.compositor == 0
             {
-                destroy(registry);
-                queue_destroy(queue);
+                // Never destroy the callback's userdata before its registry.
+                drop(registry);
                 return Err("Cannot bind Wayland compositor".into());
             }
-            let compositor = marshal(
-                registry,
+            let compositor_raw = marshal(
+                registry.as_ptr(),
                 0,
                 compositor_interface,
                 globals.version,
@@ -180,22 +206,18 @@ impl Wayland {
                 globals.version,
                 ptr::null_mut::<c_void>(),
             );
-            // No more registry dispatch: destroy it before the callback's data is dropped.
-            destroy(registry);
-            if compositor.is_null() {
-                queue_destroy(queue);
-                return Err("Cannot bind Wayland compositor".into());
-            }
+            // No further registry dispatch can see the boxed callback data.
+            drop(registry);
+            let compositor = OwnedWaylandHandle::from_native(compositor_raw, destroy)
+                .ok_or("Cannot bind Wayland compositor")?;
             Ok(Self {
-                _lib: lib,
-                queue,
                 compositor,
+                queue,
                 region_interface,
                 applied: None,
                 marshal,
                 version,
-                destroy,
-                queue_destroy,
+                _lib: lib,
             })
         }
     }
@@ -222,10 +244,10 @@ impl Wayland {
             // and subtract only the protected controller rectangle.
             let region = if pass || hole.is_some() {
                 let p = (self.marshal)(
-                    self.compositor,
+                    self.compositor.as_ptr(),
                     1,
                     self.region_interface,
-                    (self.version)(self.compositor),
+                    (self.version)(self.compositor.as_ptr()),
                     0,
                     ptr::null_mut::<c_void>(),
                 );
@@ -269,14 +291,6 @@ impl Wayland {
         }
         self.applied = Some((surface, pass, hole, size));
         Ok(())
-    }
-}
-impl Drop for Wayland {
-    fn drop(&mut self) {
-        unsafe {
-            (self.destroy)(self.compositor);
-            (self.queue_destroy)(self.queue)
-        }
     }
 }
 #[repr(C)]
