@@ -164,7 +164,12 @@ impl Transform {
         // buffer. Its native allocation remains valid through this call;
         // Little CMS supports these exact in-place pixel transforms.
         unsafe {
-            cms::cmsDoTransform(self.raw.as_ptr(), data.as_ptr().cast_const(), data.as_ptr(), count);
+            cms::cmsDoTransform(
+                self.raw.as_ptr(),
+                data.as_ptr().cast_const(),
+                data.as_ptr(),
+                count,
+            );
         }
     }
 
