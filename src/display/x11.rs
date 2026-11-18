@@ -23,6 +23,17 @@ struct Crtc {
     height: u32,
     mode: c_ulong,
 }
+/// Reject implausibly large foreign counts before doing pointer arithmetic.
+const MAX_X11_SCREENS: c_int = 256;
+const MAX_RANDR_CRTCS: c_int = 4096;
+
+fn checked_crtc_count(count: c_int, ptr: *const c_ulong) -> Option<usize> {
+    if !(0..=MAX_RANDR_CRTCS).contains(&count) || (count > 0 && ptr.is_null()) {
+        return None;
+    }
+    Some(count as usize)
+}
+
 /// An XRandR-owned allocation, paired with the exact native destructor.
 /// `Randr` keeps the libraries providing these functions loaded.
 struct OwnedRandr<T> {
@@ -98,7 +109,11 @@ impl Randr {
             let mut areas = Vec::new();
             let mut queried = false;
             let mut failed = false;
-            for screen in 0..count(display) {
+            let screen_count = count(display);
+            if !(1..=MAX_X11_SCREENS).contains(&screen_count) {
+                return None;
+            }
+            for screen in 0..screen_count {
                 let Some(list) = OwnedRandr::from_native(
                     resources(display, root(display, screen)),
                     *free_resources,
@@ -109,14 +124,14 @@ impl Randr {
                 // A positive CRTC count must have a backing array. Without
                 // this check another screen could hide a malformed response
                 // and make the incomplete result look authoritative.
-                let crtc_count = list.data().count;
-                if crtc_count < 0 || (crtc_count > 0 && list.data().crtcs.is_null()) {
+                let Some(crtc_count) = checked_crtc_count(list.data().count, list.data().crtcs)
+                else {
                     failed = true;
                     continue;
-                }
+                };
                 if crtc_count > 0 {
                     queried = true;
-                    for i in 0..crtc_count as usize {
+                    for i in 0..crtc_count {
                         let id = *list.data().crtcs.add(i);
                         let Some(info) =
                             OwnedRandr::from_native(crtc(display, list.as_ptr(), id), *free_crtc)
@@ -145,7 +160,7 @@ impl Randr {
 
 #[cfg(test)]
 mod tests {
-    use super::OwnedRandr;
+    use super::{OwnedRandr, checked_crtc_count};
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -162,6 +177,17 @@ mod tests {
     unsafe extern "C" fn free_test_resource(raw: *mut CountDrop) {
         // SAFETY: The test transfers its unique Box allocation to the guard.
         unsafe { drop(Box::from_raw(raw)) };
+    }
+
+    #[test]
+    fn rejects_invalid_native_crtc_array_lengths() {
+        let id: std::ffi::c_ulong = 1;
+        let ptr = &id as *const _;
+        assert_eq!(checked_crtc_count(0, std::ptr::null()), Some(0));
+        assert_eq!(checked_crtc_count(1, std::ptr::null()), None);
+        assert_eq!(checked_crtc_count(-1, ptr), None);
+        assert_eq!(checked_crtc_count(4097, ptr), None);
+        assert_eq!(checked_crtc_count(1, ptr), Some(1));
     }
 
     #[test]
