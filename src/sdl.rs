@@ -2215,7 +2215,7 @@ impl Renderer {
                 }
                 RenderCommand::SetTarget(target) => {
                     let raw = match target {
-                        RenderTarget::Ink(texture) => texture.raw.as_ptr(),
+                        RenderTarget::Ink(texture) => texture.raw.as_non_null().as_ptr(),
                         RenderTarget::Previous(previous) => {
                             previous.map_or(ptr::null_mut(), NonNull::as_ptr)
                         }
