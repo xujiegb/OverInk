@@ -677,19 +677,18 @@ pub fn capture_mouse(enable: bool) -> bool {
 }
 
 /// Keep the cursor allocation owned and restore the default on drop.
-pub struct SystemCursor(*mut SDL_Cursor);
+pub struct SystemCursor(NonNull<SDL_Cursor>);
 
 impl SystemCursor {
     pub fn crosshair() -> Option<Self> {
+        if !native_is_main_thread() || native_was_init(SDL_INIT_VIDEO) == 0 {
+            return None;
+        }
+        // SAFETY: SDL is initialized on its main thread. A successful
+        // creation transfers a non-null, uniquely owned cursor to Self.
         unsafe {
-            if SDL_WasInit(SDL_INIT_VIDEO) == 0 {
-                return None;
-            }
-            let cursor = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_CROSSHAIR);
-            if cursor.is_null() {
-                return None;
-            }
-            SDL_SetCursor(cursor);
+            let cursor = NonNull::new(SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_CROSSHAIR))?;
+            SDL_SetCursor(cursor.as_ptr());
             Some(Self(cursor))
         }
     }
@@ -700,10 +699,10 @@ impl Drop for SystemCursor {
         unsafe {
             // A later cursor may have replaced this one before Drop, so only
             // restore the default when we still own the active cursor.
-            if SDL_GetCursor() == self.0 {
+            if SDL_GetCursor() == self.0.as_ptr() {
                 SDL_SetCursor(SDL_GetDefaultCursor());
             }
-            SDL_DestroyCursor(self.0);
+            SDL_DestroyCursor(self.0.as_ptr());
         }
     }
 }
