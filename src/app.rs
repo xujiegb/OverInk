@@ -1733,7 +1733,8 @@ fn run_inner(options: Options) -> Result<(), String> {
                     // SDL owns the native dialog's input and delivers its result through
                     // the callback. Keep OverInk's drawing and shortcuts modal.
                     if !file_dialog.pending() {
-                        let cancelled = handle_screenshot_event(&mut app, &event, ty, &mut canvases);
+                        let cancelled =
+                            handle_screenshot_event(&mut app, &event, ty, &mut canvases);
                         mode_changed |= cancelled;
                         restore_toolbar_focus |= cancelled;
                     }
@@ -1873,14 +1874,13 @@ fn run_inner(options: Options) -> Result<(), String> {
                     }
                     let was_editing = app.input.text.editing();
                     let from_toolbar = id == Some(toolbar.id);
-                    let toolbar_claims_keys = from_toolbar
-                        && (toolbar_text_input
-                            || egui::Popup::is_any_open(&gui.ctx)
-                            || gui
-                                .raw
-                                .events
-                                .iter()
-                                .any(|event| matches!(event, egui::Event::PointerButton { .. })));
+                    let toolbar_claims_keys =
+                        from_toolbar
+                            && (toolbar_text_input
+                                || egui::Popup::is_any_open(&gui.ctx)
+                                || gui.raw.events.iter().any(|event| {
+                                    matches!(event, egui::Event::PointerButton { .. })
+                                }));
                     let key = key_event(&event).ok_or("SDL keyboard event has no keyboard data")?;
                     if from_toolbar
                         && was_editing
@@ -1929,7 +1929,9 @@ fn run_inner(options: Options) -> Result<(), String> {
                 restore_toolbar_focus = !app.screenshot.active();
                 match kind {
                     DialogKind::Font => match result {
-                        Ok(Some(path)) if app.install_annotation_font(&path, &annotation_font_path) => {
+                        Ok(Some(path))
+                            if app.install_annotation_font(&path, &annotation_font_path) =>
+                        {
                             for canvas in &mut canvases {
                                 canvas.dirty = true;
                             }
@@ -1938,8 +1940,9 @@ fn run_inner(options: Options) -> Result<(), String> {
                         Err(error) => {
                             app.panel = Some(crate::toolbar::Panel::Settings);
                             app.font_path_input.get_or_insert_with(String::new);
-                            gui.ctx
-                                .memory_mut(|mem| mem.request_focus(egui::Id::unique(FONT_PATH_FIELD)));
+                            gui.ctx.memory_mut(|mem| {
+                                mem.request_focus(egui::Id::unique(FONT_PATH_FIELD))
+                            });
                             app.status = text(
                                 "Enter a font file path",
                                 "请输入字体文件路径",
@@ -1974,7 +1977,8 @@ fn run_inner(options: Options) -> Result<(), String> {
                             canvas.suspend_text_input();
                             match result {
                                 Ok(Some(path)) => {
-                                    if let Err(error) = app.screenshot.save(Destination::File(path)) {
+                                    if let Err(error) = app.screenshot.save(Destination::File(path))
+                                    {
                                         app.screenshot.show_error(error);
                                     }
                                 }
@@ -2005,8 +2009,9 @@ fn run_inner(options: Options) -> Result<(), String> {
                 let displays = topology
                     .connected(&canvases[0].window)
                     .unwrap_or_else(|error| {
-                        app.status = text("Display query failed", "查询显示器失败", "查詢顯示器失敗")
-                            .detail(error);
+                        app.status =
+                            text("Display query failed", "查询显示器失败", "查詢顯示器失敗")
+                                .detail(error);
                         toolbar_dirty = true;
                         app.displays.clone()
                     })
@@ -2054,8 +2059,8 @@ fn run_inner(options: Options) -> Result<(), String> {
                     && !wayland
                     && let Err(error) = toolbar.arrange_toolbar(toolbar_expanded, app.pages.active)
                 {
-                    app.status =
-                        text("Toolbar layout failed", "工具栏布局失败", "工具列配置失敗").detail(error);
+                    app.status = text("Toolbar layout failed", "工具栏布局失败", "工具列配置失敗")
+                        .detail(error);
                 }
                 if (was_suspended || removed)
                     && let Some(id) = app.pages.active
@@ -2071,7 +2076,9 @@ fn run_inner(options: Options) -> Result<(), String> {
                         restore_toolbar_focus = true;
                         mode_changed = true;
                     }
-                    if let Err(error) = canvas::reconcile(&mut canvases, &mut app, &toolbar, &options) {
+                    if let Err(error) =
+                        canvas::reconcile(&mut canvases, &mut app, &toolbar, &options)
+                    {
                         app.status = canvas::failure(error);
                         toolbar_dirty = true;
                     }
@@ -2189,8 +2196,9 @@ fn run_inner(options: Options) -> Result<(), String> {
                         open_save_as = direct;
                     }
                     Err(SaveError::Failed(error)) => {
-                        app.status = text("Screenshot save failed", "保存截图失败", "儲存螢幕擷取失敗")
-                            .detail(error);
+                        app.status =
+                            text("Screenshot save failed", "保存截图失败", "儲存螢幕擷取失敗")
+                                .detail(error);
                         toolbar_dirty = true;
                     }
                 }
@@ -2243,9 +2251,12 @@ fn run_inner(options: Options) -> Result<(), String> {
                             text("Color selection cancelled", "已取消取色", "已取消取色").into()
                         }
                     }
-                    Ok(None) => text("Color selection cancelled", "已取消取色", "已取消取色").into(),
+                    Ok(None) => {
+                        text("Color selection cancelled", "已取消取色", "已取消取色").into()
+                    }
                     Err(error) => {
-                        text("Screen color picker failed", "屏幕取色失败", "螢幕取色失敗").detail(error)
+                        text("Screen color picker failed", "屏幕取色失败", "螢幕取色失敗")
+                            .detail(error)
                     }
                 };
             }
@@ -2298,8 +2309,8 @@ fn run_inner(options: Options) -> Result<(), String> {
                 controller_bounds_changed = true;
                 toolbar_expanded = expanded;
                 if let Err(error) = toolbar.arrange_toolbar(expanded, None) {
-                    app.status =
-                        text("Toolbar layout failed", "工具栏布局失败", "工具列配置失敗").detail(error);
+                    app.status = text("Toolbar layout failed", "工具栏布局失败", "工具列配置失敗")
+                        .detail(error);
                 }
             }
             let theme = appearance.theme(app.preferences.theme);
@@ -2377,7 +2388,10 @@ fn run_inner(options: Options) -> Result<(), String> {
                 cmd.redraw_canvas = true;
                 toolbar_dirty = true;
             }
-            if cmd.screenshot && !file_dialog.pending() && !picker.active() && !app.screenshot.saving()
+            if cmd.screenshot
+                && !file_dialog.pending()
+                && !picker.active()
+                && !app.screenshot.saving()
             {
                 let canvas = &mut canvases[active];
                 canvas.finish_text_editor(&mut app, theme)?;
@@ -2421,8 +2435,11 @@ fn run_inner(options: Options) -> Result<(), String> {
             if cmd.preferences {
                 toolbar_dirty = true;
                 if app.preferences != previous_preferences {
-                    topology_dirty |=
-                        update_preferences(&mut app, previous_preferences, !wayland && !options.smoke);
+                    topology_dirty |= update_preferences(
+                        &mut app,
+                        previous_preferences,
+                        !wayland && !options.smoke,
+                    );
                 }
                 #[cfg(target_os = "linux")]
                 if relogin && app.preferences.wayland {
@@ -2586,7 +2603,8 @@ fn run_inner(options: Options) -> Result<(), String> {
                             && (app.multi || index == active)
                             && (!picker.choosing() || index == active)
                 };
-                let raise_for_screenshot = visible && screenshot && (cmd.screenshot || !canvas.visible);
+                let raise_for_screenshot =
+                    visible && screenshot && (cmd.screenshot || !canvas.visible);
                 canvas.show(&toolbar, visible)?;
                 if raise_for_screenshot {
                     canvas.window.raise();
@@ -2743,7 +2761,8 @@ fn run_inner(options: Options) -> Result<(), String> {
                 if app.pages.needs_save(&app.history)
                     && let Err(error) = app.save_session()
                 {
-                    app.status = text("Autosave failed", "自动保存失败", "自動儲存失敗").detail(error);
+                    app.status =
+                        text("Autosave failed", "自动保存失败", "自動儲存失敗").detail(error);
                     toolbar_dirty = true;
                 }
                 app.last_save = Instant::now();
