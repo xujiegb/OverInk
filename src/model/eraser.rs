@@ -781,7 +781,12 @@ mod tests {
         Some(fragments)
     }
 
-    fn cut_points(sweep: Sweep, points: &[Point], width: f32, pressure: bool) -> Vec<Vec<Point>> {
+    fn cut_points(
+        sweep: Sweep,
+        points: &[Point],
+        width: f32,
+        pressure: bool,
+    ) -> Result<Vec<Vec<Point>>, &'static str> {
         cut_stroke(
             sweep,
             &Stroke {
@@ -792,14 +797,12 @@ mod tests {
                 ..pencil()
             },
         )
-        .unwrap()
-        .into_iter()
-        .map(|fragment| fragment.points)
-        .collect()
+        .ok_or("Sweep did not intersect the source stroke")
+        .map(|fragments| fragments.into_iter().map(|fragment| fragment.points).collect())
     }
 
     #[test]
-    fn preview_borrows_samples_and_commit_keeps_compact_fragments() {
+    fn preview_borrows_samples_and_commit_keeps_compact_fragments() -> Result<(), String> {
         let point = |x, y| Point::new(x, y, 0.6, [30., 0.]);
         let mut history = History::default();
         history.append(std::iter::once(Stroke {
@@ -838,7 +841,7 @@ mod tests {
                 original.points.len(),
                 &mut None,
             )
-            .unwrap();
+            .map_err(|error| format!("{error:?}"))?;
         assert_eq!(history.doc.strokes.len(), count);
         assert!(
             history
@@ -851,6 +854,7 @@ mod tests {
         assert!(Arc::ptr_eq(&history.doc.strokes[0], &original));
         history.redo();
         assert_eq!(history.doc.strokes.len(), count);
+        Ok(())
     }
 
     #[test]
@@ -878,7 +882,7 @@ mod tests {
     }
 
     #[test]
-    fn sweep_cuts_between_samples_and_preserves_brush_values() {
+    fn sweep_cuts_between_samples_and_preserves_brush_values() -> Result<(), &'static str> {
         let stroke = pencil();
         let from = Point::new(50., -50., 1., [0.; 2]);
         let to = Point::new(50., 50., 1., [0.; 2]);
@@ -887,10 +891,10 @@ mod tests {
             to,
             radius: 5.,
         };
-        let fragments = cut_stroke(sweep, &stroke).unwrap();
+        let fragments = cut_stroke(sweep, &stroke).ok_or("No stroke fragments")?;
         assert_eq!(fragments.len(), 2);
-        let left = fragments[0].points.last().unwrap();
-        let right = fragments[1].points.first().unwrap();
+        let left = fragments[0].points.last().ok_or("Missing left endpoint")?;
+        let right = fragments[1].points.first().ok_or("Missing right endpoint")?;
         assert!(left.x < 45. && right.x > 55.);
         for point in [left, right] {
             assert!((point.pressure - (0.2 + 0.006 * point.x)).abs() < 1e-6);
@@ -899,10 +903,11 @@ mod tests {
         assert!(fragments.iter().all(|s| {
             s.tool == Tool::Pencil && s.opacity == stroke.opacity && s.pressure_enabled
         }));
+        Ok(())
     }
 
     #[test]
-    fn cut_ending_at_a_corner_preserves_the_next_segment() {
+    fn cut_ending_at_a_corner_preserves_the_next_segment() -> Result<(), &'static str> {
         let corner = Point::new(10., 0., 0.7, [30., 0.]);
         let end = Point::new(10., 20., 0.9, [40., 0.]);
         let center = Point::new(6., 0., 1., [0.; 2]);
@@ -916,7 +921,7 @@ mod tests {
             &[Point::new(0., 0., 1., [0.; 2]), corner, end],
             0.,
             false,
-        );
+        )?;
         assert_eq!(fragments.len(), 2);
         assert_eq!(fragments[1].len(), 2);
         let [start, last] = fragments[1].as_slice() else {
@@ -927,10 +932,11 @@ mod tests {
             (corner.x, corner.y, corner.pressure, corner.tilt)
         );
         assert_eq!((last.x, last.y), (end.x, end.y));
+        Ok(())
     }
 
     #[test]
-    fn adjacent_segments_agree_at_a_pressure_corner() {
+    fn adjacent_segments_agree_at_a_pressure_corner() -> Result<(), &'static str> {
         let center = Point::new(0., 0., 1., [0.; 2]);
         let sweep = Sweep {
             from: center,
@@ -942,14 +948,15 @@ mod tests {
             Point::new(4., 0., 0., [0.; 2]),
             Point::new(4., 4., 1., [0.; 2]),
         ];
-        let fragments = cut_points(sweep, &points, 10., true);
+        let fragments = cut_points(sweep, &points, 10., true)?;
         assert_eq!(fragments.len(), 1);
         assert_eq!(fragments[0][1].y, 0.);
-        assert!(fragments[0].last().unwrap().y > 2.);
+        assert!(fragments[0].last().ok_or("Missing fragment endpoint")?.y > 2.);
+        Ok(())
     }
 
     #[test]
-    fn cut_discards_only_the_subpixel_remnant() {
+    fn cut_discards_only_the_subpixel_remnant() -> Result<(), &'static str> {
         let center = Point::new(50., 0., 1., [0.; 2]);
         let sweep = Sweep {
             from: center,
@@ -957,14 +964,15 @@ mod tests {
             radius: 3.,
         };
         let points = [46.75, 70.].map(|x| Point::new(x, 0., 1., [0.; 2]));
-        let fragments = cut_points(sweep, &points, 0., false);
+        let fragments = cut_points(sweep, &points, 0., false)?;
         assert_eq!(fragments.len(), 1);
         assert_eq!(fragments[0][0].x, 53.);
         assert_eq!(fragments[0][1].x, 70.);
+        Ok(())
     }
 
     #[test]
-    fn skipped_samples_still_reach_the_release_point() {
+    fn skipped_samples_still_reach_the_release_point() -> Result<(), String> {
         let mut history = History::default();
         history.append(std::iter::once(Stroke {
             width: 0.2,
@@ -978,13 +986,14 @@ mod tests {
             erase.sample(&history, 1, MAX_ERASURE_BYTES, p, 1.);
             assert!(erase.take_damage().is_none());
         }
-        assert_eq!(erase.last.unwrap().x, 0.);
+        assert_eq!(erase.last.ok_or("Missing final erase sample")?.x, 0.);
         erase
             .commit(&mut history, &mut BTreeMap::new(), 1, &mut None)
-            .unwrap();
+            .map_err(|error| format!("{error:?}"))?;
         assert!(history.doc.strokes.is_empty());
         history.undo();
         assert_eq!(history.doc.strokes.len(), 1);
+        Ok(())
     }
 
     #[test]
@@ -1022,25 +1031,26 @@ mod tests {
     }
 
     #[test]
-    fn arrowhead_can_be_erased_without_losing_its_shaft() {
+    fn arrowhead_can_be_erased_without_losing_its_shaft() -> Result<(), &'static str> {
         let stroke = Stroke {
             tool: Tool::Arrow,
             width: 10.,
             pressure_enabled: false,
             ..pencil()
         };
-        let point = stroke.arrow_head().unwrap()[0];
+        let point = stroke.arrow_head().ok_or("Missing arrow head")?[0];
         let sweep = Sweep {
             from: point,
             to: point,
             radius: 2.,
         };
-        let fragments = cut_stroke(sweep, &stroke).unwrap();
+        let fragments = cut_stroke(sweep, &stroke).ok_or("No erased arrow fragments")?;
         assert_eq!(fragments.len(), 2);
         let shaft = &fragments[0];
         assert_eq!(shaft.tool, Tool::Pen);
         assert_eq!(shaft.points[0].x, 0.);
         assert_eq!(shaft.points[1].x, 100.);
         assert!(fragments[1].points[0].x > point.x);
+        Ok(())
     }
 }
