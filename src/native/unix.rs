@@ -200,19 +200,23 @@ impl Wayland {
         }
     }
     fn set(&mut self, w: &Window, pass: bool, hole: Option<Rect>) -> Result<(), String> {
+        let surface = w.wayland_surface().ok_or("No Wayland surface")?.as_ptr();
+        // wl_region coordinates are surface-local logical units, not
+        // physical pixels like XShape rectangles. Compute and validate
+        // the region entirely in safe Rust before crossing the FFI boundary.
+        let size = w.size().map(|v| v.ceil() as i32);
+        let hole = if pass {
+            None
+        } else {
+            hole.and_then(|area| area.clipped(size))
+        };
+        if self.applied == Some((surface, pass, hole, size)) {
+            return Ok(());
+        }
+        // SAFETY: The Wayland display, compositor and wl_surface are owned
+        // by live SDL/Wayland objects. All protocol function pointers were
+        // loaded from libwayland-client and are used on the SDL thread.
         unsafe {
-            let surface = w.wayland_surface().ok_or("No Wayland surface")?.as_ptr();
-            // wl_region coordinates are surface-local logical units, not
-            // physical pixels like XShape rectangles.
-            let size = w.size().map(|v| v.ceil() as i32);
-            let hole = if pass {
-                None
-            } else {
-                hole.and_then(|area| area.clipped(size))
-            };
-            if self.applied == Some((surface, pass, hole, size)) {
-                return Ok(());
-            }
             // A NULL input region means the full surface. An empty region
             // means passthrough. For a controller hole, add the full region
             // and subtract only the protected controller rectangle.
@@ -262,9 +266,9 @@ impl Wayland {
             if !region.is_null() {
                 (self.marshal)(region, 0, ptr::null(), (self.version)(region), 1);
             }
-            self.applied = Some((surface, pass, hole, size));
-            Ok(())
         }
+        self.applied = Some((surface, pass, hole, size));
+        Ok(())
     }
 }
 impl Drop for Wayland {

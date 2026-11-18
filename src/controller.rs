@@ -41,15 +41,22 @@ impl Rect {
         true
     }
     pub fn clipped(self, size: [i32; 2]) -> Option<Self> {
-        let x = self.x.max(0);
-        let y = self.y.max(0);
-        let right = (self.x + self.w).min(size[0]);
-        let bottom = (self.y + self.h).min(size[1]);
+        // Native window coordinates may approach the i32 limits. Perform
+        // endpoint arithmetic in i64 before passing any region to SDL, X11
+        // or Wayland, rather than overflowing x + width / y + height.
+        if size[0] <= 0 || size[1] <= 0 || self.w <= 0 || self.h <= 0 {
+            return None;
+        }
+        let [right_limit, bottom_limit] = size.map(i64::from);
+        let x = i64::from(self.x).clamp(0, right_limit);
+        let y = i64::from(self.y).clamp(0, bottom_limit);
+        let right = (i64::from(self.x) + i64::from(self.w)).clamp(0, right_limit);
+        let bottom = (i64::from(self.y) + i64::from(self.h)).clamp(0, bottom_limit);
         (right > x && bottom > y).then_some(Self {
-            x,
-            y,
-            w: right - x,
-            h: bottom - y,
+            x: x as i32,
+            y: y as i32,
+            w: (right - x) as i32,
+            h: (bottom - y) as i32,
         })
     }
     pub fn pixels(self, window: &Window) -> Self {
@@ -192,6 +199,60 @@ impl Guard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn clipping_extreme_native_coordinates_never_overflows() {
+        assert_eq!(
+            Rect {
+                x: i32::MAX - 10,
+                y: i32::MAX - 10,
+                w: i32::MAX,
+                h: i32::MAX,
+            }
+            .clipped([i32::MAX, i32::MAX]),
+            Some(Rect {
+                x: i32::MAX - 10,
+                y: i32::MAX - 10,
+                w: 10,
+                h: 10,
+            })
+        );
+        assert_eq!(
+            Rect {
+                x: i32::MIN,
+                y: i32::MIN,
+                w: i32::MAX,
+                h: i32::MAX,
+            }
+            .clipped([100, 100]),
+            None
+        );
+        assert_eq!(
+            Rect {
+                x: -10,
+                y: -20,
+                w: 30,
+                h: 40,
+            }
+            .clipped([100, 100]),
+            Some(Rect {
+                x: 0,
+                y: 0,
+                w: 20,
+                h: 20,
+            })
+        );
+        assert_eq!(
+            Rect {
+                x: 1,
+                y: 1,
+                w: 5,
+                h: 5,
+            }
+            .clipped([0, 100]),
+            None
+        );
+    }
+
     #[test]
     fn excluded_area_never_belongs_to_the_canvas_regions() {
         for hole in [
