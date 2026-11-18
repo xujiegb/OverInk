@@ -276,7 +276,11 @@ mod x11 {
     }
 
     impl<'lib> OwnedImage<'lib> {
-        fn new(
+        /// # Safety
+        /// `raw` must be null or a uniquely owned XGetImage allocation,
+        /// and `destroy` must be the corresponding live XDestroyImage symbol.
+        /// The caller must keep the X11 library loaded through the guard.
+        unsafe fn new(
             raw: *mut Image,
             destroy: Symbol<'lib, unsafe extern "C" fn(*mut Image) -> c_int>,
             message: &'static str,
