@@ -580,43 +580,98 @@ pub fn wait_for_event(timeout_ms: i32) {
     }
 }
 
+/// Allowed state changes for one live SDL window. Callers provide only
+/// ordinary values and borrowed, initialized rectangles.
+enum WindowCommand<'a> {
+    InputArea(&'a SDL_Rect),
+    SyncInput(bool),
+    ClearComposition,
+    SyncAndPumpEvents,
+    #[cfg(target_os = "linux")]
+    SetSize([i32; 2]),
+    SetGeometry { x: i32, y: i32, w: i32, h: i32 },
+    AlwaysOnTop(bool),
+    RaiseIfCurrent,
+}
+
 pub struct Window {
     pub raw: *mut SDL_Window,
     pub id: SDL_WindowID,
 }
 impl Window {
-    /// Set a popup's size and origin, preserving SDL's native error reporting.
-    pub fn text_input_active(&self) -> bool {
-        unsafe { SDL_TextInputActive(self.raw) }
-    }
-
-    pub fn set_text_input_area(&self, area: &SDL_Rect) {
+    /// Dispatch a closed set of window operations on SDL's owning thread.
+    /// Input rectangles remain borrowed only for the synchronous FFI call.
+    fn run_command(&self, command: WindowCommand<'_>) -> Result<(), String> {
+        // SAFETY: Window holds the live native SDL_Window. Callers can only
+        // select the operations listed above and supply initialized Rust
+        // scalars or a borrowed SDL_Rect, never an arbitrary native pointer.
         unsafe {
-            SDL_SetTextInputArea(self.raw, area, 0);
-        }
-    }
-
-    pub fn sync_text_input(&self, enabled: bool) {
-        unsafe {
-            if enabled != SDL_TextInputActive(self.raw) {
-                if enabled {
-                    SDL_StartTextInput(self.raw);
-                } else {
-                    SDL_StopTextInput(self.raw);
+            match command {
+                WindowCommand::InputArea(area) => {
+                    SDL_SetTextInputArea(self.raw, area, 0);
+                    Ok(())
+                }
+                WindowCommand::SyncInput(enabled) => {
+                    if enabled != SDL_TextInputActive(self.raw) {
+                        if enabled {
+                            SDL_StartTextInput(self.raw);
+                        } else {
+                            SDL_StopTextInput(self.raw);
+                        }
+                    }
+                    Ok(())
+                }
+                WindowCommand::ClearComposition => {
+                    SDL_ClearComposition(self.raw);
+                    Ok(())
+                }
+                WindowCommand::SyncAndPumpEvents => {
+                    SDL_SyncWindow(self.raw);
+                    SDL_PumpEvents();
+                    Ok(())
+                }
+                #[cfg(target_os = "linux")]
+                WindowCommand::SetSize([width, height]) => {
+                    check(SDL_SetWindowSize(self.raw, width, height))
+                }
+                WindowCommand::SetGeometry { x, y, w, h } => {
+                    check(SDL_SetWindowSize(self.raw, w, h))?;
+                    check(SDL_SetWindowPosition(self.raw, x, y))
+                }
+                WindowCommand::AlwaysOnTop(enabled) => {
+                    let _ = SDL_SetWindowAlwaysOnTop(self.raw, enabled);
+                    Ok(())
+                }
+                WindowCommand::RaiseIfCurrent => {
+                    let window = SDL_GetWindowFromID(self.id);
+                    if !window.is_null() && window == self.raw {
+                        SDL_RaiseWindow(window);
+                    }
+                    Ok(())
                 }
             }
         }
     }
 
+    /// Query whether this window currently accepts text input.
+    pub fn text_input_active(&self) -> bool {
+        unsafe { SDL_TextInputActive(self.raw) }
+    }
+
+    pub fn set_text_input_area(&self, area: &SDL_Rect) {
+        let _ = self.run_command(WindowCommand::InputArea(area));
+    }
+
+    pub fn sync_text_input(&self, enabled: bool) {
+        let _ = self.run_command(WindowCommand::SyncInput(enabled));
+    }
+
     pub fn clear_composition(&self) {
-        unsafe { SDL_ClearComposition(self.raw) };
+        let _ = self.run_command(WindowCommand::ClearComposition);
     }
 
     pub fn sync_and_pump_events(&self) {
-        unsafe {
-            SDL_SyncWindow(self.raw);
-            SDL_PumpEvents();
-        }
+        let _ = self.run_command(WindowCommand::SyncAndPumpEvents);
     }
 
     pub fn sdr_white_level(&self) -> f32 {
@@ -631,29 +686,19 @@ impl Window {
 
     #[cfg(target_os = "linux")]
     pub fn set_size(&self, width: i32, height: i32) -> Result<(), String> {
-        unsafe { check(SDL_SetWindowSize(self.raw, width, height)) }
+        self.run_command(WindowCommand::SetSize([width, height]))
     }
 
     pub fn set_geometry(&self, x: i32, y: i32, w: i32, h: i32) -> Result<(), String> {
-        unsafe {
-            check(SDL_SetWindowSize(self.raw, w, h))?;
-            check(SDL_SetWindowPosition(self.raw, x, y))
-        }
+        self.run_command(WindowCommand::SetGeometry { x, y, w, h })
     }
 
     pub fn set_always_on_top(&self, enabled: bool) {
-        unsafe {
-            let _ = SDL_SetWindowAlwaysOnTop(self.raw, enabled);
-        }
+        let _ = self.run_command(WindowCommand::AlwaysOnTop(enabled));
     }
 
     pub fn raise(&self) {
-        unsafe {
-            let window = SDL_GetWindowFromID(self.id);
-            if !window.is_null() && window == self.raw {
-                SDL_RaiseWindow(window);
-            }
-        }
+        let _ = self.run_command(WindowCommand::RaiseIfCurrent);
     }
 
     pub fn input_focused(&self) -> bool {
