@@ -1573,15 +1573,13 @@ impl Renderer {
         }
     }
     pub fn begin(&self, window: &Window, color: [f32; 4]) -> Result<[f32; 2], String> {
-        unsafe {
-            let logical = window.size();
-            let pixel = window.pixel_size();
-            let scale = [pixel[0] as f32 / logical[0], pixel[1] as f32 / logical[1]];
-            check(SDL_SetRenderScale(self.raw, scale[0], scale[1]))?;
-            SDL_SetRenderClipRect(self.raw, ptr::null());
-            self.clear(color)?;
-            Ok(scale)
-        }
+        let logical = window.size();
+        let pixel = window.pixel_size();
+        let scale = [pixel[0] as f32 / logical[0], pixel[1] as f32 / logical[1]];
+        self.set_render_scale(scale)?;
+        self.set_clip_rect(None);
+        self.clear(color)?;
+        Ok(scale)
     }
     pub fn clear(&self, [r, g, b, a]: [f32; 4]) -> Result<(), String> {
         unsafe {
@@ -1741,7 +1739,10 @@ impl Drop for Renderer {
 /// Test-only owned surface for SDL's software renderer. The test harness
 /// must drop the renderer before this backing surface.
 #[cfg(test)]
-pub struct TestSurface(*mut SDL_Surface);
+pub struct TestSurface {
+    surface: OwnedSurface,
+    dimensions: [i32; 2],
+}
 
 #[cfg(test)]
 impl TestSurface {
@@ -1749,18 +1750,25 @@ impl TestSurface {
         if width <= 0 || height <= 0 {
             return Err("Test surface dimensions must be positive".into());
         }
+        // SAFETY: SDL_CreateSurface transfers ownership of its new surface
+        // to the caller; the existing OwnedSurface guard releases it once.
         unsafe {
-            let raw = SDL_CreateSurface(width, height, SDL_PIXELFORMAT_RGBA32);
-            if raw.is_null() {
-                return Err(error());
-            }
-            Ok(Self(raw))
+            let surface = OwnedSurface::from_native(SDL_CreateSurface(
+                width,
+                height,
+                SDL_PIXELFORMAT_RGBA32,
+            ))
+            .ok_or_else(error)?;
+            Ok(Self {
+                surface,
+                dimensions: [width, height],
+            })
         }
     }
 
     pub fn software_renderer(&self) -> Result<Renderer, String> {
         unsafe {
-            let raw = SDL_CreateSoftwareRenderer(self.0);
+            let raw = SDL_CreateSoftwareRenderer(self.surface.as_ptr());
             if raw.is_null() {
                 return Err(error());
             }
@@ -1775,16 +1783,26 @@ impl TestSurface {
     }
 
     pub fn size(&self) -> [i32; 2] {
-        unsafe { [(*self.0).w, (*self.0).h] }
+        self.dimensions
     }
 
     fn readback(renderer: &Renderer) -> Result<Self, String> {
+        // SAFETY: SDL_RenderReadPixels returns a new caller-owned surface.
+        // Read the dimensions while it is live, and let OwnedSurface drop it.
         unsafe {
-            let raw = SDL_RenderReadPixels(renderer.raw, ptr::null());
-            if raw.is_null() {
-                return Err(error());
+            let surface = OwnedSurface::from_native(SDL_RenderReadPixels(
+                renderer.raw,
+                ptr::null(),
+            ))
+            .ok_or_else(error)?;
+            let dimensions = [(*surface.as_ptr()).w, (*surface.as_ptr()).h];
+            if dimensions[0] <= 0 || dimensions[1] <= 0 {
+                return Err("SDL readback returned invalid surface dimensions".into());
             }
-            Ok(Self(raw))
+            Ok(Self {
+                surface,
+                dimensions,
+            })
         }
     }
 
@@ -1797,7 +1815,7 @@ impl TestSurface {
         // whether the requested pixel lies inside the surface.
         unsafe {
             check(SDL_ReadSurfacePixel(
-                self.0, x, y, &mut r, &mut g, &mut b, &mut a,
+                self.surface.as_ptr(), x, y, &mut r, &mut g, &mut b, &mut a,
             ))?;
         }
         Ok([r, g, b, a])
@@ -1817,13 +1835,6 @@ impl TestSurface {
             }
         }
         Ok(pixels)
-    }
-}
-
-#[cfg(test)]
-impl Drop for TestSurface {
-    fn drop(&mut self) {
-        destroy_owned_surface(self.0);
     }
 }
 
