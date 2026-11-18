@@ -600,13 +600,13 @@ mod tests {
     }
 
     #[test]
-    fn owned_wayland_handle_releases_exactly_once_and_rejects_null() {
+    fn owned_wayland_handle_releases_exactly_once_and_rejects_null() -> Result<(), &'static str> {
         let releases = Arc::new(AtomicUsize::new(0));
         let raw = Box::into_raw(Box::new(DropCounter(Arc::clone(&releases)))).cast();
         // SAFETY: The newly allocated Box is uniquely owned and matched with
         // its exact destructor while the function remains available.
         let owned = unsafe { OwnedWaylandHandle::from_native(raw, release_test_handle) }
-            .expect("live native handle");
+            .ok_or("New Wayland handle was unexpectedly null")?;
         assert_eq!(releases.load(Ordering::SeqCst), 0);
         drop(owned);
         assert_eq!(releases.load(Ordering::SeqCst), 1);
@@ -616,5 +616,6 @@ mod tests {
             unsafe { OwnedWaylandHandle::from_native(std::ptr::null_mut(), release_test_handle) };
         assert!(empty.is_none());
         assert_eq!(releases.load(Ordering::SeqCst), 1);
+        Ok(())
     }
 }
