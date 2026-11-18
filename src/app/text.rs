@@ -1570,7 +1570,10 @@ mod tests {
         let screen = Rect::from_min_size(Pos2::ZERO, Vec2::from(SIZE));
         let mut item = TextBox::new(pos2(150., 120.), screen, InkColor::default(), 1.);
         item.text = "中文 👩🏽‍🎨".into();
-        let index = app.history.set_text_box(None, item).ok_or("Cannot add text box")?;
+        let index = app
+            .history
+            .set_text_box(None, item)
+            .ok_or("Cannot add text box")?;
         app.input.text.press = Some(Press {
             origin: pos2(150., 120.),
             target: Some((index, Handle::Move)),
