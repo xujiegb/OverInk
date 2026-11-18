@@ -162,16 +162,19 @@ mod x11 {
             };
             let query = lib.get::<unsafe extern "C" fn(
                 NonNull<c_void>,
-                *const c_char,
+                NonNull<c_char>,
                 &mut c_int,
                 &mut c_int,
                 &mut c_int,
             ) -> c_int>(b"XQueryExtension\0");
             let (mut opcode, mut event, mut error) = (0, 0, 0);
+            let Some(extension) = NonNull::new(c"XWAYLAND".as_ptr().cast_mut()) else {
+                return false;
+            };
             query.is_ok_and(|query| {
                 query(
                     display.as_non_null(),
-                    c"XWAYLAND".as_ptr(),
+                    extension,
                     &mut opcode,
                     &mut event,
                     &mut error,

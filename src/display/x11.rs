@@ -101,8 +101,7 @@ impl Randr {
                 self.x11.get(b"XRootWindow\0").ok()?;
             let resources: Symbol<
                 unsafe extern "C" fn(NonNull<c_void>, c_ulong) -> Option<NonNull<Resources>>,
-            > =
-                self.randr.get(b"XRRGetScreenResourcesCurrent\0").ok()?;
+            > = self.randr.get(b"XRRGetScreenResourcesCurrent\0").ok()?;
             let free_resources: Symbol<unsafe extern "C" fn(NonNull<Resources>)> =
                 self.randr.get(b"XRRFreeScreenResources\0").ok()?;
             let crtc: Symbol<
