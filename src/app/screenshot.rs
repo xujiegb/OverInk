@@ -530,13 +530,9 @@ impl Screenshot {
             }
         });
         if let Some(detail) = detail {
-            menu.add(
-                egui::Label::new(
-                    egui::RichText::new(detail).size(toolbar::MENU_FONT_SIZE * scale),
-                )
-                .truncate(),
-            )
-            .on_hover_text(detail);
+            let label = egui::RichText::new(detail).size(toolbar::MENU_FONT_SIZE * scale);
+            menu.add(egui::Label::new(label).truncate())
+                .on_hover_text(detail);
         }
     }
 
