@@ -71,10 +71,8 @@ impl Rect {
         // endpoints without overflowing before narrowing to native pixels.
         let x = (self.x as f32 * scale[0]).floor() as i32;
         let y = (self.y as f32 * scale[1]).floor() as i32;
-        let right =
-            ((i64::from(self.x) + i64::from(self.w)) as f32 * scale[0]).ceil() as i32;
-        let bottom =
-            ((i64::from(self.y) + i64::from(self.h)) as f32 * scale[1]).ceil() as i32;
+        let right = ((i64::from(self.x) + i64::from(self.w)) as f32 * scale[0]).ceil() as i32;
+        let bottom = ((i64::from(self.y) + i64::from(self.h)) as f32 * scale[1]).ceil() as i32;
         Self {
             x,
             y,
