@@ -112,15 +112,15 @@ fn take_named_page(
 const SESSION_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize)]
-struct Session<D> {
+struct Session<K, D> {
     version: u32,
-    pages: Vec<(DisplayKey, D)>,
+    pages: Vec<(K, D)>,
 }
 
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum SessionFile {
-    Multi(Session<Document>),
+    Multi(Session<DisplayKey, Document>),
     Single(Document),
 }
 
@@ -216,11 +216,9 @@ impl Pages {
         if self.active.is_none() && !history.document().is_empty() {
             return Err("No display for the restored legacy page".into());
         }
-        let mut pages = self
-            .unmatched
-            .iter()
-            .map(|(key, doc)| (key.clone(), doc))
-            .collect::<BTreeMap<_, _>>();
+        // The serialized session borrows live display keys and documents.
+        // This avoids copying every display name on each autosave.
+        let mut pages = self.unmatched.iter().collect::<BTreeMap<_, _>>();
         let blank = Document::default();
         for (id, key) in &self.keys {
             let doc = if self.active == Some(*id) {
@@ -229,7 +227,7 @@ impl Pages {
                 self.parked.get(id).map_or(&blank, |page| page.document())
             };
             doc.validate()?;
-            pages.insert(key.clone(), doc);
+            pages.insert(key, doc);
         }
         let session = Session {
             version: SESSION_VERSION,
@@ -546,7 +544,7 @@ mod tests {
         assert_eq!(history.strokes()[0].points[0].x, 15.);
         assert!(restored.needs_save(&history));
         restored.save(&history, &path).unwrap();
-        let file: Session<Document> = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let file: Session<DisplayKey, Document> = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(file.version, SESSION_VERSION);
         assert_eq!(file.pages[0].0.name, "Right");
         fs::remove_file(&path).unwrap();
