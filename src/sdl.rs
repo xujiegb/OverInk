@@ -109,11 +109,7 @@ unsafe extern "C" {
     // outputs without retaining their addresses. The private call site
     // validates the live SDL window and checks the SDL main thread.
     #[link_name = "SDL_GetWindowPosition"]
-    safe fn native_window_position(
-        window: NonNull<SDL_Window>,
-        x: &mut i32,
-        y: &mut i32,
-    ) -> bool;
+    safe fn native_window_position(window: NonNull<SDL_Window>, x: &mut i32, y: &mut i32) -> bool;
     #[cfg(not(target_os = "windows"))]
     #[link_name = "SDL_GetWindowBordersSize"]
     safe fn native_window_borders_size(
@@ -208,7 +204,6 @@ impl<T> SdlAllocation<T> {
     unsafe fn from_native(raw: Option<NonNull<T>>) -> Option<Self> {
         raw.map(Self)
     }
-
 }
 
 impl<T> Drop for SdlAllocation<T> {
@@ -636,7 +631,11 @@ fn clipboard_action(action: ClipboardAction<'_>) -> Option<String> {
             }
             ClipboardAction::Read => {
                 let text = SdlAllocation::from_native(NonNull::new(SDL_GetClipboardText()))?;
-                Some(CStr::from_ptr(text.0.as_ptr()).to_string_lossy().into_owned())
+                Some(
+                    CStr::from_ptr(text.0.as_ptr())
+                        .to_string_lossy()
+                        .into_owned(),
+                )
             }
         }
     }
@@ -1181,22 +1180,24 @@ impl Window {
                         return check(SDL_SetWindowShape(self.raw, ptr::null_mut()));
                     };
                     let surface = OwnedSurface(
-                        NonNull::new(SDL_CreateSurface(
-                            size[0],
-                            size[1],
-                            SDL_PIXELFORMAT_RGBA32,
-                        ))
-                        .ok_or_else(error)?,
+                        NonNull::new(SDL_CreateSurface(size[0], size[1], SDL_PIXELFORMAT_RGBA32))
+                            .ok_or_else(error)?,
                     );
-                    let opaque = SDL_MapSurfaceRGBA(surface.as_non_null().as_ptr(), 255, 255, 255, 255);
-                    let transparent = SDL_MapSurfaceRGBA(surface.as_non_null().as_ptr(), 0, 0, 0, 0);
+                    let opaque =
+                        SDL_MapSurfaceRGBA(surface.as_non_null().as_ptr(), 255, 255, 255, 255);
+                    let transparent =
+                        SDL_MapSurfaceRGBA(surface.as_non_null().as_ptr(), 0, 0, 0, 0);
                     check(SDL_FillSurfaceRect(
                         surface.as_non_null().as_ptr(),
                         ptr::null(),
                         transparent,
                     ))?;
                     for region in regions {
-                        check(SDL_FillSurfaceRect(surface.as_non_null().as_ptr(), region, opaque))?;
+                        check(SDL_FillSurfaceRect(
+                            surface.as_non_null().as_ptr(),
+                            region,
+                            opaque,
+                        ))?;
                     }
                     check(SDL_SetWindowShape(self.raw, surface.as_non_null().as_ptr()))
                 }
@@ -1662,7 +1663,10 @@ impl OwnedSurface {
                 }
             };
             let surface = Self(NonNull::new(raw).ok_or_else(error)?);
-            let dimensions = [(*surface.as_non_null().as_ptr()).w, (*surface.as_non_null().as_ptr()).h];
+            let dimensions = [
+                (*surface.as_non_null().as_ptr()).w,
+                (*surface.as_non_null().as_ptr()).h,
+            ];
             if dimensions[0] <= 0 || dimensions[1] <= 0 {
                 return Err("SDL returned invalid surface dimensions".into());
             }
@@ -1718,8 +1722,14 @@ impl OwnedTexture {
             ))
             .ok_or_else(error)?;
             let texture = Self(raw);
-            check(SDL_SetTextureBlendMode(texture.as_non_null().as_ptr(), blend))?;
-            check(SDL_SetTextureScaleMode(texture.as_non_null().as_ptr(), scale))?;
+            check(SDL_SetTextureBlendMode(
+                texture.as_non_null().as_ptr(),
+                blend,
+            ))?;
+            check(SDL_SetTextureScaleMode(
+                texture.as_non_null().as_ptr(),
+                scale,
+            ))?;
             Ok(texture)
         }
     }
@@ -1809,7 +1819,10 @@ impl InkTexture {
                 rgb[1],
                 rgb[2],
             ))?;
-            check(SDL_SetTextureAlphaModFloat(self.raw.as_non_null().as_ptr(), alpha))
+            check(SDL_SetTextureAlphaModFloat(
+                self.raw.as_non_null().as_ptr(),
+                alpha,
+            ))
         }
     }
 
