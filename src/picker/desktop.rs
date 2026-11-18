@@ -236,7 +236,17 @@ mod x11 {
                 .map_err(|e| e.to_string())?;
             let [px, py] = local_pixels(window, local)?;
             let mut child = 0;
-            if translate(d.as_non_null(), id, root, px, py, &mut x, &mut y, &mut child) == 0 {
+            if translate(
+                d.as_non_null(),
+                id,
+                root,
+                px,
+                py,
+                &mut x,
+                &mut y,
+                &mut child,
+            ) == 0
+            {
                 return Err("Cannot convert the selected screen coordinate".into());
             }
             Ok(ScreenPoint { x, y, root })
