@@ -467,10 +467,10 @@ mod x11 {
         use super::*;
         #[test]
         fn decodes_eight_ten_and_sixteen_bit_visuals() {
-            assert_eq!(channel(0x12abef, 0xff0000).unwrap(), 18. / 255.);
-            assert_eq!(channel(0x12abef, 0xff00).unwrap(), 171. / 255.);
-            assert_eq!(channel(0xffff, 0xf800).unwrap(), 1.);
-            assert_eq!(channel(0x3ff00000, 0x3ff00000).unwrap(), 1.);
+            assert_eq!(channel(0x12abef, 0xff0000), Ok(18. / 255.));
+            assert_eq!(channel(0x12abef, 0xff00), Ok(171. / 255.));
+            assert_eq!(channel(0xffff, 0xf800), Ok(1.));
+            assert_eq!(channel(0x3ff00000, 0x3ff00000), Ok(1.));
             assert!(channel(0, 0).is_err());
         }
     }
