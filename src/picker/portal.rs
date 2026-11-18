@@ -19,6 +19,7 @@ use zbus::{Connection, OwnedObjectPath, OwnedVariant, Proxy, Structure, Variant}
 type PortalResult<T> = Result<Option<T>, String>;
 
 /// Owned full-screen Portal image conversion, transferred to the capture worker.
+#[cfg(target_os = "linux")]
 pub(crate) type ScreenshotFallback = Box<dyn FnOnce(Image) -> Result<Image, String> + Send>;
 
 pub struct SystemJob<T = InkColor> {
@@ -136,13 +137,14 @@ impl SystemJob<Image> {
                         && (error.to_string().contains("ServiceUnknown")
                             || error.to_string().contains("NameHasNoOwner")) =>
                 {
-                    // XWayland needs a composited desktop image, never an X11
-                    // framebuffer (which silently omits native Wayland apps).
-                    // Only the known-safe screen-target portal path is used.
-                    let values = zbus::block_on(request("Screenshot", true, cancelled)).map_err(
+                    // Portal v2 has no explicit full-screen target. With its
+                    // noninteractive default, accept only an image whose
+                    // dimensions match the known single-display desktop.
+                    // Never fall back to the incomplete X11 framebuffer.
+                    let values = zbus::block_on(request("Screenshot", false, cancelled)).map_err(
                         |error| {
                             format!(
-                                "GNOME Overlay is unavailable; screenshot portal failed: {error}"
+                                "GNOME Overlay is unavailable; screenshot portal failed: {error}. Enable OverInk Overlay (revision 6) in GNOME Wayland."
                             )
                         },
                     )?;
@@ -154,8 +156,25 @@ impl SystemJob<Image> {
                         .ok_or("Screenshot portal returned no image")?;
                     let uri = <&str>::try_from(&*uri).map_err(|error| error.to_string())?;
                     let file = local_file(uri)?;
+                    if cancelled.is_closed() {
+                        return Ok(None);
+                    }
+                    // The returned URI may be a document-portal FUSE entry or
+                    // a user-owned file, so it is not ours to unlink.
+                    let image = Image::load(&file)?;
+                    if cancelled.is_closed() {
+                        return Ok(None);
+                    }
                     let fallback = portal_fallback.expect("checked above");
-                    return fallback(Image::load(&file)?).map(Some);
+                    let image = fallback(image).map_err(|error| {
+                        format!(
+                            "{error}. Enable OverInk Overlay (revision 6) in GNOME Wayland for reliable compositor capture."
+                        )
+                    })?;
+                    if cancelled.is_closed() {
+                        return Ok(None);
+                    }
+                    return Ok(Some(image));
                 }
                 Err(error) => {
                     return Err(format!(
