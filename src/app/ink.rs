@@ -448,9 +448,14 @@ impl StrokePainter {
         let bounds = region.map(|_| app.history.stroke_bounds());
         for (index, stroke) in app.history.strokes().iter().enumerate().skip(first) {
             if let Some(region) = region
-                && bounds.as_ref().unwrap()[index].is_none_or(|bounds| {
-                    !region.intersects(bounds.path.padded(stroke.max_radius() * 2. + frame.aa))
-                })
+                && bounds
+                    .as_ref()
+                    .and_then(|bounds| bounds.get(index))
+                    .is_some_and(|entry| {
+                        entry.as_ref().is_none_or(|bounds| {
+                            !region.intersects(bounds.path.padded(stroke.max_radius() * 2. + frame.aa))
+                        })
+                    })
             {
                 continue;
             }
