@@ -388,7 +388,6 @@ mod tests {
         assert_eq!(crop.size, [1440., 900.]);
         assert_eq!(crop.region.min, egui::pos2(100., 84.));
         assert_eq!(crop.region.max, egui::pos2(300., 234.));
-        assert_eq!(crop.size, [1440., 900.]);
         Ok(())
     }
 
