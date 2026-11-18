@@ -1,8 +1,8 @@
 use crate::sdl::*;
 use objc2::{Encoding, RefEncode, msg_send, runtime::AnyObject};
-use std::ffi::c_void;
+use std::{ffi::c_void, ptr::NonNull};
 
-pub fn configure_metal(raw: *mut SDL_Renderer, extended: bool) {
+pub fn configure_metal(raw: NonNull<SDL_Renderer>, extended: bool) {
     #[repr(C)]
     struct ColorSpace {
         _opaque: [u8; 0],
@@ -21,7 +21,7 @@ pub fn configure_metal(raw: *mut SDL_Renderer, extended: bool) {
         fn CFRelease(value: *const c_void);
     }
     unsafe {
-        let layer = SDL_GetRenderMetalLayer(raw).cast::<AnyObject>();
+        let layer = SDL_GetRenderMetalLayer(raw.as_ptr()).cast::<AnyObject>();
         if layer.is_null() {
             return;
         }
