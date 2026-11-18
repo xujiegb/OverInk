@@ -843,8 +843,10 @@ fn write_screenshot(
 mod tests {
     use super::*;
 
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
     #[test]
-    fn screenshot_actions_accept_clicks_in_the_scaled_button_area() -> Result<(), Box<dyn std::error::Error>> {
+    fn screenshot_actions_accept_clicks_in_the_scaled_button_area() -> TestResult {
         let screen = Rect::from_min_size(Pos2::ZERO, vec2(1440., 900.));
         let region = Rect::from_min_size(pos2(400., 200.), vec2(320., 240.));
         let units = 2.;
@@ -886,7 +888,8 @@ mod tests {
     }
 
     #[test]
-    fn saving_png_never_recreates_a_missing_default_folder_or_overwrites_an_automatic_name() -> Result<(), Box<dyn std::error::Error>> {
+    fn saving_png_never_recreates_a_missing_default_folder_or_overwrites_an_automatic_name()
+    -> TestResult {
         let folder = tempfile::tempdir()?;
         let missing = folder.path().join("missing");
         let mut image = Image::buffer(2, 1)?;
@@ -927,7 +930,7 @@ mod tests {
     }
 
     #[test]
-    fn save_as_confirms_the_final_png_path_before_replacing_it() -> Result<(), Box<dyn std::error::Error>> {
+    fn save_as_confirms_the_final_png_path_before_replacing_it() -> TestResult {
         let folder = tempfile::tempdir()?;
         let path = folder.path().join("capture.png");
         std::fs::write(&path, b"existing file")?;
@@ -957,7 +960,7 @@ mod tests {
     }
 
     #[test]
-    fn cancelling_save_disconnects_its_result_and_prevents_file_creation() -> Result<(), Box<dyn std::error::Error>> {
+    fn cancelling_save_disconnects_its_result_and_prevents_file_creation() -> TestResult {
         let cancelled = Arc::new(AtomicU8::new(SAVE_PENDING));
         let (sender, receiver) = mpsc::channel();
         let mut screenshot = Screenshot {
@@ -987,7 +990,7 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_cannot_hide_an_already_publishing_save() -> Result<(), Box<dyn std::error::Error>> {
+    fn cancellation_cannot_hide_an_already_publishing_save() -> TestResult {
         let (sender, receiver) = mpsc::channel();
         let cancelled = Arc::new(AtomicU8::new(SAVE_PUBLISHING));
         let mut screenshot = Screenshot {
@@ -1027,7 +1030,7 @@ mod tests {
     }
 
     #[test]
-    fn detached_screenshot_keeps_publishing_save_until_result() -> Result<(), Box<dyn std::error::Error>> {
+    fn detached_screenshot_keeps_publishing_save_until_result() -> TestResult {
         let (sender, receiver) = mpsc::channel();
         let cancelled = Arc::new(AtomicU8::new(SAVE_PUBLISHING));
         let mut screenshot = Screenshot {
@@ -1050,7 +1053,7 @@ mod tests {
     }
 
     #[test]
-    fn detached_screenshot_cancels_save_before_publication() -> Result<(), Box<dyn std::error::Error>> {
+    fn detached_screenshot_cancels_save_before_publication() -> TestResult {
         let (sender, receiver) = mpsc::channel();
         let cancelled = Arc::new(AtomicU8::new(SAVE_PENDING));
         let mut screenshot = Screenshot {
@@ -1086,7 +1089,7 @@ mod tests {
     }
 
     #[test]
-    fn cancelling_before_publication_does_not_replace_existing_file() -> Result<(), Box<dyn std::error::Error>> {
+    fn cancelling_before_publication_does_not_replace_existing_file() -> TestResult {
         let folder = tempfile::tempdir()?;
         let path = folder.path().join("existing.png");
         std::fs::write(&path, b"original")?;
