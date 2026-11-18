@@ -110,16 +110,16 @@ unsafe extern "C" {
     fn CGContextDrawImage(context: *mut c_void, rect: CGRect, image: *const c_void);
     #[cfg(test)]
     fn CGBitmapContextCreateImage(context: *mut c_void) -> *const c_void;
-    fn CGImageGetWidth(image: *const c_void) -> usize;
-    fn CGImageGetHeight(image: *const c_void) -> usize;
-    fn CGImageGetBitsPerComponent(image: *const c_void) -> usize;
-    fn CGImageGetBitsPerPixel(image: *const c_void) -> usize;
-    fn CGImageGetBytesPerRow(image: *const c_void) -> usize;
-    fn CGImageGetBitmapInfo(image: *const c_void) -> u32;
-    fn CGImageGetColorSpace(image: *const c_void) -> *const c_void;
-    fn CGColorSpaceGetName(space: *const c_void) -> *const c_void;
-    fn CGImageGetDataProvider(image: *const c_void) -> *const c_void;
-    fn CGDataProviderCopyData(provider: *const c_void) -> *const c_void;
+    fn CGImageGetWidth(image: NonNull<c_void>) -> usize;
+    fn CGImageGetHeight(image: NonNull<c_void>) -> usize;
+    fn CGImageGetBitsPerComponent(image: NonNull<c_void>) -> usize;
+    fn CGImageGetBitsPerPixel(image: NonNull<c_void>) -> usize;
+    fn CGImageGetBytesPerRow(image: NonNull<c_void>) -> usize;
+    fn CGImageGetBitmapInfo(image: NonNull<c_void>) -> u32;
+    fn CGImageGetColorSpace(image: NonNull<c_void>) -> Option<NonNull<c_void>>;
+    fn CGColorSpaceGetName(space: NonNull<c_void>) -> Option<NonNull<c_void>>;
+    fn CGImageGetDataProvider(image: NonNull<c_void>) -> Option<NonNull<c_void>>;
+    fn CGDataProviderCopyData(provider: NonNull<c_void>) -> Option<NonNull<c_void>>;
     static kCGColorSpaceExtendedLinearSRGB: *const c_void;
     static kCGColorSpaceSRGB: *const c_void;
 }
@@ -369,12 +369,14 @@ fn begin_screenshot(
         let completion =
             block2::RcBlock::new(move |image: *const c_void, error: *mut AnyObject| {
                 autoreleasepool(|_| {
-                    let result = if image.is_null() {
-                        Err(capture_error(error, hdr))
-                    } else if hdr {
-                        copy_screenshot(image).map(Some)
+                    let result = if let Some(image) = NonNull::new(image.cast_mut()) {
+                        if hdr {
+                            copy_screenshot(image).map(Some)
+                        } else {
+                            copy_sdr_screenshot(image).map(Some)
+                        }
                     } else {
-                        copy_sdr_screenshot(image).map(Some)
+                        Err(capture_error(error, hdr))
                     };
                     let _ = sender.send(result);
                 });
@@ -394,7 +396,7 @@ impl Drop for Data {
     }
 }
 
-fn copy_screenshot(image: *const c_void) -> Result<Image, String> {
+fn copy_screenshot(image: NonNull<c_void>) -> Result<Image, String> {
     unsafe {
         let bitmap = CGImageGetBitmapInfo(image);
         let float_components = bitmap & (1 << 8) != 0;
@@ -408,26 +410,16 @@ fn copy_screenshot(image: *const c_void) -> Result<Image, String> {
         {
             return Err("ScreenCaptureKit did not return an FP16 HDR screenshot".into());
         }
-        let space = CGImageGetColorSpace(image);
-        let name = if space.is_null() {
-            ptr::null()
-        } else {
-            CGColorSpaceGetName(space)
-        };
-        if name.is_null() || CFEqual(name, kCGColorSpaceExtendedLinearSRGB) == 0 {
+        let name = CGImageGetColorSpace(image).and_then(|space| CGColorSpaceGetName(space));
+        if !name.is_some_and(|name| CFEqual(name.as_ptr(), kCGColorSpaceExtendedLinearSRGB) != 0) {
             return Err("The HDR screenshot did not use extended linear sRGB".into());
         }
         let width = u32::try_from(CGImageGetWidth(image)).map_err(|_| "Capture is too large")?;
         let height = u32::try_from(CGImageGetHeight(image)).map_err(|_| "Capture is too large")?;
         let mut snapshot = Image::hdr_buffer(width, height)?;
-        let provider = CGImageGetDataProvider(image);
-        if provider.is_null() {
-            return Err("The HDR screenshot has no pixel data".into());
-        }
-        let data = Data(
-            NonNull::new(CGDataProviderCopyData(provider).cast_mut())
-                .ok_or("Cannot read the HDR screenshot")?,
-        );
+        let provider = CGImageGetDataProvider(image)
+            .ok_or("The HDR screenshot has no pixel data")?;
+        let data = Data(CGDataProviderCopyData(provider).ok_or("Cannot read the HDR screenshot")?);
         let len = usize::try_from(CFDataGetLength(data.0.as_ptr()))
             .map_err(|_| "Invalid screenshot data")?;
         let bytes = CFDataGetBytePtr(data.0.as_ptr());
@@ -443,7 +435,7 @@ fn copy_screenshot(image: *const c_void) -> Result<Image, String> {
     }
 }
 
-fn copy_sdr_screenshot(image: *const c_void) -> Result<Image, String> {
+fn copy_sdr_screenshot(image: NonNull<c_void>) -> Result<Image, String> {
     unsafe {
         let width = u32::try_from(CGImageGetWidth(image)).map_err(|_| "Capture is too large")?;
         let height = u32::try_from(CGImageGetHeight(image)).map_err(|_| "Capture is too large")?;
@@ -479,7 +471,7 @@ fn copy_sdr_screenshot(image: *const c_void) -> Result<Image, String> {
                     height: height as f64,
                 },
             },
-            image,
+            image.as_ptr(),
         );
         Ok(snapshot)
     }
@@ -498,7 +490,7 @@ fn sdr_capture(bounds: [i32; 4], cancelled: &AtomicBool) -> CaptureResult {
     if cancelled.load(Ordering::Relaxed) {
         return Ok(None);
     }
-    copy_sdr_screenshot(image.0.as_ptr()).map(Some)
+    copy_sdr_screenshot(image.0).map(Some)
 }
 
 #[cfg(test)]
@@ -532,7 +524,7 @@ mod tests {
                 NonNull::new(CGBitmapContextCreateImage(context.0.as_ptr()).cast_mut())
                     .ok_or("Cannot create a test image")?,
             );
-            let actual = copy_sdr_screenshot(source.0.as_ptr())?;
+            let actual = copy_sdr_screenshot(source.0)?;
             assert_eq!(
                 actual.rgba, pixels,
                 "SDR screenshot must not flip vertically"
