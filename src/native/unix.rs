@@ -10,6 +10,21 @@ use std::{
 /// The caller never supplies paths or names from configuration or the network.
 pub(crate) fn library(names: &[&str]) -> Result<Library, String> {
     for &name in names {
+        if !matches!(
+            name,
+            "libX11.so.6"
+                | "libX11.so"
+                | "libXext.so.6"
+                | "libXext.so"
+                | "libXrandr.so.2"
+                | "libXrandr.so"
+                | "libwayland-client.so.0"
+                | "libwayland-client.so"
+        ) {
+            return Err("Unsupported native library".into());
+        }
+        // SAFETY: Only the enumerated desktop library sonames can reach this
+        // loader. Symbols never outlive their owning native library.
         if let Ok(lib) = unsafe { Library::new(name) } {
             return Ok(lib);
         }
