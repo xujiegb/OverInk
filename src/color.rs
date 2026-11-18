@@ -196,9 +196,9 @@ fn parse_hex(text: &str, space: Space) -> Result<InkColor, &'static str> {
     let mut rgb = [0; 3];
     for (i, component) in rgb.iter_mut().enumerate() {
         *component = if digits.len() == 3 {
-            u8::from_str_radix(&digits[i..i + 1], 16).unwrap() * 17
+            u8::from_str_radix(&digits[i..i + 1], 16).map_err(|_| "Use #RRGGBB or #RGB")? * 17
         } else {
-            u8::from_str_radix(&digits[i * 2..i * 2 + 2], 16).unwrap()
+            u8::from_str_radix(&digits[i * 2..i * 2 + 2], 16).map_err(|_| "Use #RRGGBB or #RGB")?
         };
     }
     Ok(InkColor::from_channels(rgb, space))
