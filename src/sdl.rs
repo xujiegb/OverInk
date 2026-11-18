@@ -17,7 +17,10 @@ use std::{
 struct SdlAllocation<T>(NonNull<T>);
 
 impl<T> SdlAllocation<T> {
-    fn from_native(raw: *mut T) -> Option<Self> {
+    /// # Safety
+    /// `raw` must be null or a uniquely owned allocation returned by an SDL
+    /// API that explicitly requires the caller to release it with SDL_free.
+    unsafe fn from_native(raw: *mut T) -> Option<Self> {
         NonNull::new(raw).map(Self)
     }
 
@@ -1095,7 +1098,10 @@ fn destroy_owned_surface(raw: *mut SDL_Surface) {
 struct OwnedSurface(*mut SDL_Surface);
 
 impl OwnedSurface {
-    fn from_native(raw: *mut SDL_Surface) -> Option<Self> {
+    /// # Safety
+    /// `raw` must be null or a uniquely owned SDL_Surface allocation.
+    /// Borrowed surfaces and pointers already owned elsewhere are forbidden.
+    unsafe fn from_native(raw: *mut SDL_Surface) -> Option<Self> {
         (!raw.is_null()).then(|| Self(raw))
     }
 
