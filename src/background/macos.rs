@@ -415,8 +415,8 @@ fn copy_screenshot(image: NonNull<c_void>) -> Result<Image, String> {
             return Err("ScreenCaptureKit did not return an FP16 HDR screenshot".into());
         }
         let name = CGImageGetColorSpace(image).and_then(|space| CGColorSpaceGetName(space));
-        let expected = kCGColorSpaceExtendedLinearSRGB
-            .ok_or("Extended linear sRGB is unavailable")?;
+        let expected =
+            kCGColorSpaceExtendedLinearSRGB.ok_or("Extended linear sRGB is unavailable")?;
         if !name.is_some_and(|name| CFEqual(name, expected) != 0) {
             return Err("The HDR screenshot did not use extended linear sRGB".into());
         }
