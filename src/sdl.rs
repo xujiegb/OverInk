@@ -603,8 +603,9 @@ enum WindowCommand<'a> {
     SyncInput(bool),
     ClearComposition,
     SyncAndPumpEvents,
-    #[cfg(target_os = "linux")]
     SetSize([i32; 2]),
+    SetPosition([i32; 2]),
+    SyncWindow,
     SetGeometry {
         x: i32,
         y: i32,
@@ -703,10 +704,13 @@ impl Window {
                     SDL_PumpEvents();
                     Ok(())
                 }
-                #[cfg(target_os = "linux")]
                 WindowCommand::SetSize([width, height]) => {
                     check(SDL_SetWindowSize(self.raw, width, height))
                 }
+                WindowCommand::SetPosition([x, y]) => {
+                    check(SDL_SetWindowPosition(self.raw, x, y))
+                }
+                WindowCommand::SyncWindow => check(SDL_SyncWindow(self.raw)),
                 WindowCommand::SetGeometry { x, y, w, h } => {
                     check(SDL_SetWindowSize(self.raw, w, h))?;
                     check(SDL_SetWindowPosition(self.raw, x, y))
@@ -960,51 +964,50 @@ impl Window {
         }
     }
     pub fn arrange_toolbar(&self, expanded: bool, on_display: Option<u32>) -> Result<(), String> {
-        unsafe {
-            let units = self.ui_scale();
-            let width = crate::toolbar::WIDTH
-                + if expanded {
-                    crate::toolbar::PANEL_WIDTH
-                } else {
-                    0.
-                };
-            let (mut w, mut h) = (
-                (width * units).round() as i32,
-                (crate::toolbar::HEIGHT * units).round() as i32,
-            );
-            let mut bounds = SDL_Rect::default();
-            let display = on_display.or_else(|| self.display_id());
-            let bounded = display
-                .is_some_and(|id| SDL_GetDisplayUsableBounds(SDL_DisplayID(id), &mut bounds));
-            if bounded {
-                w = w.min((bounds.w - 16).max(1));
-                h = h.min((bounds.h - 16).max(1));
-            }
-            check(SDL_SetWindowSize(self.raw, w, h))?;
-            let driver = driver();
-            if bounded && driver != "wayland" {
-                let (mut current_x, mut current_y) = (0, 0);
-                let positioned = SDL_GetWindowPosition(self.raw, &mut current_x, &mut current_y);
-                let (x, y) = if on_display.is_some() || !positioned {
-                    (
-                        bounds.x + if driver == "x11" { 0 } else { 8 },
-                        bounds.y + (bounds.h - h) / 2,
-                    )
-                } else {
-                    (current_x, current_y)
-                };
-                let x = x.clamp(bounds.x, bounds.x + (bounds.w - w).max(0));
-                let y = y.clamp(bounds.y, bounds.y + (bounds.h - h).max(0));
-                if !positioned || (x, y) != (current_x, current_y) {
-                    check(SDL_SetWindowPosition(self.raw, x, y))?;
-                }
-                // X11 reports the actual geometry through ConfigureNotify.
-                if driver != "x11" {
-                    check(SDL_SyncWindow(self.raw))?;
-                }
-            }
-            Ok(())
+        let units = self.ui_scale();
+        let width = crate::toolbar::WIDTH
+            + if expanded {
+                crate::toolbar::PANEL_WIDTH
+            } else {
+                0.
+            };
+        let (mut w, mut h) = (
+            (width * units).round() as i32,
+            (crate::toolbar::HEIGHT * units).round() as i32,
+        );
+        let bounds = on_display
+            .or_else(|| self.display_id())
+            .and_then(usable_display_bounds);
+        if let Some([_, _, available_width, available_height]) = bounds {
+            w = w.min((available_width - 16).max(1));
+            h = h.min((available_height - 16).max(1));
         }
+        self.run_command(WindowCommand::SetSize([w, h]))?;
+        let video = driver();
+        if let Some([left, top, available_width, available_height]) =
+            bounds.filter(|_| video != "wayland")
+        {
+            let current = self.position().ok();
+            let [current_x, current_y] = current.unwrap_or([0, 0]);
+            let (x, y) = if on_display.is_some() || current.is_none() {
+                (
+                    left + if video == "x11" { 0 } else { 8 },
+                    top + (available_height - h) / 2,
+                )
+            } else {
+                (current_x, current_y)
+            };
+            let x = x.clamp(left, left + (available_width - w).max(0));
+            let y = y.clamp(top, top + (available_height - h).max(0));
+            if current.is_none() || (x, y) != (current_x, current_y) {
+                self.run_command(WindowCommand::SetPosition([x, y]))?;
+            }
+            // X11 reports the actual geometry through ConfigureNotify.
+            if video != "x11" {
+                self.run_command(WindowCommand::SyncWindow)?;
+            }
+        }
+        Ok(())
     }
     /// Maintain an SDL Wayland transient parent only when it actually changes.
     pub fn set_parent(&self, parent: Option<&Window>) -> Result<(), String> {
