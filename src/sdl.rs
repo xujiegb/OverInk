@@ -949,7 +949,7 @@ extern "C" fn toolbar_hit_test(
 }
 
 pub struct Window {
-    pub raw: *mut SDL_Window,
+    pub raw: NonNull<SDL_Window>,
     pub id: SDL_WindowID,
 }
 impl Window {
@@ -960,16 +960,16 @@ impl Window {
         // number from the window's native properties or its display ID.
         unsafe {
             match query {
-                WindowNumberQuery::DisplayId => SDL_GetDisplayForWindow(self.raw).0 as i64,
+                WindowNumberQuery::DisplayId => SDL_GetDisplayForWindow(self.raw.as_ptr()).0 as i64,
                 #[cfg(target_os = "macos")]
                 WindowNumberQuery::CocoaMetalViewTag => SDL_GetNumberProperty(
-                    SDL_GetWindowProperties(self.raw),
+                    SDL_GetWindowProperties(self.raw.as_ptr()),
                     SDL_PROP_WINDOW_COCOA_METAL_VIEW_TAG_NUMBER,
                     0,
                 ),
                 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                 WindowNumberQuery::X11Window => SDL_GetNumberProperty(
-                    SDL_GetWindowProperties(self.raw),
+                    SDL_GetWindowProperties(self.raw.as_ptr()),
                     SDL_PROP_WINDOW_X11_WINDOW_NUMBER,
                     0,
                 ),
@@ -982,7 +982,7 @@ impl Window {
         if !native_is_main_thread() {
             return Err("SDL window position query requires the main thread".into());
         }
-        let window = NonNull::new(self.raw).ok_or("SDL window is unavailable")?;
+        let window = self.raw;
         match query {
             WindowCoordinateQuery::Position => {
                 let (mut x, mut y) = (0, 0);
@@ -1012,21 +1012,21 @@ impl Window {
         // Each branch reads only scalar flags or boolean SDL properties.
         unsafe {
             match query {
-                WindowBooleanQuery::TextInputActive => SDL_TextInputActive(self.raw),
+                WindowBooleanQuery::TextInputActive => SDL_TextInputActive(self.raw.as_ptr()),
                 WindowBooleanQuery::InputFocused => {
-                    SDL_GetWindowFlags(self.raw) & SDL_WINDOW_INPUT_FOCUS != 0
+                    SDL_GetWindowFlags(self.raw.as_ptr()) & SDL_WINDOW_INPUT_FOCUS != 0
                 }
-                WindowBooleanQuery::Hidden => SDL_GetWindowFlags(self.raw) & SDL_WINDOW_HIDDEN != 0,
+                WindowBooleanQuery::Hidden => SDL_GetWindowFlags(self.raw.as_ptr()) & SDL_WINDOW_HIDDEN != 0,
                 WindowBooleanQuery::Transparent => {
-                    SDL_GetWindowFlags(self.raw) & SDL_WINDOW_TRANSPARENT != 0
+                    SDL_GetWindowFlags(self.raw.as_ptr()) & SDL_WINDOW_TRANSPARENT != 0
                 }
                 WindowBooleanQuery::HdrEnabled => {
                     SDL_GetBooleanProperty(
-                        SDL_GetWindowProperties(self.raw),
+                        SDL_GetWindowProperties(self.raw.as_ptr()),
                         SDL_PROP_WINDOW_HDR_ENABLED_BOOLEAN,
                         false,
                     ) || {
-                        let display = SDL_GetDisplayForWindow(self.raw);
+                        let display = SDL_GetDisplayForWindow(self.raw.as_ptr());
                         display.0 != 0
                             && SDL_GetBooleanProperty(
                                 SDL_GetDisplayProperties(display),
@@ -1046,12 +1046,12 @@ impl Window {
         unsafe {
             match query {
                 WindowFloatQuery::SdrWhiteLevel => SDL_GetFloatProperty(
-                    SDL_GetWindowProperties(self.raw),
+                    SDL_GetWindowProperties(self.raw.as_ptr()),
                     SDL_PROP_WINDOW_SDR_WHITE_LEVEL_FLOAT,
                     1.,
                 ),
-                WindowFloatQuery::DisplayScale => SDL_GetWindowDisplayScale(self.raw),
-                WindowFloatQuery::PixelDensity => SDL_GetWindowPixelDensity(self.raw),
+                WindowFloatQuery::DisplayScale => SDL_GetWindowDisplayScale(self.raw.as_ptr()),
+                WindowFloatQuery::PixelDensity => SDL_GetWindowPixelDensity(self.raw.as_ptr()),
             }
         }
     }
@@ -1065,54 +1065,54 @@ impl Window {
         unsafe {
             match command {
                 WindowCommand::InputArea(area) => {
-                    SDL_SetTextInputArea(self.raw, area, 0);
+                    SDL_SetTextInputArea(self.raw.as_ptr(), area, 0);
                     Ok(())
                 }
                 WindowCommand::SyncInput(enabled) => {
-                    if enabled != SDL_TextInputActive(self.raw) {
+                    if enabled != SDL_TextInputActive(self.raw.as_ptr()) {
                         if enabled {
-                            SDL_StartTextInput(self.raw);
+                            SDL_StartTextInput(self.raw.as_ptr());
                         } else {
-                            SDL_StopTextInput(self.raw);
+                            SDL_StopTextInput(self.raw.as_ptr());
                         }
                     }
                     Ok(())
                 }
                 WindowCommand::ClearComposition => {
-                    SDL_ClearComposition(self.raw);
+                    SDL_ClearComposition(self.raw.as_ptr());
                     Ok(())
                 }
                 WindowCommand::SyncAndPumpEvents => {
-                    SDL_SyncWindow(self.raw);
+                    SDL_SyncWindow(self.raw.as_ptr());
                     SDL_PumpEvents();
                     Ok(())
                 }
                 WindowCommand::SetSize([width, height]) => {
-                    check(SDL_SetWindowSize(self.raw, width, height))
+                    check(SDL_SetWindowSize(self.raw.as_ptr(), width, height))
                 }
-                WindowCommand::SetPosition([x, y]) => check(SDL_SetWindowPosition(self.raw, x, y)),
+                WindowCommand::SetPosition([x, y]) => check(SDL_SetWindowPosition(self.raw.as_ptr(), x, y)),
                 WindowCommand::SyncWindow(clear_error) => {
                     if clear_error {
                         SDL_ClearError();
                     }
-                    check(SDL_SyncWindow(self.raw))
+                    check(SDL_SyncWindow(self.raw.as_ptr()))
                 }
-                WindowCommand::Maximize => check(SDL_MaximizeWindow(self.raw)),
+                WindowCommand::Maximize => check(SDL_MaximizeWindow(self.raw.as_ptr())),
                 WindowCommand::CenterOnDisplay(id) => {
                     let center = SDL_WINDOWPOS_CENTERED_DISPLAY(SDL_DisplayID(id));
-                    check(SDL_SetWindowPosition(self.raw, center, center))
+                    check(SDL_SetWindowPosition(self.raw.as_ptr(), center, center))
                 }
                 WindowCommand::SetGeometry { x, y, w, h } => {
-                    check(SDL_SetWindowSize(self.raw, w, h))?;
-                    check(SDL_SetWindowPosition(self.raw, x, y))
+                    check(SDL_SetWindowSize(self.raw.as_ptr(), w, h))?;
+                    check(SDL_SetWindowPosition(self.raw.as_ptr(), x, y))
                 }
                 WindowCommand::AlwaysOnTop(enabled) => {
-                    let _ = SDL_SetWindowAlwaysOnTop(self.raw, enabled);
+                    let _ = SDL_SetWindowAlwaysOnTop(self.raw.as_ptr(), enabled);
                     Ok(())
                 }
                 WindowCommand::RaiseIfCurrent => {
                     let window = SDL_GetWindowFromID(self.id);
-                    if !window.is_null() && window == self.raw {
+                    if !window.is_null() && window == self.raw.as_ptr() {
                         SDL_RaiseWindow(window);
                     }
                     Ok(())
@@ -1120,22 +1120,22 @@ impl Window {
                 WindowCommand::Show(show) => {
                     SDL_ClearError();
                     check(if show {
-                        SDL_ShowWindow(self.raw)
+                        SDL_ShowWindow(self.raw.as_ptr())
                     } else {
-                        SDL_HideWindow(self.raw)
+                        SDL_HideWindow(self.raw.as_ptr())
                     })
                 }
                 WindowCommand::SetParent(parent) => {
-                    let raw = parent.map_or(ptr::null_mut(), |window| window.raw);
-                    if SDL_GetWindowParent(self.raw) == raw {
+                    let raw = parent.map_or(ptr::null_mut(), |window| window.raw.as_ptr());
+                    if SDL_GetWindowParent(self.raw.as_ptr()) == raw {
                         return Ok(());
                     }
-                    check(SDL_SetWindowParent(self.raw, raw))
+                    check(SDL_SetWindowParent(self.raw.as_ptr(), raw))
                 }
                 WindowCommand::ToolbarSetup([width, height], pixels) => {
-                    SDL_SetWindowResizable(self.raw, false);
-                    if SDL_SetWindowHitTest(self.raw, Some(toolbar_hit_test), ptr::null_mut()) {
-                        SDL_SetWindowBordered(self.raw, false);
+                    SDL_SetWindowResizable(self.raw.as_ptr(), false);
+                    if SDL_SetWindowHitTest(self.raw.as_ptr(), Some(toolbar_hit_test), ptr::null_mut()) {
+                        SDL_SetWindowBordered(self.raw.as_ptr(), false);
                     }
                     // The pixel slice remains mutably borrowed until the
                     // surface has been released by the OwnedSurface guard.
@@ -1155,14 +1155,14 @@ impl Window {
                         pitch,
                     );
                     if let Some(surface) = NonNull::new(surface).map(OwnedSurface) {
-                        SDL_SetWindowIcon(self.raw, surface.as_non_null().as_ptr());
+                        SDL_SetWindowIcon(self.raw.as_ptr(), surface.as_non_null().as_ptr());
                     }
                     Ok(())
                 }
                 #[cfg(not(target_os = "windows"))]
                 WindowCommand::ShapeRegions(size, opaque_regions) => {
                     let Some(regions) = opaque_regions else {
-                        return check(SDL_SetWindowShape(self.raw, ptr::null_mut()));
+                        return check(SDL_SetWindowShape(self.raw.as_ptr(), ptr::null_mut()));
                     };
                     let surface = OwnedSurface(
                         NonNull::new(SDL_CreateSurface(size[0], size[1], SDL_PIXELFORMAT_RGBA32))
@@ -1184,7 +1184,7 @@ impl Window {
                             opaque,
                         ))?;
                     }
-                    check(SDL_SetWindowShape(self.raw, surface.as_non_null().as_ptr()))
+                    check(SDL_SetWindowShape(self.raw.as_ptr(), surface.as_non_null().as_ptr()))
                 }
             }
         }
@@ -1276,7 +1276,7 @@ impl Window {
                     SDL_CreateWindow(title.as_ptr(), *w, *h, flags)
                 }
                 WindowCreation::Tooltip(parent, [x, y, w, h]) => SDL_CreatePopupWindow(
-                    parent.raw,
+                    parent.raw.as_ptr(),
                     *x,
                     *y,
                     *w,
@@ -1287,21 +1287,21 @@ impl Window {
                         | SDL_WINDOW_NOT_FOCUSABLE,
                 ),
             };
-            if raw.is_null() {
+            let raw = NonNull::new(raw).ok_or_else(|| {
                 let detail = error();
-                return Err(match kind {
+                match kind {
                     WindowCreation::Main(title, ..) => format!(
                         "Creating {} on {} failed ({detail})",
                         title.to_string_lossy(),
                         driver()
                     ),
                     WindowCreation::Tooltip(..) => detail,
-                });
-            }
-            let id = SDL_GetWindowID(raw);
+                }
+            })?;
+            let id = SDL_GetWindowID(raw.as_ptr());
             if id.0 == 0 {
                 let message = error();
-                SDL_DestroyWindow(raw);
+                SDL_DestroyWindow(raw.as_ptr());
                 return Err(format!("SDL did not assign a window ID: {message}"));
             }
             Ok(Self { raw, id })
@@ -1322,7 +1322,7 @@ impl Window {
         if !native_is_main_thread() {
             return None;
         }
-        let window = NonNull::new(self.raw)?;
+        let window = self.raw;
         let (mut width, mut height) = (0, 0);
         let ok = if in_pixels {
             native_window_size_in_pixels(window, &mut width, &mut height)
@@ -1452,7 +1452,7 @@ impl Window {
         let key = property.key()?;
         unsafe {
             NonNull::new(SDL_GetPointerProperty(
-                SDL_GetWindowProperties(self.raw),
+                SDL_GetWindowProperties(self.raw.as_ptr()),
                 key.as_ptr(),
                 ptr::null_mut(),
             ))
@@ -1513,7 +1513,7 @@ impl Window {
         unsafe {
             let mut size = 0;
             let Some(profile) =
-                NonNull::new(SDL_GetWindowICCProfile(self.raw, &mut size)).map(SdlAllocation)
+                NonNull::new(SDL_GetWindowICCProfile(self.raw.as_ptr(), &mut size)).map(SdlAllocation)
             else {
                 // A missing ICC profile is normal; avoid leaving a stale SDL error.
                 SDL_ClearError();
@@ -1580,8 +1580,8 @@ impl Drop for Window {
         // Destroying an SDL parent also destroys its popup descendants.
         // Never dereference a popup whose parent has already been dropped.
         unsafe {
-            if !self.raw.is_null() && SDL_GetWindowFromID(self.id) == self.raw {
-                SDL_DestroyWindow(self.raw);
+            if SDL_GetWindowFromID(self.id) == self.raw.as_ptr() {
+                SDL_DestroyWindow(self.raw.as_ptr());
             }
         }
     }
@@ -2238,7 +2238,7 @@ impl Renderer {
             if !SDL_SetPointerProperty(
                 props.id(),
                 SDL_PROP_RENDERER_CREATE_WINDOW_POINTER,
-                window.raw.cast(),
+                window.raw.as_ptr().cast(),
             ) {
                 let message = error();
                 return Err(message);
@@ -2253,7 +2253,7 @@ impl Renderer {
             let mut raw = ptr::null_mut();
             // SDL's transparent Win32 swap chain uses the DXGI bitblt model.
             // Submit sRGB ink to that path so DWM composites it as SDR.
-            let transparent = SDL_GetWindowFlags(window.raw) & SDL_WINDOW_TRANSPARENT != 0;
+            let transparent = SDL_GetWindowFlags(window.raw.as_ptr()) & SDL_WINDOW_TRANSPARENT != 0;
             let extended_output =
                 cfg!(target_os = "macos") || (cfg!(target_os = "windows") && !transparent);
             if !force_sdr && extended_output {
