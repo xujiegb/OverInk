@@ -161,16 +161,16 @@ mod x11 {
                 return false;
             };
             let query = lib.get::<unsafe extern "C" fn(
-                *mut c_void,
+                NonNull<c_void>,
                 *const c_char,
-                *mut c_int,
-                *mut c_int,
-                *mut c_int,
+                &mut c_int,
+                &mut c_int,
+                &mut c_int,
             ) -> c_int>(b"XQueryExtension\0");
             let (mut opcode, mut event, mut error) = (0, 0, 0);
             query.is_ok_and(|query| {
                 query(
-                    display.as_ptr(),
+                    display.as_non_null(),
                     c"XWAYLAND".as_ptr(),
                     &mut opcode,
                     &mut event,
@@ -190,21 +190,21 @@ mod x11 {
             let id = window.x11_window_number();
             let geometry: Symbol<
                 unsafe extern "C" fn(
-                    *mut c_void,
+                    NonNull<c_void>,
                     c_ulong,
-                    *mut c_ulong,
-                    *mut c_int,
-                    *mut c_int,
-                    *mut u32,
-                    *mut u32,
-                    *mut u32,
-                    *mut u32,
+                    &mut c_ulong,
+                    &mut c_int,
+                    &mut c_int,
+                    &mut u32,
+                    &mut u32,
+                    &mut u32,
+                    &mut u32,
                 ) -> c_int,
             > = lib.get(b"XGetGeometry\0").map_err(|e| e.to_string())?;
             let (mut root, mut x, mut y, mut width, mut height, mut border, mut depth) =
                 (0, 0, 0, 0, 0, 0, 0);
             if geometry(
-                d.as_ptr(),
+                d.as_non_null(),
                 id,
                 &mut root,
                 &mut x,
@@ -219,21 +219,21 @@ mod x11 {
             }
             let translate: Symbol<
                 unsafe extern "C" fn(
-                    *mut c_void,
+                    NonNull<c_void>,
                     c_ulong,
                     c_ulong,
                     c_int,
                     c_int,
-                    *mut c_int,
-                    *mut c_int,
-                    *mut c_ulong,
+                    &mut c_int,
+                    &mut c_int,
+                    &mut c_ulong,
                 ) -> c_int,
             > = lib
                 .get(b"XTranslateCoordinates\0")
                 .map_err(|e| e.to_string())?;
             let [px, py] = local_pixels(window, local)?;
             let mut child = 0;
-            if translate(d.as_ptr(), id, root, px, py, &mut x, &mut y, &mut child) == 0 {
+            if translate(d.as_non_null(), id, root, px, py, &mut x, &mut y, &mut child) == 0 {
                 return Err("Cannot convert the selected screen coordinate".into());
             }
             Ok(ScreenPoint { x, y, root })
@@ -261,7 +261,7 @@ mod x11 {
     /// XDestroyImage function. Every early return now releases the XImage.
     struct OwnedImage<'lib> {
         raw: NonNull<Image>,
-        destroy: Symbol<'lib, unsafe extern "C" fn(*mut Image) -> c_int>,
+        destroy: Symbol<'lib, unsafe extern "C" fn(NonNull<Image>) -> c_int>,
     }
 
     impl<'lib> OwnedImage<'lib> {
@@ -271,7 +271,7 @@ mod x11 {
         /// The caller must keep the X11 library loaded through the guard.
         unsafe fn new(
             raw: Option<NonNull<Image>>,
-            destroy: Symbol<'lib, unsafe extern "C" fn(*mut Image) -> c_int>,
+            destroy: Symbol<'lib, unsafe extern "C" fn(NonNull<Image>) -> c_int>,
             message: &'static str,
         ) -> Result<Self, String> {
             let raw = raw.ok_or(message)?;
@@ -284,7 +284,7 @@ mod x11 {
             // SAFETY: This non-null XImage is owned exclusively by the guard.
             // The borrowed Symbol also keeps the X11 library loaded.
             unsafe {
-                (self.destroy)(self.raw.as_ptr());
+                (self.destroy)(self.raw);
             }
         }
     }
@@ -315,15 +315,15 @@ mod x11 {
             let display = display(window)?;
             let geometry: Symbol<
                 unsafe extern "C" fn(
-                    *mut c_void,
+                    NonNull<c_void>,
                     c_ulong,
-                    *mut c_ulong,
-                    *mut c_int,
-                    *mut c_int,
-                    *mut u32,
-                    *mut u32,
-                    *mut u32,
-                    *mut u32,
+                    &mut c_ulong,
+                    &mut c_int,
+                    &mut c_int,
+                    &mut u32,
+                    &mut u32,
+                    &mut u32,
+                    &mut u32,
                 ) -> c_int,
             > = lib.get(b"XGetGeometry\0").map_err(|e| e.to_string())?;
             let (mut returned_root, mut rx, mut ry, mut rw, mut rh, mut border, mut depth) =
@@ -348,7 +348,7 @@ mod x11 {
             }
             let get: Symbol<
                 unsafe extern "C" fn(
-                    *mut c_void,
+                    NonNull<c_void>,
                     c_ulong,
                     c_int,
                     c_int,
@@ -356,15 +356,15 @@ mod x11 {
                     u32,
                     c_ulong,
                     c_int,
-                ) -> *mut Image,
+                ) -> Option<NonNull<Image>>,
             > = lib.get(b"XGetImage\0").map_err(|e| e.to_string())?;
-            let pixel: Symbol<unsafe extern "C" fn(*mut Image, c_int, c_int) -> c_ulong> =
+            let pixel: Symbol<unsafe extern "C" fn(NonNull<Image>, c_int, c_int) -> c_ulong> =
                 lib.get(b"XGetPixel\0").map_err(|e| e.to_string())?;
-            let destroy: Symbol<unsafe extern "C" fn(*mut Image) -> c_int> =
+            let destroy: Symbol<unsafe extern "C" fn(NonNull<Image>) -> c_int> =
                 lib.get(b"XDestroyImage\0").map_err(|e| e.to_string())?;
             let image = OwnedImage::new(
-                NonNull::new(get(
-                    display.as_ptr(),
+                get(
+                    display.as_non_null(),
                     root,
                     x,
                     y,
@@ -372,7 +372,7 @@ mod x11 {
                     height as u32,
                     c_ulong::MAX,
                     2,
-                )),
+                ),
                 destroy,
                 image_error,
             )?;
@@ -394,7 +394,7 @@ mod x11 {
             }
             for y in 0..height {
                 for x in 0..width {
-                    consume(x, y, pixel(image.raw.as_ptr(), x, y), masks)?;
+                    consume(x, y, pixel(image.raw, x, y), masks)?;
                 }
             }
             Ok(())
