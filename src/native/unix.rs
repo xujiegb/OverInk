@@ -326,8 +326,17 @@ impl Wayland {
             } else {
                 None
             };
-            let region_ptr = region.as_ref().map_or(ptr::null_mut(), |region| region.as_ptr());
-            (self.marshal)(surface, 5, ptr::null(), (self.version)(surface), 0, region_ptr); // wl_surface.set_input_region
+            let region_ptr = region
+                .as_ref()
+                .map_or(ptr::null_mut(), |region| region.as_ptr());
+            (self.marshal)(
+                surface,
+                5,
+                ptr::null(),
+                (self.version)(surface),
+                0,
+                region_ptr,
+            ); // wl_surface.set_input_region
             (self.marshal)(surface, 6, ptr::null(), (self.version)(surface), 0); // wl_surface.commit
             // The region is destroyed through RAII, even if a Rust unwind
             // occurs between creation and the surface commit.
