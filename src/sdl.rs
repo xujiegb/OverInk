@@ -1017,7 +1017,9 @@ impl Window {
                 WindowBooleanQuery::InputFocused => {
                     SDL_GetWindowFlags(self.raw.as_ptr()) & SDL_WINDOW_INPUT_FOCUS != 0
                 }
-                WindowBooleanQuery::Hidden => SDL_GetWindowFlags(self.raw.as_ptr()) & SDL_WINDOW_HIDDEN != 0,
+                WindowBooleanQuery::Hidden => {
+                    SDL_GetWindowFlags(self.raw.as_ptr()) & SDL_WINDOW_HIDDEN != 0
+                }
                 WindowBooleanQuery::Transparent => {
                     SDL_GetWindowFlags(self.raw.as_ptr()) & SDL_WINDOW_TRANSPARENT != 0
                 }
@@ -1091,7 +1093,9 @@ impl Window {
                 WindowCommand::SetSize([width, height]) => {
                     check(SDL_SetWindowSize(self.raw.as_ptr(), width, height))
                 }
-                WindowCommand::SetPosition([x, y]) => check(SDL_SetWindowPosition(self.raw.as_ptr(), x, y)),
+                WindowCommand::SetPosition([x, y]) => {
+                    check(SDL_SetWindowPosition(self.raw.as_ptr(), x, y))
+                }
                 WindowCommand::SyncWindow(clear_error) => {
                     if clear_error {
                         SDL_ClearError();
@@ -1135,7 +1139,11 @@ impl Window {
                 }
                 WindowCommand::ToolbarSetup([width, height], pixels) => {
                     SDL_SetWindowResizable(self.raw.as_ptr(), false);
-                    if SDL_SetWindowHitTest(self.raw.as_ptr(), Some(toolbar_hit_test), ptr::null_mut()) {
+                    if SDL_SetWindowHitTest(
+                        self.raw.as_ptr(),
+                        Some(toolbar_hit_test),
+                        ptr::null_mut(),
+                    ) {
                         SDL_SetWindowBordered(self.raw.as_ptr(), false);
                     }
                     // The pixel slice remains mutably borrowed until the
@@ -1185,7 +1193,10 @@ impl Window {
                             opaque,
                         ))?;
                     }
-                    check(SDL_SetWindowShape(self.raw.as_ptr(), surface.as_non_null().as_ptr()))
+                    check(SDL_SetWindowShape(
+                        self.raw.as_ptr(),
+                        surface.as_non_null().as_ptr(),
+                    ))
                 }
             }
         }
@@ -1513,8 +1524,8 @@ impl Window {
     pub fn icc_profile(&self) -> Option<Vec<u8>> {
         unsafe {
             let mut size = 0;
-            let Some(profile) =
-                NonNull::new(SDL_GetWindowICCProfile(self.raw.as_ptr(), &mut size)).map(SdlAllocation)
+            let Some(profile) = NonNull::new(SDL_GetWindowICCProfile(self.raw.as_ptr(), &mut size))
+                .map(SdlAllocation)
             else {
                 // A missing ICC profile is normal; avoid leaving a stale SDL error.
                 SDL_ClearError();
