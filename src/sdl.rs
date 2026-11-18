@@ -624,12 +624,7 @@ enum WindowCommand<'a> {
     SyncWindow(bool),
     Maximize,
     CenterOnDisplay(u32),
-    SetGeometry {
-        x: i32,
-        y: i32,
-        w: i32,
-        h: i32,
-    },
+    SetGeometry { x: i32, y: i32, w: i32, h: i32 },
     AlwaysOnTop(bool),
     RaiseIfCurrent,
     Show(bool),
@@ -725,9 +720,7 @@ impl Window {
                 WindowCommand::SetSize([width, height]) => {
                     check(SDL_SetWindowSize(self.raw, width, height))
                 }
-                WindowCommand::SetPosition([x, y]) => {
-                    check(SDL_SetWindowPosition(self.raw, x, y))
-                }
+                WindowCommand::SetPosition([x, y]) => check(SDL_SetWindowPosition(self.raw, x, y)),
                 WindowCommand::SyncWindow(clear_error) => {
                     if clear_error {
                         SDL_ClearError();
