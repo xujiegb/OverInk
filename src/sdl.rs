@@ -11,6 +11,20 @@ use std::{
     ptr::{self, NonNull},
 };
 
+// The generated sdl3-sys ABI conservatively marks every native function
+// unsafe. These three exact SDL functions take no pointers, borrow no memory
+// and transfer no resources. Rust 2024 supports declaring such foreign
+// functions safe, without exposing the declaration outside this adapter.
+// The signatures and calling convention match the SDL3 C declarations.
+unsafe extern "C" {
+    #[link_name = "SDL_GetModState"]
+    safe fn native_mod_state() -> SDL_Keymod;
+    #[link_name = "SDL_GetSystemTheme"]
+    safe fn native_system_theme() -> SDL_SystemTheme;
+    #[link_name = "SDL_DelayPrecise"]
+    safe fn native_delay_precise(nanoseconds: u64);
+}
+
 /// Known SDL window property keys, with no arbitrary raw C-string input.
 enum NativeWindowProperty {
     #[cfg(target_os = "windows")]
@@ -304,7 +318,7 @@ pub fn indirect_touch_device(device: SDL_TouchID) -> bool {
 
 /// Sleep with SDL's precise delay without exposing raw native calls to users.
 pub fn delay_precise(nanoseconds: u64) {
-    unsafe { SDL_DelayPrecise(nanoseconds) }
+    native_delay_precise(nanoseconds);
 }
 
 /// Validate SDL-provided array counts before forming slices over foreign
@@ -343,7 +357,7 @@ pub fn preferred_locales() -> Vec<(String, String)> {
 
 /// Query the operating system's theme through SDL.
 pub fn system_theme() -> SDL_SystemTheme {
-    unsafe { SDL_GetSystemTheme() }
+    native_system_theme()
 }
 
 /// Reserve a single SDL user event type, returning zero on failure.
@@ -420,7 +434,7 @@ pub fn mouse_wheel_event(event: &SDL_Event) -> Option<SDL_MouseWheelEvent> {
 
 /// Read keyboard modifiers without exposing the native SDL function.
 pub fn mod_state() -> SDL_Keymod {
-    unsafe { SDL_GetModState() }
+    native_mod_state()
 }
 
 /// Clipboard writes borrow a terminated Rust string; reads take ownership
