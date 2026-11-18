@@ -419,11 +419,11 @@ fn copy_screenshot(image: NonNull<c_void>) -> Result<Image, String> {
         let width = u32::try_from(CGImageGetWidth(image)).map_err(|_| "Capture is too large")?;
         let height = u32::try_from(CGImageGetHeight(image)).map_err(|_| "Capture is too large")?;
         let mut snapshot = Image::hdr_buffer(width, height)?;
-        let provider = CGImageGetDataProvider(image)
-            .ok_or("The HDR screenshot has no pixel data")?;
+        let provider =
+            CGImageGetDataProvider(image).ok_or("The HDR screenshot has no pixel data")?;
         let data = Data(CGDataProviderCopyData(provider).ok_or("Cannot read the HDR screenshot")?);
-        let len = usize::try_from(CFDataGetLength(data.0))
-            .map_err(|_| "Invalid screenshot data")?;
+        let len =
+            usize::try_from(CFDataGetLength(data.0)).map_err(|_| "Invalid screenshot data")?;
         let bytes = CFDataGetBytePtr(data.0).ok_or("The HDR screenshot has no pixel data")?;
         // CFData owns the initialized byte buffer until the row copy completes.
         let pixels = std::slice::from_raw_parts(bytes.as_ptr(), len);
@@ -445,8 +445,10 @@ fn copy_sdr_screenshot(image: NonNull<c_void>) -> Result<Image, String> {
             .ok_or("Invalid SDR screenshot row width")?;
         let srgb = NonNull::new(kCGColorSpaceSRGB.cast_mut())
             .ok_or("The sRGB screenshot color space is unavailable")?;
-        let space =
-            Data(CGColorSpaceCreateWithName(srgb).ok_or("Cannot create an sRGB screenshot color space")?);
+        let space = Data(
+            CGColorSpaceCreateWithName(srgb)
+                .ok_or("Cannot create an sRGB screenshot color space")?,
+        );
         // kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big is RGBA8.
         let buffer = NonNull::new(snapshot.rgba.as_mut_ptr().cast())
             .ok_or("Cannot obtain SDR screenshot pixel storage")?;
@@ -507,16 +509,16 @@ mod tests {
         unsafe {
             let srgb = NonNull::new(kCGColorSpaceSRGB.cast_mut())
                 .ok_or("The test sRGB color space is unavailable")?;
-            let color = Data(CGColorSpaceCreateWithName(srgb).ok_or("Cannot create a test color space")?);
+            let color =
+                Data(CGColorSpaceCreateWithName(srgb).ok_or("Cannot create a test color space")?);
             let buffer = NonNull::new(pixels.as_mut_ptr().cast())
                 .ok_or("Cannot obtain the test pixel buffer")?;
             let context = Data(
                 CGBitmapContextCreate(buffer, 1, 2, 8, 4, color.0, 0x4001)
                     .ok_or("Cannot create a test bitmap")?,
             );
-            let source = Data(
-                CGBitmapContextCreateImage(context.0).ok_or("Cannot create a test image")?,
-            );
+            let source =
+                Data(CGBitmapContextCreateImage(context.0).ok_or("Cannot create a test image")?);
             let actual = copy_sdr_screenshot(source.0)?;
             assert_eq!(
                 actual.rgba, pixels,
