@@ -63,10 +63,7 @@ enum PixelBuffer<'a> {
 impl Transform {
     fn create(input: &Profile, output: &Profile, layout: PixelLayout) -> Option<Self> {
         let (format, flags) = match layout {
-            PixelLayout::RgbFloat => (
-                cms::PixelFormat::RGB_FLT,
-                cms::FLAGS_BLACKPOINTCOMPENSATION,
-            ),
+            PixelLayout::RgbFloat => (cms::PixelFormat::RGB_FLT, cms::FLAGS_BLACKPOINTCOMPENSATION),
             #[cfg(any(target_os = "linux", target_os = "freebsd", test))]
             PixelLayout::Rgba8 => (
                 cms::PixelFormat::RGBA_8,
