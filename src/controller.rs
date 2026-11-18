@@ -63,13 +63,23 @@ impl Rect {
         let size = window.size();
         let pixels = window.pixel_size();
         let scale = [pixels[0] as f32 / size[0], pixels[1] as f32 / size[1]];
+        self.scaled(scale)
+    }
+
+    fn scaled(self, scale: [f32; 2]) -> Self {
+        // Window placement may approach the i32 limits. Calculate both
+        // endpoints without overflowing before narrowing to native pixels.
         let x = (self.x as f32 * scale[0]).floor() as i32;
         let y = (self.y as f32 * scale[1]).floor() as i32;
+        let right =
+            ((i64::from(self.x) + i64::from(self.w)) as f32 * scale[0]).ceil() as i32;
+        let bottom =
+            ((i64::from(self.y) + i64::from(self.h)) as f32 * scale[1]).ceil() as i32;
         Self {
             x,
             y,
-            w: ((self.x + self.w) as f32 * scale[0]).ceil() as i32 - x,
-            h: ((self.y + self.h) as f32 * scale[1]).ceil() as i32 - y,
+            w: right.saturating_sub(x),
+            h: bottom.saturating_sub(y),
         }
     }
     #[cfg(not(target_os = "windows"))]
@@ -251,6 +261,21 @@ mod tests {
             .clipped([0, 100]),
             None
         );
+    }
+
+    #[test]
+    fn extreme_pixel_rectangles_do_not_overflow_native_bounds() {
+        let rect = Rect {
+            x: i32::MAX - 8,
+            y: i32::MAX - 10,
+            w: 100,
+            h: 100,
+        };
+        let scaled = rect.scaled([1., 1.]);
+        assert_eq!(scaled.x, i32::MAX - 8);
+        assert_eq!(scaled.y, i32::MAX - 10);
+        assert_eq!(scaled.w, 8);
+        assert_eq!(scaled.h, 10);
     }
 
     #[test]
