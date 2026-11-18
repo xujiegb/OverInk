@@ -1788,7 +1788,7 @@ impl SnapshotTexture {
                     SDL_PROP_TEXTURE_CREATE_HEIGHT_NUMBER,
                     height as i64,
                 ))?;
-                    // A display snapshot is already mapped. Do not tone-map it again.
+                // A display snapshot is already mapped. Do not tone-map it again.
                 check(SDL_SetFloatProperty(
                     props.id(),
                     SDL_PROP_TEXTURE_CREATE_HDR_HEADROOM_FLOAT,
