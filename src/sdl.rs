@@ -1521,12 +1521,46 @@ impl<F: FnOnce()> Drop for RestoreOnDrop<F> {
     }
 }
 
+/// Closed set of SDL renderer commands; callers cannot supply native function
+/// pointers or arbitrary memory for the renderer to access.
+enum RenderCommand<'a> {
+    Clear([f32; 4]),
+    Clip(Option<&'a SDL_Rect>),
+    Scale([f32; 2]),
+    Flush,
+    Present,
+}
+
 pub struct Renderer {
     pub raw: *mut SDL_Renderer,
     pub extended: bool,
     pub name: String,
 }
 impl Renderer {
+    /// The only FFI dispatch for ordinary clear, clip, scale, flush and
+    /// presentation commands. Borrowed rectangles remain live through each
+    /// synchronous call; the renderer is owned by this adapter.
+    fn run_command(&self, command: RenderCommand<'_>) -> Result<(), String> {
+        // SAFETY: Renderer owns a live SDL_Renderer on SDL's main thread.
+        // Each command passes only initialized scalars or a borrowed SDL_Rect
+        // whose lifetime covers the synchronous native call.
+        unsafe {
+            match command {
+                RenderCommand::Clear([r, g, b, a]) => {
+                    check(SDL_SetRenderDrawColorFloat(self.raw, r, g, b, a))?;
+                    check(SDL_RenderClear(self.raw))
+                }
+                RenderCommand::Clip(clip) => check(SDL_SetRenderClipRect(
+                    self.raw,
+                    clip.map_or(ptr::null(), |rect| rect),
+                )),
+                RenderCommand::Scale([x, y]) => check(SDL_SetRenderScale(self.raw, x, y)),
+                RenderCommand::Flush => check(SDL_FlushRenderer(self.raw)),
+                RenderCommand::Present => check(SDL_RenderPresent(self.raw)),
+            }
+        }
+    }
+
     /// Release this renderer once, including when macOS recreates the Metal
     /// output. Drop uses the same path to avoid accidental double-destruction.
     fn destroy_native(&mut self) {
@@ -1661,11 +1695,8 @@ impl Renderer {
         self.clear(color)?;
         Ok(scale)
     }
-    pub fn clear(&self, [r, g, b, a]: [f32; 4]) -> Result<(), String> {
-        unsafe {
-            check(SDL_SetRenderDrawColorFloat(self.raw, r, g, b, a))?;
-            check(SDL_RenderClear(self.raw))
-        }
+    pub fn clear(&self, color: [f32; 4]) -> Result<(), String> {
+        self.run_command(RenderCommand::Clear(color))
     }
     pub fn with_target(
         &self,
@@ -1685,9 +1716,7 @@ impl Renderer {
         }
     }
     pub fn set_clip_rect(&self, clip: Option<&SDL_Rect>) {
-        unsafe {
-            SDL_SetRenderClipRect(self.raw, clip.map_or(ptr::null(), |rect| rect));
-        }
+        let _ = self.run_command(RenderCommand::Clip(clip));
     }
     /// Query the renderer's SDR reference white, keeping SDL properties internal.
     pub fn sdr_white_point(&self) -> f32 {
@@ -1713,17 +1742,12 @@ impl Renderer {
     }
 
     pub fn set_render_scale(&self, scale: [f32; 2]) -> Result<(), String> {
-        unsafe { check(SDL_SetRenderScale(self.raw, scale[0], scale[1])) }
+        self.run_command(RenderCommand::Scale(scale))
     }
 
     /// Set a clip region and return failures (unlike the UI's best-effort clip).
     pub fn try_set_clip_rect(&self, clip: Option<&SDL_Rect>) -> Result<(), String> {
-        unsafe {
-            check(SDL_SetRenderClipRect(
-                self.raw,
-                clip.map_or(ptr::null(), |rect| rect),
-            ))
-        }
+        self.run_command(RenderCommand::Clip(clip))
     }
 
     /// Temporarily replace SDL's color scale and restore it after drawing.
@@ -1773,7 +1797,7 @@ impl Renderer {
     }
 
     pub fn flush(&self) -> Result<(), String> {
-        unsafe { check(SDL_FlushRenderer(self.raw)) }
+        self.run_command(RenderCommand::Flush)
     }
 
     pub fn geometry(
@@ -1807,7 +1831,7 @@ impl Renderer {
         }
     }
     pub fn present(&self) -> Result<(), String> {
-        unsafe { check(SDL_RenderPresent(self.raw)) }
+        self.run_command(RenderCommand::Present)
     }
 }
 impl Drop for Renderer {
