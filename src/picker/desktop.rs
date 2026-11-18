@@ -288,7 +288,6 @@ mod x11 {
             }
             Ok(Self { raw, destroy })
         }
-
     }
 
     impl Drop for OwnedImage<'_> {
