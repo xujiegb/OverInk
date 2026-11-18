@@ -11,7 +11,7 @@ use objc2::{
 };
 use std::{
     ffi::{CStr, c_char, c_void},
-    ptr,
+    ptr::{self, NonNull},
     sync::{
         OnceLock,
         atomic::{AtomicBool, Ordering},
@@ -372,10 +372,12 @@ fn begin_screenshot(
     Ok(())
 }
 
-struct Data(*const c_void);
+struct Data(NonNull<c_void>);
 impl Drop for Data {
     fn drop(&mut self) {
-        unsafe { CFRelease(self.0) }
+        // SAFETY: Data exclusively owns a non-null Core Foundation object
+        // created by a +1 Copy/Create API and releases it exactly once.
+        unsafe { CFRelease(self.0.as_ptr()) }
     }
 }
 
@@ -409,14 +411,13 @@ fn copy_screenshot(image: *const c_void) -> Result<Image, String> {
         if provider.is_null() {
             return Err("The HDR screenshot has no pixel data".into());
         }
-        let data = CGDataProviderCopyData(provider);
-        if data.is_null() {
-            return Err("Cannot read the HDR screenshot".into());
-        }
-        let data = Data(data);
-        let len =
-            usize::try_from(CFDataGetLength(data.0)).map_err(|_| "Invalid screenshot data")?;
-        let bytes = CFDataGetBytePtr(data.0);
+        let data = Data(
+            NonNull::new(CGDataProviderCopyData(provider).cast_mut())
+                .ok_or("Cannot read the HDR screenshot")?,
+        );
+        let len = usize::try_from(CFDataGetLength(data.0.as_ptr()))
+            .map_err(|_| "Invalid screenshot data")?;
+        let bytes = CFDataGetBytePtr(data.0.as_ptr());
         if bytes.is_null() {
             return Err("The HDR screenshot has no pixel data".into());
         }
@@ -438,11 +439,10 @@ fn copy_sdr_screenshot(image: *const c_void) -> Result<Image, String> {
             .ok()
             .and_then(|width| width.checked_mul(4))
             .ok_or("Invalid SDR screenshot row width")?;
-        let space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-        if space.is_null() {
-            return Err("Cannot create an sRGB screenshot color space".into());
-        }
-        let space = Data(space);
+        let space = Data(
+            NonNull::new(CGColorSpaceCreateWithName(kCGColorSpaceSRGB).cast_mut())
+                .ok_or("Cannot create an sRGB screenshot color space")?,
+        );
         // kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big is RGBA8.
         let context = CGBitmapContextCreate(
             snapshot.rgba.as_mut_ptr().cast(),
@@ -450,18 +450,16 @@ fn copy_sdr_screenshot(image: *const c_void) -> Result<Image, String> {
             height as usize,
             8,
             stride,
-            space.0,
+            space.0.as_ptr(),
             0x4001,
         );
-        if context.is_null() {
-            return Err("Cannot create the SDR screenshot bitmap".into());
-        }
-        let context = Data(context);
+        let context =
+            Data(NonNull::new(context).ok_or("Cannot create the SDR screenshot bitmap")?);
         // The bitmap context stores top-to-bottom RGBA rows. The Core
         // Graphics user-space convention already maps the image into them.
         // Flipping the CTM here would invert the output scanlines.
         CGContextDrawImage(
-            context.0.cast_mut(),
+            context.0.as_ptr(),
             CGRect {
                 origin: Point { x: 0., y: 0. },
                 size: Size {
@@ -482,18 +480,20 @@ fn sdr_capture(bounds: [i32; 4], cancelled: &AtomicBool) -> CaptureResult {
     // macOS 11–13 fallback: capture directly in OverInk instead of spawning
     // /usr/sbin/screencapture, which could trigger a different TCC identity.
     let id = display_id(bounds)?;
-    let image = unsafe { CGDisplayCreateImage(id) };
-    if image.is_null() {
-        return Err(
-            "Core Graphics could not capture the display. Check Screen Recording permission."
-                .into(),
-        );
-    }
-    let image = Data(image);
+    let image = Data(
+        NonNull::new(
+            // SAFETY: Core Graphics returns a +1 retained CGImageRef or null,
+            // and Data takes ownership only of a non-null result.
+            unsafe { CGDisplayCreateImage(id) }.cast_mut(),
+        )
+        .ok_or(
+            "Core Graphics could not capture the display. Check Screen Recording permission.",
+        )?,
+    );
     if cancelled.load(Ordering::Relaxed) {
         return Ok(None);
     }
-    copy_sdr_screenshot(image.0).map(Some)
+    copy_sdr_screenshot(image.0.as_ptr()).map(Some)
 }
 
 #[cfg(test)]
@@ -501,25 +501,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sdr_conversion_preserves_top_and_bottom_rows() {
+    fn sdr_conversion_preserves_top_and_bottom_rows() -> Result<(), String> {
         // Two opaque rows in raw CGImage pixel order: red above blue.
         let mut pixels = [255, 0, 0, 255, 0, 0, 255, 255_u8];
+        // SAFETY: This test creates and owns bitmap contexts through the
+        // same +1 Core Graphics APIs as production capture.
         unsafe {
-            let color = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-            assert!(!color.is_null());
-            let color = Data(color);
-            let context =
-                CGBitmapContextCreate(pixels.as_mut_ptr().cast(), 1, 2, 8, 4, color.0, 0x4001);
-            assert!(!context.is_null());
-            let context = Data(context);
-            let source = CGBitmapContextCreateImage(context.0.cast_mut());
-            assert!(!source.is_null());
-            let source = Data(source);
-            let actual = copy_sdr_screenshot(source.0).unwrap();
+            let color = Data(
+                NonNull::new(CGColorSpaceCreateWithName(kCGColorSpaceSRGB).cast_mut())
+                    .ok_or("Cannot create a test color space")?,
+            );
+            let context = Data(
+                NonNull::new(CGBitmapContextCreate(
+                    pixels.as_mut_ptr().cast(),
+                    1,
+                    2,
+                    8,
+                    4,
+                    color.0.as_ptr(),
+                    0x4001,
+                ))
+                .ok_or("Cannot create a test bitmap")?,
+            );
+            let source = Data(
+                NonNull::new(CGBitmapContextCreateImage(context.0.as_ptr()).cast_mut())
+                    .ok_or("Cannot create a test image")?,
+            );
+            let actual = copy_sdr_screenshot(source.0.as_ptr())?;
             assert_eq!(
                 actual.rgba, pixels,
                 "SDR screenshot must not flip vertically"
             );
         }
+        Ok(())
     }
 }
