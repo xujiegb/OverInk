@@ -100,17 +100,15 @@ impl Passthrough {
             },
         };
 
-        let raw = window
+        let identity = window
             .win32_hwnd()
             .ok_or("No Win32 window handle")?
-            .as_non_null()
-            .as_ptr();
-        let identity = std::ptr::NonNull::new(raw).ok_or("No Win32 window handle")?;
+            .as_non_null();
         if self.applied == Some((identity, pass)) {
             return Ok(());
         }
         self.invalidate();
-        let hwnd = HWND(raw);
+        let hwnd = HWND(identity.as_ptr());
         // SAFETY: The HWND is borrowed from the live SDL window; the typed
         // windows bindings preserve the system ABI. Clearing last-error
         // distinguishes a valid zero style from an API failure.
@@ -166,13 +164,11 @@ impl Passthrough {
         // SAFETY: SDL owns the live NSWindow. The Cocoa selectors and Bool
         // return/argument types match the NSWindow methods being called.
         unsafe {
-            let ns = window
+            let identity = window
                 .cocoa_window()
                 .ok_or("No Cocoa window handle")?
-                .as_non_null()
-                .as_ptr();
-            let identity = std::ptr::NonNull::new(ns).ok_or("No Cocoa window handle")?;
-            let cocoa = ns.cast::<AnyObject>();
+                .as_non_null();
+            let cocoa = identity.as_ptr().cast::<AnyObject>();
             if self.applied != Some((identity, pass)) {
                 // SDL's Cocoa listener can reset ignoresMouseEvents when it
                 // handles motion for a transparent window. Disable that motion
