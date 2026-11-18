@@ -501,7 +501,11 @@ impl SystemCursor {
 impl Drop for SystemCursor {
     fn drop(&mut self) {
         unsafe {
-            SDL_SetCursor(SDL_GetDefaultCursor());
+            // A later cursor may have replaced this one before Drop, so only
+            // restore the default when we still own the active cursor.
+            if SDL_GetCursor() == self.0 {
+                SDL_SetCursor(SDL_GetDefaultCursor());
+            }
             SDL_DestroyCursor(self.0);
         }
     }
@@ -1382,7 +1386,10 @@ impl Drop for SnapshotTexture {
 }
 
 /// Owned SDL texture backing egui's font atlas and custom UI images.
-pub struct GuiTexture(*mut SDL_Texture);
+pub struct GuiTexture {
+    raw: *mut SDL_Texture,
+    dimensions: [i32; 2],
+}
 
 impl GuiTexture {
     pub fn new(renderer: &Renderer, width: usize, height: usize) -> Result<Self, String> {
@@ -1402,7 +1409,10 @@ impl GuiTexture {
             if raw.is_null() {
                 return Err(error());
             }
-            let texture = Self(raw);
+            let texture = Self {
+                raw,
+                dimensions: [w, h],
+            };
             check(SDL_SetTextureBlendMode(raw, SDL_BLENDMODE_BLEND))?;
             SDL_SetTextureScaleMode(raw, SDL_SCALEMODE_LINEAR);
             Ok(texture)
@@ -1427,9 +1437,32 @@ impl GuiTexture {
         if rgba.len() != bytes {
             return Err("egui texture pixel buffer size mismatch".into());
         }
+        let dimensions = [
+            i32::try_from(width).map_err(|_| "egui texture width exceeds i32")?,
+            i32::try_from(height).map_err(|_| "egui texture height exceeds i32")?,
+        ];
+        match rect {
+            None if dimensions != self.dimensions => {
+                return Err("egui full texture upload dimensions mismatch".into());
+            }
+            Some(area)
+                if area.x < 0
+                    || area.y < 0
+                    || area.w <= 0
+                    || area.h <= 0
+                    || [area.w, area.h] != dimensions
+                    || area.x.checked_add(area.w).is_none_or(|end| end > self.dimensions[0])
+                    || area.y.checked_add(area.h).is_none_or(|end| end > self.dimensions[1]) =>
+            {
+                return Err("egui partial texture upload is out of bounds".into());
+            }
+            _ => {}
+        }
+        // SAFETY: The validated upload covers exactly the specified SDL
+        // region, with a row stride matching its width and live RGBA bytes.
         unsafe {
             check(SDL_UpdateTexture(
-                self.0,
+                self.raw,
                 rect.map_or(ptr::null(), |area| area),
                 rgba.as_ptr().cast(),
                 pitch,
@@ -1443,13 +1476,13 @@ impl GuiTexture {
         vertices: &[SDL_Vertex],
         indices: &[u32],
     ) -> Result<(), String> {
-        renderer.geometry(self.0, vertices, indices)
+        renderer.geometry(self.raw, vertices, indices)
     }
 }
 
 impl Drop for GuiTexture {
     fn drop(&mut self) {
-        destroy_owned_texture(self.0);
+        destroy_owned_texture(self.raw);
     }
 }
 
