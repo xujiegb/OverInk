@@ -2556,14 +2556,19 @@ impl TestSurface {
         // TestRenderer takes ownership of that surface and drops its Renderer
         // first, including when SDL configuration fails during construction.
         unsafe {
-            let raw = NonNull::new(SDL_CreateSoftwareRenderer(self.surface.as_non_null().as_ptr()))
-                .ok_or_else(error)?;
+            let raw = NonNull::new(SDL_CreateSoftwareRenderer(
+                self.surface.as_non_null().as_ptr(),
+            ))
+            .ok_or_else(error)?;
             let renderer = Renderer {
                 raw: Some(raw),
                 extended: false,
                 name: "software".into(),
             };
-            check(SDL_SetRenderDrawBlendMode(raw.as_ptr(), SDL_BLENDMODE_BLEND))?;
+            check(SDL_SetRenderDrawBlendMode(
+                raw.as_ptr(),
+                SDL_BLENDMODE_BLEND,
+            ))?;
             Ok(TestRenderer {
                 renderer,
                 _surface: self,
