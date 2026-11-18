@@ -245,7 +245,7 @@ mod x11 {
         height: c_int,
         xoffset: c_int,
         format: c_int,
-        data: *mut c_char,
+        data: Option<NonNull<c_char>>,
         byte_order: c_int,
         bitmap_unit: c_int,
         bitmap_bit_order: c_int,
@@ -382,7 +382,7 @@ mod x11 {
             let header = image.raw.as_ref();
             if header.width != width
                 || header.height != height
-                || header.data.is_null()
+                || header.data.is_none()
                 || header.bytes_per_line <= 0
                 || header.bits_per_pixel <= 0
             {

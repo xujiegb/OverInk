@@ -46,6 +46,14 @@ unsafe extern "C" {
     // import is called only by OwnedProperties::drop on the live, unique ID.
     #[link_name = "SDL_DestroyProperties"]
     safe fn native_destroy_properties(props: SDL_PropertiesID);
+    // The only caller passes SDL's static, NUL-terminated Wayland hint
+    // name. NonNull uses the same pointer ABI as the native C parameter.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[link_name = "SDL_GetHintBoolean"]
+    safe fn native_get_hint_boolean(
+        name: NonNull<std::ffi::c_char>,
+        default_value: bool,
+    ) -> bool;
     #[link_name = "SDL_GetModState"]
     safe fn native_mod_state() -> SDL_Keymod;
     #[link_name = "SDL_GetSystemTheme"]
@@ -284,7 +292,8 @@ pub fn driver() -> String {
 /// Return the SDL Wayland display scaling hint without raw FFI at call sites.
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub fn wayland_scale_to_display_forced() -> bool {
-    unsafe { SDL_GetHintBoolean(SDL_HINT_VIDEO_WAYLAND_SCALE_TO_DISPLAY, false) }
+    NonNull::new(SDL_HINT_VIDEO_WAYLAND_SCALE_TO_DISPLAY.cast_mut())
+        .is_some_and(|name| native_get_hint_boolean(name, false))
 }
 
 /// Only these two display-bound queries cross into SDL.

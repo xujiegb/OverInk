@@ -819,14 +819,13 @@ fn write_screenshot(
         }
         Destination::File(path) => {
             begin_publish(cancelled).map_err(|_| SaveError::Cancelled)?;
-            output.persist_noclobber(&path).map_err(|error| {
-                if error.error.kind() == io::ErrorKind::AlreadyExists {
-                    SaveError::Exists(path.clone())
-                } else {
-                    SaveError::Failed(error.error.to_string())
+            match output.persist_noclobber(&path) {
+                Ok(_) => Ok(path),
+                Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {
+                    Err(SaveError::Exists(path))
                 }
-            })?;
-            Ok(path)
+                Err(error) => Err(SaveError::Failed(error.error.to_string())),
+            }
         }
         Destination::Replace(path) => {
             begin_publish(cancelled).map_err(|_| SaveError::Cancelled)?;
