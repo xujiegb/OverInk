@@ -494,10 +494,9 @@ fn sdr_capture(bounds: [i32; 4], cancelled: &AtomicBool) -> CaptureResult {
     // macOS 11–13 fallback: capture directly in OverInk instead of spawning
     // /usr/sbin/screencapture, which could trigger a different TCC identity.
     let id = display_id(bounds)?;
-    let image = Data(
-        CGDisplayCreateImage(id)
-            .ok_or("Core Graphics could not capture the display. Check Screen Recording permission.")?,
-    );
+    let image = Data(CGDisplayCreateImage(id).ok_or(
+        "Core Graphics could not capture the display. Check Screen Recording permission.",
+    )?);
     if cancelled.load(Ordering::Relaxed) {
         return Ok(None);
     }
