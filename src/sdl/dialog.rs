@@ -102,9 +102,9 @@ mod tests {
     use std::ptr;
 
     #[test]
-    fn delivers_a_callback_from_another_thread_once() {
+    fn delivers_a_callback_from_another_thread_once() -> Result<(), String> {
         let mut dialog = FileDialog::default();
-        let id = dialog.begin(DialogKind::ScreenshotFile).unwrap();
+        let id = dialog.begin(DialogKind::ScreenshotFile).ok_or("Cannot begin file dialog")?;
         assert!(dialog.begin(DialogKind::Font).is_none());
         assert!(dialog.poll().is_none());
 
@@ -113,25 +113,28 @@ mod tests {
             complete(id, || panic!("A duplicate callback must be ignored"));
         })
         .join()
-        .unwrap();
+        .map_err(|_| "File dialog callback thread panicked")?;
 
-        let (kind, result) = dialog.poll().unwrap();
+        let (kind, result) = dialog.poll().ok_or("Expected a file dialog result")?;
         assert!(matches!(kind, DialogKind::ScreenshotFile));
         assert_eq!(result, Ok(Some(PathBuf::from("截图.png"))));
         assert!(!dialog.pending());
         assert!(!callbacks().results.contains_key(&id));
         assert!(dialog.poll().is_none());
+        Ok(())
     }
 
     #[test]
-    fn drop_unregisters_a_request_without_a_callback() {
+    fn drop_unregisters_a_request_without_a_callback() -> Result<(), String> {
         let mut dialog = FileDialog::default();
-        let id = dialog.begin(DialogKind::Font).unwrap();
+        let id = dialog.begin(DialogKind::Font).ok_or("Cannot begin font dialog")?;
         drop(dialog);
         assert!(!callbacks().results.contains_key(&id));
 
         let mut next = FileDialog::default();
-        let next_id = next.begin(DialogKind::ScreenshotFolder).unwrap();
+        let next_id = next
+            .begin(DialogKind::ScreenshotFolder)
+            .ok_or("Cannot begin folder dialog")?;
         assert_ne!(id, next_id);
         complete(0, || panic!("Request ID zero is reserved"));
         complete(id, || panic!("A dropped request must be ignored"));
@@ -141,51 +144,58 @@ mod tests {
             next.poll(),
             Some((DialogKind::ScreenshotFolder, Ok(None)))
         ));
+        Ok(())
     }
 
     #[test]
-    fn native_callback_copies_selected_path() {
+    fn native_callback_copies_selected_path() -> Result<(), String> {
         let mut dialog = FileDialog::default();
-        let id = dialog.begin(DialogKind::ScreenshotFile).unwrap();
+        let id = dialog.begin(DialogKind::ScreenshotFile).ok_or("Cannot begin file dialog")?;
         let files = [c"sample.png".as_ptr(), ptr::null()];
         native::chosen(ptr::without_provenance_mut(id), files.as_ptr(), -1);
-        let (kind, result) = dialog.poll().unwrap();
+        let (kind, result) = dialog.poll().ok_or("Expected a file dialog result")?;
         assert!(matches!(kind, DialogKind::ScreenshotFile));
         assert_eq!(result, Ok(Some(PathBuf::from("sample.png"))));
+        Ok(())
     }
 
     #[test]
-    fn native_callback_cancellation_is_owned_and_consumed_once() {
+    fn native_callback_cancellation_is_owned_and_consumed_once() -> Result<(), String> {
         let mut dialog = FileDialog::default();
-        let id = dialog.begin(DialogKind::Font).unwrap();
+        let id = dialog.begin(DialogKind::Font).ok_or("Cannot begin font dialog")?;
         let list = [ptr::null()];
         native::chosen(ptr::without_provenance_mut(id), list.as_ptr(), -1);
         assert!(matches!(dialog.poll(), Some((DialogKind::Font, Ok(None)))));
         assert!(dialog.poll().is_none());
+        Ok(())
     }
 
     #[test]
-    fn native_callback_error_returns_a_result_not_a_pending_dialog() {
+    fn native_callback_error_returns_a_result_not_a_pending_dialog() -> Result<(), String> {
         let mut dialog = FileDialog::default();
-        let id = dialog.begin(DialogKind::ScreenshotFolder).unwrap();
+        let id = dialog
+            .begin(DialogKind::ScreenshotFolder)
+            .ok_or("Cannot begin folder dialog")?;
         native::chosen(ptr::without_provenance_mut(id), ptr::null(), -1);
         assert!(matches!(
             dialog.poll(),
             Some((DialogKind::ScreenshotFolder, Err(_)))
         ));
         assert!(!dialog.pending());
+        Ok(())
     }
 
     #[test]
-    fn handles_non_utf8_paths_with_platform_encoding() {
+    fn handles_non_utf8_paths_with_platform_encoding() -> Result<(), String> {
         let path = c"\xff";
         #[cfg(unix)]
         {
             use std::os::unix::ffi::OsStrExt as _;
-            let native = native::path_from_c(path).unwrap();
+            let native = native::path_from_c(path)?;
             assert_eq!(native.as_os_str().as_bytes(), path.to_bytes());
         }
         #[cfg(not(unix))]
         assert!(native::path_from_c(path).is_err());
+        Ok(())
     }
 }
