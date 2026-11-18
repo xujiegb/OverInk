@@ -548,10 +548,15 @@ impl App {
     }
 
     pub(super) fn pick_text_color(&mut self, color: InkColor) -> Option<InkColor> {
-        let target = self.text_pick_target()?;
-        let color = color.converted(target.item.color.space);
+        if !self.tool.is_text() || self.pass || self.hidden {
+            return None;
+        }
+        // An immediate color pick only needs the current color. Do not copy
+        // the full text box and committed draft as a delayed screen pick does.
+        let current = self.text_menu_item()?.color;
+        let color = color.converted(current.space);
         // Picking an already selected color is still a successful pick.
-        (target.item.color == color || self.recolor_text(color)).then_some(color)
+        (current == color || self.recolor_text(color)).then_some(color)
     }
 
     fn resize_text_font(&mut self, step: f32) {
