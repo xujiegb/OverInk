@@ -52,6 +52,7 @@ pub fn position(window: &Window, local: [f32; 2]) -> Result<ScreenPoint, String>
         window
             .win32_hwnd()
             .ok_or("No Win32 window handle")?
+            .as_non_null()
             .as_ptr(),
     );
     // SAFETY: SDL owns this live HWND and POINT is a writable Win32 value.
