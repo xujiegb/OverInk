@@ -798,7 +798,12 @@ mod tests {
             },
         )
         .ok_or("Sweep did not intersect the source stroke")
-        .map(|fragments| fragments.into_iter().map(|fragment| fragment.points).collect())
+        .map(|fragments| {
+            fragments
+                .into_iter()
+                .map(|fragment| fragment.points)
+                .collect()
+        })
     }
 
     #[test]
@@ -894,7 +899,10 @@ mod tests {
         let fragments = cut_stroke(sweep, &stroke).ok_or("No stroke fragments")?;
         assert_eq!(fragments.len(), 2);
         let left = fragments[0].points.last().ok_or("Missing left endpoint")?;
-        let right = fragments[1].points.first().ok_or("Missing right endpoint")?;
+        let right = fragments[1]
+            .points
+            .first()
+            .ok_or("Missing right endpoint")?;
         assert!(left.x < 45. && right.x > 55.);
         for point in [left, right] {
             assert!((point.pressure - (0.2 + 0.006 * point.x)).abs() < 1e-6);
