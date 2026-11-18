@@ -589,7 +589,12 @@ enum WindowCommand<'a> {
     SyncAndPumpEvents,
     #[cfg(target_os = "linux")]
     SetSize([i32; 2]),
-    SetGeometry { x: i32, y: i32, w: i32, h: i32 },
+    SetGeometry {
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+    },
     AlwaysOnTop(bool),
     RaiseIfCurrent,
 }
