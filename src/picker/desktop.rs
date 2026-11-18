@@ -90,10 +90,11 @@ mod win32_capture {
         fn GetPixel(dc: *mut c_void, x: i32, y: i32) -> u32;
     }
     #[link(name = "dwmapi")]
-    // SAFETY: The declarations below use the Win32 system ABI and
-    // match the dwmapi exports; callers must uphold the pointer contracts.
+    // SAFETY: The declaration matches the Win32 system ABI. DwmFlush has
+    // no input pointers or caller-side memory invariants, so Rust 2024
+    // may expose this specific imported function as a safe FFI call.
     unsafe extern "system" {
-        fn DwmFlush() -> i32;
+        safe fn DwmFlush() -> i32;
     }
 
     /// The screen DC is tied to a null HWND and must be released with the same
@@ -132,10 +133,9 @@ mod win32_capture {
     pub(super) fn sample(point: [i32; 2]) -> Result<[u8; 3], String> {
         // Both OverInk windows have been hidden before this readback. GDI
         // returns the system SDR representation rather than scene HDR data.
-        // SAFETY: DwmFlush takes no pointers and is safe to call on this thread.
-        unsafe {
-            DwmFlush();
-        }
+        // DwmFlush is a safe FFI declaration: no pointers or caller-owned
+        // buffers cross the boundary. Failure is non-fatal for readback.
+        let _ = DwmFlush();
         let dc = ScreenDc::acquire()?;
         dc.sample(point)
     }
