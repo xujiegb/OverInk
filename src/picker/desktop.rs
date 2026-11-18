@@ -290,21 +290,6 @@ mod x11 {
         destroy: Symbol<'lib, unsafe extern "C" fn(NonNull<Image>) -> c_int>,
     }
 
-    impl<'lib> OwnedImage<'lib> {
-        /// # Safety
-        /// `raw` must be null or a uniquely owned XGetImage allocation,
-        /// and `destroy` must be the corresponding live XDestroyImage symbol.
-        /// The caller must keep the X11 library loaded through the guard.
-        unsafe fn new(
-            raw: Option<NonNull<Image>>,
-            destroy: Symbol<'lib, unsafe extern "C" fn(NonNull<Image>) -> c_int>,
-            message: &'static str,
-        ) -> Result<Self, String> {
-            let raw = raw.ok_or(message)?;
-            Ok(Self { raw, destroy })
-        }
-    }
-
     impl Drop for OwnedImage<'_> {
         fn drop(&mut self) {
             // SAFETY: This non-null XImage is owned exclusively by the guard.
@@ -377,20 +362,18 @@ mod x11 {
                 lib.get(b"XGetPixel\0").map_err(|e| e.to_string())?;
             let destroy: Symbol<unsafe extern "C" fn(NonNull<Image>) -> c_int> =
                 lib.get(b"XDestroyImage\0").map_err(|e| e.to_string())?;
-            let image = OwnedImage::new(
-                get(
-                    display.as_non_null(),
-                    root,
-                    x,
-                    y,
-                    width as u32,
-                    height as u32,
-                    c_ulong::MAX,
-                    2,
-                ),
-                destroy,
-                image_error,
-            )?;
+            let raw = get(
+                display.as_non_null(),
+                root,
+                x,
+                y,
+                width as u32,
+                height as u32,
+                c_ulong::MAX,
+                2,
+            )
+            .ok_or(image_error)?;
+            let image = OwnedImage { raw, destroy };
             // SAFETY: XGetImage returned a non-null, owned image that stays
             // alive through the OwnedImage guard. Reject malformed metadata
             // before asking XGetPixel to address its native pixel buffer.
