@@ -1517,10 +1517,6 @@ impl InkTexture {
         })
     }
 
-    pub fn raw(&self) -> *mut SDL_Texture {
-        self.raw.as_ptr()
-    }
-
     pub fn update_rgba8(&self, pixels: &[u8]) -> Result<(), String> {
         let [width, height] = self.dimensions;
         let pitch = usize::try_from(width)
