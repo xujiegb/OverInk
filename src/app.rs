@@ -3844,7 +3844,8 @@ mod touch_tests {
     }
 
     #[test]
-    fn disabling_session_recovery_discards_the_cache_and_keeps_manual_saves() -> Result<(), Box<dyn std::error::Error>> {
+    fn disabling_session_recovery_discards_the_cache_and_keeps_manual_saves()
+    -> Result<(), Box<dyn std::error::Error>> {
         let state = std::env::temp_dir().join(format!(
             "overink-session-test-{}-{}",
             std::process::id(),
@@ -3887,7 +3888,8 @@ mod touch_tests {
         Ok(())
     }
     #[test]
-    fn svg_export_creates_the_default_directory_on_first_launch() -> Result<(), Box<dyn std::error::Error>> {
+    fn svg_export_creates_the_default_directory_on_first_launch()
+    -> Result<(), Box<dyn std::error::Error>> {
         let state = std::env::temp_dir().join(format!("overink-svg-export-{}", std::process::id()));
         let mut app = App::new(
             true,
