@@ -87,6 +87,10 @@ pub fn set_controller_region(
 #[deny(clippy::undocumented_unsafe_blocks)]
 impl Passthrough {
     pub fn set(&mut self, window: &Window, pass: bool) -> Result<(), String> {
+        #[cfg(target_pointer_width = "64")]
+        use windows::Win32::UI::WindowsAndMessaging::{GetWindowLongPtrW, SetWindowLongPtrW};
+        #[cfg(target_pointer_width = "32")]
+        use windows::Win32::UI::WindowsAndMessaging::{GetWindowLongW, SetWindowLongW};
         use windows::Win32::{
             Foundation::{ERROR_SUCCESS, GetLastError, HWND, SetLastError},
             UI::WindowsAndMessaging::{
@@ -94,12 +98,6 @@ impl Passthrough {
                 SWP_NOZORDER, SetWindowPos, WS_EX_LAYERED, WS_EX_TRANSPARENT,
             },
         };
-        #[cfg(target_pointer_width = "64")]
-        use windows::Win32::UI::WindowsAndMessaging::{
-            GetWindowLongPtrW, SetWindowLongPtrW,
-        };
-        #[cfg(target_pointer_width = "32")]
-        use windows::Win32::UI::WindowsAndMessaging::{GetWindowLongW, SetWindowLongW};
 
         let raw = window
             .win32_hwnd()
