@@ -62,7 +62,7 @@ struct Fragment {
 impl Fragment {
     fn points<'a>(&self, source: &'a [Point]) -> PointSpan<'a> {
         PointSpan {
-            points: &source[self.range.clone()],
+            points: &source[self.range.start..self.range.end],
             start: self.start,
             end: self.end,
         }
@@ -84,7 +84,7 @@ impl Fragment {
         let range = self.range.start + kept.start.saturating_sub(first).min(self.range.len())
             ..self.range.start + kept.end.saturating_sub(first).min(self.range.len());
         let span = PointSpan {
-            points: &source[range.clone()],
+            points: &source[range.start..range.end],
             start: start.or_else(|| point_span.start.filter(|_| kept.contains(&0))),
             end: end.or_else(|| {
                 point_span
@@ -484,7 +484,7 @@ impl Erasure {
             if !replaced {
                 self.insert_remapped(range.start, &history.doc.strokes[range.start], edit);
             } else {
-                for index in range.clone() {
+                for index in range.start..range.end {
                     let stroke = &history.doc.strokes[index];
                     let Some(stroke_bounds) = bounds.get(index).copied().flatten() else {
                         self.reject(EraseError::Preview, true);
