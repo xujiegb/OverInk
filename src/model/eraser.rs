@@ -144,7 +144,7 @@ impl Paths {
                 start: None,
                 end: None,
                 head: true,
-                bounds: StrokeBounds::measure(points.into_iter()).unwrap(),
+                bounds: StrokeBounds::measure(points.into_iter()).unwrap_or(bounds),
             });
         }
         Self {
@@ -205,7 +205,7 @@ fn path_source<'a>(
     is_head: bool,
 ) -> &'a [Point] {
     if is_head {
-        head.as_ref().unwrap()
+        head.as_ref().map_or(&stroke.points, |points| points.as_slice())
     } else {
         outline.as_deref().unwrap_or(&stroke.points)
     }
@@ -485,9 +485,13 @@ impl Erasure {
             } else {
                 for index in range.clone() {
                     let stroke = &history.doc.strokes[index];
+                    let Some(stroke_bounds) = bounds.get(index).copied().flatten() else {
+                        self.reject(EraseError::Preview, true);
+                        return;
+                    };
                     let mut remapped = Edit {
                         sweeps: Vec::new(),
-                        paths: Paths::new(stroke, bounds[index].unwrap()),
+                        paths: Paths::new(stroke, stroke_bounds),
                     };
                     for &sweep in &edit.sweeps {
                         if remapped
@@ -628,7 +632,7 @@ impl Sweep {
             // Shape conversion and sample processing can also change distant pixels.
             fragment.bounds.path
         } else {
-            damage.unwrap()
+            damage.unwrap_or(fragment.bounds.path)
         };
         Some(damage.padded(margin))
     }
