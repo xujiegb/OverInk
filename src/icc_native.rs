@@ -5,6 +5,13 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
 use lcms2_sys as cms;
 
+// Creating the standard sRGB profile accepts no pointer or memory owned by
+// Rust. A non-null result is transferred to Profile and freed in Drop.
+unsafe extern "C" {
+    #[link_name = "cmsCreate_sRGBProfile"]
+    safe fn native_create_srgb_profile() -> cms::HPROFILE;
+}
+
 const MAX_PROFILE_BYTES: usize = 16 * 1024 * 1024;
 
 struct Profile(cms::HPROFILE);
@@ -21,8 +28,9 @@ impl Profile {
     }
 
     fn srgb() -> Option<Self> {
-        // SAFETY: The returned handle is owned and closed by Profile::drop.
-        let raw = unsafe { cms::cmsCreate_sRGBProfile() };
+        // The parameter-free Little CMS constructor transfers ownership
+        // only on success. Profile::drop remains the native release point.
+        let raw = native_create_srgb_profile();
         (!raw.is_null()).then(|| Self(raw))
     }
 }

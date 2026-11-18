@@ -29,13 +29,19 @@ unsafe extern "C" {
     safe fn native_display_usable_bounds(id: SDL_DisplayID, bounds: &mut SDL_Rect) -> bool;
     // The mouse getters synchronously copy optional float coordinates. Use
     // real exclusive Rust borrows rather than arbitrary nullable pointers.
+    #[cfg(not(target_os = "macos"))]
     #[link_name = "SDL_GetMouseState"]
     safe fn native_mouse_state(x: &mut f32, y: &mut f32) -> SDL_MouseButtonFlags;
+    #[cfg(target_os = "macos")]
     #[link_name = "SDL_GetGlobalMouseState"]
     safe fn native_global_mouse_state(x: &mut f32, y: &mut f32) -> SDL_MouseButtonFlags;
     // A fresh SDL property list is identified by a scalar, not a pointer.
     #[link_name = "SDL_CreateProperties"]
     safe fn native_create_properties() -> SDL_PropertiesID;
+    // SDL property IDs are opaque scalars managed by SDL. This private
+    // import is called only by OwnedProperties::drop on the live, unique ID.
+    #[link_name = "SDL_DestroyProperties"]
+    safe fn native_destroy_properties(props: SDL_PropertiesID);
     #[link_name = "SDL_GetModState"]
     safe fn native_mod_state() -> SDL_Keymod;
     #[link_name = "SDL_GetSystemTheme"]
@@ -1543,9 +1549,9 @@ impl OwnedProperties {
 
 impl Drop for OwnedProperties {
     fn drop(&mut self) {
-        // SAFETY: This guard uniquely owns the nonzero SDL property ID
-        // obtained from SDL_CreateProperties.
-        unsafe { SDL_DestroyProperties(self.0) };
+        // This guard uniquely owns the nonzero SDL property ID created by
+        // SDL. Destroying the integer ID requires no raw Rust pointer.
+        native_destroy_properties(self.0);
     }
 }
 
