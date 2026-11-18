@@ -274,8 +274,7 @@ pub struct DisplayInfo {
 pub fn display_info() -> Result<Vec<DisplayInfo>, String> {
     unsafe {
         let mut count = 0;
-        let list = SdlAllocation::from_native(SDL_GetDisplays(&mut count))
-            .ok_or_else(error)?;
+        let list = SdlAllocation::from_native(SDL_GetDisplays(&mut count)).ok_or_else(error)?;
         let result = (0..count.max(0) as usize)
             .map(|i| {
                 let id = *list.as_ptr().add(i);
