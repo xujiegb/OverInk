@@ -194,12 +194,13 @@ mod tests {
     }
 
     #[test]
-    fn owned_resource_drops_exactly_once_and_ignores_null() {
+    fn owned_resource_drops_exactly_once_and_ignores_null() -> Result<(), &'static str> {
         let freed = Arc::new(AtomicUsize::new(0));
         let raw = Box::into_raw(Box::new(CountDrop(freed.clone())));
         // SAFETY: raw is from Box::into_raw and its matching destructor
         // reconstructs that same Box exactly once.
-        let owned = unsafe { OwnedRandr::from_native(raw, free_test_resource) }.unwrap();
+        let owned = unsafe { OwnedRandr::from_native(raw, free_test_resource) }
+            .ok_or("New XRandR handle was unexpectedly null")?;
         drop(owned);
         assert_eq!(freed.load(Ordering::SeqCst), 1);
 
@@ -209,5 +210,6 @@ mod tests {
         };
         assert!(empty.is_none());
         assert_eq!(freed.load(Ordering::SeqCst), 1);
+        Ok(())
     }
 }
