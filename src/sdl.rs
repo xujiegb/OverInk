@@ -108,6 +108,19 @@ unsafe extern "C" {
     #[cfg(target_os = "linux")]
     #[link_name = "SDL_FlushEvent"]
     safe fn native_flush_event(event_type: u32);
+    // SDL cursor functions run on the main thread. Only SystemCursor invokes
+    // these bindings, after verifying initialization and retaining unique
+    // ownership of a newly created cursor until Drop.
+    #[link_name = "SDL_CreateSystemCursor"]
+    safe fn native_create_system_cursor(id: SDL_SystemCursor) -> Option<NonNull<SDL_Cursor>>;
+    #[link_name = "SDL_SetCursor"]
+    safe fn native_set_cursor(cursor: Option<NonNull<SDL_Cursor>>) -> bool;
+    #[link_name = "SDL_GetCursor"]
+    safe fn native_get_cursor() -> Option<NonNull<SDL_Cursor>>;
+    #[link_name = "SDL_GetDefaultCursor"]
+    safe fn native_default_cursor() -> Option<NonNull<SDL_Cursor>>;
+    #[link_name = "SDL_DestroyCursor"]
+    safe fn native_destroy_cursor(cursor: NonNull<SDL_Cursor>);
 }
 
 /// A borrowed native backend handle whose lifetime is tied to the SDL
@@ -730,26 +743,23 @@ impl SystemCursor {
         if !native_is_main_thread() || native_was_init(SDL_INIT_VIDEO) == 0 {
             return None;
         }
-        // SAFETY: SDL is initialized on its main thread. A successful
-        // creation transfers a non-null, uniquely owned cursor to Self.
-        unsafe {
-            let cursor = NonNull::new(SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_CROSSHAIR))?;
-            SDL_SetCursor(cursor.as_ptr());
-            Some(Self(cursor))
+        let cursor = native_create_system_cursor(SDL_SYSTEM_CURSOR_CROSSHAIR)?;
+        if !native_set_cursor(Some(cursor)) {
+            native_destroy_cursor(cursor);
+            return None;
         }
+        Some(Self(cursor))
     }
 }
 
 impl Drop for SystemCursor {
     fn drop(&mut self) {
-        unsafe {
-            // A later cursor may have replaced this one before Drop, so only
-            // restore the default when we still own the active cursor.
-            if SDL_GetCursor() == self.0.as_ptr() {
-                SDL_SetCursor(SDL_GetDefaultCursor());
-            }
-            SDL_DestroyCursor(self.0.as_ptr());
+        // A later cursor may have replaced this one before Drop, so only
+        // restore the default when we still own the active cursor.
+        if native_get_cursor() == Some(self.0) {
+            let _ = native_set_cursor(native_default_cursor());
         }
+        native_destroy_cursor(self.0);
     }
 }
 
