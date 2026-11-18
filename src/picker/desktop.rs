@@ -372,8 +372,7 @@ mod x11 {
             {
                 return Err(bounds_error.into());
             }
-            let get: Symbol<GetXImage> =
-                lib.get(b"XGetImage\0").map_err(|e| e.to_string())?;
+            let get: Symbol<GetXImage> = lib.get(b"XGetImage\0").map_err(|e| e.to_string())?;
             let pixel: Symbol<unsafe extern "C" fn(NonNull<Image>, c_int, c_int) -> c_ulong> =
                 lib.get(b"XGetPixel\0").map_err(|e| e.to_string())?;
             let destroy: Symbol<unsafe extern "C" fn(NonNull<Image>) -> c_int> =
