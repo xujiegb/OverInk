@@ -119,6 +119,9 @@ enum SdlNativeAction<'a> {
     ClipboardRead,
     ReadString(SdlStringSource),
     WindowIccProfile(&'a Window),
+    WindowPointer(&'a Window, NativeWindowProperty),
+    WindowNumber(&'a Window, WindowNumberQuery),
+    WindowFloat(&'a Window, WindowFloatQuery),
     SystemTheme,
     IndirectTouch(SDL_TouchID),
     CaptureMouse(bool),
@@ -142,6 +145,9 @@ enum SdlNativeResult {
     Success(bool),
     Text(Option<String>),
     Profile(Option<Vec<u8>>),
+    NativePointer(Option<NonNull<c_void>>),
+    Number(i64),
+    Float(f32),
     ColorProperty((bool, f32)),
     #[cfg(test)]
     Pixel(Option<[u8; 4]>),
@@ -182,6 +188,30 @@ impl SdlNativeResult {
             bytes
         } else {
             None
+        }
+    }
+
+    fn native_pointer(self) -> Option<NonNull<c_void>> {
+        if let Self::NativePointer(raw) = self {
+            raw
+        } else {
+            None
+        }
+    }
+
+    fn number(self) -> i64 {
+        if let Self::Number(value) = self {
+            value
+        } else {
+            0
+        }
+    }
+
+    fn float(self) -> f32 {
+        if let Self::Float(value) = self {
+            value
+        } else {
+            1.
         }
     }
 
@@ -457,6 +487,52 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
                     SDL_ClearError();
                     SdlNativeResult::Profile(None)
                 }
+            }
+            SdlNativeAction::WindowPointer(window, property) => {
+                let raw = property.key().and_then(|key| {
+                    NonNull::new(SDL_GetPointerProperty(
+                        SDL_GetWindowProperties(window.raw.as_ptr()),
+                        key.as_ptr(),
+                        ptr::null_mut(),
+                    ))
+                });
+                SdlNativeResult::NativePointer(raw)
+            }
+            SdlNativeAction::WindowNumber(window, query) => {
+                let value = match query {
+                    WindowNumberQuery::DisplayId => {
+                        SDL_GetDisplayForWindow(window.raw.as_ptr()).0 as i64
+                    }
+                    #[cfg(target_os = "macos")]
+                    WindowNumberQuery::CocoaMetalViewTag => SDL_GetNumberProperty(
+                        SDL_GetWindowProperties(window.raw.as_ptr()),
+                        SDL_PROP_WINDOW_COCOA_METAL_VIEW_TAG_NUMBER,
+                        0,
+                    ),
+                    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                    WindowNumberQuery::X11Window => SDL_GetNumberProperty(
+                        SDL_GetWindowProperties(window.raw.as_ptr()),
+                        SDL_PROP_WINDOW_X11_WINDOW_NUMBER,
+                        0,
+                    ),
+                };
+                SdlNativeResult::Number(value)
+            }
+            SdlNativeAction::WindowFloat(window, query) => {
+                let value = match query {
+                    WindowFloatQuery::SdrWhiteLevel => SDL_GetFloatProperty(
+                        SDL_GetWindowProperties(window.raw.as_ptr()),
+                        SDL_PROP_WINDOW_SDR_WHITE_LEVEL_FLOAT,
+                        1.,
+                    ),
+                    WindowFloatQuery::DisplayScale => {
+                        SDL_GetWindowDisplayScale(window.raw.as_ptr())
+                    }
+                    WindowFloatQuery::PixelDensity => {
+                        SDL_GetWindowPixelDensity(window.raw.as_ptr())
+                    }
+                };
+                SdlNativeResult::Float(value)
             }
             SdlNativeAction::SystemTheme => SdlNativeResult::Theme(SDL_GetSystemTheme()),
             SdlNativeAction::IndirectTouch(device) => SdlNativeResult::Success(matches!(
@@ -1268,25 +1344,7 @@ impl Window {
     /// Copy only a known numeric SDL window property; never expose a
     /// property handle or unchecked key to higher-level callers.
     fn query_number(&self, query: WindowNumberQuery) -> i64 {
-        // SAFETY: SDL owns the still-live window. This only reads a copied
-        // number from the window's native properties or its display ID.
-        unsafe {
-            match query {
-                WindowNumberQuery::DisplayId => SDL_GetDisplayForWindow(self.raw.as_ptr()).0 as i64,
-                #[cfg(target_os = "macos")]
-                WindowNumberQuery::CocoaMetalViewTag => SDL_GetNumberProperty(
-                    SDL_GetWindowProperties(self.raw.as_ptr()),
-                    SDL_PROP_WINDOW_COCOA_METAL_VIEW_TAG_NUMBER,
-                    0,
-                ),
-                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-                WindowNumberQuery::X11Window => SDL_GetNumberProperty(
-                    SDL_GetWindowProperties(self.raw.as_ptr()),
-                    SDL_PROP_WINDOW_X11_WINDOW_NUMBER,
-                    0,
-                ),
-            }
-        }
+        sdl_native(SdlNativeAction::WindowNumber(self, query)).number()
     }
 
     /// Copy initialized coordinate outputs from the already-audited native
@@ -1380,19 +1438,7 @@ impl Window {
 
     /// Read one SDL-owned window metric without exporting native handles.
     fn query_float(&self, query: WindowFloatQuery) -> f32 {
-        // SAFETY: The SDL window belongs to this live Window instance.
-        // These queries return scalar copies and do not transfer ownership.
-        unsafe {
-            match query {
-                WindowFloatQuery::SdrWhiteLevel => SDL_GetFloatProperty(
-                    SDL_GetWindowProperties(self.raw.as_ptr()),
-                    SDL_PROP_WINDOW_SDR_WHITE_LEVEL_FLOAT,
-                    1.,
-                ),
-                WindowFloatQuery::DisplayScale => SDL_GetWindowDisplayScale(self.raw.as_ptr()),
-                WindowFloatQuery::PixelDensity => SDL_GetWindowPixelDensity(self.raw.as_ptr()),
-            }
-        }
+        sdl_native(SdlNativeAction::WindowFloat(self, query)).float()
     }
 
     /// Dispatch a closed set of window operations on SDL's owning thread.
@@ -1789,21 +1835,12 @@ impl Window {
         &self,
         property: NativeWindowProperty,
     ) -> Option<NativeWindowHandle<'_>> {
-        let key = property.key()?;
-        // SAFETY: The known key belongs to SDL's live Window property
-        // table; SDL returns a borrowed pointer or null without transferring
-        // ownership. NativeWindowHandle ties it to the Window borrow.
-        unsafe {
-            NonNull::new(SDL_GetPointerProperty(
-                SDL_GetWindowProperties(self.raw.as_ptr()),
-                key.as_ptr(),
-                ptr::null_mut(),
-            ))
+        sdl_native(SdlNativeAction::WindowPointer(self, property))
+            .native_pointer()
             .map(|raw| NativeWindowHandle {
                 raw,
                 _window: PhantomData,
             })
-        }
     }
 
     /// Borrow the Win32 HWND backing this live SDL window.
