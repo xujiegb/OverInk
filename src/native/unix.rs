@@ -462,8 +462,8 @@ impl X11 {
                         2,
                         0,
                         0,
-                        NonNull::new(rectangles.as_ptr().cast_mut())
-                            .filter(|_| !rectangles.is_empty()),
+                        (!rectangles.is_empty())
+                            .then(|| NonNull::from(rectangles).cast::<Rectangle>()),
                         count,
                         0,
                         0,
