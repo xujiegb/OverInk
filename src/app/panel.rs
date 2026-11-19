@@ -23,7 +23,13 @@ impl App {
         let mut commands = Commands::default();
         let tr = self.language;
         let available = ui.available_size();
-        let opened = self.panel.filter(|_| !self.picking);
+        let opened = self.panel_visual.filter(|_| !self.picking);
+        // Rounded root silhouette: the SDL toolbar window has an alpha channel.
+        ui.painter().rect_filled(
+            ui.max_rect(),
+            16.,
+            toolbar::colors(ui.visuals().dark_mode).rail,
+        );
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 0.;
             ui.allocate_ui_with_layout(
@@ -40,8 +46,15 @@ impl App {
                         |ui| {
                             egui::Frame::new()
                                 .fill(ui.visuals().window_fill())
+                                .corner_radius(egui::CornerRadius {
+                                    nw: 0, ne: 16, sw: 0, se: 16,
+                                })
                                 .inner_margin(egui::Margin::same(13))
                                 .show(ui, |ui| {
+                                    ui.set_opacity(self.panel_opacity);
+                                    if self.panel != Some(panel) {
+                                        ui.disable();
+                                    }
                                     ui.spacing_mut().item_spacing = vec2(6., 4.);
                                     ui.set_width((width - 26.).max(0.));
                                     ui.set_min_height((available.y - 26.).max(0.));
