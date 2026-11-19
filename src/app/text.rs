@@ -6,6 +6,7 @@ use crate::{
     color::{InkColor, PRESETS},
     fonts::TextFonts,
     gui::Gui,
+    keyboard::KeyboardRequest,
     model::{History, MAX_TEXT_BOXES, MAX_TEXT_CHARS, TextBox, Tool},
     sdl::{SDL_Event, SDL_WindowID},
     toolbar,
@@ -26,7 +27,7 @@ const MENU_GAP: f32 = 4.;
 const MENU_PADDING: f32 = 5.;
 const PALETTE_SIZE: Vec2 = vec2(240., 272.);
 const MENU_SIZE: Vec2 = vec2(
-    8. * MENU_BUTTON.x + 7. * MENU_GAP + 2. * MENU_PADDING,
+    9. * MENU_BUTTON.x + 8. * MENU_GAP + 2. * MENU_PADDING,
     MENU_BUTTON.y + 2. * MENU_PADDING,
 );
 
@@ -108,6 +109,7 @@ pub(super) struct TextInput {
     press: Option<Press>,
     click: Option<(usize, Pos2, Instant)>,
     touch_press: bool,
+    keyboard_request: Option<KeyboardRequest>,
     menu_pointer: MenuPointer,
     context_menu: Option<Pos2>,
     color_wheel: Option<ColorWheel>,
@@ -192,6 +194,10 @@ struct Press {
 impl TextInput {
     pub fn editing(&self) -> bool {
         self.draft.is_some()
+    }
+
+    pub fn take_keyboard_request(&mut self) -> Option<KeyboardRequest> {
+        self.keyboard_request.take()
     }
 
     pub fn take_screen_pick(&mut self) -> bool {
@@ -331,6 +337,10 @@ impl App {
         }
         let touch_ended = matches!(ty, SDL_EVENT_FINGER_UP | SDL_EVENT_FINGER_CANCELED);
         if editing {
+            if touch_ended && self.input.text.touch_press {
+                // An already focused editor may have lost its virtual keyboard.
+                self.input.text.keyboard_request = Some(KeyboardRequest::Touch);
+            }
             if touch_ended {
                 self.input.text.touch_press = false;
             }
@@ -443,16 +453,25 @@ impl App {
                                 && now.duration_since(when) < Duration::from_millis(400)
                                 && at.distance(pos) <= 8. * self.input.canvas_units
                         });
-                        // Touch: first tap selects, subsequent tap enters the
-                        // editor, even after the mouse double-click timeout.
+                        // Touch: first tap selects, subsequent tap edits even
+                        // after the mouse double-click timeout. macOS 27 may
+                        // emulate direct touch as mouse events; the previous
+                        // selection click also covers that path.
                         let already_selected = state.selected == Some(index);
-                        let edit = if state.touch_press {
-                            already_selected
-                        } else {
-                            self.tool == Tool::Text || double
-                        };
+                        let selected_again = already_selected
+                            && state.click.is_some_and(|(last, _, _)| last == index);
+                        let edit = self.tool == Tool::Text
+                            || double
+                            || selected_again
+                            || (state.touch_press && already_selected);
                         if edit {
+                            let kind = if state.touch_press {
+                                KeyboardRequest::Touch
+                            } else {
+                                KeyboardRequest::Focus
+                            };
                             state.edit(Some(index), (**item).clone());
+                            state.keyboard_request = Some(kind);
                         } else {
                             state.selected = Some(index);
                             state.click = Some((index, pos, now));
@@ -568,6 +587,19 @@ impl App {
             preview.color = color;
         }
         true
+    }
+
+    fn request_text_keyboard(&mut self) {
+        if !self.input.text.editing()
+            && let Some(index) = self.input.text.selected
+            && let Some(item) = self.history.text_boxes().get(index)
+        {
+            self.input.text.edit(Some(index), (**item).clone());
+        }
+        if let Some(draft) = &mut self.input.text.draft {
+            draft.focus = true;
+            self.input.text.keyboard_request = Some(KeyboardRequest::Button);
+        }
     }
 
     fn text_menu_item(&self) -> Option<&TextBox> {
@@ -929,6 +961,37 @@ impl App {
             && self.text_menu_item().is_some()
         {
             self.input.text.color_wheel = (!wheel_open).then(|| ColorWheel::new(color));
+            acted = true;
+        }
+        let label = tr.text("Show screen keyboard", "呼出屏幕键盘", "開啟螢幕鍵盤");
+        let (icon, response) = menu.allocate_exact_size(button, egui::Sense::click());
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, menu.is_enabled(), label));
+        if response.hovered() || response.has_focus() {
+            menu.painter()
+                .rect_filled(icon, 6. * scale, menu.visuals().widgets.hovered.bg_fill);
+        }
+        let board = icon.shrink2(vec2(8. * scale, 8. * scale));
+        let stroke = Stroke::new(1.5 * scale, menu.visuals().text_color());
+        menu.painter().rect_stroke(board, 2. * scale, stroke, StrokeKind::Inside);
+        for row in 0..2 {
+            for col in 0..4 {
+                let key = pos2(
+                    board.left() + (5. + 7. * col as f32) * scale,
+                    board.top() + (5. + 6. * row as f32) * scale,
+                );
+                menu.painter().circle_filled(key, 1.2 * scale, stroke.color);
+            }
+        }
+        menu.painter().hline(
+            board.x_range().shrink(6. * scale),
+            board.bottom() - 4. * scale,
+            stroke,
+        );
+        if response
+            .on_hover_text(egui::RichText::new(label).size(toolbar::MENU_FONT_SIZE * scale))
+            .clicked()
+        {
+            self.request_text_keyboard();
             acted = true;
         }
         if acted {
@@ -2126,7 +2189,8 @@ mod tests {
         let Some(row) = app.text_menus(screen).map(|menus| menus.actions) else {
             panic!("expected annotation palette row");
         };
-        let wheel_button = row.right_center() - vec2(MENU_PADDING + MENU_BUTTON.x * 0.5, 0.);
+        let wheel_button = row.right_center()
+            - vec2(MENU_PADDING + MENU_BUTTON.x * 1.5 + MENU_GAP, 0.);
         tap(&mut app, wheel_button);
         let Some((palette, scale)) = app.text_menus(screen).and_then(|menus| menus.palette) else {
             panic!("expected text color palette");
