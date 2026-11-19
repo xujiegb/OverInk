@@ -470,6 +470,19 @@ impl Canvas {
             output.platform_output.ime = None;
             self.text_repaint_at = Some(Instant::now());
         }
+        if let Some(request) = app.input.text.take_keyboard_request()
+            && app.input.text.editing()
+        {
+            self.focus_text_editor();
+            if let Err(error) = crate::keyboard::request(&self.window, request) {
+                app.status = text(
+                    "Cannot open the screen keyboard",
+                    "无法呼出屏幕键盘",
+                    "無法開啟螢幕鍵盤",
+                )
+                .detail(error);
+            }
+        }
         Some(output)
     }
 
