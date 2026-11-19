@@ -965,7 +965,9 @@ impl App {
         }
         let label = tr.text("Show screen keyboard", "呼出屏幕键盘", "開啟螢幕鍵盤");
         let (icon, response) = menu.allocate_exact_size(button, egui::Sense::click());
-        response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, menu.is_enabled(), false, label));
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(egui::Role::Button, menu.is_enabled(), false, label)
+        });
         if response.hovered() || response.has_focus() {
             menu.painter()
                 .rect_filled(icon, 6. * scale, menu.visuals().widgets.hovered.bg_fill);
@@ -2264,6 +2266,105 @@ mod tests {
         assert!(!app.matches_text_pick_target(&target));
         assert!(app.text_pick_target().is_none());
         assert!(app.pick_text_color(color).is_none());
+    }
+
+    #[test]
+    fn second_touch_tap_enters_the_editor_and_requests_a_keyboard() {
+        let mut app = app();
+        app.use_tool(Tool::Select);
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::from(SIZE));
+        let mut item = TextBox::new(pos2(200., 140.), screen, InkColor::default(), 1.);
+        item.text = "Touch".into();
+        let Some(index) = app.history.set_text_box(None, item) else {
+            panic!("expected text box index");
+        };
+        let mut gui = Gui::new();
+        let window = SDL_WindowID(1);
+        for tap in 0..2 {
+            for ty in [SDL_EVENT_FINGER_DOWN, SDL_EVENT_FINGER_UP] {
+                let event = SDL_Event {
+                    tfinger: SDL_TouchFingerEvent {
+                        r#type: ty,
+                        touchID: SDL_TouchID(3),
+                        fingerID: SDL_FingerID(4),
+                        windowID: window,
+                        x: 0.35,
+                        y: 0.3,
+                        ..Default::default()
+                    },
+                };
+                app.text_event(&mut gui, &event, window, SIZE);
+            }
+            if tap == 0 {
+                assert_eq!(app.input.text.selected, Some(index));
+                assert!(!app.input.text.editing());
+            }
+        }
+        assert!(app.input.text.editing());
+        assert_eq!(
+            app.input.text.take_keyboard_request(),
+            Some(KeyboardRequest::Touch)
+        );
+        assert_eq!(app.input.text.take_keyboard_request(), None);
+    }
+
+    #[test]
+    fn mouse_emulated_touch_edits_after_the_double_click_interval() {
+        let mut app = app();
+        app.use_tool(Tool::Select);
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::from(SIZE));
+        let mut item = TextBox::new(pos2(200., 140.), screen, InkColor::default(), 1.);
+        item.text = "Mouse emulation".into();
+        let Some(index) = app.history.set_text_box(None, item) else {
+            panic!("expected text box index");
+        };
+        let point = pos2(280., 180.);
+        click(&mut app, point);
+        assert_eq!(app.input.text.selected, Some(index));
+        app.input.text.click = Some((
+            index,
+            point,
+            Instant::now() - Duration::from_millis(700),
+        ));
+        click(&mut app, point);
+        assert!(app.input.text.editing());
+        assert_eq!(
+            app.input.text.take_keyboard_request(),
+            Some(KeyboardRequest::Focus)
+        );
+    }
+
+    #[test]
+    fn keyboard_menu_button_opens_a_selected_text_box() {
+        let mut app = app();
+        app.use_tool(Tool::Select);
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::from(SIZE));
+        let mut item = TextBox::new(pos2(200., 140.), screen, InkColor::default(), 1.);
+        item.text = "Keyboard".into();
+        app.input.text.selected = app.history.set_text_box(None, item);
+        let Some(row) = app.text_menus(screen).map(|menus| menus.actions) else {
+            panic!("expected text menu");
+        };
+        let button = row.right_center() - vec2(MENU_PADDING + MENU_BUTTON.x * 0.5, 0.);
+        let mut gui = Gui::new();
+        gui.ctx.set_fonts(app.text_fonts.definitions());
+        render(&mut app, &mut gui);
+        render(&mut app, &mut gui);
+        gui.raw.events.push(Event::PointerMoved(button));
+        for pressed in [true, false] {
+            gui.raw.events.push(Event::PointerButton {
+                pos: button,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            render(&mut app, &mut gui);
+        }
+        assert!(app.input.text.editing());
+        assert_eq!(
+            app.input.text.take_keyboard_request(),
+            Some(KeyboardRequest::Button)
+        );
     }
 
     #[test]
