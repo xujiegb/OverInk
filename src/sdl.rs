@@ -34,10 +34,6 @@ static WAYLAND_SCALE_TO_DISPLAY_FORCED: std::sync::atomic::AtomicBool =
 unsafe extern "C" {
     #[link_name = "SDL_IsMainThread"]
     safe fn native_is_main_thread() -> bool;
-    // SDL_Quit has no parameters, but must be called from SDL's main
-    // thread. Runtime is !Send and checks this invariant before shutdown.
-    #[link_name = "SDL_Quit"]
-    safe fn native_quit();
     // SDL only writes the caller's borrowed, initialized rectangle. It
     // neither retains the pointer nor transfers allocation ownership.
     #[link_name = "SDL_GetDisplayBounds"]
@@ -52,13 +48,6 @@ unsafe extern "C" {
     #[cfg(target_os = "macos")]
     #[link_name = "SDL_GetGlobalMouseState"]
     safe fn native_global_mouse_state(x: &mut f32, y: &mut f32) -> SDL_MouseButtonFlags;
-    // A fresh SDL property list is identified by a scalar, not a pointer.
-    #[link_name = "SDL_CreateProperties"]
-    safe fn native_create_properties() -> SDL_PropertiesID;
-    // SDL property IDs are opaque scalars managed by SDL. This private
-    // import is called only by OwnedProperties::drop on the live, unique ID.
-    #[link_name = "SDL_DestroyProperties"]
-    safe fn native_destroy_properties(props: SDL_PropertiesID);
     #[link_name = "SDL_GetModState"]
     safe fn native_mod_state() -> SDL_Keymod;
     #[link_name = "SDL_GetSystemTheme"]
@@ -97,19 +86,6 @@ unsafe extern "C" {
     #[cfg(target_os = "linux")]
     #[link_name = "SDL_FlushEvent"]
     safe fn native_flush_event(event_type: u32);
-    // SDL cursor functions run on the main thread. Only SystemCursor invokes
-    // these bindings, after verifying initialization and retaining unique
-    // ownership of a newly created cursor until Drop.
-    #[link_name = "SDL_CreateSystemCursor"]
-    safe fn native_create_system_cursor(id: SDL_SystemCursor) -> Option<NonNull<SDL_Cursor>>;
-    #[link_name = "SDL_SetCursor"]
-    safe fn native_set_cursor(cursor: Option<NonNull<SDL_Cursor>>) -> bool;
-    #[link_name = "SDL_GetCursor"]
-    safe fn native_get_cursor() -> Option<NonNull<SDL_Cursor>>;
-    #[link_name = "SDL_GetDefaultCursor"]
-    safe fn native_default_cursor() -> Option<NonNull<SDL_Cursor>>;
-    #[link_name = "SDL_DestroyCursor"]
-    safe fn native_destroy_cursor(cursor: NonNull<SDL_Cursor>);
 }
 
 /// A borrowed native backend handle whose lifetime is tied to the SDL
@@ -166,11 +142,98 @@ impl NativeWindowProperty {
 /// be wrapped by this type.
 struct SdlAllocation<T>(NonNull<T>);
 
+/// The only permitted SDL lifecycle operations. Native handles only enter
+/// these variants from their unique Rust owners; no foreign function pointer
+/// or raw buffer can be supplied by application code.
+enum SdlLifecycle {
+    Shutdown,
+    FreeAllocation(NonNull<c_void>),
+    CreateProperties,
+    DestroyProperties(SDL_PropertiesID),
+    CreateCrosshair,
+    SetCursor(Option<NonNull<SDL_Cursor>>),
+    CurrentCursor,
+    DefaultCursor,
+    DestroyCursor(NonNull<SDL_Cursor>),
+}
+
+enum SdlLifecycleResult {
+    Done,
+    Properties(SDL_PropertiesID),
+    Cursor(Option<NonNull<SDL_Cursor>>),
+    Success(bool),
+}
+
+impl SdlLifecycleResult {
+    fn properties(self) -> Option<SDL_PropertiesID> {
+        if let Self::Properties(id) = self {
+            Some(id)
+        } else {
+            None
+        }
+    }
+
+    fn cursor(self) -> Option<NonNull<SDL_Cursor>> {
+        if let Self::Cursor(cursor) = self {
+            cursor
+        } else {
+            None
+        }
+    }
+
+    fn succeeded(self) -> bool {
+        matches!(self, Self::Success(true))
+    }
+}
+
+/// One native lifecycle boundary shared by SDL allocation, property and
+/// cursor RAII guards and the main-thread Runtime shutdown.
+fn sdl_lifecycle(action: SdlLifecycle) -> SdlLifecycleResult {
+    // SAFETY: Every destruction variant is created only by its unique Rust
+    // owner (SdlAllocation, OwnedProperties, SystemCursor or Runtime).
+    // Cursor calls use SDL's main thread and live video subsystem; Runtime
+    // checks the SDL main thread before shutdown. The SDL allocation has
+    // its matching allocator, and none of these functions retain input.
+    unsafe {
+        match action {
+            SdlLifecycle::Shutdown => {
+                SDL_Quit();
+                SdlLifecycleResult::Done
+            }
+            SdlLifecycle::FreeAllocation(raw) => {
+                SDL_free(raw.as_ptr());
+                SdlLifecycleResult::Done
+            }
+            SdlLifecycle::CreateProperties => {
+                SdlLifecycleResult::Properties(SDL_CreateProperties())
+            }
+            SdlLifecycle::DestroyProperties(id) => {
+                SDL_DestroyProperties(id);
+                SdlLifecycleResult::Done
+            }
+            SdlLifecycle::CreateCrosshair => SdlLifecycleResult::Cursor(
+                NonNull::new(SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_CROSSHAIR)),
+            ),
+            SdlLifecycle::SetCursor(cursor) => SdlLifecycleResult::Success(SDL_SetCursor(
+                cursor.map_or(ptr::null_mut(), NonNull::as_ptr),
+            )),
+            SdlLifecycle::CurrentCursor => {
+                SdlLifecycleResult::Cursor(NonNull::new(SDL_GetCursor()))
+            }
+            SdlLifecycle::DefaultCursor => {
+                SdlLifecycleResult::Cursor(NonNull::new(SDL_GetDefaultCursor()))
+            }
+            SdlLifecycle::DestroyCursor(cursor) => {
+                SDL_DestroyCursor(cursor.as_ptr());
+                SdlLifecycleResult::Done
+            }
+        }
+    }
+}
+
 impl<T> Drop for SdlAllocation<T> {
     fn drop(&mut self) {
-        // SAFETY: Only caller-owned SDL allocations are wrapped; SDL_free is
-        // their matching allocator, and each allocation has a single owner.
-        unsafe { SDL_free(self.0.as_ptr().cast()) };
+        let _ = sdl_lifecycle(SdlLifecycle::FreeAllocation(self.0.cast()));
     }
 }
 
@@ -311,7 +374,7 @@ impl Drop for Runtime {
         // down if a foreign callback somehow causes off-main destruction.
         if native_is_main_thread() {
             SDL_VIDEO_READY.store(false, std::sync::atomic::Ordering::Release);
-            native_quit();
+            let _ = sdl_lifecycle(SdlLifecycle::Shutdown);
         }
     }
 }
@@ -757,9 +820,9 @@ impl SystemCursor {
         if !native_is_main_thread() || !SDL_VIDEO_READY.load(std::sync::atomic::Ordering::Acquire) {
             return None;
         }
-        let cursor = native_create_system_cursor(SDL_SYSTEM_CURSOR_CROSSHAIR)?;
-        if !native_set_cursor(Some(cursor)) {
-            native_destroy_cursor(cursor);
+        let cursor = sdl_lifecycle(SdlLifecycle::CreateCrosshair).cursor()?;
+        if !sdl_lifecycle(SdlLifecycle::SetCursor(Some(cursor))).succeeded() {
+            let _ = sdl_lifecycle(SdlLifecycle::DestroyCursor(cursor));
             return None;
         }
         Some(Self(cursor))
@@ -770,10 +833,11 @@ impl Drop for SystemCursor {
     fn drop(&mut self) {
         // A later cursor may have replaced this one before Drop, so only
         // restore the default when we still own the active cursor.
-        if native_get_cursor() == Some(self.0) {
-            let _ = native_set_cursor(native_default_cursor());
+        if sdl_lifecycle(SdlLifecycle::CurrentCursor).cursor() == Some(self.0) {
+            let default = sdl_lifecycle(SdlLifecycle::DefaultCursor).cursor();
+            let _ = sdl_lifecycle(SdlLifecycle::SetCursor(default));
         }
-        native_destroy_cursor(self.0);
+        let _ = sdl_lifecycle(SdlLifecycle::DestroyCursor(self.0));
     }
 }
 
@@ -1632,9 +1696,11 @@ struct OwnedProperties(SDL_PropertiesID);
 
 impl OwnedProperties {
     fn new() -> Result<Self, String> {
-        // SDL_CreateProperties takes no pointers or borrowed resources.
-        // Drop remains the sole native destruction boundary for this ID.
-        let id = native_create_properties();
+        // No caller can construct a property ID except the SDL lifecycle
+        // boundary. The unique owner frees it through Drop.
+        let id = sdl_lifecycle(SdlLifecycle::CreateProperties)
+            .properties()
+            .ok_or_else(error)?;
         (id.0 != 0).then(|| Self(id)).ok_or_else(error)
     }
 
@@ -1645,9 +1711,7 @@ impl OwnedProperties {
 
 impl Drop for OwnedProperties {
     fn drop(&mut self) {
-        // This guard uniquely owns the nonzero SDL property ID created by
-        // SDL. Destroying the integer ID requires no raw Rust pointer.
-        native_destroy_properties(self.0);
+        let _ = sdl_lifecycle(SdlLifecycle::DestroyProperties(self.0));
     }
 }
 
