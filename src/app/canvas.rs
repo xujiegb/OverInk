@@ -474,7 +474,11 @@ impl Canvas {
             && app.input.text.editing()
         {
             self.focus_text_editor();
-            if let Err(error) = crate::keyboard::request(&self.window, request) {
+            // An active IME composition must not be discarded by stopping
+            // and restarting SDL text input to reopen the OSK.
+            if !composing
+                && let Err(error) = crate::keyboard::request(&self.window, request)
+            {
                 app.status = text(
                     "Cannot open the screen keyboard",
                     "无法呼出屏幕键盘",
