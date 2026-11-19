@@ -179,7 +179,10 @@ fn clipboard_menu(
 ) -> Option<ClipboardAction> {
     let mut action = None;
     let entries = [
-        (ClipboardAction::SelectAll, tr.text("Select all", "全选", "全選")),
+        (
+            ClipboardAction::SelectAll,
+            tr.text("Select all", "全选", "全選"),
+        ),
         (ClipboardAction::Copy, tr.text("Copy", "拷贝", "複製")),
         (ClipboardAction::Paste, tr.text("Paste", "粘贴", "貼上")),
         (ClipboardAction::Cut, tr.text("Cut", "剪切", "剪下")),
@@ -235,12 +238,12 @@ fn apply_clipboard(
         ClipboardAction::Paste => {
             let value = crate::sdl::clipboard_text()?;
             let replacement = range.unwrap_or_else(|| {
-                let pos = selected.map_or(CCursor::new(length).index, |cursor| cursor.primary.index);
+                let pos =
+                    selected.map_or(CCursor::new(length).index, |cursor| cursor.primary.index);
                 pos..pos
             });
-            let capacity = MAX_TEXT_CHARS.saturating_sub(
-                length.saturating_sub(replacement.end.0 - replacement.start.0),
-            );
+            let capacity = MAX_TEXT_CHARS
+                .saturating_sub(length.saturating_sub(replacement.end.0 - replacement.start.0));
             let to_insert: String = value.chars().take(capacity).collect();
             text.delete_char_range(replacement.clone());
             text.insert_text(&to_insert, replacement.start);
@@ -1006,13 +1009,7 @@ impl App {
                 );
                 let mut action = None;
                 area.context_menu(|ui| {
-                    action = clipboard_menu(
-                        ui,
-                        self.language,
-                        !item.text.is_empty(),
-                        false,
-                        false,
-                    );
+                    action = clipboard_menu(ui, self.language, !item.text.is_empty(), false, false);
                 });
                 if let Some(action) = action {
                     match action {
@@ -1345,7 +1342,6 @@ mod tests {
         assert_eq!(item.font_size, TextBox::DEFAULT_FONT_SIZE);
         assert_eq!(item.scroll_offset, 0.);
     }
-
 
     fn click(app: &mut App, point: Pos2) {
         for pressed in [true, false] {
