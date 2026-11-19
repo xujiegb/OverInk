@@ -28,7 +28,11 @@ impl App {
         let opened = active.or(self.closing_panel);
         let mut content_opacity = 0.0;
         for panel in [
-            Panel::Shapes, Panel::Brush, Panel::Colors, Panel::Background, Panel::Settings,
+            Panel::Shapes,
+            Panel::Brush,
+            Panel::Colors,
+            Panel::Background,
+            Panel::Settings,
         ] {
             let opacity = ui.ctx().animate_bool_with_time(
                 egui::Id::new(("toolbar-panel-content", panel)),
@@ -40,7 +44,8 @@ impl App {
             }
         }
         if content_opacity > 0.001 && content_opacity < 0.999 {
-            ui.ctx().request_repaint_after(std::time::Duration::from_millis(16));
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(16));
         }
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 0.;
@@ -631,20 +636,33 @@ impl App {
         ));
         if let Some(item) = self.text_menu_item() {
             let current = item.font.as_deref();
-            let selected_name = current.and_then(|key| self.text_fonts.display_name(key))
-                .unwrap_or(tr.text("Automatic (font priority)", "自动（按优先级）", "自動（依優先順序）"));
+            let selected_name = current
+                .and_then(|key| self.text_fonts.display_name(key))
+                .unwrap_or(tr.text(
+                    "Automatic (font priority)",
+                    "自动（按优先级）",
+                    "自動（依優先順序）",
+                ));
             ui.horizontal(|ui| {
                 ui.label(tr.text("Selected text box", "选中文本框", "選取文字框"));
                 egui::ComboBox::from_id_salt("selected-annotation-font")
                     .selected_text(selected_name)
                     .width(190.)
                     .show_ui(ui, |ui| {
-                        if ui.selectable_label(current.is_none(),
-                            tr.text("Automatic", "自动", "自動")).clicked() {
+                        if ui
+                            .selectable_label(
+                                current.is_none(),
+                                tr.text("Automatic", "自动", "自動"),
+                            )
+                            .clicked()
+                        {
                             commands.box_font = Some(None);
                         }
                         for entry in self.text_fonts.entries() {
-                            if ui.selectable_label(current == Some(entry.key), entry.name).clicked() {
+                            if ui
+                                .selectable_label(current == Some(entry.key), entry.name)
+                                .clicked()
+                            {
                                 commands.box_font = Some(Some(entry.key.to_owned()));
                             }
                         }
@@ -656,9 +674,7 @@ impl App {
         for (index, font) in self.text_fonts.entries().iter().enumerate() {
             ui.horizontal(|ui| {
                 let label = format!("⋮⋮  {}", font.name);
-                let drag = ui.add(
-                    egui::Label::new(label).sense(egui::Sense::click_and_drag())
-                );
+                let drag = ui.add(egui::Label::new(label).sense(egui::Sense::click_and_drag()));
                 if drag.drag_started() {
                     self.font_drag = Some(index);
                 }
@@ -667,7 +683,8 @@ impl App {
                 }
                 if font.bundled {
                     ui.weak(tr.text("Included", "内置", "內建"));
-                } else if ui.small_button("×")
+                } else if ui
+                    .small_button("×")
                     .on_hover_text(tr.text("Remove font", "删除字体", "刪除字型"))
                     .clicked()
                 {
@@ -683,7 +700,10 @@ impl App {
             }
         }
         ui.add_enabled_ui(!dialog_open, |ui| {
-            if ui.button(tr.text("Add font…", "添加字体…", "新增字型…")).clicked() {
+            if ui
+                .button(tr.text("Add font…", "添加字体…", "新增字型…"))
+                .clicked()
+            {
                 commands.choose_font = true;
             }
         });
