@@ -2707,7 +2707,13 @@ fn run_inner(options: Options) -> Result<(), String> {
                 if !toolbar_ime_active {
                     output.platform_output.ime = None;
                 }
-                toolbar.update_rounded_shape(&mut toolbar_shape_size)?;
+                if let Err(error) = toolbar.update_rounded_shape(&mut toolbar_shape_size) {
+                    // Some compositors lack native shape masks. Keep a visible
+                    // rounded, alpha-composited UI rather than terminating the
+                    // entire application; retry after a real size/DPI change.
+                    eprintln!("OverInk: native toolbar shape unavailable: {error}");
+                    toolbar_shape_size = Some(toolbar.pixel_size());
+                }
                 toolbar_render.begin(&toolbar, [0.; 4])?;
                 gui.paint(&toolbar_render, &toolbar, &toolbar_color, output)?;
                 toolbar_render.present()?;
