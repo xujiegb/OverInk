@@ -906,6 +906,22 @@ mod tests {
     }
 
     #[test]
+    fn cancelling_save_dialog_keeps_the_screenshot_ready_for_retry() -> TestResult {
+        let region = Rect::from_min_size(pos2(50., 40.), vec2(100., 80.));
+        let mut screenshot = Screenshot {
+            stage: Stage::Ready(region, Arc::new(Image::buffer(1, 1)?)),
+            save_dialog: true,
+            ..Default::default()
+        };
+        screenshot.close_save_as();
+        assert!(!screenshot.save_dialog);
+        assert!(screenshot.active());
+        assert!(screenshot.ready());
+        assert!(matches!(screenshot.stage, Stage::Ready(rect, _) if rect == region));
+        Ok(())
+    }
+
+    #[test]
     fn saving_png_never_recreates_a_missing_default_folder_or_overwrites_an_automatic_name()
     -> TestResult {
         let folder = tempfile::tempdir()?;
