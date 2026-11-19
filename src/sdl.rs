@@ -103,6 +103,9 @@ enum SdlNativeAction<'a> {
     DestroyRenderer(NonNull<SDL_Renderer>),
     DestroyWindow(SDL_WindowID, NonNull<SDL_Window>),
     SaveBmp(&'a OwnedSurface, &'a CStr),
+    InkTextureUpload(&'a OwnedTexture, &'a [u8], i32),
+    TextureModulation(&'a OwnedTexture, [f32; 3], f32),
+    GuiTextureUpload(&'a OwnedTexture, Option<&'a SDL_Rect>, &'a [u8], i32),
     SystemTheme,
     IndirectTouch(SDL_TouchID),
     CaptureMouse(bool),
@@ -268,6 +271,29 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
             }
             SdlNativeAction::SaveBmp(surface, name) => {
                 SdlNativeResult::Success(SDL_SaveBMP(surface.as_non_null().as_ptr(), name.as_ptr()))
+            }
+            SdlNativeAction::InkTextureUpload(texture, pixels, pitch) => SdlNativeResult::Success(
+                SDL_UpdateTexture(
+                    texture.as_non_null().as_ptr(),
+                    ptr::null(),
+                    pixels.as_ptr().cast(),
+                    pitch,
+                ),
+            ),
+            SdlNativeAction::TextureModulation(texture, rgb, alpha) => {
+                let raw = texture.as_non_null().as_ptr();
+                SdlNativeResult::Success(
+                    SDL_SetTextureColorModFloat(raw, rgb[0], rgb[1], rgb[2])
+                        && SDL_SetTextureAlphaModFloat(raw, alpha),
+                )
+            }
+            SdlNativeAction::GuiTextureUpload(texture, rect, rgba, pitch) => {
+                SdlNativeResult::Success(SDL_UpdateTexture(
+                    texture.as_non_null().as_ptr(),
+                    rect.map_or(ptr::null(), |area| area),
+                    rgba.as_ptr().cast(),
+                    pitch,
+                ))
             }
             SdlNativeAction::SystemTheme => SdlNativeResult::Theme(SDL_GetSystemTheme()),
             SdlNativeAction::IndirectTouch(device) => SdlNativeResult::Success(matches!(
@@ -1976,33 +2002,15 @@ impl InkTexture {
         if pixels.len() != expected {
             return Err("Ink texture pixel buffer size mismatch".into());
         }
-        // SAFETY: The texture is live and the exact byte count and pitch
-        // were validated before SDL synchronously copies the borrowed pixels.
-        unsafe {
-            check(SDL_UpdateTexture(
-                self.raw.as_non_null().as_ptr(),
-                ptr::null(),
-                pixels.as_ptr().cast(),
-                pitch,
-            ))
-        }
+        // The dimensions, pitch, and byte count were validated above; the
+        // native dispatcher synchronously borrows the owned texture and pixels.
+        check(sdl_native(SdlNativeAction::InkTextureUpload(&self.raw, pixels, pitch)).succeeded())
     }
 
     pub fn set_modulation(&self, rgb: [f32; 3], alpha: f32) -> Result<(), String> {
-        // SAFETY: The owned SDL texture is live; SDL copies only the scalar
-        // color and alpha values on the renderer's main thread.
-        unsafe {
-            check(SDL_SetTextureColorModFloat(
-                self.raw.as_non_null().as_ptr(),
-                rgb[0],
-                rgb[1],
-                rgb[2],
-            ))?;
-            check(SDL_SetTextureAlphaModFloat(
-                self.raw.as_non_null().as_ptr(),
-                alpha,
-            ))
-        }
+        // Both native modulation calls use only the live texture and copied
+        // scalar values. A failed color update never performs the alpha update.
+        check(sdl_native(SdlNativeAction::TextureModulation(&self.raw, rgb, alpha)).succeeded())
     }
 
     pub fn draw(
@@ -2202,16 +2210,11 @@ impl GuiTexture {
         if !gui_upload_valid(self.dimensions, dimensions, rect) {
             return Err("egui texture upload has invalid dimensions or bounds".into());
         }
-        // SAFETY: The validated upload covers exactly the specified SDL
-        // region, with a row stride matching its width and live RGBA bytes.
-        unsafe {
-            check(SDL_UpdateTexture(
-                self.raw.as_non_null().as_ptr(),
-                rect.map_or(ptr::null(), |area| area),
-                rgba.as_ptr().cast(),
-                pitch,
-            ))
-        }
+        // SDL receives only the checked borrowed region and the exact RGBA
+        // payload through the existing native operation dispatcher.
+        check(
+            sdl_native(SdlNativeAction::GuiTextureUpload(&self.raw, rect, rgba, pitch)).succeeded(),
+        )
     }
 
     pub fn geometry(
