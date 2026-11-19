@@ -11,16 +11,27 @@ pub struct Rect {
 }
 impl Rect {
     pub fn contains(self, x: f32, y: f32) -> bool {
-        x >= self.x as f32
-            && y >= self.y as f32
-            && x < (self.x + self.w) as f32
-            && y < (self.y + self.h) as f32
+        // Native input coordinates can be close to i32::MAX. Widen the
+        // endpoints before comparing against the floating-point input.
+        let right = i64::from(self.x) + i64::from(self.w);
+        let bottom = i64::from(self.y) + i64::from(self.h);
+        x >= self.x as f32 && y >= self.y as f32 && x < right as f32 && y < bottom as f32
     }
     pub fn crosses(self, from: crate::model::Point, to: crate::model::Point) -> bool {
         let (mut enter, mut exit) = (0.0_f32, 1.0_f32);
         for (start, end, min, max) in [
-            (from.x, to.x, self.x, self.x + self.w),
-            (from.y, to.y, self.y, self.y + self.h),
+            (
+                from.x,
+                to.x,
+                i64::from(self.x),
+                i64::from(self.x) + i64::from(self.w),
+            ),
+            (
+                from.y,
+                to.y,
+                i64::from(self.y),
+                i64::from(self.y) + i64::from(self.h),
+            ),
         ] {
             let delta = end - start;
             let (min, max) = (min as f32, max as f32);
@@ -262,6 +273,23 @@ mod tests {
             .clipped([0, 100]),
             None
         );
+    }
+
+    #[test]
+    fn containment_and_crossings_do_not_overflow_native_endpoints() {
+        let rect = Rect {
+            x: i32::MAX - 1_048_576,
+            y: i32::MAX - 1_048_576,
+            w: i32::MAX,
+            h: i32::MAX,
+        };
+        let inside = 2_147_483_648.0;
+        assert!(rect.contains(inside, inside));
+        assert!(!rect.contains(-1.0, inside));
+        let outside = crate::model::Point::new(inside - 2_097_152.0, inside, 0.5, [0.; 2]);
+        let within = crate::model::Point::new(inside, inside, 0.5, [0.; 2]);
+        assert!(rect.crosses(outside, within));
+        assert!(!rect.crosses(outside, outside));
     }
 
     #[test]

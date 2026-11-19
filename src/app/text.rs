@@ -1731,9 +1731,10 @@ mod tests {
         app.history.undo();
         assert_eq!(app.history.text_boxes()[index].font_size, item.font_size);
         item.move_to(pos2(500., 580.), screen);
-        app.history.set_text_box(Some(index), item.clone());
+        let moved_rect = item.rect();
+        app.history.set_text_box(Some(index), item);
         let menu = app.text_menus(screen).unwrap().actions;
-        assert!(item.rect().intersects(menu));
+        assert!(moved_rect.intersects(menu));
         assert!(screen.contains_rect(menu));
         click(&mut app, pos2(50., 50.));
         assert!(app.text_menus(screen).is_none());
