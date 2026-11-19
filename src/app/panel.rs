@@ -19,27 +19,55 @@ impl App {
         freeze_unavailable: Option<Text>,
         mark: egui::TextureId,
         dialog_open: bool,
+        panel_progress: f32,
     ) -> Commands {
         let mut commands = Commands::default();
         let tr = self.language;
         let available = ui.available_size();
-        let opened = self.panel.filter(|_| !self.picking);
+        let active = self.panel.filter(|_| !self.picking);
+        let opened = active.or(self.closing_panel);
+        let mut content_opacity = 0.0;
+        for panel in [
+            Panel::Shapes, Panel::Brush, Panel::Colors, Panel::Background, Panel::Settings,
+        ] {
+            let opacity = ui.ctx().animate_bool_with_time(
+                egui::Id::new(("toolbar-panel-content", panel)),
+                active == Some(panel),
+                0.18,
+            );
+            if opened == Some(panel) {
+                content_opacity = opacity;
+            }
+        }
+        if content_opacity > 0.001 && content_opacity < 0.999 {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(16));
+        }
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 0.;
             ui.allocate_ui_with_layout(
                 vec2(toolbar::WIDTH, available.y),
                 Layout::top_down(Align::Center),
-                |ui| self.rail(ui, mark, &mut commands),
+                |ui| {
+                    egui::Frame::new()
+                        .fill(ui.visuals().window_fill())
+                        .corner_radius(12)
+                        .show(ui, |ui| self.rail(ui, mark, &mut commands));
+                },
             );
-            if let Some(panel) = opened {
+            if let Some(panel) = opened.filter(|_| panel_progress > 0.001) {
                 let width = (available.x - toolbar::WIDTH).max(0.);
                 if width > 48. {
                     ui.allocate_ui_with_layout(
                         vec2(width, available.y),
                         Layout::top_down(Align::Min),
                         |ui| {
+                            ui.set_opacity((content_opacity * panel_progress).clamp(0., 1.));
+                            if active.is_none() {
+                                ui.disable();
+                            }
                             egui::Frame::new()
                                 .fill(ui.visuals().window_fill())
+                                .corner_radius(14)
                                 .inner_margin(egui::Margin::same(13))
                                 .show(ui, |ui| {
                                     ui.spacing_mut().item_spacing = vec2(6., 4.);
