@@ -9,7 +9,6 @@ use std::{
 
 #[derive(Clone, Copy)]
 pub enum DialogKind {
-    Font,
     ScreenshotFolder,
     ScreenshotFile,
 }
@@ -111,7 +110,6 @@ mod tests {
     #[test]
     fn screenshot_save_dialog_does_not_parent_fullscreen_overlay() {
         assert!(!use_window_parent(DialogKind::ScreenshotFile));
-        assert_eq!(use_window_parent(DialogKind::Font), USE_WINDOW_PARENT);
         assert_eq!(
             use_window_parent(DialogKind::ScreenshotFolder),
             USE_WINDOW_PARENT
@@ -124,7 +122,7 @@ mod tests {
         let id = dialog
             .begin(DialogKind::ScreenshotFile)
             .ok_or("Cannot begin file dialog")?;
-        assert!(dialog.begin(DialogKind::Font).is_none());
+        assert!(dialog.begin(DialogKind::ScreenshotFolder).is_none());
         assert!(dialog.poll().is_none());
 
         std::thread::spawn(move || {
@@ -147,8 +145,8 @@ mod tests {
     fn drop_unregisters_a_request_without_a_callback() -> Result<(), String> {
         let mut dialog = FileDialog::default();
         let id = dialog
-            .begin(DialogKind::Font)
-            .ok_or("Cannot begin font dialog")?;
+            .begin(DialogKind::ScreenshotFile)
+            .ok_or("Cannot begin save dialog")?;
         drop(dialog);
         assert!(!callbacks().results.contains_key(&id));
 
@@ -186,11 +184,11 @@ mod tests {
     fn native_callback_cancellation_is_owned_and_consumed_once() -> Result<(), String> {
         let mut dialog = FileDialog::default();
         let id = dialog
-            .begin(DialogKind::Font)
-            .ok_or("Cannot begin font dialog")?;
+            .begin(DialogKind::ScreenshotFolder)
+            .ok_or("Cannot begin folder dialog")?;
         let list = [ptr::null()];
         native::chosen(ptr::without_provenance_mut(id), list.as_ptr(), -1);
-        assert!(matches!(dialog.poll(), Some((DialogKind::Font, Ok(None)))));
+        assert!(matches!(dialog.poll(), Some((DialogKind::ScreenshotFolder, Ok(None)))));
         assert!(dialog.poll().is_none());
         Ok(())
     }

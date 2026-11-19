@@ -86,7 +86,6 @@ const LEFT_BUTTON: u8 = SDL_BUTTON_LEFT as u8;
 const RIGHT_BUTTON: u8 = SDL_BUTTON_RIGHT as u8;
 const LASER_LIFETIME: Duration = Duration::from_millis(900);
 const MAX_LASER_SAMPLES: usize = 4096;
-const FONT_PATH_FIELD: &str = "annotation-font-path";
 #[derive(Default)]
 struct Commands {
     mode: bool,
@@ -99,7 +98,6 @@ struct Commands {
     #[cfg(target_os = "linux")]
     gnome_action: Option<crate::gnome::Action>,
     redraw_canvas: bool,
-    choose_font: bool,
     font_path: Option<PathBuf>,
     reset_font: bool,
     font_reorder: Option<(usize, usize)>,
@@ -202,7 +200,6 @@ struct App {
     font_catalog: Option<Vec<crate::fonts::SystemFont>>,
     font_search: String,
     adding_font: bool,
-    font_path_input: Option<String>,
     screenshot: Screenshot,
     #[cfg(target_os = "linux")]
     gnome_guide: Option<crate::gnome::Guide>,
@@ -275,7 +272,6 @@ impl App {
             font_catalog: None,
             font_search: String::new(),
             adding_font: false,
-            font_path_input: None,
             screenshot: Screenshot::default(),
             #[cfg(target_os = "linux")]
             gnome_guide: None,
@@ -1323,7 +1319,6 @@ impl App {
     fn install_annotation_font(&mut self, source: &Path, destination: &Path) -> bool {
         match self.text_fonts.install(source, destination) {
             Ok(()) => {
-                self.font_path_input = None;
                 self.status = text(
                     "Annotation font updated",
                     "已更新标注字体",
@@ -2095,29 +2090,6 @@ fn run_inner(options: Options) -> Result<(), String> {
                 toolbar_dirty = true;
                 restore_toolbar_focus = !app.screenshot.active();
                 match kind {
-                    DialogKind::Font => match result {
-                        Ok(Some(path))
-                            if app.install_annotation_font(&path, &annotation_font_path) =>
-                        {
-                            for canvas in &mut canvases {
-                                canvas.dirty = true;
-                            }
-                        }
-                        Ok(_) => (),
-                        Err(error) => {
-                            app.panel = Some(crate::toolbar::Panel::Settings);
-                            app.font_path_input.get_or_insert_with(String::new);
-                            gui.ctx.memory_mut(|mem| {
-                                mem.request_focus(egui::Id::unique(FONT_PATH_FIELD))
-                            });
-                            app.status = text(
-                                "Enter a font file path",
-                                "请输入字体文件路径",
-                                "請輸入字型檔案路徑",
-                            )
-                            .detail(error);
-                        }
-                    },
                     DialogKind::ScreenshotFolder => match result {
                         Ok(Some(path)) => {
                             let previous = app.preferences.screenshot_folder.replace(path);
@@ -2549,17 +2521,6 @@ fn run_inner(options: Options) -> Result<(), String> {
                 return Ok(());
             }
             mode_changed |= cmd.mode;
-            if cmd.choose_font && !file_dialog.pending() {
-                app.finish_all_contacts();
-                tooltips.clear();
-                for canvas in &mut canvases {
-                    canvas.show(&toolbar, false)?;
-                }
-                gui.suspend_input(&toolbar);
-                file_dialog.open(DialogKind::Font, &toolbar, None);
-                cmd.redraw_canvas = true;
-                toolbar_dirty = true;
-            }
             if cmd.screenshot_folder && !file_dialog.pending() {
                 app.finish_all_contacts();
                 tooltips.clear();
@@ -3260,7 +3221,6 @@ mod touch_tests {
             font_catalog: None,
             font_search: String::new(),
             adding_font: false,
-            font_path_input: None,
             screenshot: Screenshot::default(),
             #[cfg(target_os = "linux")]
             gnome_guide: None,

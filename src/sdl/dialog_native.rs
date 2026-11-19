@@ -56,9 +56,6 @@ pub(super) fn show(id: usize, kind: DialogKind, window: &Window, location: Optio
     // the chooser is open, including GNOME Wayland and XWayland.
     unsafe {
         match kind {
-            DialogKind::Font => {
-                SDL_ShowOpenFileDialog(Some(chosen), user, parent, ptr::null(), 0, initial, false)
-            }
             DialogKind::ScreenshotFolder => {
                 SDL_ShowOpenFolderDialog(Some(chosen), user, parent, initial, false)
             }
