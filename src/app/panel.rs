@@ -19,12 +19,16 @@ impl App {
         freeze_unavailable: Option<Text>,
         mark: egui::TextureId,
         dialog_open: bool,
-        panel_progress: f32,
     ) -> Commands {
         let mut commands = Commands::default();
         let tr = self.language;
         let available = ui.available_size();
         let active = self.panel.filter(|_| !self.picking);
+        let panel_progress = ui.ctx().animate_bool_with_time(
+            egui::Id::unique("toolbar-panel-expansion"),
+            active.is_some(),
+            0.20,
+        );
         let opened = active.or(self.closing_panel);
         let mut content_opacity = 0.0;
         for panel in [
@@ -35,7 +39,7 @@ impl App {
             Panel::Settings,
         ] {
             let opacity = ui.ctx().animate_bool_with_time(
-                egui::Id::new(("toolbar-panel-content", panel)),
+                egui::Id::unique(("toolbar-panel-content", panel)),
                 active == Some(panel),
                 0.18,
             );
@@ -692,12 +696,11 @@ impl App {
                 }
             });
         }
-        if ui.input(|input| input.pointer.any_released()) {
-            if let (Some(from), Some(to)) = (self.font_drag.take(), hovered)
-                && from != to
-            {
-                commands.move_font = Some((from, to));
-            }
+        if ui.input(|input| input.pointer.any_released())
+            && let (Some(from), Some(to)) = (self.font_drag.take(), hovered)
+            && from != to
+        {
+            commands.move_font = Some((from, to));
         }
         ui.add_enabled_ui(!dialog_open, |ui| {
             if ui
