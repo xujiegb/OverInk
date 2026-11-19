@@ -655,10 +655,10 @@ impl App {
                 drop_target = Some(index);
             }
         }
-        if released {
-            if let (Some(from), Some(to)) = (self.font_drag.take(), drop_target) {
-                commands.font_move = Some((from, to));
-            }
+        if released
+            && let (Some(from), Some(to)) = (self.font_drag.take(), drop_target)
+        {
+            commands.font_move = Some((from, to));
         }
         ui.add_enabled_ui(!dialog_open, |ui| {
             if ui
