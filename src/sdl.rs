@@ -1782,7 +1782,11 @@ impl Window {
     }
     pub fn arrange_toolbar(&self, expanded: bool, on_display: Option<u32>) -> Result<(), String> {
         self.arrange_toolbar_width(
-            if expanded { crate::toolbar::PANEL_WIDTH } else { 0. },
+            if expanded {
+                crate::toolbar::PANEL_WIDTH
+            } else {
+                0.
+            },
             on_display,
         )
     }
@@ -1795,8 +1799,7 @@ impl Window {
         on_display: Option<u32>,
     ) -> Result<(), String> {
         let units = self.ui_scale();
-        let width = crate::toolbar::WIDTH
-            + panel_width.clamp(0., crate::toolbar::PANEL_WIDTH);
+        let width = crate::toolbar::WIDTH + panel_width.clamp(0., crate::toolbar::PANEL_WIDTH);
         let (mut w, mut h) = (
             (width * units).round() as i32,
             (crate::toolbar::HEIGHT * units).round() as i32,
