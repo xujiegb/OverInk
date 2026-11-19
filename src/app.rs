@@ -224,6 +224,15 @@ struct App {
     last_save: Instant,
 }
 impl App {
+    fn mouse_mode_status() -> Status {
+        text(
+            "Mouse mode. Click the desktop or select a drawing tool to resume.",
+            "鼠标模式。可点击桌面，选择任一画具即可继续书写。",
+            "滑鼠模式。可點按桌面，選擇任一繪圖工具即可繼續書寫。",
+        )
+        .into()
+    }
+
     fn new(
         board: bool,
         display: usize,
@@ -237,12 +246,7 @@ impl App {
         let suspended = displays.is_empty();
         let mut pages = Pages::new(displays.get(display).map(|d| d.id));
         pages.sync(&mut history, &displays);
-        let mut status = text(
-            "Ready. Draw on the canvas. Space switches to mouse mode.",
-            "就绪。可在屏幕上书写，按空格键切换到鼠标模式。",
-            "就緒。可在螢幕上書寫，按空白鍵切換至滑鼠模式。",
-        )
-        .into();
+        let mut status = Self::mouse_mode_status();
         if preferences.restore_session && save_path.exists() {
             match pages.load(&mut history, &save_path, true) {
                 Ok(0) => {}
@@ -259,6 +263,7 @@ impl App {
             parked_input: BTreeMap::new(),
             multi: false,
             history,
+            // Mouse mode is active on launch; remember Pen for Space to resume.
             tool: Tool::Pen,
             color: InkColor::default(),
             hex_entry: crate::color::HexEntry::new(InkColor::default()),
@@ -267,7 +272,8 @@ impl App {
             opacity: 1.,
             pressure: true,
             curve: 1.,
-            pass: false,
+            pass: true,
+            // No button was pressed to enter mouse mode during startup.
             wait_for_mouse_up: false,
             hidden: false,
             board: board.then_some(Board::White),
@@ -576,12 +582,7 @@ impl App {
         self.pass = true;
         self.wait_for_mouse_up = true;
         self.panel = None;
-        self.status = text(
-            "Mouse mode. Click the desktop or select a drawing tool to resume.",
-            "鼠标模式。可点击桌面，选择任一画具即可继续书写。",
-            "滑鼠模式。可點按桌面，選擇任一繪圖工具即可繼續書寫。",
-        )
-        .into();
+        self.status = Self::mouse_mode_status();
         self.finish_all_contacts();
     }
     fn use_tool(&mut self, tool: Tool) {
@@ -3954,6 +3955,41 @@ mod touch_tests {
         assert!(trail[1].point.x < 100. && trail[2].point.x > 300.);
     }
     #[test]
+    fn startup_uses_mouse_mode_and_space_restores_the_pen() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let state = tempfile::tempdir()?;
+        let mut app = App::new(
+            false,
+            0,
+            vec![screen(10, 0, 60.)],
+            state.path(),
+            Preferences {
+                restore_session: false,
+                ..Preferences::default()
+            },
+        );
+        assert!(app.pass);
+        assert!(!app.wait_for_mouse_up);
+        assert!(app.mouse_ready());
+        assert_eq!(app.tool, Tool::Pen);
+        assert!(!app.hidden);
+
+        let space = SDL_Event {
+            key: SDL_KeyboardEvent {
+                r#type: SDL_EVENT_KEY_DOWN,
+                key: SDLK_SPACE,
+                ..Default::default()
+            },
+        };
+        assert!(app.keyboard(&space, false).mode);
+        assert!(!app.pass);
+        assert_eq!(app.tool, Tool::Pen);
+        assert!(app.keyboard(&space, false).mode);
+        assert!(app.pass);
+        Ok(())
+    }
+
+    #[test]
     fn tool_hotkeys_and_space_switch_between_mouse_and_drawing() {
         let mut a = app();
         a.use_mouse();
@@ -4084,6 +4120,7 @@ mod touch_tests {
         ));
         let displays = vec![screen(10, 0, 60.0), screen(20, 1920, 120.0)];
         let mut a = App::new(true, 0, displays.clone(), &state, Preferences::default());
+        a.use_tool(Tool::Pen);
         add_ink(&mut a, &[120.]);
         a.select_page(20);
         add_ink(&mut a, &[440.]);
@@ -4107,6 +4144,7 @@ mod touch_tests {
             Preferences::load(&state.join("ui.json")),
         );
         assert!(private.history.strokes().is_empty());
+        private.use_tool(Tool::Pen);
         add_ink(&mut private, &[640.]);
         private.finish_session()?;
         assert!(!private.save_path.exists());
@@ -4131,6 +4169,7 @@ mod touch_tests {
             },
         );
         assert!(!state.exists());
+        app.use_tool(Tool::Pen);
         add_ink(&mut app, &[20., 40.]);
         app.export();
         let svg = std::fs::read_to_string(Path::new(&app.path).with_extension("svg"))?;

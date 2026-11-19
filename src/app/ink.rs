@@ -793,21 +793,23 @@ mod tests {
     use super::*;
     use crate::app::touch_tests::app;
 
+    type TestResult = Result<(), String>;
+
     struct TestCanvas {
         renderer: TestRenderer,
         pixels: [i32; 2],
         color: ColorManager,
     }
     impl TestCanvas {
-        fn new([width, height]: [i32; 2]) -> Self {
-            let surface = TestSurface::new([width, height]).unwrap();
+        fn new([width, height]: [i32; 2]) -> Result<Self, String> {
+            let surface = TestSurface::new([width, height])?;
             let pixels = surface.size();
-            let renderer = surface.software_renderer().unwrap();
-            Self {
+            let renderer = surface.software_renderer()?;
+            Ok(Self {
                 renderer,
                 pixels,
                 color: ColorManager::default(),
-            }
+            })
         }
         fn frame(&self) -> Frame<'_> {
             Frame {
@@ -819,15 +821,15 @@ mod tests {
                 extended_budget: MAX_EXTENDED_INK_TEXTURE_BYTES,
             }
         }
-        fn pixel(&self, x: i32, y: i32) -> [u8; 4] {
-            TestSurface::pixel(&self.renderer, x, y).unwrap()
+        fn pixel(&self, x: i32, y: i32) -> Result<[u8; 4], String> {
+            TestSurface::pixel(&self.renderer, x, y)
         }
-        fn pixels(&self) -> Vec<[u8; 4]> {
-            TestSurface::pixels(&self.renderer).unwrap()
+        fn pixels(&self) -> Result<Vec<[u8; 4]>, String> {
+            TestSurface::pixels(&self.renderer)
         }
-        fn history(&self, ink: &mut Ink, app: &mut App) {
-            self.renderer.clear([0.; 4]).unwrap();
-            ink.committed(&self.frame(), app).unwrap();
+        fn history(&self, ink: &mut Ink, app: &mut App) -> TestResult {
+            self.renderer.clear([0.; 4])?;
+            ink.committed(&self.frame(), app)
         }
     }
 
@@ -848,43 +850,43 @@ mod tests {
     }
 
     #[test]
-    fn cached_ink_keeps_alpha_and_tracks_history_and_eraser_edits() {
-        let canvas = TestCanvas::new([128, 96]);
+    fn cached_ink_keeps_alpha_and_tracks_history_and_eraser_edits() -> TestResult {
+        let canvas = TestCanvas::new([128, 96])?;
         let mut app = app();
         let mut ink = Ink::default();
         commit(&mut app, Tool::Pen, [255, 0, 0], &[[10., 20.], [100., 20.]]);
-        canvas.history(&mut ink, &mut app);
-        let red = canvas.pixel(50, 20);
+        canvas.history(&mut ink, &mut app)?;
+        let red = canvas.pixel(50, 20)?;
         assert!((125..=129).contains(&red[0]), "{red:?}");
         assert_eq!(red[0], red[3]);
-        assert_eq!(ink.layer.as_ref().unwrap().count, 1);
+        assert_eq!(ink.layer.as_ref().map(|layer| layer.count), Some(1));
 
         ink.painter.vertices.clear();
-        canvas.history(&mut ink, &mut app);
+        canvas.history(&mut ink, &mut app)?;
         assert!(ink.painter.vertices.is_empty());
-        assert_eq!(canvas.pixel(50, 20), red);
+        assert_eq!(canvas.pixel(50, 20)?, red);
 
         commit(&mut app, Tool::Pen, [0, 255, 0], &[[10., 70.], [100., 70.]]);
-        canvas.history(&mut ink, &mut app);
-        assert_eq!(ink.layer.as_ref().unwrap().count, 2);
-        assert_eq!(canvas.pixel(50, 20), red);
-        let green = canvas.pixel(50, 70);
+        canvas.history(&mut ink, &mut app)?;
+        assert_eq!(ink.layer.as_ref().map(|layer| layer.count), Some(2));
+        assert_eq!(canvas.pixel(50, 20)?, red);
+        let green = canvas.pixel(50, 70)?;
         assert!(green[1] > 120);
         app.history.undo();
-        canvas.history(&mut ink, &mut app);
-        assert_eq!(canvas.pixel(50, 70), [0; 4]);
+        canvas.history(&mut ink, &mut app)?;
+        assert_eq!(canvas.pixel(50, 70)?, [0; 4]);
         app.history.redo();
-        canvas.history(&mut ink, &mut app);
-        assert_eq!(canvas.pixel(50, 70), green);
+        canvas.history(&mut ink, &mut app)?;
+        assert_eq!(canvas.pixel(50, 70)?, green);
 
         app.erase_sample(1, Point::new(50., 20., 1., [0.; 2]));
-        canvas.history(&mut ink, &mut app);
-        assert_eq!(canvas.pixel(50, 20), [0; 4]);
+        canvas.history(&mut ink, &mut app)?;
+        assert_eq!(canvas.pixel(50, 20)?, [0; 4]);
         app.reset_contacts();
-        canvas.history(&mut ink, &mut app);
-        assert_eq!(canvas.pixel(50, 20), red);
+        canvas.history(&mut ink, &mut app)?;
+        assert_eq!(canvas.pixel(50, 20)?, red);
 
-        let outside_hole = canvas.pixel(60, 20);
+        let outside_hole = canvas.pixel(60, 20)?;
         clear_hole(
             &canvas.renderer,
             Rect {
@@ -893,18 +895,18 @@ mod tests {
                 w: 8,
                 h: 8,
             },
-        )
-        .unwrap();
-        assert_eq!(canvas.pixel(50, 20), [0; 4]);
-        assert_eq!(canvas.pixel(60, 20), outside_hole);
+        )?;
+        assert_eq!(canvas.pixel(50, 20)?, [0; 4]);
+        assert_eq!(canvas.pixel(60, 20)?, outside_hole);
         app.history.clear();
-        canvas.history(&mut ink, &mut app);
+        canvas.history(&mut ink, &mut app)?;
         assert!(ink.layer.is_none());
+        Ok(())
     }
 
     #[test]
-    fn marker_crossing_has_the_same_opacity_as_the_rest_of_the_stroke() {
-        let canvas = TestCanvas::new([1280, 96]);
+    fn marker_crossing_has_the_same_opacity_as_the_rest_of_the_stroke() -> TestResult {
+        let canvas = TestCanvas::new([1280, 96])?;
         let mut app = app();
         let mut ink = Ink::default();
         commit(
@@ -919,19 +921,20 @@ mod tests {
                 [45., 10.],
             ],
         );
-        canvas.history(&mut ink, &mut app);
+        canvas.history(&mut ink, &mut app)?;
         assert!(ink.painter.marker_mask.is_some());
-        let straight = canvas.pixel(65, 25);
+        let straight = canvas.pixel(65, 25)?;
         assert!((125..=129).contains(&straight[3]), "{straight:?}");
-        assert_eq!(canvas.pixel(45, 25), straight);
-        assert_eq!(canvas.pixel(MARKER_TILE - 1, 25), straight);
-        assert_eq!(canvas.pixel(MARKER_TILE, 25), straight);
+        assert_eq!(canvas.pixel(45, 25)?, straight);
+        assert_eq!(canvas.pixel(MARKER_TILE - 1, 25)?, straight);
+        assert_eq!(canvas.pixel(MARKER_TILE, 25)?, straight);
+        Ok(())
     }
 
     #[test]
-    fn marker_split_updates_a_crossing_away_from_the_cut() {
-        let canvas = TestCanvas::new([600, 160]);
-        let full = TestCanvas::new([600, 160]);
+    fn marker_split_updates_a_crossing_away_from_the_cut() -> TestResult {
+        let canvas = TestCanvas::new([600, 160])?;
+        let full = TestCanvas::new([600, 160])?;
         let mut app = app();
         let mut ink = Ink::default();
         commit(
@@ -952,38 +955,39 @@ mod tests {
             ],
         );
         let crossing = |canvas: &TestCanvas| canvas.pixel(100, 60);
-        canvas.history(&mut ink, &mut app);
-        let before = crossing(&canvas);
-        assert_eq!(before, canvas.pixel(160, 60));
+        canvas.history(&mut ink, &mut app)?;
+        let before = crossing(&canvas)?;
+        assert_eq!(before, canvas.pixel(160, 60)?);
 
         app.erase_sample(1, Point::new(420., 60., 1., [0.; 2]));
-        canvas.history(&mut ink, &mut app);
-        full.history(&mut Ink::default(), &mut app);
-        let split = crossing(&full);
+        canvas.history(&mut ink, &mut app)?;
+        full.history(&mut Ink::default(), &mut app)?;
+        let split = crossing(&full)?;
         assert!(split[3] > before[3]);
-        assert_eq!(crossing(&canvas), split);
+        assert_eq!(crossing(&canvas)?, split);
 
         app.reset_contacts();
-        canvas.history(&mut ink, &mut app);
-        assert_eq!(crossing(&canvas), before);
+        canvas.history(&mut ink, &mut app)?;
+        assert_eq!(crossing(&canvas)?, before);
 
         app.erase_sample(2, Point::new(420., 60., 1., [0.; 2]));
-        canvas.history(&mut ink, &mut app);
+        canvas.history(&mut ink, &mut app)?;
         app.commit_erase(2);
-        canvas.history(&mut ink, &mut app);
+        canvas.history(&mut ink, &mut app)?;
         assert_eq!(app.history.strokes().len(), 2);
-        assert_eq!(crossing(&canvas), split);
+        assert_eq!(crossing(&canvas)?, split);
         app.history.undo();
-        canvas.history(&mut ink, &mut app);
-        assert_eq!(crossing(&canvas), before);
+        canvas.history(&mut ink, &mut app)?;
+        assert_eq!(crossing(&canvas)?, before);
         app.history.redo();
-        canvas.history(&mut ink, &mut app);
-        assert_eq!(crossing(&canvas), split);
+        canvas.history(&mut ink, &mut app)?;
+        assert_eq!(crossing(&canvas)?, split);
+        Ok(())
     }
 
     #[test]
-    fn small_extended_cache_releases_its_layer_after_erase() {
-        let canvas = TestCanvas::new([320, 160]);
+    fn small_extended_cache_releases_its_layer_after_erase() -> TestResult {
+        let canvas = TestCanvas::new([320, 160])?;
         let mut app = app();
         let mut ink = Ink::default();
         commit(
@@ -995,9 +999,12 @@ mod tests {
         assert!(!extended_cache_needed(&app));
         for (id, x) in [(1, 100.), (2, 180.)] {
             app.erase_sample(id, Point::new(x, 60., 1., [0.; 2]));
-            canvas.history(&mut ink, &mut app);
+            canvas.history(&mut ink, &mut app)?;
             // Exercise the lifetime policy with a software-backed target.
-            ink.layer.as_mut().unwrap().format = SDL_PIXELFORMAT_RGBA64_FLOAT;
+            let Some(layer) = ink.layer.as_mut() else {
+                panic!("expected a cached ink layer");
+            };
+            layer.format = SDL_PIXELFORMAT_RGBA64_FLOAT;
             ink.release_unused_extended_layer(&app);
             assert_eq!(ink.extended_bytes(), extended_bytes([320, 160]));
 
@@ -1016,12 +1023,13 @@ mod tests {
         app.history
             .append(std::iter::repeat_n(stroke, EXTENDED_CACHE_STROKES));
         assert!(extended_cache_needed(&app));
+        Ok(())
     }
 
     #[test]
-    fn local_erase_matches_a_full_rebuild_at_fractional_scale() {
-        let canvas = TestCanvas::new([840, 240]);
-        let full = TestCanvas::new([840, 240]);
+    fn local_erase_matches_a_full_rebuild_at_fractional_scale() -> TestResult {
+        let canvas = TestCanvas::new([840, 240])?;
+        let full = TestCanvas::new([840, 240])?;
         let mut app = app();
         let mut ink = Ink::default();
         let mut reference = Ink::default();
@@ -1034,7 +1042,7 @@ mod tests {
             ..frame
         };
         for renderer in [&canvas.renderer, &full.renderer] {
-            set_scale(renderer, frame.scale).unwrap();
+            set_scale(renderer, frame.scale)?;
         }
         for (tool, color, points) in [
             (
@@ -1067,42 +1075,44 @@ mod tests {
             [0, 0, 255],
             &[[390., 122.], [540., 122.]],
         );
-        let mut compare = |app: &mut App| {
-            canvas.renderer.clear([0.; 4]).unwrap();
-            full.renderer.clear([0.; 4]).unwrap();
-            ink.committed(&frame, app).unwrap();
+        let mut compare = |app: &mut App| -> TestResult {
+            canvas.renderer.clear([0.; 4])?;
+            full.renderer.clear([0.; 4])?;
+            ink.committed(&frame, app)?;
             reference.invalidate_layer();
-            reference.committed(&reference_frame, app).unwrap();
-            let actual = canvas.pixels();
-            let expected = full.pixels();
+            reference.committed(&reference_frame, app)?;
+            let actual = canvas.pixels()?;
+            let expected = full.pixels()?;
             let difference = actual.iter().zip(&expected).position(|(a, b)| a != b);
             assert!(
                 difference.is_none(),
                 "{:?}",
                 difference.map(|i| (i % 840, i / 840, actual[i], expected[i]))
             );
+            Ok(())
         };
         let point = |x, y| Point::new(x, y, 1., [0.; 2]);
-        compare(&mut app);
+        compare(&mut app)?;
         app.erase_sample(1, point(240., 70.));
-        compare(&mut app);
+        compare(&mut app)?;
         app.erase_sample(1, point(260., 78.));
-        compare(&mut app);
+        compare(&mut app)?;
         app.erase_sample(2, point(300., 70.));
-        compare(&mut app);
+        compare(&mut app)?;
         app.commit_erase(2);
-        compare(&mut app);
+        compare(&mut app)?;
         app.reset_contacts();
-        compare(&mut app);
+        compare(&mut app)?;
         app.history.undo();
-        compare(&mut app);
+        compare(&mut app)?;
         app.history.redo();
-        compare(&mut app);
+        compare(&mut app)?;
+        Ok(())
     }
 
     #[test]
-    fn local_erase_skips_distant_geometry_on_dense_canvas() {
-        let canvas = TestCanvas::new([1024, 768]);
+    fn local_erase_skips_distant_geometry_on_dense_canvas() -> TestResult {
+        let canvas = TestCanvas::new([1024, 768])?;
         let mut app = app();
         let mut ink = Ink::default();
         app.history.append((0..100).map(|row| {
@@ -1141,31 +1151,33 @@ mod tests {
         app.input.pending_erasures.insert(0, draft);
         app.commit_erase(0);
         assert_eq!(app.history.strokes().len(), 10_000);
-        canvas.history(&mut ink, &mut app);
+        canvas.history(&mut ink, &mut app)?;
         let full_indices = std::mem::take(&mut ink.painter.submitted_indices);
         app.erase_sample(1, Point::new(500., 350., 1., [0.; 2]));
-        canvas.history(&mut ink, &mut app);
+        canvas.history(&mut ink, &mut app)?;
         let preview_indices = std::mem::take(&mut ink.painter.submitted_indices);
         eprintln!("Full canvas: {full_indices} indices. Erase preview: {preview_indices} indices.");
         assert!(preview_indices > 0 && preview_indices < full_indices / 100);
         app.commit_erase(1);
-        canvas.history(&mut ink, &mut app);
+        canvas.history(&mut ink, &mut app)?;
         assert_eq!(ink.painter.submitted_indices, 0);
+        Ok(())
     }
 
     #[test]
-    fn committed_layer_maps_logical_coordinates_at_high_pixel_density() {
-        let canvas = TestCanvas::new([128, 96]);
+    fn committed_layer_maps_logical_coordinates_at_high_pixel_density() -> TestResult {
+        let canvas = TestCanvas::new([128, 96])?;
         let mut app = app();
         let mut ink = Ink::default();
         commit(&mut app, Tool::Pen, [255, 0, 0], &[[30., 16.], [58., 16.]]);
         let mut frame = canvas.frame();
         frame.scale = [2.; 2];
         frame.aa = 0.4;
-        canvas.renderer.set_render_scale([2., 2.]).unwrap();
-        canvas.renderer.clear([0.; 4]).unwrap();
-        ink.committed(&frame, &mut app).unwrap();
-        assert!(canvas.pixel(100, 32)[3] > 120);
-        assert_eq!(canvas.pixel(35, 16), [0; 4]);
+        canvas.renderer.set_render_scale([2., 2.])?;
+        canvas.renderer.clear([0.; 4])?;
+        ink.committed(&frame, &mut app)?;
+        assert!(canvas.pixel(100, 32)?[3] > 120);
+        assert_eq!(canvas.pixel(35, 16)?, [0; 4]);
+        Ok(())
     }
 }

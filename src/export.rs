@@ -186,7 +186,7 @@ mod tests {
     };
 
     #[test]
-    fn pencil_exports_every_core_triangle_and_its_density() {
+    fn pencil_exports_every_core_triangle_and_its_density() -> Result<(), String> {
         let stroke = Stroke {
             tool: Tool::Pencil,
             color: InkColor::default(),
@@ -206,13 +206,14 @@ mod tests {
             strokes: vec![stroke.into()],
             ..Document::default()
         };
-        let svg = svg(&doc, &TextFonts::default()).unwrap();
+        let svg = svg(&doc, &TextFonts::default())?;
         assert_eq!(svg.matches("<path").count(), core.indices.len() / 3);
         assert_eq!(svg.matches("fill-opacity").count(), core.indices.len() / 3);
+        Ok(())
     }
 
     #[test]
-    fn identical_glyphs_share_images_without_reusing_the_wrong_tint() {
+    fn identical_glyphs_share_images_without_reusing_the_wrong_tint() -> Result<(), String> {
         let item = TextBox {
             origin: [10., 10.],
             size: [200., 72.],
@@ -233,14 +234,15 @@ mod tests {
             ],
             ..Document::default()
         };
-        let svg = svg(&doc, &TextFonts::default()).unwrap();
+        let svg = svg(&doc, &TextFonts::default())?;
         assert_eq!(svg.matches("<image ").count(), 3);
         assert_eq!(svg.matches("<use ").count(), 6);
         assert_eq!(svg.matches("href=\"#glyph-1\"").count(), 3);
+        Ok(())
     }
 
     #[test]
-    fn scrolled_annotations_export_the_visible_rows() {
+    fn scrolled_annotations_export_the_visible_rows() -> Result<(), String> {
         let item = TextBox {
             origin: [10., 10.],
             size: [200., 56.],
@@ -264,13 +266,13 @@ mod tests {
                 },
                 &fonts,
             )
-            .unwrap()
         };
-        let top = render(0.);
-        let bottom = render(1000.);
+        let top = render(0.)?;
+        let bottom = render(1000.)?;
         assert_eq!(top.matches("<use ").count(), 1);
         assert_eq!(bottom.matches("<use ").count(), 1);
         assert_ne!(top, bottom);
-        assert_eq!(render(2000.), bottom);
+        assert_eq!(render(2000.)?, bottom);
+        Ok(())
     }
 }
