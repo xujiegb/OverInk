@@ -95,7 +95,9 @@ const MACOS_MAX_RELEASE_JUMP: f32 = 128.;
 /// ordinary pen and mouse hot paths.
 fn trace_input_event(event: &SDL_Event) {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if !*ENABLED.get_or_init(|| std::env::var("OVERINK_TRACE_INPUT").is_ok_and(|value| value == "1")) {
+    if !*ENABLED
+        .get_or_init(|| std::env::var("OVERINK_TRACE_INPUT").is_ok_and(|value| value == "1"))
+    {
         return;
     }
     match event_type(event) {
@@ -103,8 +105,13 @@ fn trace_input_event(event: &SDL_Event) {
             if let Some(pen) = pen_touch_event(event) {
                 eprintln!(
                     "OverInk input PEN_TOUCH ts={} window={} pen={} down={} state={} xy=({:.1},{:.1})",
-                    pen.timestamp, pen.windowID.0, pen.which.0, pen.down, pen.pen_state,
-                    pen.x, pen.y
+                    pen.timestamp,
+                    pen.windowID.0,
+                    pen.which.0,
+                    pen.down,
+                    pen.pen_state,
+                    pen.x,
+                    pen.y
                 );
             }
         }
@@ -112,8 +119,7 @@ fn trace_input_event(event: &SDL_Event) {
             if let Some(pen) = pen_motion_event(event) {
                 eprintln!(
                     "OverInk input PEN_MOTION ts={} window={} pen={} state={} xy=({:.1},{:.1})",
-                    pen.timestamp, pen.windowID.0, pen.which.0, pen.pen_state,
-                    pen.x, pen.y
+                    pen.timestamp, pen.windowID.0, pen.which.0, pen.pen_state, pen.x, pen.y
                 );
             }
         }
@@ -121,8 +127,14 @@ fn trace_input_event(event: &SDL_Event) {
             if let Some(pen) = pen_axis_event(event) {
                 eprintln!(
                     "OverInk input PEN_AXIS ts={} window={} pen={} state={} axis={} value={:.4} xy=({:.1},{:.1})",
-                    pen.timestamp, pen.windowID.0, pen.which.0, pen.pen_state, pen.axis.0,
-                    pen.value, pen.x, pen.y
+                    pen.timestamp,
+                    pen.windowID.0,
+                    pen.which.0,
+                    pen.pen_state,
+                    pen.axis.0,
+                    pen.value,
+                    pen.x,
+                    pen.y
                 );
             }
         }
@@ -130,8 +142,13 @@ fn trace_input_event(event: &SDL_Event) {
             if let Some(mouse) = mouse_button_event(event) {
                 eprintln!(
                     "OverInk input MOUSE_BUTTON ts={} window={} mouse={} button={} down={} xy=({:.1},{:.1})",
-                    mouse.timestamp, mouse.windowID.0, mouse.which.0, mouse.button,
-                    mouse.down, mouse.x, mouse.y
+                    mouse.timestamp,
+                    mouse.windowID.0,
+                    mouse.which.0,
+                    mouse.button,
+                    mouse.down,
+                    mouse.x,
+                    mouse.y
                 );
             }
         }
@@ -139,17 +156,30 @@ fn trace_input_event(event: &SDL_Event) {
             if let Some(mouse) = mouse_motion_event(event) {
                 eprintln!(
                     "OverInk input MOUSE_MOTION ts={} window={} mouse={} state={} xy=({:.1},{:.1})",
-                    mouse.timestamp, mouse.windowID.0, mouse.which.0, mouse.state.0,
-                    mouse.x, mouse.y
+                    mouse.timestamp,
+                    mouse.windowID.0,
+                    mouse.which.0,
+                    mouse.state.0,
+                    mouse.x,
+                    mouse.y
                 );
             }
         }
-        SDL_EVENT_FINGER_DOWN | SDL_EVENT_FINGER_MOTION | SDL_EVENT_FINGER_UP | SDL_EVENT_FINGER_CANCELED => {
+        SDL_EVENT_FINGER_DOWN
+        | SDL_EVENT_FINGER_MOTION
+        | SDL_EVENT_FINGER_UP
+        | SDL_EVENT_FINGER_CANCELED => {
             if let Some(finger) = finger_event(event) {
                 eprintln!(
                     "OverInk input FINGER ts={} type={} window={} touch={} finger={} pressure={:.4} xy=({:.4},{:.4})",
-                    finger.timestamp, event_type(event).0, finger.windowID.0,
-                    finger.touchID.0, finger.fingerID.0, finger.pressure, finger.x, finger.y
+                    finger.timestamp,
+                    event_type(event).0,
+                    finger.windowID.0,
+                    finger.touchID.0,
+                    finger.fingerID.0,
+                    finger.pressure,
+                    finger.x,
+                    finger.y
                 );
             }
         }
