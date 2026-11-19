@@ -170,36 +170,20 @@ enum ClipboardAction {
     Cut,
 }
 
-fn clipboard_menu(
-    ui: &mut Ui,
-    tr: Language,
-    has_text: bool,
-    editing: bool,
-    selected: bool,
-) -> Option<ClipboardAction> {
+fn clipboard_menu(ui: &mut Ui, tr: Language, has_text: bool) -> Option<ClipboardAction> {
     let mut action = None;
     let entries = [
-        (
-            ClipboardAction::SelectAll,
-            tr.text("Select all", "全选", "全選"),
-        ),
+        (ClipboardAction::SelectAll, tr.text("Select all", "全选", "全選")),
         (ClipboardAction::Copy, tr.text("Copy", "拷贝", "複製")),
         (ClipboardAction::Paste, tr.text("Paste", "粘贴", "貼上")),
         (ClipboardAction::Cut, tr.text("Cut", "剪切", "剪下")),
     ];
     for (item, label) in entries {
-        if (!has_text && item != ClipboardAction::Paste)
-            || (!editing && item == ClipboardAction::SelectAll)
-        {
+        if !has_text && item != ClipboardAction::Paste {
             continue;
         }
-        let enabled = match item {
-            ClipboardAction::Copy | ClipboardAction::Cut => !editing || selected,
-            ClipboardAction::Paste => {
-                crate::sdl::clipboard_text().is_some_and(|value| !value.is_empty())
-            }
-            ClipboardAction::SelectAll => true,
-        };
+        let enabled = item != ClipboardAction::Paste
+            || crate::sdl::clipboard_text().is_some_and(|value| !value.is_empty());
         if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
             action = Some(item);
             ui.close();
@@ -223,14 +207,20 @@ fn apply_clipboard(
             Some(CCursorRange::two(CCursor::new(length), CCursor::new(0)))
         }
         ClipboardAction::Copy | ClipboardAction::Cut => {
-            // A collapsed caret is not a selection. Never copy or erase
-            // all editor text merely because no characters are selected.
-            let range = range?;
-            ui.ctx()
-                .copy_text(text.char_range(range.clone()).to_owned());
+            // With no selection, Copy and Cut act on the entire text buffer.
+            let copied = range.as_ref().map_or_else(
+                || text.to_owned(),
+                |selected| text.char_range(selected.clone()).to_owned(),
+            );
+            ui.ctx().copy_text(copied);
             if action == ClipboardAction::Cut {
-                text.delete_char_range(range.clone());
-                Some(CCursorRange::one(CCursor::new(range.start)))
+                let start = range.as_ref().map_or(0, |selected| selected.start.0);
+                if let Some(range) = range {
+                    text.delete_char_range(range);
+                } else {
+                    text.clear();
+                }
+                Some(CCursorRange::one(CCursor::new(start)))
             } else {
                 selected
             }
@@ -995,13 +985,11 @@ impl App {
                 );
                 let mut action = None;
                 area.context_menu(|ui| {
-                    action = clipboard_menu(ui, self.language, !item.text.is_empty(), false, false);
+                    action = clipboard_menu(ui, self.language, !item.text.is_empty());
                 });
                 if let Some(action) = action {
                     match action {
                         ClipboardAction::Copy => {
-                            // A selected box, unlike a text caret, represents
-                            // the entire committed annotation.
                             ui.ctx().copy_text(item.text.clone());
                         }
                         ClipboardAction::Cut => {
@@ -1009,27 +997,19 @@ impl App {
                             self.history.remove_text_box(index);
                             self.input.text.selected = None;
                         }
-                        ClipboardAction::Paste => {
-                            if let Some(value) = crate::sdl::clipboard_text()
-                                && self.history.text_boxes().len() < MAX_TEXT_BOXES
-                            {
-                                // Paste text only. Never copy source markup,
-                                // original font size or box styling.
-                                let origin = rect.min + vec2(18., 18.) * self.input.canvas_units;
-                                let mut pasted = TextBox::new(
-                                    origin,
-                                    screen,
-                                    self.color,
-                                    self.input.canvas_units,
-                                );
-                                pasted.text = value.chars().take(MAX_TEXT_CHARS).collect();
-                                if pasted.valid() {
-                                    self.input.text.selected =
-                                        self.history.set_text_box(None, pasted);
+                        ClipboardAction::SelectAll | ClipboardAction::Paste => {
+                            self.input.text.edit(Some(index), (**item).clone());
+                            if let Some(draft) = &mut self.input.text.draft {
+                                if action == ClipboardAction::SelectAll {
+                                    draft.cursor = Some(CCursorRange::select_all_str(&draft.item.text));
+                                } else if let Some(next) = apply_clipboard(
+                                    ui, &mut draft.item.text, draft.cursor, action,
+                                ) {
+                                    draft.cursor = Some(next);
+                                    draft.committed.clone_from(&draft.item.text);
                                 }
                             }
                         }
-                        ClipboardAction::SelectAll => (),
                     }
                     ui.ctx().request_repaint();
                 }
@@ -1175,15 +1155,8 @@ impl App {
             .char_range()
             .or(output.cursor_range)
             .or(draft.cursor);
-        let has_selection = range.is_some_and(|cursor| !cursor.is_empty());
         output.response.context_menu(|ui| {
-            action = clipboard_menu(
-                ui,
-                self.language,
-                !draft.item.text.is_empty(),
-                true,
-                has_selection,
-            );
+            action = clipboard_menu(ui, self.language, !draft.item.text.is_empty());
         });
         if let Some(action) = action {
             if let Some(next) = apply_clipboard(ui, &mut draft.item.text, range, action) {
