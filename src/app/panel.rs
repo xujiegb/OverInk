@@ -23,6 +23,10 @@ impl App {
         let mut commands = Commands::default();
         let tr = self.language;
         let available = ui.available_size();
+        // Transparent SDL controller: paint the complete toolbar body in egui
+        // rather than clearing the whole native window to an opaque rectangle.
+        let rail_color = toolbar::colors(ui.visuals().dark_mode).rail;
+        ui.painter().rect_filled(ui.max_rect(), 15., rail_color);
         let opened = self.panel.filter(|_| !self.picking);
         let shown = opened.or(self.panel_retiring);
         // Animate each panel independently so switching fades in and the
