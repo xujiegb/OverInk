@@ -30,12 +30,20 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[derive(Clone, Copy)]
+struct PendingPenDown {
+    timestamp: u64,
+    point: Point,
+    eraser: bool,
+}
+
 #[derive(Default, Clone, Copy)]
 struct Pen {
     pressure: f32,
     tilt: [f32; 2],
     has_pressure: bool,
     down: bool,
+    pending_down: Option<PendingPenDown>,
 }
 impl Pen {
     fn point(self, x: f32, y: f32) -> Point {
@@ -50,6 +58,7 @@ impl Pen {
         self.pressure = 0.;
         self.has_pressure = false;
         self.down = false;
+        self.pending_down = None;
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -570,6 +579,25 @@ impl App {
             }
         }
     }
+    /// SDL's Cocoa backend sends PEN_DOWN before PEN_MOTION for the same
+    /// NSEvent, and the DOWN event carries the *previous* pen coordinates.
+    /// Start from the following same-timestamp motion/axis instead. On other
+    /// platforms the DOWN coordinates are authoritative.
+    fn begin_pen(&mut self, id: u32, p: Point, eraser: bool, has_pressure: bool) {
+        let source = Source::Pen(id);
+        self.begin(source, p, eraser);
+        let accepted = self
+            .input
+            .contact
+            .is_some_and(|contact| contact.source == source);
+        self.input.pens.entry(id).or_default().down = accepted;
+        if let Some(contact) = &mut self.input.contact
+            && contact.source == source
+        {
+            contact.measured_pressure = has_pressure;
+        }
+    }
+
     fn pen_motion(&mut self, source: Source, p: Point, has_pressure: bool) {
         if has_pressure
             && let Some(contact) = &mut self.input.contact
@@ -1246,18 +1274,32 @@ impl App {
                 let source = Source::Pen(t.which.0);
                 let p = pen.point(t.x, t.y);
                 if t.down {
-                    self.begin(source, p, t.eraser);
-                    let accepted = self
-                        .input
-                        .contact
-                        .is_some_and(|contact| contact.source == source);
-                    self.input.pens.entry(t.which.0).or_default().down = accepted;
-                    if let Some(contact) = &mut self.input.contact
-                        && contact.source == source
-                    {
-                        contact.measured_pressure = pen.has_pressure;
+                    if cfg!(target_os = "macos") && t.timestamp != 0 {
+                        // In SDL 3.4.20 Cocoa_HandlePenPointEvent calls
+                        // SDL_SendPenTouch before SDL_SendPenMotion, so the
+                        // PEN_DOWN x/y are the previous cached pen position.
+                        // Defer beginning until a matching same-timestamp
+                        // PEN_MOTION or PEN_AXIS provides the actual position.
+                        self.input.pens.entry(t.which.0).or_default().pending_down =
+                            Some(PendingPenDown {
+                                timestamp: t.timestamp,
+                                point: p,
+                                eraser: t.eraser,
+                            });
+                    } else {
+                        self.begin_pen(t.which.0, p, t.eraser, pen.has_pressure);
                     }
                 } else {
+                    if let Some(pending) = self
+                        .input
+                        .pens
+                        .get_mut(&t.which.0)
+                        .and_then(|pen| pen.pending_down.take())
+                    {
+                        // A stationary tap can have no motion or changed axis.
+                        // In that case the stored DOWN coordinate is valid.
+                        self.begin_pen(t.which.0, pending.point, pending.eraser, pen.has_pressure);
+                    }
                     // PEN_UP is a release signal, not an instruction to draw
                     // a connector to any stale coordinate Cocoa/SDL supplies.
                     // Keep nearby endpoint samples for natural stroke ends,
@@ -1317,7 +1359,23 @@ impl App {
                 }
                 let point = pen.point(a.x, a.y);
                 let has_pressure = pen.has_pressure;
-                self.pen_motion(source, point, has_pressure);
+                let pending = pen.pending_down.take();
+                if let Some(pending) = pending {
+                    // Cocoa generates motion then axis with the same
+                    // timestamp. If motion didn't change the SDL pen position,
+                    // the axis still carries the current true coordinates.
+                    let starts_at = if pending.timestamp == a.timestamp {
+                        point
+                    } else {
+                        pending.point
+                    };
+                    self.begin_pen(a.which.0, starts_at, pending.eraser, has_pressure);
+                    if pending.timestamp != a.timestamp {
+                        self.pen_motion(source, point, has_pressure);
+                    }
+                } else {
+                    self.pen_motion(source, point, has_pressure);
+                }
             }
             SDL_EVENT_PEN_MOTION
                 if pen_motion_event(e).is_some_and(|pen| pen.windowID == overlay) =>
@@ -1325,12 +1383,29 @@ impl App {
                 let Some(m) = pen_motion_event(e) else {
                     return;
                 };
-                let pen = *self.input.pens.entry(m.which.0).or_default();
-                self.pen_motion(
-                    Source::Pen(m.which.0),
-                    pen.point(m.x, m.y),
-                    pen.has_pressure,
-                );
+                let pen = self.input.pens.entry(m.which.0).or_default();
+                let point = pen.point(m.x, m.y);
+                let has_pressure = pen.has_pressure;
+                let pending = pen.pending_down.take();
+                let source = Source::Pen(m.which.0);
+                if let Some(pending) = pending {
+                    let same_cocoa_event = pending.timestamp == m.timestamp;
+                    self.begin_pen(
+                        m.which.0,
+                        if same_cocoa_event {
+                            point
+                        } else {
+                            pending.point
+                        },
+                        pending.eraser,
+                        has_pressure,
+                    );
+                    if !same_cocoa_event {
+                        self.pen_motion(source, point, has_pressure);
+                    }
+                } else {
+                    self.pen_motion(source, point, has_pressure);
+                }
             }
             SDL_EVENT_WINDOW_FOCUS_LOST if window_event_id(e) == Some(overlay) => {
                 if !self.multi {
