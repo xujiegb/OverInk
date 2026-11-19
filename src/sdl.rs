@@ -1342,6 +1342,7 @@ enum WindowCommand<'a> {
     Show(bool),
     SetParent(Option<&'a Window>),
     ToolbarSetup([i32; 2], &'a mut [u8]),
+    RoundedCorners([i32; 2], i32),
     #[cfg(not(target_os = "windows"))]
     ShapeRegions([i32; 2], Option<&'a [SDL_Rect]>),
 }
@@ -1349,7 +1350,7 @@ enum WindowCommand<'a> {
 /// Closed SDL window constructors, retaining borrowed title and parent
 /// references only until native creation completes.
 enum WindowCreation<'a> {
-    Main(&'a CStr, i32, i32, bool),
+    Main(&'a CStr, i32, i32, bool, bool),
     Tooltip(&'a Window, [i32; 4]),
 }
 
@@ -1598,6 +1599,65 @@ impl Window {
                     }
                     Ok(())
                 }
+                WindowCommand::RoundedCorners([width, height], radius) => {
+                    if width <= 0 || height <= 0 || radius <= 0 {
+                        return Err("Invalid toolbar shape geometry".into());
+                    }
+                    let radius = radius.min(width / 2).min(height / 2);
+                    if radius == 0 {
+                        return Err("Toolbar window is too small for rounded corners".into());
+                    }
+                    let surface = OwnedSurface(
+                        NonNull::new(SDL_CreateSurface(width, height, SDL_PIXELFORMAT_RGBA32))
+                            .ok_or_else(error)?,
+                    );
+                    let surface_ptr = surface.as_non_null().as_ptr();
+                    let transparent = SDL_MapSurfaceRGBA(surface_ptr, 0, 0, 0, 0);
+                    let opaque = SDL_MapSurfaceRGBA(surface_ptr, 255, 255, 255, 255);
+                    check(SDL_FillSurfaceRect(surface_ptr, ptr::null(), transparent))?;
+
+                    let middle = SDL_Rect {
+                        x: 0,
+                        y: radius,
+                        w: width,
+                        h: height - radius * 2,
+                    };
+                    if middle.h > 0 {
+                        check(SDL_FillSurfaceRect(surface_ptr, &middle, opaque))?;
+                    }
+                    // Alpha antialiasing at the extreme two outer edges of
+                    // each row, and mirrored geometry on all four corners.
+                    for y in 0..radius {
+                        let vertical = f64::from(radius) - (f64::from(y) + 0.5);
+                        let x_edge = f64::from(radius)
+                            - (f64::from(radius).powi(2) - vertical.powi(2))
+                                .max(0.)
+                                .sqrt();
+                        let inset = (x_edge.ceil() as i32).clamp(0, radius);
+                        let row_width = width - inset * 2;
+                        if row_width > 0 {
+                            let top = SDL_Rect { x: inset, y, w: row_width, h: 1 };
+                            let bottom = SDL_Rect { y: height - y - 1, ..top };
+                            check(SDL_FillSurfaceRect(surface_ptr, &top, opaque))?;
+                            check(SDL_FillSurfaceRect(surface_ptr, &bottom, opaque))?;
+                        }
+                        if inset > 0 {
+                            let coverage = (f64::from(inset) - x_edge).clamp(0., 1.);
+                            let edge_alpha = (coverage * 255.).round() as u8;
+                            if edge_alpha > 0 {
+                                let edge_color =
+                                    SDL_MapSurfaceRGBA(surface_ptr, 255, 255, 255, edge_alpha);
+                                for x in [inset - 1, width - inset] {
+                                    for row in [y, height - y - 1] {
+                                        let pixel = SDL_Rect { x, y: row, w: 1, h: 1 };
+                                        check(SDL_FillSurfaceRect(surface_ptr, &pixel, edge_color))?;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    check(SDL_SetWindowShape(self.raw.as_ptr(), surface_ptr))
+                }
                 #[cfg(not(target_os = "windows"))]
                 WindowCommand::ShapeRegions(size, opaque_regions) => {
                     let Some(regions) = opaque_regions else {
@@ -1706,12 +1766,12 @@ impl Window {
         // SDL fails to assign an ID. A valid pointer is owned only by Self.
         unsafe {
             let raw = match &kind {
-                WindowCreation::Main(title, w, h, overlay) => {
+                WindowCreation::Main(title, w, h, overlay, toolbar) => {
                     let mut flags = SDL_WINDOW_HIDDEN
                         | SDL_WINDOW_HIGH_PIXEL_DENSITY
                         | SDL_WINDOW_ALWAYS_ON_TOP
                         | SDL_WINDOW_RESIZABLE;
-                    if *overlay {
+                    if *overlay || *toolbar {
                         flags |= SDL_WINDOW_BORDERLESS | SDL_WINDOW_TRANSPARENT;
                     }
                     SDL_ClearError();
@@ -1752,7 +1812,14 @@ impl Window {
 
     pub fn new(title: &str, w: i32, h: i32, overlay: bool) -> Result<Self, String> {
         let title = cstring(title);
-        Self::construct(WindowCreation::Main(&title, w, h, overlay))
+        Self::construct(WindowCreation::Main(&title, w, h, overlay, false))
+    }
+
+    /// Controller windows need a transparent back buffer for a native rounded
+    /// alpha/hit-test mask. Canvas windows continue to use their original path.
+    pub fn toolbar(title: &str, w: i32, h: i32) -> Result<Self, String> {
+        let title = cstring(title);
+        Self::construct(WindowCreation::Main(&title, w, h, false, true))
     }
 
     pub fn tooltip(parent: &Self, x: i32, y: i32, w: i32, h: i32) -> Result<Self, String> {
@@ -1809,6 +1876,12 @@ impl Window {
             h = h.min((available_height - 16).max(1));
         }
         self.run_command(WindowCommand::SetSize([w, h]))?;
+        // SDL must own the mask surface's lifetime and the temporary surface
+        // must be released after SetWindowShape copies it. Reapply after DPI
+        // or size changes, but never on every rendered frame.
+        let pixels = self.pixel_size();
+        let radius = (15. * units * self.pixel_density()).round() as i32;
+        self.run_command(WindowCommand::RoundedCorners(pixels, radius.max(1)))?;
         let video = driver();
         if let Some([left, top, available_width, available_height]) =
             bounds.filter(|_| video != "wayland")
