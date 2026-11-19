@@ -494,8 +494,12 @@ pub fn installed_system_fonts() -> Vec<SystemFont> {
             continue;
         };
         for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
             let path = entry.path();
-            if path.is_dir() {
+            // Never recurse through directory symlinks (which can form cycles).
+            if kind.is_dir() {
                 if roots.len() < 4096 {
                     roots.push(path);
                 }
