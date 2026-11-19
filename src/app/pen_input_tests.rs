@@ -472,11 +472,19 @@ fn cocoa_touch(app: &mut App, timestamp: u64, down: bool, x: f32) {
     app.event(
         &SDL_Event {
             ptouch: SDL_PenTouchEvent {
-                r#type: if down { SDL_EVENT_PEN_DOWN } else { SDL_EVENT_PEN_UP },
+                r#type: if down {
+                    SDL_EVENT_PEN_DOWN
+                } else {
+                    SDL_EVENT_PEN_UP
+                },
                 timestamp,
                 windowID: CANVAS,
                 which: PEN,
-                pen_state: if down { SDL_PEN_INPUT_DOWN } else { Default::default() },
+                pen_state: if down {
+                    SDL_PEN_INPUT_DOWN
+                } else {
+                    Default::default()
+                },
                 down,
                 x,
                 y: 140.,
@@ -523,7 +531,10 @@ fn cocoa_pen_down_uses_same_nsevent_motion_instead_of_previous_cached_position()
     cocoa_touch(&mut app, 102_000, false, 85.);
     assert_eq!(app.history.strokes().len(), 1);
     assert_eq!(app.history.strokes()[0].points[0].x, 30.);
-    assert_eq!(app.history.strokes()[0].points.last().map(|p| p.x), Some(85.));
+    assert_eq!(
+        app.history.strokes()[0].points.last().map(|p| p.x),
+        Some(85.)
+    );
 
     // The next PEN_DOWN reports 85: that was the previous stroke's end.
     // A following PEN_MOTION with the very same timestamp carries the

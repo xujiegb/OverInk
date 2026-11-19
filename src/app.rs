@@ -1298,12 +1298,7 @@ impl App {
                     {
                         // A stationary tap can have no motion or changed axis.
                         // In that case the stored DOWN coordinate is valid.
-                        self.begin_pen(
-                            t.which.0,
-                            pending.point,
-                            pending.eraser,
-                            pen.has_pressure,
-                        );
+                        self.begin_pen(t.which.0, pending.point, pending.eraser, pen.has_pressure);
                     }
                     // PEN_UP is a release signal, not an instruction to draw
                     // a connector to any stale coordinate Cocoa/SDL supplies.
@@ -1397,7 +1392,11 @@ impl App {
                     let same_cocoa_event = pending.timestamp == m.timestamp;
                     self.begin_pen(
                         m.which.0,
-                        if same_cocoa_event { point } else { pending.point },
+                        if same_cocoa_event {
+                            point
+                        } else {
+                            pending.point
+                        },
                         pending.eraser,
                         has_pressure,
                     );
