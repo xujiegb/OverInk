@@ -532,7 +532,9 @@ fn cocoa_pen_down_uses_same_nsevent_motion_instead_of_previous_cached_position()
     cocoa_touch(&mut app, 200_000, true, 85.);
     assert!(app.history.active.is_none());
     cocoa_motion(&mut app, 200_000, 690.);
-    let active = app.history.active.as_ref().expect("pen motion begins a new stroke");
+    let Some(active) = app.history.active.as_ref() else {
+        panic!("pen motion must begin the next stroke");
+    };
     assert_eq!(active.points.len(), 1);
     assert_eq!(active.points[0].x, 690.);
     cocoa_motion(&mut app, 201_000, 740.);
