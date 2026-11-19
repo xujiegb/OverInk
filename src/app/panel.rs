@@ -625,12 +625,7 @@ impl App {
             "拖动 ☰ 调整字体优先级；三个内置字体不可删除。",
             "拖曳 ☰ 調整字型優先順序；三個內建字型不可刪除。",
         ));
-        let font_rows: Vec<_> = self
-            .text_fonts
-            .entries()
-            .map(|(id, name, bundled)| (id.to_owned(), name.to_owned(), bundled))
-            .collect();
-        for (index, (id, name, bundled)) in font_rows.iter().enumerate() {
+        for (index, (id, name, bundled)) in self.text_fonts.entries().enumerate() {
             let frame = egui::Frame::default().inner_margin(egui::Margin::symmetric(5, 3));
             let (_, dropped) = ui.dnd_drop_zone::<usize, ()>(frame, |ui| {
                 ui.horizontal(|ui| {
@@ -639,7 +634,7 @@ impl App {
                         ui.label("☰");
                     });
                     ui.label(name);
-                    if *bundled {
+                    if bundled {
                         ui.small("🔒").on_hover_text(tr.text(
                             "Included font",
                             "内置字体",
@@ -650,7 +645,7 @@ impl App {
                         .on_hover_text(tr.text("Remove font", "删除字体", "刪除字型"))
                         .clicked()
                     {
-                        commands.font_remove = Some(id.clone());
+                        commands.font_remove = Some(id.to_owned());
                     }
                 });
             });
