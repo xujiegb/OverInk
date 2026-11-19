@@ -3200,6 +3200,24 @@ mod touch_tests {
     }
 
     #[test]
+    fn pen_button_double_press_toggles_tools_and_ignores_mouse_passthrough() {
+        let mut app = app();
+        app.tool = Tool::Text;
+        app.pen_button_press(11, 1);
+        app.pen_button_press(12, 1);
+        assert_eq!(app.tool, Tool::Text);
+        app.pen_button_press(12, 1);
+        assert_eq!(app.tool, Tool::Pen);
+        app.pen_button_press(12, 1);
+        app.pen_button_press(12, 1);
+        assert_eq!(app.tool, Tool::Eraser);
+        app.pass = true;
+        app.pen_button_press(12, 1);
+        app.pen_button_press(12, 1);
+        assert_eq!(app.tool, Tool::Eraser);
+    }
+
+    #[test]
     fn text_tool_accepts_ink_cleanup_events_and_rejects_new_strokes() {
         let mut a = app();
         finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 1, 0.1, 0.1);
