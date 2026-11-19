@@ -878,9 +878,7 @@ pub fn event_window(event: &SDL_Event, ty: SDL_EventType) -> Option<SDL_WindowID
             pen_proximity_event(event)?.windowID
         }
         SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP => pen_touch_event(event)?.windowID,
-        SDL_EVENT_PEN_BUTTON_DOWN | SDL_EVENT_PEN_BUTTON_UP => {
-            pen_button_event(event)?.windowID
-        },
+        SDL_EVENT_PEN_BUTTON_DOWN | SDL_EVENT_PEN_BUTTON_UP => pen_button_event(event)?.windowID,
         SDL_EVENT_PEN_MOTION => pen_motion_event(event)?.windowID,
         SDL_EVENT_PEN_AXIS => pen_axis_event(event)?.windowID,
         SDL_EVENT_KEY_DOWN | SDL_EVENT_KEY_UP => key_event(event)?.windowID,
