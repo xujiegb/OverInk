@@ -15,13 +15,20 @@ pub(crate) enum KeyboardRequest {
 }
 
 pub(crate) fn request(window: &Window, kind: KeyboardRequest) -> Result<(), String> {
-    // An active IME can coexist with a dismissed OSK. Reissue SDL text input
-    // only on a deliberate edit/keyboard gesture, never on every frame.
-    window.sync_text_input(false);
-    window.sync_text_input(true);
+    // An active IME can coexist with a dismissed OSK. Reissue SDL input
+    // only for a deliberate edit gesture, not every frame. An actual touch
+    // or explicit button forces the keyboard hint for this one request;
+    // SDL's "auto" otherwise suppresses it when hardware keys are attached.
     match kind {
-        KeyboardRequest::Focus => Ok(()),
-        KeyboardRequest::Touch | KeyboardRequest::Button => launch_os_keyboard(kind),
+        KeyboardRequest::Focus => {
+            window.sync_text_input(false);
+            window.sync_text_input(true);
+            Ok(())
+        }
+        KeyboardRequest::Touch | KeyboardRequest::Button => {
+            window.request_screen_keyboard()?;
+            launch_os_keyboard(kind)
+        }
     }
 }
 
