@@ -100,6 +100,8 @@ struct Commands {
     choose_font: bool,
     font_path: Option<PathBuf>,
     reset_font: bool,
+    font_reorder: Option<(usize, usize)>,
+    font_remove: Option<String>,
     screenshot: bool,
     screenshot_folder: bool,
 }
@@ -195,6 +197,9 @@ struct App {
     frame_rate: FrameRate,
     preferences: Preferences,
     text_fonts: TextFonts,
+    font_catalog: Option<Vec<crate::fonts::SystemFont>>,
+    font_search: String,
+    adding_font: bool,
     font_path_input: Option<String>,
     screenshot: Screenshot,
     #[cfg(target_os = "linux")]
@@ -265,6 +270,9 @@ impl App {
             language: preferences.language.unwrap_or_else(Language::system),
             preferences,
             text_fonts: TextFonts::load(&base.join("annotation-font")),
+            font_catalog: None,
+            font_search: String::new(),
+            adding_font: false,
             font_path_input: None,
             screenshot: Screenshot::default(),
             #[cfg(target_os = "linux")]
@@ -2473,6 +2481,34 @@ fn run_inner(options: Options) -> Result<(), String> {
                 cmd.redraw_canvas |= app.install_annotation_font(&source, &annotation_font_path);
                 toolbar_dirty = true;
             }
+            if let Some((from, to)) = cmd.font_reorder {
+                match app.text_fonts.move_font(from, to, &annotation_font_path) {
+                    Ok(()) => cmd.redraw_canvas = true,
+                    Err(error) => {
+                        app.status = text(
+                            "Could not reorder fonts",
+                            "无法调整字体顺序",
+                            "無法調整字型順序",
+                        )
+                        .detail(error);
+                    }
+                }
+                toolbar_dirty = true;
+            }
+            if let Some(id) = cmd.font_remove.take() {
+                match app.text_fonts.remove_font(&id, &annotation_font_path) {
+                    Ok(()) => cmd.redraw_canvas = true,
+                    Err(error) => {
+                        app.status = text(
+                            "Could not remove font",
+                            "无法删除字体",
+                            "無法刪除字型",
+                        )
+                        .detail(error);
+                    }
+                }
+                toolbar_dirty = true;
+            }
             if cmd.reset_font {
                 match app.text_fonts.reset(&annotation_font_path) {
                     Ok(()) => {
@@ -3108,6 +3144,9 @@ mod touch_tests {
             frame_rate: FrameRate::Auto,
             preferences: Preferences::default(),
             text_fonts: TextFonts::default(),
+            font_catalog: None,
+            font_search: String::new(),
+            adding_font: false,
             font_path_input: None,
             screenshot: Screenshot::default(),
             #[cfg(target_os = "linux")]
