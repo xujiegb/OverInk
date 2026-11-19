@@ -78,9 +78,8 @@ impl MatrixBlackPointCompensation {
         if source.black_point.is_none() && destination.black_point.is_none() {
             return None;
         }
-        let black = |profile: &ColorProfile| {
-            profile.black_point.map_or([0.; 3], |bp| [bp.x, bp.y, bp.z])
-        };
+        let black =
+            |profile: &ColorProfile| profile.black_point.map_or([0.; 3], |bp| [bp.x, bp.y, bp.z]);
         let src = black(source);
         let dst = black(destination);
         const D50: [f64; 3] = [0.9642, 1.0, 0.8249];
@@ -97,13 +96,26 @@ impl MatrixBlackPointCompensation {
         }
         let rgb_to_xyz = Matrix3d {
             v: [
-                [destination.red_colorant.x, destination.green_colorant.x, destination.blue_colorant.x],
-                [destination.red_colorant.y, destination.green_colorant.y, destination.blue_colorant.y],
-                [destination.red_colorant.z, destination.green_colorant.z, destination.blue_colorant.z],
+                [
+                    destination.red_colorant.x,
+                    destination.green_colorant.x,
+                    destination.blue_colorant.x,
+                ],
+                [
+                    destination.red_colorant.y,
+                    destination.green_colorant.y,
+                    destination.blue_colorant.y,
+                ],
+                [
+                    destination.red_colorant.z,
+                    destination.green_colorant.z,
+                    destination.blue_colorant.z,
+                ],
             ],
         };
         let determinant = rgb_to_xyz.determinant()?;
-        if !determinant.is_finite() || determinant.abs() < 1e-8
+        if !determinant.is_finite()
+            || determinant.abs() < 1e-8
             || rgb_to_xyz.v.iter().flatten().any(|c| !c.is_finite())
         {
             return None;
@@ -134,12 +146,13 @@ impl MatrixBlackPointCompensation {
     }
 
     fn map(&self, rgb: [f32; 3]) -> [f32; 3] {
-        if rgb.iter().any(|v| !v.is_finite() || !(0. ..=1.).contains(v)) {
+        if rgb
+            .iter()
+            .any(|v| !v.is_finite() || !(0. ..=1.).contains(v))
+        {
             return rgb;
         }
-        let linear = std::array::from_fn(|i| {
-            f64::from(self.decode[i].evaluate_value(rgb[i]))
-        });
+        let linear = std::array::from_fn(|i| f64::from(self.decode[i].evaluate_value(rgb[i])));
         if linear.iter().any(|v| !v.is_finite()) {
             return rgb;
         }
@@ -151,7 +164,11 @@ impl MatrixBlackPointCompensation {
         }
         std::array::from_fn(|i| {
             let encoded = self.encode[i].evaluate_value(corrected[i].clamp(0., 1.) as f32);
-            if encoded.is_finite() { encoded.clamp(0., 1.) } else { rgb[i] }
+            if encoded.is_finite() {
+                encoded.clamp(0., 1.)
+            } else {
+                rgb[i]
+            }
         })
     }
 }
@@ -371,7 +388,8 @@ mod tests {
             z: 0.00825,
         });
         let plain = Transform::rgb(&srgb, &srgb).ok_or("Missing sRGB transform")?;
-        let adjusted = Transform::rgb(&srgb, &measured).ok_or("Missing measured display transform")?;
+        let adjusted =
+            Transform::rgb(&srgb, &measured).ok_or("Missing measured display transform")?;
         assert!(adjusted.bpc.is_some(), "Expected explicit matrix RGB BPC");
         let near_black = [0.02, 0.02, 0.02];
         let ordinary = plain.map_rgb(near_black);
