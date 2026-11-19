@@ -434,9 +434,7 @@ fn native_display_query(query: NativeDisplayQuery) -> Result<NativeDisplayResult
                 let display = SDL_DisplayID(id);
                 check(match kind {
                     DisplayBoundsKind::Full => SDL_GetDisplayBounds(display, &mut bounds),
-                    DisplayBoundsKind::Usable => {
-                        SDL_GetDisplayUsableBounds(display, &mut bounds)
-                    }
+                    DisplayBoundsKind::Usable => SDL_GetDisplayUsableBounds(display, &mut bounds),
                 })?;
                 Ok(NativeDisplayResult::Bounds([
                     bounds.x, bounds.y, bounds.w, bounds.h,
