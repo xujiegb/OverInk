@@ -1790,13 +1790,20 @@ impl Window {
         let _ = self.run_command(WindowCommand::ToolbarSetup(size, &mut pixels));
     }
     pub fn arrange_toolbar(&self, expanded: bool, on_display: Option<u32>) -> Result<(), String> {
+        self.arrange_toolbar_width(
+            if expanded { crate::toolbar::PANEL_WIDTH } else { 0. },
+            on_display,
+        )
+    }
+
+    /// Resize the panel in device-independent points to animate without FFI at call sites.
+    pub fn arrange_toolbar_width(
+        &self,
+        panel_width: f32,
+        on_display: Option<u32>,
+    ) -> Result<(), String> {
         let units = self.ui_scale();
-        let width = crate::toolbar::WIDTH
-            + if expanded {
-                crate::toolbar::PANEL_WIDTH
-            } else {
-                0.
-            };
+        let width = crate::toolbar::WIDTH + panel_width.clamp(0., crate::toolbar::PANEL_WIDTH);
         let (mut w, mut h) = (
             (width * units).round() as i32,
             (crate::toolbar::HEIGHT * units).round() as i32,
