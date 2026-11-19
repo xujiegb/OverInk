@@ -200,6 +200,8 @@ struct App {
     suspended: bool,
     frozen: bool,
     panel: Option<crate::toolbar::Panel>,
+    panel_visual: Option<crate::toolbar::Panel>,
+    panel_opacity: f32,
     touch_enabled: bool,
     status: Status,
     path: String,
@@ -267,6 +269,8 @@ impl App {
             suspended,
             frozen: false,
             panel: None,
+            panel_visual: None,
+            panel_opacity: 0.,
             touch_enabled: true,
             status,
             path: base
@@ -1563,7 +1567,9 @@ fn run_inner(options: Options) -> Result<(), String> {
     let annotation_font_path = base.join("annotation-font");
     let mut tooltips = crate::toolbar::Tooltips::default();
     let mut toolbar_hidden = false;
-    let mut toolbar_expanded = false;
+    let mut toolbar_panel_width = 0.;
+    let mut toolbar_panel_target = None;
+    let mut toolbar_panel_at = Instant::now();
     let mut running = true;
     let mut frame = 0;
     let mut last_color = Instant::now();
@@ -2065,7 +2071,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 }
                 if requested.is_some()
                     && !wayland
-                    && let Err(error) = toolbar.arrange_toolbar(toolbar_expanded, app.pages.active)
+                    && let Err(error) = toolbar.arrange_toolbar_width(toolbar_panel_width, app.pages.active)
                 {
                     app.status = text("Toolbar layout failed", "工具栏布局失败", "工具列配置失敗")
                         .detail(error);
@@ -2317,16 +2323,50 @@ fn run_inner(options: Options) -> Result<(), String> {
                 }
                 last_color = Instant::now();
             }
-            let expanded = app.panel.is_some() && !app.picking;
-            if expanded != toolbar_expanded || controller_scale_changed {
+            // Animate the *native window size* as well as egui contents.
+            // Animating only the panel paint would leave the window rectangle
+            // expanding and collapsing in a single frame.
+            let target_panel = app.panel.filter(|_| !app.picking);
+            if target_panel != toolbar_panel_target {
+                toolbar_panel_target = target_panel;
+                if let Some(panel) = target_panel {
+                    app.panel_visual = Some(panel);
+                    app.panel_opacity = 0.;
+                }
+            }
+            let now = Instant::now();
+            let elapsed = now.saturating_duration_since(toolbar_panel_at).as_secs_f32().min(0.1);
+            toolbar_panel_at = now;
+            let motion = 1. - (-18. * elapsed).exp();
+            let target_width = if target_panel.is_some() {
+                crate::toolbar::PANEL_WIDTH
+            } else {
+                0.
+            };
+            let previous_width = toolbar_panel_width;
+            toolbar_panel_width += (target_width - toolbar_panel_width) * motion;
+            if (target_width - toolbar_panel_width).abs() < 0.5 {
+                toolbar_panel_width = target_width;
+            }
+            let target_opacity = if target_panel.is_some() { 1. } else { 0. };
+            app.panel_opacity += (target_opacity - app.panel_opacity) * motion;
+            if (target_opacity - app.panel_opacity).abs() < 0.01 {
+                app.panel_opacity = target_opacity;
+            }
+            if target_panel.is_none() && toolbar_panel_width == 0. {
+                app.panel_visual = None;
+            }
+            let animating = toolbar_panel_width != target_width
+                || app.panel_opacity != target_opacity;
+            if (toolbar_panel_width - previous_width).abs() > 0.01 || controller_scale_changed {
                 toolbar_dirty = true;
                 controller_bounds_changed = true;
-                toolbar_expanded = expanded;
-                if let Err(error) = toolbar.arrange_toolbar(expanded, None) {
+                if let Err(error) = toolbar.arrange_toolbar_width(toolbar_panel_width, None) {
                     app.status = text("Toolbar layout failed", "工具栏布局失败", "工具列配置失敗")
                         .detail(error);
                 }
             }
+            toolbar_dirty |= animating;
             let theme = appearance.theme(app.preferences.theme);
             if gui.ctx.theme() != theme {
                 gui.ctx.set_theme(theme);
@@ -3072,6 +3112,8 @@ mod touch_tests {
             suspended: false,
             frozen: false,
             panel: None,
+            panel_visual: None,
+            panel_opacity: 0.,
             touch_enabled: true,
             status: Status::default(),
             path: String::new(),
