@@ -479,6 +479,7 @@ pub fn installed_system_fonts() -> Vec<SystemFont> {
     {
         roots.extend(["/usr/share/fonts", "/usr/local/share/fonts"].map(PathBuf::from));
     }
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd"))]
     if let Some(home) = std::env::var_os("HOME") {
         let home = PathBuf::from(home);
         #[cfg(target_os = "macos")]
