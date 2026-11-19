@@ -1,26 +1,46 @@
-<p align="center">
-  <img src="assets/overink.svg" alt="OverInk — a pen drawing over the desktop" width="112">
+<h1 align="left">
+  OverInk
+  <a href="https://github.com/xujiegb/OverInk/releases/latest">
+    <img align="right" src="assets/overink.svg" alt="OverInk icon" width="44" height="44">
+  </a>
+</h1>
+
+<p align="left">
+  <strong>写在屏幕上的灵感。</strong><br>
+  <sub>Ideas, drawn right on your screen.</sub><br>
+  <sub>Vos idées, dessinées directement sur votre écran.</sub>
 </p>
 
-<h1 align="center">OverInk</h1>
+<p align="left">
+  <a href="https://github.com/xujiegb/OverInk/releases">发行版本 / Releases / Versions</a>
+  &nbsp; · &nbsp;
+  <a href="https://github.com/xujiegb/OverInk/actions/workflows/build.yml">构建状态 / Builds / Compilations</a>
+  &nbsp; · &nbsp;
+  <a href="LICENSE">BSD-3-Clause</a>
+</p>
 
-<h2 align="center">屏幕所见，随心落笔。</h2>
+<br>
 
 <p align="center">
-  <sub>Write naturally, right over your screen.</sub><br>
-  <sub>Écrivez naturellement, directement sur votre écran.</sub>
+  <img src="assets/overink.svg" width="108" alt="OverInk — desktop annotation application">
+</p>
+
+<h1 align="center">所见之处，即是画布。</h1>
+
+<p align="center">
+  <strong>Your screen. Your canvas.</strong><br>
+  <sub>Votre écran. Votre toile.</sub>
 </p>
 
 <p align="center">
-  用笔迹连接想法与画面。无需切换到另一张画布。<br>
-  <sub>Bring ideas and visuals together—without leaving what you're doing.</sub><br>
-  <sub>Reliez vos idées à ce que vous voyez, sans quitter votre travail.</sub>
+  不打断思路，不离开当前窗口。<br>
+  用一支笔，在任何画面上书写、标注与表达。<br>
+  <sub>Stay in the moment. Write, annotate, and explain directly over your desktop.</sub><br>
+  <sub>Restez dans l’instant. Écrivez, annotez et expliquez directement sur votre bureau.</sub>
 </p>
 
 <p align="center">
-  <a href="https://github.com/xujiegb/OverInk/releases/latest"><strong>获取 OverInk · Download · Télécharger</strong></a>
-  &nbsp;·&nbsp;
-  <a href="https://github.com/xujiegb/OverInk/releases">所有版本 · All releases · Toutes les versions</a>
+  <a href="https://github.com/xujiegb/OverInk/releases/latest"><strong>↓ 下载 OverInk · Download OverInk · Télécharger OverInk</strong></a>
 </p>
 
 <p align="center">
@@ -28,11 +48,11 @@
 </p>
 
 <p align="center">
-  <img src="assets/readme/overview.svg" alt="OverInk 桌面批注功能的视觉示意：彩色笔迹、文字和悬浮工具栏。Illustration of desktop annotation, strokes, text, and tools. Illustration de l’annotation de bureau." width="100%">
+  <img src="assets/readme/overview.svg" width="100%" alt="OverInk 桌面标注概念图 / Desktop annotation illustration / Illustration de l’annotation de bureau">
 </p>
 
 <p align="center">
-  <sub>功能视觉示意 · Product concept illustration · Illustration du concept</sub>
+  <sub>产品概念示意，非应用实拍 · Concept artwork, not an actual screenshot · Illustration conceptuelle, et non une capture réelle</sub>
 </p>
 
 <br>
@@ -41,99 +61,133 @@
 
 <br>
 
-<h2 align="center">把屏幕，变成你的画布。</h2>
+<h2 align="center">把想法，直接画出来。</h2>
 
 <p align="center">
-  <sub>Your screen is the canvas.</sub><br>
-  <sub>Votre écran devient votre toile.</sub>
+  <sub>From thought to ink, without interruption.</sub><br>
+  <sub>De l’idée au trait, sans interruption.</sub>
 </p>
 
 <p align="center">
-  演示中的重点、课堂上的思路、会议里的灵感。<br>
-  直接在桌面和应用程序上标注，让表达始终跟得上思考。<br>
-  <sub>Highlight what matters in a lesson, presentation, or meeting—directly over your desktop and apps.</sub><br>
-  <sub>Soulignez l’essentiel d’un cours, d’une présentation ou d’une réunion, directement sur le bureau et vos applications.</sub>
+  课堂讲解、屏幕演示、设计讨论，精彩的想法不必等待下一页。<br>
+  <sub>For lessons, presentations, and creative discussions—make every point visible as it happens.</sub><br>
+  <sub>Pour les cours, les présentations et les échanges créatifs : montrez chaque idée au moment où elle naît.</sub>
 </p>
-
-<br>
 
 <table>
   <tr>
     <td width="50%" valign="top">
-      <h3>每一笔，都有感觉。</h3>
-      <p><sub>Every stroke feels personal.</sub><br><sub>Chaque trait a son caractère.</sub></p>
-      <p>支持压感与倾角输入，让数字书写保留笔的自然变化。</p>
-      <p><sub>Pressure- and tilt-aware input brings nuance to handwriting and sketching.</sub><br><sub>La pression et l’inclinaison donnent de la nuance à l’écriture et au croquis.</sub></p>
+      <img src="assets/readme/ink.svg" alt="笔迹视觉示意 / Ink illustration / Illustration des traits" width="100%">
+      <h3>落笔，随心而动。</h3>
+      <p><sub>Ink that follows your hand.<br>Une encre qui suit votre geste.</sub></p>
+      <p>感知压感与笔的倾角，让轻重变化自然融入每一笔。</p>
+      <p><sub>Pressure and tilt input add expressive variation to every stroke.<br>La pression et l’inclinaison apportent des nuances à chaque trait.</sub></p>
     </td>
     <td width="50%" valign="top">
-      <h3>工具齐全，操作轻盈。</h3>
-      <p><sub>The right tool, right there.</sub><br><sub>Le bon outil, à portée de main.</sub></p>
-      <p>钢笔、铅笔、荧光笔、橡皮擦、激光笔，以及线条和形状工具，随时切换。</p>
-      <p><sub>Pen, pencil, highlighter, eraser, laser pointer, lines, and shapes—ready when you are.</sub><br><sub>Stylo, crayon, surligneur, gomme, pointeur laser, lignes et formes : tout est à portée de main.</sub></p>
+      <img src="assets/readme/capture.svg" alt="区域截图视觉示意 / Capture illustration / Illustration de la capture" width="100%">
+      <h3>精彩瞬间，随手留下。</h3>
+      <p><sub>Capture what matters.<br>Conservez l’essentiel.</sub></p>
+      <p>框选屏幕区域，保存 PNG 截图，让重点随时可回顾。</p>
+      <p><sub>Select a screen area and save a PNG for later.<br>Sélectionnez une zone de l’écran et enregistrez-la en PNG.</sub></p>
+    </td>
+  </tr>
+</table>
+
+<p align="center">
+  <sub>以上插画用于说明功能，并非真实运行截图。<br>These are feature illustrations, not actual application screenshots.<br>Ces visuels illustrent les fonctions ; il ne s’agit pas de captures de l’application.</sub>
+</p>
+
+<br>
+
+<h2 align="center">需要的工具，恰好都在。</h2>
+
+<p align="center">
+  <sub>Everything you need. Nothing in your way.</sub><br>
+  <sub>Tout ce qu’il faut, sans vous gêner.</sub>
+</p>
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <h3>✎ 书写与强调</h3>
+      <p><sub>Draw &amp; highlight<br>Dessiner et surligner</sub></p>
+      <p>画笔、铅笔、荧光笔、橡皮擦、激光笔以及线条与形状工具，让演示更清楚。</p>
+      <p><sub>Pens, pencils, highlighters, erasers, a laser pointer, lines, and shapes.<br>Stylos, crayons, surligneurs, gomme, pointeur laser, lignes et formes.</sub></p>
+    </td>
+    <td width="50%" valign="top">
+      <h3>▣ 自由文字</h3>
+      <p><sub>Editable text<br>Texte modifiable</sub></p>
+      <p>创建、移动、缩放、修改文本框，并按需要调整字体。</p>
+      <p><sub>Create, move, resize, and edit text boxes with font selection.<br>Créez, déplacez, redimensionnez et modifiez vos zones de texte et leur police.</sub></p>
     </td>
   </tr>
   <tr>
     <td width="50%" valign="top">
-      <h3>写字，也可以很自由。</h3>
-      <p><sub>Words have room to move.</sub><br><sub>Les mots prennent leur place.</sub></p>
-      <p>创建、移动、缩放和重新编辑文本框，配合字体选择表达更多内容。</p>
-      <p><sub>Add, move, resize, and edit text boxes, with font selection when you need it.</sub><br><sub>Ajoutez, déplacez, redimensionnez et modifiez vos zones de texte, avec le choix de la police.</sub></p>
+      <h3>↗ 标注与操作，自由切换</h3>
+      <p><sub>Annotate or interact<br>Annoter ou interagir</sub></p>
+      <p>随时返回鼠标操作，不必退出标注环境；支持撤销、重做与清除。</p>
+      <p><sub>Switch to mouse interaction without leaving the overlay; undo, redo, or clear marks.<br>Passez à la souris sans quitter la superposition ; annulez, rétablissez ou effacez les annotations.</sub></p>
     </td>
     <td width="50%" valign="top">
-      <h3>想操作，就操作。</h3>
-      <p><sub>Back to your desktop in a moment.</sub><br><sub>Retrouvez votre bureau en un instant.</sub></p>
-      <p>在标注和鼠标操作之间切换，保留讲解节奏，不让工具打断工作。</p>
-      <p><sub>Switch between annotation and mouse interaction without breaking your flow.</sub><br><sub>Passez de l’annotation à l’utilisation de la souris sans interrompre votre élan.</sub></p>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%" valign="top">
-      <h3>重要画面，随手留下。</h3>
-      <p><sub>Capture the moment.</sub><br><sub>Capturez l’instant.</sub></p>
-      <p>选择屏幕区域、保存 PNG 截图，也能撤销或重做你的标注。</p>
-      <p><sub>Select a screen region, save a PNG, and undo or redo annotations.</sub><br><sub>Sélectionnez une zone de l’écran, enregistrez-la en PNG et annulez ou rétablissez vos annotations.</sub></p>
-    </td>
-    <td width="50%" valign="top">
-      <h3>一个屏幕，不必是全部。</h3>
-      <p><sub>Made for more than one display.</sub><br><sub>Pensé pour plusieurs écrans.</sub></p>
-      <p>为多显示器工作流而设计，兼顾不同桌面系统与显示环境。</p>
-      <p><sub>Designed for multi-monitor workflows and different desktop environments.</sub><br><sub>Conçu pour les configurations multi-écrans et différents environnements de bureau.</sub></p>
+      <h3>▤ 为多屏而设计</h3>
+      <p><sub>Across displays<br>Sur plusieurs écrans</sub></p>
+      <p>面向多显示器与不同桌面环境，关注输入体验和色彩呈现。</p>
+      <p><sub>Designed for multiple displays, native input, and thoughtful color handling.<br>Conçu pour plusieurs écrans, les entrées natives et un rendu soigné des couleurs.</sub></p>
     </td>
   </tr>
 </table>
 
 <br>
 
-<h2 align="center">每一种表达，都值得被看见。</h2>
+---
+
+<br>
+
+<h2 align="center">熟悉的桌面，自由的表达。</h2>
 
 <p align="center">
-  <sub>See ideas take shape.</sub><br>
-  <sub>Donnez forme à vos idées.</sub>
+  <sub>Four operating systems. One natural way to annotate.</sub><br>
+  <sub>Quatre systèmes. Une façon naturelle d’annoter.</sub>
 </p>
 
-<table>
-  <tr>
-    <td width="50%" valign="top">
-      <img src="assets/readme/ink.svg" alt="OverInk 压感手写与多种笔迹的界面示意。Stylus and ink concept illustration. Illustration du stylet et des traits." width="100%">
-      <h3>落笔，自有分寸。</h3>
-      <p><sub>Ink that follows your hand.</sub><br><sub>Des traits qui suivent votre geste.</sub></p>
-      <p>从细腻线条到醒目强调，让内容在眼前自然呈现。</p>
-      <p><sub>From delicate marks to bold emphasis, keep your ideas visible.</sub><br><sub>Des traits subtils aux accents marqués, vos idées prennent vie.</sub></p>
-    </td>
-    <td width="50%" valign="top">
-      <img src="assets/readme/capture.svg" alt="OverInk 区域截图与 PNG 保存功能的界面示意。Screen capture concept illustration. Illustration de la capture d’écran." width="100%">
-      <h3>捕捉，恰到好处。</h3>
-      <p><sub>Keep the moment that matters.</sub><br><sub>Gardez l’essentiel.</sub></p>
-      <p>框选屏幕区域，留下需要分享或回顾的重点。</p>
-      <p><sub>Select an area and save what matters for later.</sub><br><sub>Sélectionnez une zone et conservez l’essentiel.</sub></p>
-    </td>
-  </tr>
-</table>
+<p align="center">
+  <strong>Windows &nbsp; · &nbsp; macOS &nbsp; · &nbsp; Linux &nbsp; · &nbsp; FreeBSD</strong>
+</p>
 
 <p align="center">
-  <sub>以上为界面概念示意，并非实际运行截图；可直接替换为真实截图。</sub><br>
-  <sub>Concept illustrations, not actual application screenshots. Real screenshots can replace them.</sub><br>
-  <sub>Illustrations conceptuelles, et non des captures réelles. Elles pourront être remplacées.</sub>
+  使用 Rust 2024、egui 和 SDL3 构建。Linux 同时考虑 Wayland 与 X11，部分桌面功能可能需要系统授权或额外集成。<br>
+  <sub>Built with Rust 2024, egui, and SDL3. Linux supports Wayland/X11 integration; some features may require desktop permissions or additional setup.</sub><br>
+  <sub>Développé avec Rust 2024, egui et SDL3. Sous Linux, l’intégration Wayland/X11 peut nécessiter des autorisations ou une configuration supplémentaire.</sub>
+</p>
+
+<h3 align="center">架构支持 · Architecture targets · Architectures ciblées</h3>
+
+| 系统 / OS / Système | x64 | x86 | arm64 | riscv64 | loong64 | ppc64le | s390x |
+| :-- | :--: | :--: | :--: | :--: | :--: | :--: | :--: |
+| **Windows** | ✓ | ✓ | ✓ | — | — | — | — |
+| **macOS** | ✓ | — | ✓ | — | — | — | — |
+| **Linux** | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| **FreeBSD** | ✓ | ✓ | ✓ | ✓ | — | ✓ | — |
+
+<p align="center">
+  <sub>✓ 已配置的构建目标，不代表每个发布版本都包含对应文件。<br>✓ Configured build targets; individual releases may offer different files.<br>✓ Cibles de compilation configurées ; les fichiers disponibles peuvent varier selon la version.</sub>
+</p>
+
+<h3 align="center">选择适合你的版本。</h3>
+
+<p align="center">
+  <sub>Find your download.<br>Choisissez votre version.</sub>
+</p>
+
+| 系统 / OS / Système | 发布格式 / Packages / Formats |
+| :-- | :-- |
+| **Windows** | 安装程序 ` .exe `、便携压缩包 ` .zip ` · Installer & portable ZIP · Installation et archive ZIP |
+| **macOS** | 磁盘映像 ` .dmg `、应用压缩包 ` .zip ` · Disk image & app ZIP · Image disque et archive de l’app |
+| **Linux** | Debian ` .deb `、RHEL 系 ` .rpm `、` .tar.gz ` · Debian/RHEL packages & archive · Paquets Debian/RHEL et archive |
+| **FreeBSD** | ` .tar.gz ` · Archive · Archive |
+
+<p align="center">
+  <sub>macOS 目标最低版本为 11.0；Linux 的 DEB 基于 Debian 13，RPM 基于 UBI 10；FreeBSD 构建目标使用 14.4（x86）及 15.1（其他列出的架构）。<br>macOS deployment target: 11.0. DEB builds target Debian 13, RPM builds UBI 10; FreeBSD targets 14.4 (x86) and 15.1 (other listed architectures).<br>Version macOS minimale ciblée : 11.0. Paquets DEB : Debian 13 ; RPM : UBI 10 ; FreeBSD : 14.4 (x86) et 15.1 (autres architectures indiquées).</sub>
 </p>
 
 <br>
@@ -142,51 +196,22 @@
 
 <br>
 
-<h2 align="center">原生桌面，各有精彩。</h2>
+<h2 align="center">现在，就让灵感留下痕迹。</h2>
 
 <p align="center">
-  <sub>At home on your desktop.</sub><br>
-  <sub>À sa place sur votre bureau.</sub>
+  <sub>Make your point.<br>Donnez forme à vos idées.</sub>
 </p>
 
 <p align="center">
-  <strong>Windows &nbsp;&nbsp; macOS &nbsp;&nbsp; Linux &nbsp;&nbsp; FreeBSD</strong>
+  从官方 Releases 获取对应系统的安装包，按需选择架构。<br>
+  <sub>Get the package for your system and processor from the official Releases page.</sub><br>
+  <sub>Téléchargez la version adaptée à votre système et à votre processeur depuis la page officielle des versions.</sub>
 </p>
 
 <p align="center">
-  基于 Rust、egui 与 SDL3 构建，关注原生输入、跨平台体验和显示细节。<br>
-  Linux 桌面同时考虑 Wayland 与 X11；不同桌面环境的部分功能可能需要额外授权或集成。<br>
-  <sub>Built with Rust, egui, and SDL3, with attention to native input and display behavior.</sub><br>
-  <sub>Linux integration considers both Wayland and X11; some desktop features may require permissions or additional integration.</sub><br>
-  <sub>Développé avec Rust, egui et SDL3, avec une attention particulière aux entrées natives et à l’affichage.</sub><br>
-  <sub>Sous Linux, Wayland et X11 sont pris en compte ; certaines fonctions peuvent nécessiter des autorisations ou une intégration supplémentaire.</sub>
-</p>
-
-<p align="center">
-  <sub>Rust 2024 &nbsp; / &nbsp; egui &nbsp; / &nbsp; SDL3 &nbsp; / &nbsp; sRGB · Display P3 · HDR-aware workflows</sub>
-</p>
-
-<br>
-
----
-
-<br>
-
-<h2 align="center">现在，就开始表达。</h2>
-
-<p align="center">
-  <sub>Make your point.</sub><br>
-  <sub>Donnez vie à vos idées.</sub>
-</p>
-
-<p align="center">
-  从 Releases 选择适合你系统与处理器架构的版本。具体可下载文件以对应版本页面为准。<br>
-  <sub>Choose the package for your operating system and architecture from Releases. Availability varies by release.</sub><br>
-  <sub>Choisissez le paquet adapté à votre système et à votre architecture dans les versions publiées. Les fichiers disponibles varient selon la version.</sub>
-</p>
-
-<p align="center">
-  <a href="https://github.com/xujiegb/OverInk/releases/latest"><strong>前往下载 · Get OverInk · Obtenir OverInk</strong></a>
+  <a href="https://github.com/xujiegb/OverInk/releases/latest"><strong>↓ 立即下载 · Download · Télécharger</strong></a>
+  &nbsp;&nbsp;·&nbsp;&nbsp;
+  <a href="https://github.com/xujiegb/OverInk/releases">历史版本 · All releases · Toutes les versions</a>
 </p>
 
 <details>
@@ -194,17 +219,28 @@
 
 <br>
 
-需要 Rust 1.100.0 或更新版本，以及对应平台所需的原生开发依赖。  
-<sub>Requires Rust 1.100.0 or later and platform-specific native build dependencies.</sub>  
-<sub>Nécessite Rust 1.100.0 ou une version ultérieure, ainsi que les dépendances natives de votre plateforme.</sub>
+需要 Rust 1.100.0 或更新版本，并安装系统对应的原生开发依赖。  
+<sub>Requires Rust 1.100.0 or later and the native dependencies for your platform.</sub>  
+<sub>Nécessite Rust 1.100.0 ou une version ultérieure et les dépendances natives de votre plateforme.</sub>
 
 ```bash
 cargo build --locked --release
 ```
 
-构建配置与各平台依赖可参考 [GitHub Actions 构建流程](https://github.com/xujiegb/OverInk/blob/master/.github/workflows/build.yml)。  
-<sub>See the GitHub Actions workflow for platform-specific build details.</sub>  
-<sub>Consultez le workflow GitHub Actions pour les détails de compilation propres à chaque plateforme.</sub>
+各平台的具体构建步骤、依赖与打包方式请参阅 [GitHub Actions 构建工作流](.github/workflows/build.yml)。  
+<sub>See the GitHub Actions workflow for platform-specific build and packaging steps.</sub>  
+<sub>Consultez le workflow GitHub Actions pour la compilation et la création des paquets selon la plateforme.</sub>
+
+</details>
+
+<details>
+<summary><strong>桌面集成说明 · Desktop integration · Intégration au bureau</strong></summary>
+
+<br>
+
+在部分 Linux Wayland 桌面上，截图或窗口交互可能需要门户授权或桌面扩展。请根据应用提示完成相关设置。  
+<sub>Some Linux Wayland desktops may require portal permissions or a desktop extension for screen capture or window interaction. Follow the application prompts.</sub>  
+<sub>Certains bureaux Linux Wayland peuvent exiger des autorisations du portail ou une extension pour les captures et les interactions avec les fenêtres. Suivez les indications de l’application.</sub>
 
 </details>
 
@@ -215,28 +251,28 @@ cargo build --locked --release
 <br>
 
 <p align="center">
-  <img src="assets/overink.svg" alt="OverInk" width="56">
+  <img src="assets/overink.svg" alt="OverInk" width="60">
 </p>
 
-<h2 align="center">让表达，回到直觉。</h2>
+<h2 align="center">每一笔，都值得被看见。</h2>
 
 <p align="center">
-  <sub>Annotation, made intuitive.</sub><br>
-  <sub>L’annotation, tout simplement intuitive.</sub>
+  <sub>Every idea deserves to be seen.</sub><br>
+  <sub>Chaque idée mérite d’être vue.</sub>
 </p>
 
 <p align="center">
   <sub>
-    <a href="LICENSE">BSD 3-Clause</a>
-    &nbsp; · &nbsp;
-    <a href="https://github.com/xujiegb/OverInk">Source · 源代码 · Code source</a>
+    <a href="https://github.com/xujiegb/OverInk">源代码 · Source code · Code source</a>
     &nbsp; · &nbsp;
     <a href="https://github.com/xujiegb/OverInk/issues">反馈 · Issues · Signaler un problème</a>
+    &nbsp; · &nbsp;
+    <a href="LICENSE">BSD-3-Clause</a>
   </sub>
 </p>
 
 <p align="center">
-  <sub>第三方字体及其许可信息见 <a href="LICENSE">LICENSE</a> 与 <a href="assets/fonts/OFL.txt">字体许可说明</a>。</sub><br>
-  <sub>Third-party font credits and licenses are documented in the repository.</sub><br>
-  <sub>Les crédits et licences des polices tierces figurent dans le dépôt.</sub>
+  <sub>OverInk 采用 BSD-3-Clause 许可。内置 OpenMoji 资源适用 CC BY-SA 4.0；其他字体授权见 <a href="assets/fonts/OFL.txt">OFL.txt</a>。<br>
+  OverInk is BSD-3-Clause licensed. Bundled OpenMoji assets use CC BY-SA 4.0; see <a href="assets/fonts/OFL.txt">OFL.txt</a> for other font terms.<br>
+  OverInk est sous licence BSD-3-Clause. Les ressources OpenMoji intégrées sont sous CC BY-SA 4.0 ; voir <a href="assets/fonts/OFL.txt">OFL.txt</a> pour les autres polices.</sub>
 </p>
