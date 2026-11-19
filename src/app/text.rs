@@ -313,6 +313,8 @@ impl App {
         if matches!(ty, SDL_EVENT_PEN_PROXIMITY_IN | SDL_EVENT_PEN_DOWN) {
             changed |= self.cancel_text_touches(gui);
         }
+        let primary_touch_released = ty == SDL_EVENT_FINGER_UP
+            && gui.primary_touch() == crate::touch::key_from_event(event);
         gui.event(event, window, size);
         if editing
             && ty == SDL_EVENT_MOUSE_BUTTON_DOWN
@@ -337,8 +339,9 @@ impl App {
         }
         let touch_ended = matches!(ty, SDL_EVENT_FINGER_UP | SDL_EVENT_FINGER_CANCELED);
         if editing {
-            if touch_ended && self.input.text.touch_press {
-                // An already focused editor may have lost its virtual keyboard.
+            if primary_touch_released && self.input.text.touch_press {
+                // Only a completed primary tap reopens the keyboard; canceling
+                // or lifting a second finger must not interrupt the IME.
                 self.input.text.keyboard_request = Some(KeyboardRequest::Touch);
             }
             if touch_ended {
