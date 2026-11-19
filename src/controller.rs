@@ -106,46 +106,53 @@ impl Rect {
 }
 
 // Four disjoint rectangles cover the canvas except the protected controller.
+// Return a stack-backed iterator so native input routing never needs to
+// allocate a temporary Vec just to iterate over at most four regions.
 #[cfg(any(not(target_os = "windows"), test))]
-pub fn outside(size: [i32; 2], hole: Option<Rect>) -> Vec<Rect> {
+pub fn outside(size: [i32; 2], hole: Option<Rect>) -> impl Iterator<Item = Rect> {
     let full = Rect {
         x: 0,
         y: 0,
         w: size[0],
         h: size[1],
     };
-    let Some(hole) = hole.and_then(|r| r.clipped(size)) else {
-        return vec![full];
-    };
-    [
-        Rect {
+    let areas = if let Some(hole) = hole.and_then(|r| r.clipped(size)) {
+        [
+            Rect {
+                x: 0,
+                y: 0,
+                w: size[0],
+                h: hole.y,
+            },
+            Rect {
+                x: 0,
+                y: hole.y + hole.h,
+                w: size[0],
+                h: size[1] - hole.y - hole.h,
+            },
+            Rect {
+                x: 0,
+                y: hole.y,
+                w: hole.x,
+                h: hole.h,
+            },
+            Rect {
+                x: hole.x + hole.w,
+                y: hole.y,
+                w: size[0] - hole.x - hole.w,
+                h: hole.h,
+            },
+        ]
+    } else {
+        let empty = Rect {
             x: 0,
             y: 0,
-            w: size[0],
-            h: hole.y,
-        },
-        Rect {
-            x: 0,
-            y: hole.y + hole.h,
-            w: size[0],
-            h: size[1] - hole.y - hole.h,
-        },
-        Rect {
-            x: 0,
-            y: hole.y,
-            w: hole.x,
-            h: hole.h,
-        },
-        Rect {
-            x: hole.x + hole.w,
-            y: hole.y,
-            w: size[0] - hole.x - hole.w,
-            h: hole.h,
-        },
-    ]
-    .into_iter()
-    .filter(|r| r.w > 0 && r.h > 0)
-    .collect()
+            w: 0,
+            h: 0,
+        };
+        [full, empty, empty, empty]
+    };
+    areas.into_iter().filter(|r| r.w > 0 && r.h > 0)
 }
 
 fn rectangle(canvas: &Window, toolbar: &Window) -> Option<Rect> {
@@ -308,6 +315,28 @@ mod tests {
     }
 
     #[test]
+    fn uncovered_canvas_regions_are_bounded_without_a_protected_hole() {
+        let whole = Rect {
+            x: 0,
+            y: 0,
+            w: 100,
+            h: 100,
+        };
+        assert_eq!(outside([100, 100], None).collect::<Vec<_>>(), vec![whole]);
+        let outside_canvas = Rect {
+            x: 200,
+            y: 200,
+            w: 20,
+            h: 20,
+        };
+        assert_eq!(
+            outside([100, 100], Some(outside_canvas)).collect::<Vec<_>>(),
+            vec![whole]
+        );
+        assert!(outside([0, 100], None).next().is_none());
+    }
+
+    #[test]
     fn excluded_area_never_belongs_to_the_canvas_regions() {
         for hole in [
             Rect {
@@ -335,7 +364,7 @@ mod tests {
                 h: 100,
             },
         ] {
-            let areas = outside([100, 100], Some(hole));
+            let areas = outside([100, 100], Some(hole)).collect::<Vec<_>>();
             for y in 0..100 {
                 for x in 0..100 {
                     let coverage = areas
