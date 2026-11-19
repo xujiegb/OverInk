@@ -98,7 +98,9 @@ struct Commands {
     redraw_canvas: bool,
     choose_font: bool,
     font_path: Option<PathBuf>,
-    reset_font: bool,
+    remove_font: Option<String>,
+    move_font: Option<(usize, usize)>,
+    box_font: Option<Option<String>>,
     screenshot: bool,
     screenshot_folder: bool,
 }
@@ -196,6 +198,7 @@ struct App {
     preferences: Preferences,
     text_fonts: TextFonts,
     font_path_input: Option<String>,
+    font_drag: Option<usize>,
     screenshot: Screenshot,
     #[cfg(target_os = "linux")]
     gnome_guide: Option<crate::gnome::Guide>,
@@ -264,6 +267,7 @@ impl App {
             preferences,
             text_fonts: TextFonts::load(&base.join("annotation-font")),
             font_path_input: None,
+            font_drag: None,
             screenshot: Screenshot::default(),
             #[cfg(target_os = "linux")]
             gnome_guide: None,
@@ -2484,26 +2488,31 @@ fn run_inner(options: Options) -> Result<(), String> {
                 cmd.redraw_canvas |= app.install_annotation_font(&source, &annotation_font_path);
                 toolbar_dirty = true;
             }
-            if cmd.reset_font {
-                match app.text_fonts.reset(&annotation_font_path) {
+            if let Some(key) = cmd.remove_font.take() {
+                match app.text_fonts.remove(&key, &annotation_font_path) {
                     Ok(()) => {
-                        app.status = text(
-                            "Using the included annotation font",
-                            "已切换到内置标注字体",
-                            "已切換至內建標註字型",
-                        )
-                        .into();
+                        app.status = text("Font removed", "已删除字体", "已刪除字型").into();
                         cmd.redraw_canvas = true;
                     }
                     Err(error) => {
                         app.status = text(
-                            "Could not reset the annotation font",
-                            "无法还原标注字体",
-                            "無法還原標註字型",
-                        )
-                        .detail(error)
+                            "Could not remove font", "无法删除字体", "無法刪除字型"
+                        ).detail(error);
                     }
                 }
+                toolbar_dirty = true;
+            }
+            if let Some((from, to)) = cmd.move_font.take() {
+                match app.text_fonts.move_priority(from, to, &annotation_font_path) {
+                    Ok(()) => cmd.redraw_canvas = true,
+                    Err(error) => app.status = text(
+                        "Could not save font order", "无法保存字体顺序", "無法儲存字型順序"
+                    ).detail(error),
+                }
+                toolbar_dirty = true;
+            }
+            if let Some(key) = cmd.box_font.take() {
+                cmd.redraw_canvas |= app.set_text_box_font(key);
                 toolbar_dirty = true;
             }
             #[cfg(target_os = "linux")]
@@ -3119,6 +3128,7 @@ mod touch_tests {
             preferences: Preferences::default(),
             text_fonts: TextFonts::default(),
             font_path_input: None,
+            font_drag: None,
             screenshot: Screenshot::default(),
             #[cfg(target_os = "linux")]
             gnome_guide: None,
