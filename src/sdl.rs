@@ -106,6 +106,15 @@ enum SdlNativeAction<'a> {
     InkTextureUpload(&'a OwnedTexture, &'a [u8], i32),
     TextureModulation(&'a OwnedTexture, [f32; 3], f32),
     GuiTextureUpload(&'a OwnedTexture, Option<&'a SDL_Rect>, &'a [u8], i32),
+    RendererColorProperty(&'a Renderer, RendererPropertyQuery),
+    RenderOwnedTexture(
+        &'a Renderer,
+        OwnedTextureRef<'a>,
+        Option<&'a SDL_FRect>,
+        Option<&'a SDL_FRect>,
+    ),
+    #[cfg(test)]
+    ReadSurfacePixel(&'a OwnedSurface, i32, i32),
     ClipboardWrite(&'a CStr),
     ClipboardRead,
     ReadString(SdlStringSource),
@@ -133,6 +142,9 @@ enum SdlNativeResult {
     Success(bool),
     Text(Option<String>),
     Profile(Option<Vec<u8>>),
+    ColorProperty((bool, f32)),
+    #[cfg(test)]
+    Pixel(Option<[u8; 4]>),
     Theme(SDL_SystemTheme),
 }
 
@@ -168,6 +180,23 @@ impl SdlNativeResult {
     fn profile(self) -> Option<Vec<u8>> {
         if let Self::Profile(bytes) = self {
             bytes
+        } else {
+            None
+        }
+    }
+
+    fn color_property(self) -> (bool, f32) {
+        if let Self::ColorProperty(value) = self {
+            value
+        } else {
+            (false, 1.)
+        }
+    }
+
+    #[cfg(test)]
+    fn pixel(self) -> Option<[u8; 4]> {
+        if let Self::Pixel(value) = self {
+            value
         } else {
             None
         }
@@ -316,6 +345,63 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
                     rgba.as_ptr().cast(),
                     pitch,
                 ))
+            }
+            SdlNativeAction::RendererColorProperty(renderer, query) => {
+                let values = if let Some(raw) = renderer.raw {
+                    let props = SDL_GetRendererProperties(raw.as_ptr());
+                    match query {
+                        RendererPropertyQuery::HdrState => (
+                            SDL_GetBooleanProperty(
+                                props,
+                                SDL_PROP_RENDERER_HDR_ENABLED_BOOLEAN,
+                                false,
+                            ),
+                            SDL_GetFloatProperty(props, SDL_PROP_RENDERER_HDR_HEADROOM_FLOAT, 1.),
+                        ),
+                        RendererPropertyQuery::SdrWhitePoint => (
+                            false,
+                            SDL_GetFloatProperty(
+                                props,
+                                SDL_PROP_RENDERER_SDR_WHITE_POINT_FLOAT,
+                                1.,
+                            ),
+                        ),
+                    }
+                } else {
+                    (false, 1.)
+                };
+                SdlNativeResult::ColorProperty(values)
+            }
+            SdlNativeAction::RenderOwnedTexture(renderer, texture, source, destination) => {
+                let success = if let Some(raw) = renderer.raw {
+                    SDL_RenderTexture(
+                        raw.as_ptr(),
+                        texture.raw().as_ptr(),
+                        source.map_or(ptr::null(), |rect| rect),
+                        destination.map_or(ptr::null(), |rect| rect),
+                    )
+                } else {
+                    false
+                };
+                SdlNativeResult::Success(success)
+            }
+            #[cfg(test)]
+            SdlNativeAction::ReadSurfacePixel(surface, x, y) => {
+                let [mut r, mut g, mut b, mut a] = [0; 4];
+                let pixel = if SDL_ReadSurfacePixel(
+                    surface.as_non_null().as_ptr(),
+                    x,
+                    y,
+                    &mut r,
+                    &mut g,
+                    &mut b,
+                    &mut a,
+                ) {
+                    Some([r, g, b, a])
+                } else {
+                    None
+                };
+                SdlNativeResult::Pixel(pixel)
             }
             SdlNativeAction::ClipboardWrite(value) => {
                 SdlNativeResult::Success(SDL_SetClipboardText(value.as_ptr()))
@@ -2348,24 +2434,7 @@ impl Renderer {
     /// Read only known SDL renderer color properties at the FFI boundary.
     /// HDR uses both fields from the same property handle.
     fn query_color_property(&self, query: RendererPropertyQuery) -> (bool, f32) {
-        let Some(renderer) = self.raw else {
-            return (false, 1.);
-        };
-        // SAFETY: Renderer owns a live SDL renderer. These SDL getters
-        // return copied numeric values without exporting native pointers.
-        unsafe {
-            let props = SDL_GetRendererProperties(renderer.as_ptr());
-            match query {
-                RendererPropertyQuery::HdrState => (
-                    SDL_GetBooleanProperty(props, SDL_PROP_RENDERER_HDR_ENABLED_BOOLEAN, false),
-                    SDL_GetFloatProperty(props, SDL_PROP_RENDERER_HDR_HEADROOM_FLOAT, 1.),
-                ),
-                RendererPropertyQuery::SdrWhitePoint => (
-                    false,
-                    SDL_GetFloatProperty(props, SDL_PROP_RENDERER_SDR_WHITE_POINT_FLOAT, 1.),
-                ),
-            }
-        }
+        sdl_native(SdlNativeAction::RendererColorProperty(self, query)).color_property()
     }
 
     /// Render an adapter-owned texture. The enum keeps the native pointer
@@ -2376,19 +2445,18 @@ impl Renderer {
         source: Option<&SDL_FRect>,
         destination: Option<&SDL_FRect>,
     ) -> Result<(), String> {
-        let Some(renderer) = self.raw else {
+        if self.raw.is_none() {
             return Err("Renderer has been destroyed".into());
-        };
-        // SAFETY: Both the renderer and selected texture are live while the
-        // synchronous SDL call reads the borrowed source/destination bounds.
-        unsafe {
-            check(SDL_RenderTexture(
-                renderer.as_ptr(),
-                texture.raw().as_ptr(),
-                source.map_or(ptr::null(), |rect| rect),
-                destination.map_or(ptr::null(), |rect| rect),
-            ))
         }
+        check(
+            sdl_native(SdlNativeAction::RenderOwnedTexture(
+                self,
+                texture,
+                source,
+                destination,
+            ))
+            .succeeded(),
+        )
     }
 
     /// The only FFI dispatch for ordinary clear, clip, scale, flush and
@@ -2800,22 +2868,12 @@ impl TestSurface {
     /// Read a pixel from an owned test surface; share this one native read
     /// boundary with both single-pixel and full-frame test assertions.
     fn read_pixel(&self, x: i32, y: i32) -> Result<[u8; 4], String> {
-        let [mut r, mut g, mut b, mut a] = [0; 4];
-        // SAFETY: TestSurface holds the live SDL_Surface allocation, and the
-        // four initialized output bytes are valid writable memory. SDL checks
-        // whether the requested pixel lies inside the surface.
-        unsafe {
-            check(SDL_ReadSurfacePixel(
-                self.surface.as_non_null().as_ptr(),
-                x,
-                y,
-                &mut r,
-                &mut g,
-                &mut b,
-                &mut a,
-            ))?;
+        if x < 0 || y < 0 || x >= self.dimensions[0] || y >= self.dimensions[1] {
+            return Err("Pixel is outside the test surface".into());
         }
-        Ok([r, g, b, a])
+        sdl_native(SdlNativeAction::ReadSurfacePixel(&self.surface, x, y))
+            .pixel()
+            .ok_or_else(error)
     }
 
     pub fn pixel(renderer: &Renderer, x: i32, y: i32) -> Result<[u8; 4], String> {
