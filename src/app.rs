@@ -1087,12 +1087,12 @@ impl App {
                 let Some(m) = mouse_motion_event(e) else {
                     return;
                 };
-                if m.which != SDL_PEN_MOUSEID && m.which != SDL_TOUCH_MOUSEID {
-                    if let Some(contact) = self.input.contact
-                        && matches!(contact.source, Source::Mouse(_))
-                    {
-                        self.motion(contact.source, Point::new(m.x, m.y, 1., [0.; 2]));
-                    }
+                if m.which != SDL_PEN_MOUSEID
+                    && m.which != SDL_TOUCH_MOUSEID
+                    && let Some(contact) = self.input.contact
+                    && matches!(contact.source, Source::Mouse(_))
+                {
+                    self.motion(contact.source, Point::new(m.x, m.y, 1., [0.; 2]));
                 }
             }
             SDL_EVENT_FINGER_CANCELED => {
