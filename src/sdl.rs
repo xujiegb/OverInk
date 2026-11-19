@@ -1614,7 +1614,11 @@ impl Window {
                     let surface_handle = surface.as_non_null();
                     let transparent = SDL_MapSurfaceRGBA(surface_handle.as_ptr(), 0, 0, 0, 0);
                     let opaque = SDL_MapSurfaceRGBA(surface_handle.as_ptr(), 255, 255, 255, 255);
-                    check(SDL_FillSurfaceRect(surface_handle.as_ptr(), ptr::null(), transparent))?;
+                    check(SDL_FillSurfaceRect(
+                        surface_handle.as_ptr(),
+                        ptr::null(),
+                        transparent,
+                    ))?;
 
                     let middle = SDL_Rect {
                         x: 0,
@@ -1623,7 +1627,11 @@ impl Window {
                         h: height - radius * 2,
                     };
                     if middle.h > 0 {
-                        check(SDL_FillSurfaceRect(surface_handle.as_ptr(), &middle, opaque))?;
+                        check(SDL_FillSurfaceRect(
+                            surface_handle.as_ptr(),
+                            &middle,
+                            opaque,
+                        ))?;
                     }
                     // Alpha antialiasing at the extreme two outer edges of
                     // each row, and mirrored geometry on all four corners.
@@ -1647,14 +1655,23 @@ impl Window {
                                 ..top
                             };
                             check(SDL_FillSurfaceRect(surface_handle.as_ptr(), &top, opaque))?;
-                            check(SDL_FillSurfaceRect(surface_handle.as_ptr(), &bottom, opaque))?;
+                            check(SDL_FillSurfaceRect(
+                                surface_handle.as_ptr(),
+                                &bottom,
+                                opaque,
+                            ))?;
                         }
                         if inset > 0 {
                             let coverage = (f64::from(inset) - x_edge).clamp(0., 1.);
                             let edge_alpha = (coverage * 255.).round() as u8;
                             if edge_alpha > 0 {
-                                let edge_color =
-                                    SDL_MapSurfaceRGBA(surface_handle.as_ptr(), 255, 255, 255, edge_alpha);
+                                let edge_color = SDL_MapSurfaceRGBA(
+                                    surface_handle.as_ptr(),
+                                    255,
+                                    255,
+                                    255,
+                                    edge_alpha,
+                                );
                                 for x in [inset - 1, width - inset] {
                                     for row in [y, height - y - 1] {
                                         let pixel = SDL_Rect {
@@ -1673,7 +1690,10 @@ impl Window {
                             }
                         }
                     }
-                    check(SDL_SetWindowShape(self.raw.as_ptr(), surface_handle.as_ptr()))
+                    check(SDL_SetWindowShape(
+                        self.raw.as_ptr(),
+                        surface_handle.as_ptr(),
+                    ))
                 }
                 #[cfg(not(target_os = "windows"))]
                 WindowCommand::ShapeRegions(size, opaque_regions) => {
