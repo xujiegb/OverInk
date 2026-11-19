@@ -2,7 +2,10 @@
 //! No native CMS handles, handwritten FFI, raw pointers, or unsafe code.
 #![forbid(unsafe_code)]
 
-use moxcms::{ColorProfile, InPlaceTransformExecutor, Layout, RenderingIntent, TransformOptions};
+use moxcms::{
+    ColorProfile, DataColorSpace, InPlaceTransformExecutor, Layout, Matrix3d, RenderingIntent,
+    ToneCurveEvaluator, TransformOptions, Vector3d,
+};
 use std::sync::Arc;
 
 const MAX_PROFILE_BYTES: usize = 16 * 1024 * 1024;
@@ -42,8 +45,120 @@ enum PixelTransform {
     Rgba8(Arc<dyn InPlaceTransformExecutor<u8> + Send + Sync>),
 }
 
+/// Explicit relative-colorimetric BPC for measured-black RGB matrix/TRC
+/// profiles. moxcms 0.9.2's internal LUT black-point scaling is only
+/// evaluated for perceptual/saturation intent, not RelativeColorimetric.
+/// Offset and scale are applied in PCS D50 XYZ (not gamma-encoded RGB).
+/// Unknown/unsupported profiles retain the library's original transform.
+struct MatrixBlackPointCompensation {
+    rgb_to_xyz: Matrix3d,
+    xyz_to_rgb: Matrix3d,
+    scale: [f64; 3],
+    offset: [f64; 3],
+    decode: [Box<dyn ToneCurveEvaluator + Send + Sync>; 3],
+    encode: [Box<dyn ToneCurveEvaluator + Send + Sync>; 3],
+}
+
+impl MatrixBlackPointCompensation {
+    fn new(source: &ColorProfile, destination: &ColorProfile) -> Option<Self> {
+        if source.color_space != DataColorSpace::Rgb
+            || destination.color_space != DataColorSpace::Rgb
+            || source.pcs != DataColorSpace::Xyz
+            || destination.pcs != DataColorSpace::Xyz
+            // Destination LUT transforms cannot be inverted by RGB colorants.
+            || destination.lut_b_to_a_colorimetric.is_some()
+            || destination.lut_b_to_a_perceptual.is_some()
+            || destination.lut_b_to_a_saturation.is_some()
+        {
+            return None;
+        }
+        // The presence of an ICC 'bkpt' tag is necessary for a reliable
+        // measured black point; assuming one for an untagged profile would
+        // alter normal sRGB, P3 and screenshot colors without evidence.
+        if source.black_point.is_none() && destination.black_point.is_none() {
+            return None;
+        }
+        let black = |profile: &ColorProfile| {
+            profile.black_point.map_or([0.; 3], |bp| [bp.x, bp.y, bp.z])
+        };
+        let src = black(source);
+        let dst = black(destination);
+        const D50: [f64; 3] = [0.9642, 1.0, 0.8249];
+        if (0..3).any(|i| {
+            !src[i].is_finite()
+                || !dst[i].is_finite()
+                || src[i] < 0.
+                || dst[i] < 0.
+                || src[i] >= D50[i] * 0.5
+                || dst[i] >= D50[i] * 0.5
+        }) || (0..3).all(|i| (src[i] - dst[i]).abs() < 1e-8)
+        {
+            return None;
+        }
+        let rgb_to_xyz = Matrix3d {
+            v: [
+                [destination.red_colorant.x, destination.green_colorant.x, destination.blue_colorant.x],
+                [destination.red_colorant.y, destination.green_colorant.y, destination.blue_colorant.y],
+                [destination.red_colorant.z, destination.green_colorant.z, destination.blue_colorant.z],
+            ],
+        };
+        let determinant = rgb_to_xyz.determinant()?;
+        if !determinant.is_finite() || determinant.abs() < 1e-8
+            || rgb_to_xyz.v.iter().flatten().any(|c| !c.is_finite())
+        {
+            return None;
+        }
+        let red = destination.red_trc.as_ref()?;
+        let green = destination.green_trc.as_ref()?;
+        let blue = destination.blue_trc.as_ref()?;
+        let decode = [
+            red.make_linear_evaluator().ok()?,
+            green.make_linear_evaluator().ok()?,
+            blue.make_linear_evaluator().ok()?,
+        ];
+        let encode = [
+            red.make_gamma_evaluator().ok()?,
+            green.make_gamma_evaluator().ok()?,
+            blue.make_gamma_evaluator().ok()?,
+        ];
+        let scale = std::array::from_fn(|i| (D50[i] - dst[i]) / (D50[i] - src[i]));
+        let offset = std::array::from_fn(|i| dst[i] - scale[i] * src[i]);
+        Some(Self {
+            xyz_to_rgb: rgb_to_xyz.inverse(),
+            rgb_to_xyz,
+            scale,
+            offset,
+            decode,
+            encode,
+        })
+    }
+
+    fn map(&self, rgb: [f32; 3]) -> [f32; 3] {
+        if rgb.iter().any(|v| !v.is_finite() || !(0. ..=1.).contains(v)) {
+            return rgb;
+        }
+        let linear = std::array::from_fn(|i| {
+            f64::from(self.decode[i].evaluate_value(rgb[i]))
+        });
+        if linear.iter().any(|v| !v.is_finite()) {
+            return rgb;
+        }
+        let pcs = self.rgb_to_xyz.mul_vector(Vector3d { v: linear }).v;
+        let adjusted = std::array::from_fn(|i| self.scale[i] * pcs[i] + self.offset[i]);
+        let corrected = self.xyz_to_rgb.mul_vector(Vector3d { v: adjusted }).v;
+        if corrected.iter().any(|v| !v.is_finite()) {
+            return rgb;
+        }
+        std::array::from_fn(|i| {
+            let encoded = self.encode[i].evaluate_value(corrected[i].clamp(0., 1.) as f32);
+            if encoded.is_finite() { encoded.clamp(0., 1.) } else { rgb[i] }
+        })
+    }
+}
+
 pub struct Transform {
     inner: PixelTransform,
+    bpc: Option<MatrixBlackPointCompensation>,
 }
 
 enum PixelBuffer<'a> {
@@ -59,6 +174,7 @@ impl Transform {
             .ok()
             .map(|executor| Self {
                 inner: PixelTransform::Rgb(executor),
+                bpc: MatrixBlackPointCompensation::new(input, output),
             })
     }
 
@@ -69,6 +185,7 @@ impl Transform {
             .ok()
             .map(|executor| Self {
                 inner: PixelTransform::Rgba8(executor),
+                bpc: MatrixBlackPointCompensation::new(input, output),
             })
     }
 
@@ -98,6 +215,11 @@ impl Transform {
                     if executor.transform(chunk.as_flattened_mut()).is_err() {
                         break;
                     }
+                    if let Some(bpc) = &self.bpc {
+                        for color in chunk {
+                            *color = bpc.map(*color);
+                        }
+                    }
                 }
             }
             #[cfg(any(target_os = "linux", target_os = "freebsd", test))]
@@ -108,6 +230,19 @@ impl Transform {
                 for chunk in bytes.chunks_mut(MAX_RGBA_PIXELS_PER_BATCH * 4) {
                     if executor.transform(chunk).is_err() {
                         break;
+                    }
+                    if let Some(bpc) = &self.bpc {
+                        for pixel in chunk.as_chunks_mut::<4>().0 {
+                            let color = [
+                                f32::from(pixel[0]) / 255.,
+                                f32::from(pixel[1]) / 255.,
+                                f32::from(pixel[2]) / 255.,
+                            ];
+                            let mapped = bpc.map(color);
+                            for i in 0..3 {
+                                pixel[i] = (mapped[i] * 255.).round() as u8;
+                            }
+                        }
                     }
                 }
             }
@@ -223,6 +358,35 @@ mod tests {
                 "Display P3 conversion exceeded round-trip tolerance"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn measured_black_point_is_compensated_in_relative_rgb_transform() -> Result<(), &'static str> {
+        let srgb = ColorProfile::new_srgb();
+        let mut measured = ColorProfile::new_srgb();
+        measured.black_point = Some(moxcms::Xyzd {
+            x: 0.00964,
+            y: 0.01,
+            z: 0.00825,
+        });
+        let plain = Transform::rgb(&srgb, &srgb).ok_or("Missing sRGB transform")?;
+        let adjusted = Transform::rgb(&srgb, &measured).ok_or("Missing measured display transform")?;
+        assert!(adjusted.bpc.is_some(), "Expected explicit matrix RGB BPC");
+        let near_black = [0.02, 0.02, 0.02];
+        let ordinary = plain.map_rgb(near_black);
+        let corrected = adjusted.map_rgb(near_black);
+        assert!(corrected.iter().zip(ordinary).all(|(a, b)| *a > b));
+        let white = adjusted.map_rgb([1., 1., 1.]);
+        assert!(white.iter().all(|v| (*v - 1.).abs() < 0.02));
+        Ok(())
+    }
+
+    #[test]
+    fn untagged_rgb_profiles_do_not_apply_black_point_compensation() -> Result<(), &'static str> {
+        let profile = ColorProfile::new_srgb();
+        let transform = Transform::rgb(&profile, &profile).ok_or("Missing sRGB transform")?;
+        assert!(transform.bpc.is_none());
         Ok(())
     }
 
