@@ -113,6 +113,7 @@ struct CanvasInput {
     protected: Option<crate::controller::Rect>,
     pens: HashMap<u32, Pen>,
     pen_proximity: BTreeSet<u32>,
+    last_pen_button: Option<(u32, u8, Instant)>,
     touches: BTreeMap<TouchKey, FingerStroke>,
     contact: Option<Contact>,
     laser: BTreeMap<u64, VecDeque<LaserSample>>,
@@ -129,6 +130,7 @@ impl Default for CanvasInput {
             protected: None,
             pens: HashMap::new(),
             pen_proximity: BTreeSet::new(),
+            last_pen_button: None,
             touches: BTreeMap::new(),
             contact: None,
             laser: BTreeMap::new(),
@@ -928,6 +930,9 @@ impl App {
                 pen_proximity_event(event).map(|pen| pen.which.0)
             }
             SDL_EVENT_PEN_AXIS => pen_axis_event(event).map(|pen| pen.which.0),
+            SDL_EVENT_PEN_BUTTON_DOWN | SDL_EVENT_PEN_BUTTON_UP => {
+                pen_button_event(event).map(|pen| pen.which.0)
+            },
             SDL_EVENT_PEN_MOTION => pen_motion_event(event).map(|pen| pen.which.0),
             SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP => pen_touch_event(event).map(|pen| pen.which.0),
             _ => None,
@@ -945,10 +950,44 @@ impl App {
             self.discard_touches();
         }
     }
+    // SDL delivers pen side buttons independently of mouse and tip events.
+    // Only two presses of the same physical button count as a double-click.
+    // No toggle occurs during a stroke or while mouse passthrough is active.
+    fn pen_button_press(&mut self, id: u32, button: u8) {
+        if button == 0 || self.pass || self.hidden || self.suspended {
+            self.input.last_pen_button = None;
+            return;
+        }
+        let now = Instant::now();
+        let double = self.input.last_pen_button.is_some_and(|(last_id, last_button, at)| {
+            last_id == id
+                && last_button == button
+                && now.duration_since(at) <= Duration::from_millis(400)
+        });
+        if double {
+            self.input.last_pen_button = None;
+            let tool = if self.tool == Tool::Pen {
+                Tool::Eraser
+            } else {
+                Tool::Pen
+            };
+            self.use_tool(tool);
+        } else {
+            self.input.last_pen_button = Some((id, button, now));
+        }
+    }
+
     fn event(&mut self, e: &SDL_Event, overlay: SDL_WindowID, size: [f32; 2]) {
         self.track_pen(e);
         let ty = event_type(e);
         match ty {
+            SDL_EVENT_PEN_BUTTON_DOWN
+                if pen_button_event(e).is_some_and(|button| button.windowID == overlay) =>
+            {
+                if let Some(button) = pen_button_event(e) {
+                    self.pen_button_press(button.which.0, button.button);
+                }
+            }
             SDL_EVENT_MOUSE_BUTTON_DOWN
                 if mouse_button_event(e).is_some_and(|button| button.windowID == overlay) =>
             {
@@ -1729,6 +1768,8 @@ fn run_inner(options: Options) -> Result<(), String> {
                             | SDL_EVENT_PEN_UP
                             | SDL_EVENT_PEN_MOTION
                             | SDL_EVENT_PEN_AXIS
+                            | SDL_EVENT_PEN_BUTTON_DOWN
+                            | SDL_EVENT_PEN_BUTTON_UP
                     ) {
                         app.for_each_page(|page| page.track_pen(&event));
                         if !app.input.pen_proximity.is_empty()
@@ -1842,7 +1883,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                         had_contacts || app.input.has_contacts()
                     });
                     canvas.dirty |= edited;
-                    toolbar_dirty |= before != app.history_buttons();
+                    toolbar_dirty |= before != app.history_buttons() || ty == SDL_EVENT_PEN_BUTTON_DOWN;
                     toolbar_dirty |= selection_before != app.input.text.selected;
                     toolbar_dirty |= panel_before != app.panel;
                     toolbar_dirty |= app.panel.is_some() && (edited || activates);
@@ -1853,6 +1894,8 @@ fn run_inner(options: Options) -> Result<(), String> {
                         | SDL_EVENT_PEN_UP
                         | SDL_EVENT_PEN_AXIS
                         | SDL_EVENT_PEN_MOTION
+                        | SDL_EVENT_PEN_BUTTON_DOWN
+                        | SDL_EVENT_PEN_BUTTON_UP
                 ) {
                     // Pen events on the controller still drive palm rejection.
                     let index = if id == Some(toolbar.id) && app.multi {
@@ -1864,6 +1907,12 @@ fn run_inner(options: Options) -> Result<(), String> {
                     let edited = app.on_page(canvas.output, |page| {
                         let had_touches = !page.input.touches.is_empty();
                         page.track_pen(&event);
+                        if ty == SDL_EVENT_PEN_BUTTON_DOWN
+                            && drawing
+                            && let Some(button) = pen_button_event(&event)
+                        {
+                            page.pen_button_press(button.which.0, button.button);
+                        }
                         let canceled_text = canvas.cancel_text_touches(page);
                         canceled_text || (had_touches && page.input.touches.is_empty())
                     });
