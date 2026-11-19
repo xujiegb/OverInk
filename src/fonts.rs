@@ -7,8 +7,8 @@ use egui::{
 use skrifa::{FontRef, GlyphId, MetadataProvider, string::StringId};
 use std::{
     fs::{self, File},
-    io::{self, Read},
-    path::Path,
+    io::Read,
+    path::{Path, PathBuf},
     sync::{Arc, OnceLock},
 };
 use unicode_segmentation::UnicodeSegmentation;
@@ -20,13 +20,20 @@ const CUSTOM: &str = "Custom annotation font";
 const ANNOTATION: &str = "Annotations";
 const MAX_FONT_BYTES: u64 = 64 * 1024 * 1024;
 
-#[derive(Default)]
 pub struct TextFonts {
-    custom: Option<CustomFont>,
+    custom: Vec<CustomFont>,
+    order: Vec<String>,
     pub revision: u64,
 }
 
+pub struct FontEntry<'a> {
+    pub key: &'a str,
+    pub name: &'a str,
+    pub bundled: bool,
+}
+
 struct CustomFont {
+    key: String,
     name: String,
     face: FontFace,
 }
@@ -147,8 +154,26 @@ pub fn ui_definitions() -> FontDefinitions {
     bundled().definitions.clone()
 }
 
+impl Default for TextFonts {
+    fn default() -> Self {
+        Self {
+            custom: Vec::new(),
+            order: FALLBACK.map(str::to_owned).to_vec(),
+            revision: 0,
+        }
+    }
+}
+
+fn font_directory(path: &Path) -> PathBuf {
+    path.with_file_name("annotation-fonts")
+}
+
+fn order_file(path: &Path) -> PathBuf {
+    path.with_file_name("annotation-font-order.json")
+}
+
 impl CustomFont {
-    fn read(path: &Path) -> Result<Self, String> {
+    fn read(path: &Path, key: String) -> Result<Self, String> {
         if !fs::metadata(path)
             .map_err(|error| error.to_string())?
             .is_file()
@@ -171,69 +196,168 @@ impl CustomFont {
                     .map(|name| name.chars().take(100).collect())
             })
             .unwrap_or_else(|| CUSTOM.into());
-        Ok(Self { name, face })
+        Ok(Self { key, name, face })
     }
 }
 
 impl TextFonts {
     pub fn load(path: &Path) -> Self {
-        Self {
-            custom: CustomFont::read(path).ok(),
-            revision: 0,
+        let mut fonts = Self::default();
+        if let Ok(entries) = fs::read_dir(font_directory(path)) {
+            for entry in entries.flatten() {
+                let Some(key) = entry.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+                if !key.starts_with("custom-")
+                    || !key["custom-".len()..].chars().all(|ch| ch.is_ascii_digit())
+                {
+                    continue;
+                }
+                if let Ok(custom) = CustomFont::read(&entry.path(), key) {
+                    fonts.custom.push(custom);
+                }
+            }
+        }
+        // Keep installations made by older releases available until removed.
+        if path.exists() && let Ok(old) = CustomFont::read(path, "legacy".into()) {
+            fonts.custom.push(old);
+        }
+        fonts.custom.sort_unstable_by(|a, b| a.key.cmp(&b.key));
+        let saved = fs::read(order_file(path)).ok()
+            .and_then(|bytes| serde_json::from_slice::<Vec<String>>(&bytes).ok())
+            .unwrap_or_default();
+        fonts.order.clear();
+        for key in saved {
+            if fonts.known(&key) && !fonts.order.contains(&key) {
+                fonts.order.push(key);
+            }
+        }
+        for custom in &fonts.custom {
+            if !fonts.order.contains(&custom.key) {
+                fonts.order.push(custom.key.clone());
+            }
+        }
+        for builtin in FALLBACK {
+            if !fonts.order.iter().any(|key| key == builtin) {
+                fonts.order.push(builtin.into());
+            }
+        }
+        fonts
+    }
+
+    fn known(&self, key: &str) -> bool {
+        FALLBACK.contains(&key) || self.custom.iter().any(|font| font.key == key)
+    }
+
+    pub fn entries(&self) -> Vec<FontEntry<'_>> {
+        self.order.iter().filter_map(|key| {
+            if FALLBACK.contains(&key.as_str()) {
+                Some(FontEntry { key, name: key, bundled: true })
+            } else {
+                self.custom.iter().find(|font| font.key == *key)
+                    .map(|font| FontEntry { key, name: &font.name, bundled: false })
+            }
+        }).collect()
+    }
+
+    pub fn display_name(&self, key: &str) -> Option<&str> {
+        if FALLBACK.contains(&key) {
+            Some(FALLBACK.iter().copied().find(|name| *name == key)?)
+        } else {
+            self.custom.iter().find(|font| font.key == key).map(|font| font.name.as_str())
         }
     }
 
-    pub fn name(&self) -> Option<&str> {
-        self.custom.as_ref().map(|font| font.name.as_str())
+    fn save_order(&self, path: &Path) -> Result<(), String> {
+        let file = order_file(path);
+        let temporary = file.with_extension(format!("{}.tmp", std::process::id()));
+        let data = serde_json::to_vec_pretty(&self.order).map_err(|error| error.to_string())?;
+        fs::write(&temporary, data)
+            .and_then(|()| fs::rename(&temporary, &file))
+            .inspect_err(|_| { let _ = fs::remove_file(&temporary); })
+            .map_err(|error| error.to_string())
     }
 
     pub fn install(&mut self, source: &Path, path: &Path) -> Result<(), String> {
-        let font = CustomFont::read(source)?;
-        let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-        }
+        let mut suffix = 1_usize;
+        let destination = loop {
+            let candidate = format!("custom-{suffix}");
+            let location = font_directory(path).join(&candidate);
+            if !location.exists() && !self.known(&candidate) {
+                break (candidate, location);
+            }
+            suffix = suffix.checked_add(1).ok_or("Too many fonts installed")?;
+        };
+        let (key, file) = destination;
+        let font = CustomFont::read(source, key.clone())?;
+        fs::create_dir_all(font_directory(path)).map_err(|error| error.to_string())?;
+        let temporary = file.with_extension(format!("{}.tmp", std::process::id()));
         fs::write(&temporary, font.face.data.bytes())
-            .and_then(|()| fs::rename(&temporary, path))
-            .inspect_err(|_| {
-                let _ = fs::remove_file(&temporary);
-            })
+            .and_then(|()| fs::rename(&temporary, &file))
+            .inspect_err(|_| { let _ = fs::remove_file(&temporary); })
             .map_err(|error| error.to_string())?;
-        self.custom = Some(font);
+        self.custom.push(font);
+        self.order.insert(0, key);
+        if let Err(error) = self.save_order(path) {
+            self.custom.pop();
+            self.order.remove(0);
+            let _ = fs::remove_file(file);
+            return Err(error);
+        }
         self.revision = self.revision.wrapping_add(1);
         Ok(())
     }
 
-    pub fn reset(&mut self, path: &Path) -> Result<(), String> {
-        match fs::remove_file(path) {
-            Ok(()) => (),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => (),
-            Err(error) => return Err(error.to_string()),
+    pub fn remove(&mut self, key: &str, path: &Path) -> Result<(), String> {
+        let Some(index) = self.custom.iter().position(|font| font.key == key) else {
+            return Err("Bundled fonts cannot be removed".into());
+        };
+        let file = if key == "legacy" {
+            path.to_path_buf()
+        } else {
+            font_directory(path).join(key)
+        };
+        fs::remove_file(file).map_err(|error| error.to_string())?;
+        self.custom.remove(index);
+        self.order.retain(|item| item != key);
+        self.save_order(path)?;
+        self.revision = self.revision.wrapping_add(1);
+        Ok(())
+    }
+
+    pub fn move_priority(&mut self, from: usize, to: usize, path: &Path) -> Result<(), String> {
+        if from >= self.order.len() || to >= self.order.len() || from == to {
+            return Ok(());
         }
-        self.custom = None;
+        let moved = self.order.remove(from);
+        self.order.insert(to, moved);
+        if let Err(error) = self.save_order(path) {
+            let moved = self.order.remove(to);
+            self.order.insert(from, moved);
+            return Err(error);
+        }
         self.revision = self.revision.wrapping_add(1);
         Ok(())
     }
 
     pub fn definitions(&self) -> FontDefinitions {
         let mut definitions = bundled().definitions.clone();
-        if let Some(custom) = &self.custom {
-            definitions
-                .font_data
-                .insert(CUSTOM.into(), custom.face.data.clone());
-            definitions
-                .families
-                .insert(FontFamily::Name(CUSTOM.into()), vec![CUSTOM.into()]);
-            definitions
-                .families
-                .entry(FontFamily::Name(ANNOTATION.into()))
-                .or_default()
-                .insert(0, CUSTOM.into());
+        for font in &self.custom {
+            definitions.font_data.insert(font.key.clone(), font.face.data.clone());
+        }
+        definitions.families.insert(
+            FontFamily::Name(ANNOTATION.into()), self.order.clone()
+        );
+        for key in &self.order {
+            let mut chain = Vec::with_capacity(self.order.len());
+            chain.push(key.clone());
+            chain.extend(self.order.iter().filter(|other| *other != key).cloned());
+            definitions.families.insert(FontFamily::Name(key.clone().into()), chain);
         }
         definitions
     }
 
-    fn family_for_cluster(&self, cluster: &str) -> &'static str {
+    fn family_for_cluster(&self, cluster: &str) -> &str {
         let mut chars = cluster.chars();
         let Some(base) = chars.next() else {
             return ANNOTATION;
@@ -251,26 +375,24 @@ impl TextFonts {
         if selector.is_none() && !sequence {
             return ANNOTATION;
         }
-
-        // egui resolves a cluster from its first character. Choose a face for
-        // emoji sequences before shaping so a plain digit or a partially
-        // supported flag does not mask the remaining fonts in the chain.
-        let faces = self
-            .custom
-            .iter()
-            .map(|font| (CUSTOM, &font.face))
-            .chain(FALLBACK.into_iter().zip(&bundled().faces));
         let mut monochrome_fallback = None;
-        for (name, face) in faces {
+        for key in &self.order {
+            let face = if let Some(font) = self.custom.iter().find(|font| font.key == *key) {
+                &font.face
+            } else if let Some(index) = FALLBACK.iter().position(|builtin| *builtin == key) {
+                &bundled().faces[index]
+            } else {
+                continue;
+            };
             let Some(glyph) = face.shape_cluster(cluster) else {
                 continue;
             };
             match selector {
                 Some('\u{fe0f}') if !face.has_color_glyph(glyph) => {
-                    monochrome_fallback.get_or_insert(name);
+                    monochrome_fallback.get_or_insert(key.as_str());
                 }
-                Some('\u{fe0e}') if name == COLOR || face.has_color_glyph(glyph) => (),
-                _ => return name,
+                Some('\u{fe0e}') if key == COLOR || face.has_color_glyph(glyph) => (),
+                _ => return key,
             }
         }
         monochrome_fallback.unwrap_or(ANNOTATION)
@@ -284,17 +406,31 @@ impl TextFonts {
         color: Color32,
         width: f32,
     ) -> Arc<Galley> {
+        self.layout_preferred(ui, text, size, color, width, None)
+    }
+
+    pub fn layout_preferred(
+        &self,
+        ui: &Ui,
+        text: &str,
+        size: f32,
+        color: Color32,
+        width: f32,
+        preferred: Option<&str>,
+    ) -> Arc<Galley> {
+        let ordinary = preferred.filter(|key| self.known(key)).unwrap_or(ANNOTATION);
         let mut job = LayoutJob::default();
         job.wrap.max_width = width;
         job.keep_trailing_whitespace = true;
-        let mut current = ANNOTATION;
+        let mut current = ordinary;
         let mut start = 0;
         let mut append = |range, name| {
             let font = FontId::new(size, FontFamily::Name(Arc::from(name)));
             job.append(&text[range], 0., TextFormat::simple(font, color));
         };
         for (index, cluster) in text.grapheme_indices(true) {
-            let next = self.family_for_cluster(cluster);
+            let special = self.family_for_cluster(cluster);
+            let next = if special == ANNOTATION { ordinary } else { special };
             if next != current {
                 if start < index {
                     append(start..index, current);
