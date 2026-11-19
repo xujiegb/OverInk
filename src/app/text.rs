@@ -1384,6 +1384,41 @@ fn text_hit(
         .map(|index| (index, Handle::Move))
 }
 
+// The compositor owns Wayland's virtual keyboard. SDL text-input activation
+// requests it through the available protocol; applications cannot reliably
+// force the GNOME/KDE keyboard to appear. X11 and XWayland need an external OSK.
+pub(super) fn show_screen_keyboard(video: &str) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = video;
+        std::process::Command::new("osk.exe")
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| format!("Cannot start Windows On-Screen Keyboard: {error}"))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = video;
+        std::process::Command::new("open")
+            .args(["-a", "KeyboardViewer"])
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| format!("Cannot start macOS Keyboard Viewer: {error}"))
+    }
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    {
+        if video == "wayland" {
+            // SDL_StartTextInput was enabled with the editor; GNOME/KDE
+            // decide whether to display their compositor-owned keyboard.
+            return Ok(());
+        }
+        std::process::Command::new("onboard")
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| format!("Cannot start Onboard on X11/XWayland: {error}"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
