@@ -3117,6 +3117,7 @@ fn smoke_events(app: &mut App, id: SDL_WindowID) -> Result<(), String> {
         origin: [80., 70.],
         size: [360., 80.],
         font_size: 28.,
+        font: None,
         color: InkColor::default(),
         text: "OverInk 文字 😀".into(),
         scroll_offset: 0.,
