@@ -47,7 +47,10 @@ impl App {
                             egui::Frame::new()
                                 .fill(ui.visuals().window_fill())
                                 .corner_radius(egui::CornerRadius {
-                                    nw: 0, ne: 16, sw: 0, se: 16,
+                                    nw: 0,
+                                    ne: 16,
+                                    sw: 0,
+                                    se: 16,
                                 })
                                 .inner_margin(egui::Margin::same(13))
                                 .show(ui, |ui| {
@@ -635,9 +638,11 @@ impl App {
                         ui.label(&row.name);
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             if row.removable {
-                                if ui.small_button("×").on_hover_text(tr.text(
-                                    "Remove font", "删除字体", "刪除字型",
-                                )).clicked() {
+                                if ui
+                                    .small_button("×")
+                                    .on_hover_text(tr.text("Remove font", "删除字体", "刪除字型"))
+                                    .clicked()
+                                {
                                     commands.font_remove = Some(index);
                                 }
                             } else {
@@ -656,9 +661,10 @@ impl App {
             }
         }
         ui.add_enabled_ui(!dialog_open, |ui| {
-            if ui.button(tr.text(
-                "＋ Add font…", "＋ 添加字体…", "＋ 加入字型…",
-            )).clicked() {
+            if ui
+                .button(tr.text("＋ Add font…", "＋ 添加字体…", "＋ 加入字型…"))
+                .clicked()
+            {
                 commands.choose_font = true;
             }
         });
