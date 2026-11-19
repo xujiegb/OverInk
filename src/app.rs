@@ -968,13 +968,42 @@ impl App {
             self.input.pen_proximity.remove(&id);
             return;
         }
+        // Sidecar and some tablet drivers can deliver hover motion/axis
+        // before (or instead of) PEN_UP. SDL's pen_state is the contact
+        // truth for these packets: a hovering pen must NEVER extend ink,
+        // even if a previous PEN_UP packet was lost or routed elsewhere.
+        let lifted = match ty {
+            SDL_EVENT_PEN_UP => true,
+            SDL_EVENT_PEN_MOTION => pen_motion_event(event)
+                .is_some_and(|pen| pen.pen_state & SDL_PEN_INPUT_DOWN == 0),
+            SDL_EVENT_PEN_AXIS => pen_axis_event(event)
+                .is_some_and(|pen| pen.pen_state & SDL_PEN_INPUT_DOWN == 0),
+            _ => false,
+        };
+        if lifted {
+            let had_contact = self
+                .input
+                .contact
+                .is_some_and(|contact| contact.source == Source::Pen(id));
+            self.end(Source::Pen(id));
+            if (had_contact || ty == SDL_EVENT_PEN_UP)
+                && let Some(pen) = self.input.pens.get_mut(&id)
+            {
+                pen.finish();
+            }
+        }
         if self.input.pen_proximity.insert(id) {
             self.discard_touches();
         }
     }
     fn event(&mut self, e: &SDL_Event, overlay: SDL_WindowID, size: [f32; 2]) {
-        self.track_pen(e);
         let ty = event_type(e);
+        // Preserve PEN_UP's final endpoint sample before reconciling its
+        // released state. Hover packets, in contrast, must end the stroke
+        // *before* motion() or axis processing can append their coordinates.
+        if ty != SDL_EVENT_PEN_UP {
+            self.track_pen(e);
+        }
         match ty {
             SDL_EVENT_MOUSE_BUTTON_DOWN
                 if mouse_button_event(e).is_some_and(|button| button.windowID == overlay) =>
@@ -1122,6 +1151,9 @@ impl App {
                 self.finish_contact();
             }
             _ => {}
+        }
+        if ty == SDL_EVENT_PEN_UP {
+            self.track_pen(e);
         }
     }
     fn keyboard(&mut self, e: &SDL_Event, toolbar_keyboard: bool) -> Commands {
@@ -1753,6 +1785,20 @@ fn run_inner(options: Options) -> Result<(), String> {
                     app.for_each_page(|page| page.input.text.refocus());
                 }
 
+                // A pen can lift over the toolbar, another canvas, or outside
+                // the window that owns the active stroke. Apply hover release
+                // to every page before dispatching its coordinate packet.
+                if matches!(ty, SDL_EVENT_PEN_MOTION | SDL_EVENT_PEN_AXIS)
+                    && match ty {
+                        SDL_EVENT_PEN_MOTION => pen_motion_event(&event)
+                            .is_some_and(|pen| pen.pen_state & SDL_PEN_INPUT_DOWN == 0),
+                        _ => pen_axis_event(&event)
+                            .is_some_and(|pen| pen.pen_state & SDL_PEN_INPUT_DOWN == 0),
+                    }
+                {
+                    app.for_each_page(|page| page.track_pen(&event));
+                }
+
                 if screenshot_owns_input {
                     // Keep pen proximity and palm rejection current even while
                     // screenshot selection owns the event batch.
@@ -1972,6 +2018,11 @@ fn run_inner(options: Options) -> Result<(), String> {
                         running = false;
                         break;
                     }
+                }
+                if ty == SDL_EVENT_PEN_UP {
+                    // The normal target already consumed its release endpoint.
+                    // Commit any orphaned contact on a different page/window.
+                    app.for_each_page(|page| page.track_pen(&event));
                 }
             }
             #[cfg(target_os = "macos")]
@@ -3522,6 +3573,7 @@ mod touch_tests {
                     y: 80.,
                     axis: SDL_PEN_AXIS_XTILT,
                     value: 20.,
+                    pen_state: SDL_PEN_INPUT_DOWN,
                     ..Default::default()
                 },
             },
