@@ -11,7 +11,7 @@ use crate::{
     toolbar,
 };
 use egui::{
-    Color32, Event, ImeEvent, Key, PointerButton, Pos2, Rect, Stroke, StrokeKind, TextBuffer, Ui,
+    Color32, Event, ImeEvent, Key, PointerButton, Pos2, Rect, RichText, Stroke, StrokeKind, TextBuffer, Ui,
     UiBuilder, Vec2, pos2,
     text::{CCursor, CCursorRange},
     vec2,
@@ -24,6 +24,8 @@ use color_wheel::ColorWheel;
 const MENU_BUTTON: Vec2 = vec2(toolbar::RAIL_BUTTON_SIZE.x, 35.);
 const MENU_GAP: f32 = 4.;
 const MENU_PADDING: f32 = 5.;
+const EDIT_MENU_WIDTH: f32 = 184.;
+const EDIT_MENU_ITEM_HEIGHT: f32 = 30.;
 const PALETTE_SIZE: Vec2 = vec2(240., 272.);
 const MENU_SIZE: Vec2 = vec2(
     8. * MENU_BUTTON.x + 7. * MENU_GAP + 2. * MENU_PADDING,
@@ -35,6 +37,14 @@ struct TextMenus {
     actions: Rect,
     scale: f32,
     palette: Option<(Rect, f32)>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EditAction {
+    SelectAll,
+    Copy,
+    Paste,
+    Cut,
 }
 
 // A screen pick must not recolor a different annotation when the toolbar is
@@ -371,6 +381,7 @@ impl App {
                 if self
                     .text_menus(canvas)
                     .is_some_and(|menus| menus.contains(pos))
+                    || self.text_context_rect(canvas).is_some_and(|rect| rect.contains(pos))
                 {
                     return true;
                 }
@@ -556,6 +567,21 @@ impl App {
         })
     }
 
+    fn text_context_rect(&self, canvas: Rect) -> Option<Rect> {
+        let pos = self.input.text.context?;
+        let item = self.text_menu_item()?;
+        let rows = if item.text.is_empty() { 1. } else { 4. };
+        let units = self.input.canvas_units;
+        let base = vec2(EDIT_MENU_WIDTH, EDIT_MENU_ITEM_HEIGHT * rows + 12.);
+        let scale = toolbar::menu_scale(canvas, base, units);
+        let size = base * scale;
+        let min = pos2(
+            pos.x.clamp(canvas.left(), (canvas.right() - size.x).max(canvas.left())),
+            pos.y.clamp(canvas.top(), (canvas.bottom() - size.y).max(canvas.top())),
+        );
+        Some(Rect::from_min_size(min, size))
+    }
+
     fn text_menus(&self, canvas: Rect) -> Option<TextMenus> {
         let item = self.text_menu_item()?;
         let protected = self.input.protected.map(|hole| {
@@ -651,6 +677,113 @@ impl App {
             let mut item = (**item).clone();
             resize(&mut item);
             self.history.set_text_box(Some(index), item);
+        }
+    }
+
+    fn text_context_action(&mut self, action: EditAction) {
+        self.input.text.context = None;
+        let selected = self.input.text.selected;
+        if self.input.text.draft.is_none()
+            && action != EditAction::Copy
+            && let Some(index) = selected
+            && let Some(item) = self.history.text_boxes().get(index)
+        {
+            self.input.text.edit(Some(index), (**item).clone());
+        }
+        if let Some(draft) = &mut self.input.text.draft {
+            let length = draft.committed.chars().count();
+            let cursor_range = draft.cursor
+                .as_ref()
+                .map(CCursorRange::as_sorted_char_range)
+                .unwrap_or(length..length);
+            let selection = if cursor_range.is_empty() && action != EditAction::Paste {
+                0..length
+            } else {
+                cursor_range
+            };
+            match action {
+                EditAction::SelectAll => {
+                    draft.cursor = Some(CCursorRange::two(
+                        CCursor::new(0),
+                        CCursor::new(length),
+                    ));
+                    draft.focus = true;
+                }
+                EditAction::Copy | EditAction::Cut => {
+                    let chosen: String = draft.committed.chars()
+                        .skip(selection.start)
+                        .take(selection.end.saturating_sub(selection.start))
+                        .collect();
+                    crate::sdl::set_clipboard_text(&chosen);
+                    if action == EditAction::Cut {
+                        draft.item.text.delete_char_range(selection.clone());
+                        draft.committed.clone_from(&draft.item.text);
+                        draft.cursor = Some(CCursorRange::one(CCursor::new(selection.start)));
+                        draft.focus = true;
+                    }
+                }
+                EditAction::Paste => {
+                    if let Some(clipboard) = crate::sdl::clipboard_text() {
+                        let capacity = MAX_TEXT_CHARS.saturating_sub(
+                            length.saturating_sub(cursor_range.end - cursor_range.start)
+                        );
+                        let pasted: String = clipboard.chars().take(capacity).collect();
+                        draft.item.text.delete_char_range(cursor_range.clone());
+                        let inserted = draft.item.text.insert_text(&pasted, cursor_range.start);
+                        draft.committed.clone_from(&draft.item.text);
+                        draft.cursor = Some(CCursorRange::one(CCursor::new(
+                            cursor_range.start + inserted,
+                        )));
+                        draft.focus = true;
+                    }
+                }
+            }
+            return;
+        }
+        if action == EditAction::Copy
+            && let Some(item) = selected.and_then(|index| self.history.text_boxes().get(index))
+        {
+            crate::sdl::set_clipboard_text(&item.text);
+        }
+    }
+
+    fn text_context_menu(&mut self, ui: &mut Ui, rect: Rect) {
+        let Some(item) = self.text_menu_item() else {
+            return;
+        };
+        let has_text = !item.text.is_empty();
+        let tr = self.language;
+        let scale = rect.width() / EDIT_MENU_WIDTH;
+        ui.painter().rect(
+            rect,
+            9. * scale,
+            ui.visuals().window_fill(),
+            ui.visuals().window_stroke(),
+            StrokeKind::Inside,
+        );
+        let mut menu = ui.new_child(
+            UiBuilder::new()
+                .id_salt("annotation-edit-context-actions")
+                .max_rect(rect.shrink(6. * scale)),
+        );
+        menu.spacing_mut().item_spacing = vec2(0., 0.);
+        for (action, label) in [
+            (EditAction::SelectAll, tr.text("Select all", "全选", "全選")),
+            (EditAction::Copy, tr.text("Copy", "拷贝", "複製")),
+            (EditAction::Paste, tr.text("Paste", "粘贴", "貼上")),
+            (EditAction::Cut, tr.text("Cut", "剪切", "剪下")),
+        ] {
+            if !has_text && action != EditAction::Paste {
+                continue;
+            }
+            if menu.add_sized(
+                vec2(rect.width() - 12. * scale, EDIT_MENU_ITEM_HEIGHT * scale),
+                egui::Button::new(RichText::new(label).size(14. * scale)).frame(false),
+            ).clicked() {
+                self.text_context_action(action);
+                ui.ctx().request_repaint();
+                break;
+            }
         }
     }
 
@@ -867,6 +1000,19 @@ impl App {
         }
         if interactive {
             let screen = ui.clip_rect();
+            if self.input.text.editing()
+                && let Some(pos) = ui.input(|input| input.events.iter().find_map(|event| {
+                    match event {
+                        Event::PointerButton {
+                            pos, button: PointerButton::Secondary, pressed: true, ..
+                        } => Some(*pos),
+                        _ => None,
+                    }
+                }))
+                && self.text_menu_item().is_some_and(|item| item.rect().contains(pos))
+            {
+                self.input.text.context = Some(pos);
+            }
             let mut menus = self.text_menus(screen);
             if self.input.text.color_wheel.is_some() {
                 let escape = !composing
@@ -931,6 +1077,11 @@ impl App {
                     });
                 }
             }
+            if let Some(rect) = self.text_context_rect(screen) {
+                overlay(ui, "annotation-edit-context", rect, |ui| {
+                    self.text_context_menu(ui, rect)
+                });
+            }
         }
     }
 
@@ -970,6 +1121,7 @@ impl App {
             let clicked = input.pointer.primary_clicked().then(|| input.pointer.interact_pos()).flatten();
             let menu_pointer = input.pointer.interact_pos().is_some_and(|point| {
                 menus.is_some_and(|menus| menus.contains(point))
+                    || self.text_context_rect(ui.clip_rect()).is_some_and(|rect| rect.contains(point))
             });
             let finish = lost_window_focus
                 || (!composing
