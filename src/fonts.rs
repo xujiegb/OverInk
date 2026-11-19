@@ -8,7 +8,7 @@ use skrifa::{FontRef, GlyphId, MetadataProvider, string::StringId};
 use std::{
     fs::{self, File},
     io::{self, Read},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, OnceLock},
 };
 use unicode_segmentation::UnicodeSegmentation;
@@ -19,6 +19,125 @@ const MONO: &str = "OpenMoji Black";
 const CUSTOM: &str = "Custom annotation font";
 const ANNOTATION: &str = "Annotations";
 const MAX_FONT_BYTES: u64 = 64 * 1024 * 1024;
+
+/// A named face discovered in the operating system's installed-font locations.
+/// The file path is an implementation detail; users select a family name.
+pub struct InstalledFont {
+    pub name: String,
+    path: PathBuf,
+    index: u32,
+}
+
+/// Enumerate installed typefaces only when the font picker is opened.
+/// A single cached scan avoids reading font files on every UI frame.
+pub fn installed_fonts() -> &'static [InstalledFont] {
+    static FONTS: OnceLock<Vec<InstalledFont>> = OnceLock::new();
+    FONTS.get_or_init(scan_installed_fonts)
+}
+
+fn system_font_directories() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(root) = std::env::var_os("WINDIR") {
+            dirs.push(PathBuf::from(root).join("Fonts"));
+        }
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            dirs.push(PathBuf::from(local).join("Microsoft/Windows/Fonts"));
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        dirs.push(PathBuf::from("/System/Library/Fonts"));
+        dirs.push(PathBuf::from("/Library/Fonts"));
+        if let Some(home) = std::env::var_os("HOME") {
+            dirs.push(PathBuf::from(home).join("Library/Fonts"));
+        }
+    }
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    {
+        dirs.extend([
+            PathBuf::from("/usr/share/fonts"),
+            PathBuf::from("/usr/local/share/fonts"),
+            PathBuf::from("/usr/X11R6/lib/X11/fonts"),
+        ]);
+        if let Some(home) = std::env::var_os("HOME") {
+            let home = PathBuf::from(home);
+            dirs.push(home.join(".fonts"));
+            dirs.push(home.join(".local/share/fonts"));
+        }
+        if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
+            dirs.push(PathBuf::from(xdg).join("fonts"));
+        }
+    }
+    dirs
+}
+
+fn scan_installed_fonts() -> Vec<InstalledFont> {
+    let mut found = Vec::new();
+    let mut dirs = system_font_directories();
+    let mut visited = 0usize;
+    while let Some(dir) = dirs.pop() {
+        // Bound the scan in the presence of surprising mount or directory layouts.
+        if visited >= 40_000 {
+            break;
+        }
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            visited += 1;
+            if visited >= 40_000 {
+                break;
+            }
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if file_type.is_dir() {
+                dirs.push(path);
+                continue;
+            }
+            if !file_type.is_file()
+                || !path.extension().and_then(|v| v.to_str()).is_some_and(|ext| {
+                    ["ttf", "otf", "ttc", "otc"].iter().any(|s| ext.eq_ignore_ascii_case(s))
+                })
+                || !fs::metadata(&path)
+                    .is_ok_and(|m| m.len() > 0 && m.len() <= MAX_FONT_BYTES)
+            {
+                continue;
+            }
+            let Ok(bytes) = fs::read(&path) else {
+                continue;
+            };
+            for index in 0..128 {
+                let Ok(face) = FontRef::from_index(&bytes, index) else {
+                    break;
+                };
+                let family = face
+                    .localized_strings(StringId::TYPOGRAPHIC_FAMILY_NAME)
+                    .english_or_first()
+                    .or_else(|| {
+                        face.localized_strings(StringId::FAMILY_NAME)
+                            .english_or_first()
+                    });
+                let Some(name) = family.map(|v| v.chars().take(100).collect::<String>()) else {
+                    continue;
+                };
+                if !name.trim().is_empty() {
+                    found.push(InstalledFont {
+                        name,
+                        path: path.clone(),
+                        index,
+                    });
+                }
+            }
+        }
+    }
+    found.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    found.dedup_by(|a, b| a.name.eq_ignore_ascii_case(&b.name));
+    found
+}
 
 #[derive(Default)]
 pub struct TextFonts {
@@ -148,7 +267,7 @@ pub fn ui_definitions() -> FontDefinitions {
 }
 
 impl CustomFont {
-    fn read(path: &Path) -> Result<Self, String> {
+    fn read_index(path: &Path, index: u32) -> Result<Self, String> {
         if !fs::metadata(path)
             .map_err(|error| error.to_string())?
             .is_file()
@@ -162,7 +281,9 @@ impl CustomFont {
         if data.len() as u64 > MAX_FONT_BYTES {
             return Err("Font exceeds 64 MiB".into());
         }
-        let face = FontFace::new(FontData::from_owned(data))?;
+        let mut font_data = FontData::from_owned(data);
+        font_data.index = index;
+        let face = FontFace::new(font_data)?;
         let name = face
             .font()
             .and_then(|font| {
@@ -177,8 +298,12 @@ impl CustomFont {
 
 impl TextFonts {
     pub fn load(path: &Path) -> Self {
+        let index = fs::read_to_string(path.with_extension("index"))
+            .ok()
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or(0);
         Self {
-            custom: CustomFont::read(path).ok(),
+            custom: CustomFont::read_index(path, index).ok(),
             revision: 0,
         }
     }
@@ -187,8 +312,11 @@ impl TextFonts {
         self.custom.as_ref().map(|font| font.name.as_str())
     }
 
-    pub fn install(&mut self, source: &Path, path: &Path) -> Result<(), String> {
-        let font = CustomFont::read(source)?;
+    pub fn install_installed(&mut self, choice: usize, path: &Path) -> Result<(), String> {
+        let selected = installed_fonts().get(choice).ok_or("Font no longer available")?;
+        let mut font = CustomFont::read_index(&selected.path, selected.index)?;
+        // Display the selected family rather than an internal PostScript/full name.
+        font.name.clone_from(&selected.name);
         let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|error| error.to_string())?;
@@ -199,6 +327,9 @@ impl TextFonts {
                 let _ = fs::remove_file(&temporary);
             })
             .map_err(|error| error.to_string())?;
+        // Eg. PingFang.ttc contains several faces; keep the chosen index.
+        fs::write(path.with_extension("index"), selected.index.to_string())
+            .map_err(|error| error.to_string())?;
         self.custom = Some(font);
         self.revision = self.revision.wrapping_add(1);
         Ok(())
@@ -206,6 +337,11 @@ impl TextFonts {
 
     pub fn reset(&mut self, path: &Path) -> Result<(), String> {
         match fs::remove_file(path) {
+            Ok(()) => (),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => (),
+            Err(error) => return Err(error.to_string()),
+        }
+        match fs::remove_file(path.with_extension("index")) {
             Ok(()) => (),
             Err(error) if error.kind() == io::ErrorKind::NotFound => (),
             Err(error) => return Err(error.to_string()),
