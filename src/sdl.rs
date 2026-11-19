@@ -322,12 +322,16 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
             }
             SdlNativeAction::ClipboardRead => {
                 // SDL owns the returned allocation until the RAII guard drops.
-                let text = NonNull::new(SDL_GetClipboardText()).map(|raw| {
+                let text = if let Some(raw) = NonNull::new(SDL_GetClipboardText()) {
                     let owned = SdlAllocation(raw);
-                    CStr::from_ptr(owned.0.as_ptr())
-                        .to_string_lossy()
-                        .into_owned()
-                });
+                    Some(
+                        CStr::from_ptr(owned.0.as_ptr())
+                            .to_string_lossy()
+                            .into_owned(),
+                    )
+                } else {
+                    None
+                };
                 SdlNativeResult::Text(text)
             }
             SdlNativeAction::ReadString(source) => {
@@ -337,9 +341,12 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
                     SdlStringSource::Error => SDL_GetError(),
                     SdlStringSource::VideoDriver => SDL_GetCurrentVideoDriver(),
                 };
-                SdlNativeResult::Text(
-                    (!text.is_null()).then(|| CStr::from_ptr(text).to_string_lossy().into_owned()),
-                )
+                let copied = if text.is_null() {
+                    None
+                } else {
+                    Some(CStr::from_ptr(text).to_string_lossy().into_owned())
+                };
+                SdlNativeResult::Text(copied)
             }
             SdlNativeAction::WindowIccProfile(window) => {
                 // SDL returns an owned profile allocation. The typed Window
@@ -350,9 +357,12 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
                     NonNull::new(SDL_GetWindowICCProfile(window.raw.as_ptr(), &mut size))
                         .map(SdlAllocation)
                 {
-                    SdlNativeResult::Profile((size > 0 && size <= 16 * 1024 * 1024).then(|| {
-                        std::slice::from_raw_parts(profile.0.as_ptr().cast::<u8>(), size).to_vec()
-                    }))
+                    let bytes = if size > 0 && size <= 16 * 1024 * 1024 {
+                        Some(std::slice::from_raw_parts(profile.0.as_ptr().cast::<u8>(), size).to_vec())
+                    } else {
+                        None
+                    };
+                    SdlNativeResult::Profile(bytes)
                 } else {
                     // A missing ICC profile is normal; clear SDL's stale error.
                     SDL_ClearError();
