@@ -25,34 +25,6 @@ static SDL_VIDEO_READY: std::sync::atomic::AtomicBool = std::sync::atomic::Atomi
 static WAYLAND_SCALE_TO_DISPLAY_FORCED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-// The generated sdl3-sys ABI conservatively marks every foreign function
-// unsafe. This adapter uses safe Rust 2024 imports only for SDL's scalar
-// queries, timer/event functions, and synchronous time conversions with
-// exclusive typed output borrows. None retains caller-owned memory.
-// SDL_GetSystemTheme additionally requires the main thread: enforce it in
-// the public wrapper. Signatures match the documented SDL3 C declarations.
-unsafe extern "C" {
-    #[link_name = "SDL_IsMainThread"]
-    safe fn native_is_main_thread() -> bool;
-    #[link_name = "SDL_GetModState"]
-    safe fn native_mod_state() -> SDL_Keymod;
-    #[link_name = "SDL_DelayPrecise"]
-    safe fn native_delay_precise(nanoseconds: u64);
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    #[link_name = "SDL_RegisterEvents"]
-    safe fn native_register_events(count: i32) -> u32;
-    // SDL copies the resulting value into a caller-owned initialized
-    // SDL_Time / SDL_DateTime; these typed mutable borrows cannot be null.
-    #[link_name = "SDL_GetCurrentTime"]
-    safe fn native_current_time(ticks: &mut SDL_Time) -> bool;
-    #[link_name = "SDL_TimeToDateTime"]
-    safe fn native_time_to_date_time(
-        ticks: SDL_Time,
-        out: &mut sdl3_sys::time::SDL_DateTime,
-        local: bool,
-    ) -> bool;
-}
-
 /// A borrowed native backend handle whose lifetime is tied to the SDL
 /// Window that owns the underlying system object. This also inherits the
 /// Window's thread-safety restrictions rather than returning a free-floating
@@ -111,6 +83,12 @@ struct SdlAllocation<T>(NonNull<T>);
 /// these variants from their unique Rust owners; no foreign function pointer
 /// or raw buffer can be supplied by application code.
 enum SdlNativeAction<'a> {
+    IsMainThread,
+    ModState,
+    DelayPrecise(u64),
+    ScreenshotTimestamp,
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    RegisterUserEvent,
     Shutdown,
     FreeAllocation(NonNull<c_void>),
     CreateProperties,
@@ -134,6 +112,10 @@ enum SdlNativeAction<'a> {
 
 enum SdlNativeResult {
     Done,
+    ModState(SDL_Keymod),
+    ScreenshotTimestamp(String),
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    EventType(u32),
     Properties(SDL_PropertiesID),
     Cursor(Option<NonNull<SDL_Cursor>>),
     Success(bool),
@@ -161,6 +143,31 @@ impl SdlNativeResult {
         matches!(self, Self::Success(true))
     }
 
+    fn mod_state(self) -> SDL_Keymod {
+        if let Self::ModState(modifiers) = self {
+            modifiers
+        } else {
+            SDL_KMOD_NONE
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    fn event_type(self) -> u32 {
+        if let Self::EventType(ty) = self {
+            ty
+        } else {
+            0
+        }
+    }
+
+    fn screenshot_timestamp(self) -> String {
+        if let Self::ScreenshotTimestamp(stem) = self {
+            stem
+        } else {
+            "OverInk".into()
+        }
+    }
+
     fn theme(self) -> SDL_SystemTheme {
         if let Self::Theme(theme) = self {
             theme
@@ -181,6 +188,32 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
     // allocations created by SDL and kept in RAII guards.
     unsafe {
         match action {
+            SdlNativeAction::IsMainThread => SdlNativeResult::Success(SDL_IsMainThread()),
+            SdlNativeAction::ModState => SdlNativeResult::ModState(SDL_GetModState()),
+            SdlNativeAction::DelayPrecise(nanoseconds) => {
+                sdl3_sys::timer::SDL_DelayPrecise(nanoseconds);
+                SdlNativeResult::Done
+            }
+            SdlNativeAction::ScreenshotTimestamp => {
+                use sdl3_sys::time::{SDL_DateTime, SDL_GetCurrentTime, SDL_TimeToDateTime};
+                let mut ticks = 0;
+                let mut date = SDL_DateTime::default();
+                let stem = if SDL_GetCurrentTime(&mut ticks)
+                    && SDL_TimeToDateTime(ticks, &mut date, true)
+                {
+                    format!(
+                        "OverInk-{:04}-{:02}-{:02}_{:02}-{:02}-{:02}",
+                        date.year, date.month, date.day, date.hour, date.minute, date.second
+                    )
+                } else {
+                    "OverInk".into()
+                };
+                SdlNativeResult::ScreenshotTimestamp(stem)
+            }
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            SdlNativeAction::RegisterUserEvent => {
+                SdlNativeResult::EventType(SDL_RegisterEvents(1))
+            }
             SdlNativeAction::Shutdown => {
                 SDL_Quit();
                 SdlNativeResult::Done
@@ -305,7 +338,7 @@ pub struct Runtime {
 }
 impl Runtime {
     pub fn new(x11: bool, wayland: bool, smoke: bool) -> Result<Self, String> {
-        if !native_is_main_thread() {
+        if !is_main_thread() {
             return Err("SDL video must initialize on the main thread".into());
         }
         let wayland = wayland
@@ -384,7 +417,7 @@ impl Drop for Runtime {
     fn drop(&mut self) {
         // The runtime cannot cross threads in safe Rust. Do not shut SDL
         // down if a foreign callback somehow causes off-main destruction.
-        if native_is_main_thread() {
+        if is_main_thread() {
             SDL_VIDEO_READY.store(false, std::sync::atomic::Ordering::Release);
             let _ = sdl_native(SdlNativeAction::Shutdown);
         }
@@ -392,6 +425,11 @@ impl Drop for Runtime {
 }
 pub fn driver() -> String {
     sdl_string(SdlStringSource::VideoDriver).unwrap_or_else(|| "unknown".into())
+}
+
+/// Check SDL's native main-thread identity without exposing an FFI function.
+fn is_main_thread() -> bool {
+    sdl_native(SdlNativeAction::IsMainThread).succeeded()
 }
 
 /// SDL's Wayland scaling hint as observed at video initialization.
@@ -419,7 +457,7 @@ enum NativeDisplayResult {
 }
 
 fn native_display_query(query: NativeDisplayQuery) -> Result<NativeDisplayResult, String> {
-    if !native_is_main_thread() {
+    if !is_main_thread() {
         return Err("SDL display query requires the main thread".into());
     }
     // SAFETY: The SDL video subsystem and display ID are checked by SDL.
@@ -546,14 +584,14 @@ pub fn event_window(event: &SDL_Event, ty: SDL_EventType) -> Option<SDL_WindowID
 pub fn indirect_touch_device(device: SDL_TouchID) -> bool {
     // Query native devices only while the Runtime-owned SDL video subsystem
     // is live, and always on SDL's owning main thread.
-    native_is_main_thread()
+    is_main_thread()
         && SDL_VIDEO_READY.load(std::sync::atomic::Ordering::Acquire)
         && sdl_native(SdlNativeAction::IndirectTouch(device)).succeeded()
 }
 
 /// Sleep with SDL's precise delay without exposing raw native calls to users.
 pub fn delay_precise(nanoseconds: u64) {
-    native_delay_precise(nanoseconds);
+    let _ = sdl_native(SdlNativeAction::DelayPrecise(nanoseconds));
 }
 
 /// Validate SDL-provided array counts before forming slices over foreign
@@ -605,19 +643,20 @@ pub fn preferred_locales() -> Vec<(String, String)> {
 pub fn system_theme() -> SDL_SystemTheme {
     // SDL's video/theme query must run on the main thread. Avoid querying
     // shared video state from arbitrary safe Rust worker threads.
-    if native_is_main_thread() {
+    if is_main_thread() {
         sdl_native(SdlNativeAction::SystemTheme).theme()
     } else {
         SDL_SYSTEM_THEME_UNKNOWN
     }
 }
 
-/// Reserve a single SDL user event type, returning zero on failure.
+/// Reserve one user event type while the video subsystem is active.
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub fn register_user_event() -> u32 {
-    // SDL_RegisterEvents takes a fixed, positive scalar count; no caller
-    // pointer, buffer or resource ownership crosses this ABI.
-    native_register_events(1)
+    if !is_main_thread() || !SDL_VIDEO_READY.load(std::sync::atomic::Ordering::Acquire) {
+        return 0;
+    }
+    sdl_native(SdlNativeAction::RegisterUserEvent).event_type()
 }
 
 /// Only registered SDL user event types may be used to wake the portal
@@ -698,9 +737,13 @@ pub fn mouse_wheel_event(event: &SDL_Event) -> Option<SDL_MouseWheelEvent> {
     tagged_event!(event, wheel, SDL_EVENT_MOUSE_WHEEL)
 }
 
-/// Read keyboard modifiers without exposing the native SDL function.
+/// Read keyboard modifiers only on SDL's owning thread.
 pub fn mod_state() -> SDL_Keymod {
-    native_mod_state()
+    if is_main_thread() && SDL_VIDEO_READY.load(std::sync::atomic::Ordering::Acquire) {
+        sdl_native(SdlNativeAction::ModState).mod_state()
+    } else {
+        SDL_KMOD_NONE
+    }
 }
 
 /// Clipboard writes borrow a terminated Rust string; reads take ownership
@@ -848,7 +891,7 @@ pub fn key_event(event: &SDL_Event) -> Option<SDL_KeyboardEvent> {
 }
 
 pub fn capture_mouse(enable: bool) -> bool {
-    if !native_is_main_thread() {
+    if !is_main_thread() {
         return false;
     }
     sdl_native(SdlNativeAction::CaptureMouse(enable)).succeeded()
@@ -859,7 +902,7 @@ pub struct SystemCursor(NonNull<SDL_Cursor>);
 
 impl SystemCursor {
     pub fn crosshair() -> Option<Self> {
-        if !native_is_main_thread() || !SDL_VIDEO_READY.load(std::sync::atomic::Ordering::Acquire) {
+        if !is_main_thread() || !SDL_VIDEO_READY.load(std::sync::atomic::Ordering::Acquire) {
             return None;
         }
         let cursor = sdl_native(SdlNativeAction::CreateCrosshair).cursor()?;
@@ -885,28 +928,18 @@ impl Drop for SystemCursor {
 
 /// Local timestamp for screenshot filenames, using SDL's platform clock.
 pub fn screenshot_file_stem() -> String {
-    use sdl3_sys::time::SDL_DateTime;
-    let mut time = 0;
-    let mut date = SDL_DateTime::default();
-    if native_current_time(&mut time) && native_time_to_date_time(time, &mut date, true) {
-        format!(
-            "OverInk-{:04}-{:02}-{:02}_{:02}-{:02}-{:02}",
-            date.year, date.month, date.day, date.hour, date.minute, date.second
-        )
-    } else {
-        "OverInk".into()
-    }
+    sdl_native(SdlNativeAction::ScreenshotTimestamp).screenshot_timestamp()
 }
 
 /// Take the next queued SDL event on the SDL-owning thread.
 pub fn poll_event(event: &mut SDL_Event) -> bool {
-    native_is_main_thread() && sdl_native(SdlNativeAction::PollEvent(event)).succeeded()
+    is_main_thread() && sdl_native(SdlNativeAction::PollEvent(event)).succeeded()
 }
 
 /// Remove the leftover SDL quit event when dismissing a temporary guide.
 #[cfg(target_os = "linux")]
 pub fn flush_quit_event() {
-    if native_is_main_thread() {
+    if is_main_thread() {
         let _ = sdl_native(SdlNativeAction::FlushQuitEvent);
     }
 }
@@ -939,12 +972,12 @@ pub fn render_reset_window_id(event: &SDL_Event) -> Option<SDL_WindowID> {
 
 /// Check physical buttons on macOS, and SDL's per-window state elsewhere.
 pub fn mouse_buttons_released() -> bool {
-    native_is_main_thread() && sdl_native(SdlNativeAction::MouseButtonsReleased).succeeded()
+    is_main_thread() && sdl_native(SdlNativeAction::MouseButtonsReleased).succeeded()
 }
 
 /// Wait without dequeuing the SDL event, preserving the polling loop's order.
 pub fn wait_for_event(timeout_ms: i32) {
-    if native_is_main_thread() {
+    if is_main_thread() {
         let _ = sdl_native(SdlNativeAction::WaitEvent(timeout_ms));
     }
 }
@@ -1084,7 +1117,7 @@ impl Window {
     /// Window query boundary. Position failures remain errors; unsupported
     /// decorations still return the zero defaults.
     fn query_coordinates(&self, query: WindowCoordinateQuery) -> Result<[i32; 4], String> {
-        if !native_is_main_thread() {
+        if !is_main_thread() {
             return Err("SDL window position query requires the main thread".into());
         }
         let mut output = [0; 4];
@@ -1458,7 +1491,7 @@ impl Window {
     /// Read either window geometry in one audited FFI boundary. Each call
     /// performs exactly one SDL query, preserving the rendering fast path.
     fn query_size(&self, in_pixels: bool) -> Option<[i32; 2]> {
-        if !native_is_main_thread() {
+        if !is_main_thread() {
             return None;
         }
         let mut output = [0; 2];
