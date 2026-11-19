@@ -165,7 +165,7 @@ fn capture_permission() -> Result<(), String> {
     // TCC may cache a denial until the application is restarted. Request once
     // per process rather than showing another OS alert for every screenshot.
     static REQUESTED: OnceLock<bool> = OnceLock::new();
-    if *REQUESTED.get_or_init(CGRequestScreenCaptureAccess) {
+    if *REQUESTED.get_or_init(|| CGRequestScreenCaptureAccess()) {
         // A newly granted permission may be usable immediately even if TCC's
         // preflight result remains cached until the next process launch.
         Ok(())

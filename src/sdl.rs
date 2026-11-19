@@ -1477,6 +1477,9 @@ impl Window {
         // value is borrowed and checked for null. PhantomData ties the native
         // handle to this SDL Window's lifetime and thread restrictions.
         let key = property.key()?;
+        // SAFETY: The known key belongs to SDL's live Window property
+        // table; SDL returns a borrowed pointer or null without transferring
+        // ownership. NativeWindowHandle ties it to the Window borrow.
         unsafe {
             NonNull::new(SDL_GetPointerProperty(
                 SDL_GetWindowProperties(self.raw.as_ptr()),
