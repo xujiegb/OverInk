@@ -76,6 +76,13 @@ pub(crate) fn request(window: &Window, kind: KeyboardRequest) -> Result<(), Stri
         return Err("Install an on-screen keyboard (Onboard, Matchbox or Florence) for X11".into());
     }
 
-    #[allow(unreachable_code)]
-    Ok(())
+    #[cfg(not(any(
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "freebsd"
+    )))]
+    {
+        Ok(())
+    }
 }
