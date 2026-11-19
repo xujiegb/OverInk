@@ -22,6 +22,7 @@ mod gnome;
 mod gui;
 mod icc;
 mod icc_native;
+mod keyboard;
 mod model;
 mod native;
 mod picker;
