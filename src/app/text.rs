@@ -107,6 +107,9 @@ pub(super) struct TextInput {
     draft: Option<Draft>,
     press: Option<Press>,
     click: Option<(usize, Pos2, Instant)>,
+    touch_pointer: bool,
+    touch_selection: Option<usize>,
+    context: Option<Pos2>,
     menu_pointer: MenuPointer,
     color_wheel: Option<ColorWheel>,
     screen_pick_requested: bool,
@@ -119,8 +122,11 @@ struct MenuPointer {
 }
 
 impl MenuPointer {
-    fn wants_event(&mut self, event: &Event, menu: Option<TextMenus>) -> bool {
-        let contains = |pos| menu.is_some_and(|rect| rect.contains(pos));
+    fn wants_event(&mut self, event: &Event, menu: Option<TextMenus>, context: Option<Rect>) -> bool {
+        let contains = |pos| {
+            menu.is_some_and(|rect| rect.contains(pos))
+                || context.is_some_and(|rect| rect.contains(pos))
+        };
         match *event {
             Event::PointerMoved(pos) => {
                 let hovered = contains(pos);
@@ -246,6 +252,8 @@ impl TextInput {
         self.cancel_press();
         self.menu_pointer = MenuPointer::default();
         self.color_wheel = None;
+        self.context = None;
+        self.touch_selection = None;
         self.selected = index;
         self.draft = Some(Draft {
             committed: item.text.clone(),
@@ -278,6 +286,12 @@ impl App {
         use crate::sdl::*;
 
         let ty = event_type(event);
+        if ty == SDL_EVENT_FINGER_DOWN {
+            self.input.text.touch_pointer = true;
+        } else if matches!(ty, SDL_EVENT_PEN_DOWN | SDL_EVENT_MOUSE_BUTTON_DOWN) {
+            self.input.text.touch_pointer = false;
+            self.input.text.touch_selection = None;
+        }
         let editing = self.input.text.editing();
         if !editing && self.input.text.selected.is_none() {
             gui.clear_events();
@@ -306,7 +320,8 @@ impl App {
             }
             changed |= self.text_pointer(event, size);
             let menu = self.text_menus(canvas);
-            let forward = self.input.text.menu_pointer.wants_event(event, menu);
+            let context = self.text_context_rect(canvas);
+            let forward = self.input.text.menu_pointer.wants_event(event, menu, context);
             changed |= forward;
             forward
         });
@@ -317,6 +332,27 @@ impl App {
         let canvas = Rect::from_min_size(Pos2::ZERO, Vec2::from(size));
         let state = &mut self.input.text;
         match *event {
+            Event::PointerButton {
+                pos,
+                button: PointerButton::Secondary,
+                pressed: true,
+                ..
+            } if canvas.contains(pos) => {
+                let hit = text_hit(
+                    &self.history,
+                    self.input.text.selected,
+                    pos,
+                    self.input.canvas_units,
+                );
+                if let Some((index, _)) = hit {
+                    self.input.text.selected = Some(index);
+                    self.input.text.context = Some(pos);
+                    self.input.text.color_wheel = None;
+                } else {
+                    self.input.text.context = None;
+                }
+                true
+            }
             Event::PointerButton {
                 pos,
                 button: PointerButton::Primary,
@@ -338,8 +374,12 @@ impl App {
                 {
                     return true;
                 }
+                let in_context = self.text_context_rect(canvas).is_some_and(|rect| rect.contains(pos));
                 let state = &mut self.input.text;
                 state.color_wheel = None;
+                if !in_context {
+                    state.context = None;
+                }
                 state.press = Some(Press {
                     origin: pos,
                     target: text_hit(&self.history, state.selected, pos, self.input.canvas_units),
@@ -369,6 +409,7 @@ impl App {
                     if let Some(item) = press.preview {
                         self.history.set_text_box(Some(index), item);
                         state.click = None;
+                        state.touch_selection = None;
                     } else if !press.moved && handle == Handle::Move {
                         let now = Instant::now();
                         let double = state.click.is_some_and(|(last, at, when)| {
@@ -376,16 +417,22 @@ impl App {
                                 && now.duration_since(when) < Duration::from_millis(400)
                                 && at.distance(pos) <= 8. * self.input.canvas_units
                         });
-                        if self.tool == Tool::Text || double {
+                        let touch = state.touch_pointer;
+                        if touch && state.touch_selection == Some(index)
+                            || !touch && (self.tool == Tool::Text || double)
+                        {
                             state.edit(Some(index), (**item).clone());
                         } else {
                             state.selected = Some(index);
+                            state.touch_selection = touch.then_some(index);
                             state.click = Some((index, pos, now));
                         }
                     }
                 } else if press.target.is_none() && !press.moved && canvas.contains(pos) {
                     state.selected = None;
                     state.click = None;
+                    state.touch_selection = None;
+                    state.context = None;
                     if self.tool == Tool::Text {
                         if self.history.text_boxes().len() >= MAX_TEXT_BOXES {
                             self.status = text(
