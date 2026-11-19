@@ -112,7 +112,10 @@ mod tests {
     fn screenshot_save_dialog_does_not_parent_fullscreen_overlay() {
         assert!(!use_window_parent(DialogKind::ScreenshotFile));
         assert_eq!(use_window_parent(DialogKind::Font), USE_WINDOW_PARENT);
-        assert_eq!(use_window_parent(DialogKind::ScreenshotFolder), USE_WINDOW_PARENT);
+        assert_eq!(
+            use_window_parent(DialogKind::ScreenshotFolder),
+            USE_WINDOW_PARENT
+        );
     }
 
     #[test]
