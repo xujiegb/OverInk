@@ -214,7 +214,6 @@ impl Guard {
             // SDL applies this mask to both rendering and native hit testing.
             let opaque_regions = pixels.map(|hole| {
                 outside(size, Some(hole))
-                    .into_iter()
                     .map(Rect::sdl)
                     .collect::<Vec<_>>()
             });
