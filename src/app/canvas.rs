@@ -470,13 +470,14 @@ impl Canvas {
             output.platform_output.ime = None;
             self.text_repaint_at = Some(Instant::now());
         }
-        if let Some(request) = app.input.text.take_keyboard_request()
+        // Keep the request queued until any active composition has finished:
+        // restarting SDL input mid-composition would lose preedit text.
+        if !composing
             && app.input.text.editing()
+            && let Some(request) = app.input.text.take_keyboard_request()
         {
             self.focus_text_editor();
-            // An active IME composition must not be discarded by stopping
-            // and restarting SDL text input to reopen the OSK.
-            if !composing && let Err(error) = crate::keyboard::request(&self.window, request) {
+            if let Err(error) = crate::keyboard::request(&self.window, request) {
                 app.status = text(
                     "Cannot open the screen keyboard",
                     "无法呼出屏幕键盘",
