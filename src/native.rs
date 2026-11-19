@@ -274,6 +274,15 @@ pub fn show_canvas(canvas: &Window, controller: &Window, shown: bool) -> Result<
     canvas.show(shown)
 }
 
+// Validate native RECT dimensions before narrowing to floating-point canvas
+// units. The difference of two valid i32 coordinates need not fit in i32.
+#[cfg(any(target_os = "windows", test))]
+fn checked_native_rect_size(left: i32, top: i32, right: i32, bottom: i32) -> Option<[i64; 2]> {
+    let width = i64::from(right) - i64::from(left);
+    let height = i64::from(bottom) - i64::from(top);
+    (width > 0 && height > 0).then_some([width, height])
+}
+
 #[deny(clippy::undocumented_unsafe_blocks)]
 pub fn controller_bounds(canvas: &Window, controller: &Window) -> Option<[f32; 4]> {
     #[cfg(target_os = "windows")]
@@ -288,7 +297,7 @@ pub fn controller_bounds(canvas: &Window, controller: &Window) -> Option<[f32; 4
         let mut rect = RECT::default();
         // SAFETY: Both HWNDs belong to live SDL windows. RECT and POINT are
         // initialized, writable Win32 values. Typed bindings check the ABI.
-        unsafe {
+        let point = unsafe {
             if GetWindowRect(window, &mut rect).is_err() {
                 return None;
             }
@@ -299,19 +308,24 @@ pub fn controller_bounds(canvas: &Window, controller: &Window) -> Option<[f32; 4
             if !ScreenToClient(surface, &mut point).as_bool() {
                 return None;
             }
-            let logical = canvas.size();
-            let pixels = canvas.pixel_size();
-            if pixels[0] <= 0 || pixels[1] <= 0 {
-                return None;
-            }
-            let scale = [logical[0] / pixels[0] as f32, logical[1] / pixels[1] as f32];
-            Some([
-                point.x as f32 * scale[0],
-                point.y as f32 * scale[1],
-                (rect.right - rect.left) as f32 * scale[0],
-                (rect.bottom - rect.top) as f32 * scale[1],
-            ])
+            point
+        };
+        // Win32 RECT coordinates can span the full signed 32-bit range.
+        // Reject invalid sizes and widen differences outside the FFI block.
+        let [width, height] =
+            checked_native_rect_size(rect.left, rect.top, rect.right, rect.bottom)?;
+        let logical = canvas.size();
+        let pixels = canvas.pixel_size();
+        if pixels[0] <= 0 || pixels[1] <= 0 {
+            return None;
         }
+        let scale = [logical[0] / pixels[0] as f32, logical[1] / pixels[1] as f32];
+        Some([
+            point.x as f32 * scale[0],
+            point.y as f32 * scale[1],
+            width as f32 * scale[0],
+            height as f32 * scale[1],
+        ])
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -325,5 +339,21 @@ pub fn controller_bounds(canvas: &Window, controller: &Window) -> Option<[f32; 4
             size[0] + (left + right) as f32,
             size[1] + (top + bottom) as f32,
         ])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::checked_native_rect_size;
+
+    #[test]
+    fn win32_rectangle_dimensions_are_checked_without_overflow() {
+        assert_eq!(checked_native_rect_size(1, 2, 101, 202), Some([100, 200]));
+        assert_eq!(checked_native_rect_size(1, 2, 1, 202), None);
+        assert_eq!(checked_native_rect_size(1, 2, 101, -2), None);
+        assert_eq!(
+            checked_native_rect_size(i32::MIN, i32::MIN, i32::MAX, i32::MAX),
+            Some([i64::from(u32::MAX), i64::from(u32::MAX)])
+        );
     }
 }
