@@ -714,49 +714,40 @@ impl App {
             self.input.text.edit(Some(index), (**item).clone());
         }
         if let Some(draft) = &mut self.input.text.draft {
-            let length = draft.committed.chars().count();
-            let cursor_range = draft.cursor
-                .as_ref()
-                .map(|range| range.as_sorted_char_range())
-                .unwrap_or(length..length);
-            let selection = if cursor_range.is_empty() && action != EditAction::Paste {
-                0..length
+            let cursor = draft.cursor.unwrap_or_else(|| {
+                CCursorRange::one(CCursor::new(draft.committed.chars().count()))
+            });
+            let selection = if cursor.is_empty() && action != EditAction::Paste {
+                CCursorRange::select_all_str(&draft.committed)
             } else {
-                cursor_range.clone()
+                cursor
             };
             match action {
                 EditAction::SelectAll => {
-                    draft.cursor = Some(CCursorRange::two(
-                        CCursor::new(0),
-                        CCursor::new(length),
-                    ));
+                    draft.cursor = Some(CCursorRange::select_all_str(&draft.committed));
                     draft.focus = true;
                 }
                 EditAction::Copy | EditAction::Cut => {
-                    let chosen: String = draft.committed.chars()
-                        .skip(selection.start)
-                        .take(selection.end.saturating_sub(selection.start))
-                        .collect();
-                    crate::sdl::set_clipboard_text(&chosen);
+                    let chosen = selection.slice_str(&draft.committed);
+                    crate::sdl::set_clipboard_text(chosen);
                     if action == EditAction::Cut {
-                        draft.item.text.delete_char_range(selection.clone());
+                        draft.item.text.clone_from(&draft.committed);
+                        let cursor = draft.item.text.delete_selected(&selection);
                         draft.committed.clone_from(&draft.item.text);
-                        draft.cursor = Some(CCursorRange::one(CCursor::new(selection.start)));
+                        draft.cursor = Some(CCursorRange::one(cursor));
                         draft.focus = true;
                     }
                 }
                 EditAction::Paste => {
                     if let Some(clipboard) = crate::sdl::clipboard_text() {
-                        let capacity = MAX_TEXT_CHARS.saturating_sub(
-                            length.saturating_sub(cursor_range.end - cursor_range.start)
+                        draft.item.text.clone_from(&draft.committed);
+                        let cursor = draft.item.text.delete_selected(&selection);
+                        let mut cursor = cursor;
+                        draft.item.text.insert_text_at(
+                            &mut cursor, &clipboard, MAX_TEXT_CHARS
                         );
-                        let pasted: String = clipboard.chars().take(capacity).collect();
-                        draft.item.text.delete_char_range(cursor_range.clone());
-                        let inserted = draft.item.text.insert_text(&pasted, cursor_range.start);
                         draft.committed.clone_from(&draft.item.text);
-                        draft.cursor = Some(CCursorRange::one(CCursor::new(
-                            cursor_range.start + inserted,
-                        )));
+                        draft.cursor = Some(CCursorRange::one(cursor));
                         draft.focus = true;
                     }
                 }
