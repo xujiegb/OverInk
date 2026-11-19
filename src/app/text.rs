@@ -107,6 +107,7 @@ pub(super) struct TextInput {
     draft: Option<Draft>,
     press: Option<Press>,
     click: Option<(usize, Pos2, Instant)>,
+    touch_press: bool,
     menu_pointer: MenuPointer,
     color_wheel: Option<ColorWheel>,
     screen_pick_requested: bool,
@@ -294,7 +295,16 @@ impl App {
             changed |= self.cancel_text_touches(gui);
         }
         gui.event(event, window, size);
+        if ty == SDL_EVENT_FINGER_DOWN && gui.primary_touch().is_some() {
+            self.input.text.touch_press = true;
+        } else if ty == SDL_EVENT_MOUSE_BUTTON_DOWN {
+            self.input.text.touch_press = false;
+        }
+        let touch_ended = matches!(ty, SDL_EVENT_FINGER_UP | SDL_EVENT_FINGER_CANCELED);
         if editing {
+            if touch_ended {
+                self.input.text.touch_press = false;
+            }
             return changed || gui.raw.events.len() != first;
         }
         let mut queued = first;
@@ -310,6 +320,9 @@ impl App {
             changed |= forward;
             forward
         });
+        if touch_ended {
+            self.input.text.touch_press = false;
+        }
         changed
     }
 
@@ -376,7 +389,15 @@ impl App {
                                 && now.duration_since(when) < Duration::from_millis(400)
                                 && at.distance(pos) <= 8. * self.input.canvas_units
                         });
-                        if self.tool == Tool::Text || double {
+                        // Touch: first tap selects, subsequent tap enters the
+                        // editor, even after the mouse double-click timeout.
+                        let already_selected = state.selected == Some(index);
+                        let edit = if state.touch_press {
+                            already_selected
+                        } else {
+                            self.tool == Tool::Text || double
+                        };
+                        if edit {
                             state.edit(Some(index), (**item).clone());
                         } else {
                             state.selected = Some(index);
