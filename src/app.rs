@@ -1504,7 +1504,7 @@ fn run_inner(options: Options) -> Result<(), String> {
     let _runtime = Runtime::new(options.x11, preferences.wayland, options.smoke)?;
     let video = crate::sdl::driver();
     let wayland = video == "wayland";
-    let window = Window::new("OverInk - canvas", 1100, 720, !options.smoke)?;
+    let window = with_autorelease_pool(|| Window::new("OverInk - canvas", 1100, 720, !options.smoke))?;
     let topology = crate::display::Topology::new(&video);
     let displays = topology.connected(&window).unwrap_or_default();
     let xwayland = crate::background::is_xwayland(&window, &video);
@@ -1520,23 +1520,23 @@ fn run_inner(options: Options) -> Result<(), String> {
         app.status = status;
     }
     app.multi = app.preferences.per_display_windows && !wayland && !options.smoke;
-    let mut canvases = vec![canvas::Canvas::new(
-        window,
-        app.displays.get(app.display),
-        &options,
-    )?];
-    let toolbar = Window::new(
-        "OverInk",
-        crate::toolbar::WIDTH as i32,
-        crate::toolbar::HEIGHT as i32,
-        false,
-    )?;
+    let mut canvases = vec![with_autorelease_pool(|| {
+        canvas::Canvas::new(window, app.displays.get(app.display), &options)
+    })?];
+    let toolbar = with_autorelease_pool(|| {
+        Window::new(
+            "OverInk",
+            crate::toolbar::WIDTH as i32,
+            crate::toolbar::HEIGHT as i32,
+            false,
+        )
+    })?;
     toolbar.setup_toolbar();
     if !options.smoke {
         let _ = toolbar.arrange_toolbar(false, app.pages.active);
         canvas::reconcile(&mut canvases, &mut app, &toolbar, &options)?;
     }
-    let toolbar_render = Renderer::new(&toolbar, true)
+    let toolbar_render = with_autorelease_pool(|| Renderer::new(&toolbar, true))
         .map_err(|error| format!("Creating the toolbar renderer on {video} failed ({error})"))?;
     let mut gui = gui::Gui::new();
     let mut mark = crate::toolbar::brand(&gui.ctx);
