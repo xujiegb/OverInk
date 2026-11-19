@@ -2900,6 +2900,32 @@ fn run_inner(options: Options) -> Result<(), String> {
                     canvas.keep_toolbar_above(&toolbar);
                 }
             }
+            // UI buttons and primary finger taps only request the keyboard.
+            // Focus and native OSK activation run after the paint/event batch,
+            // never inside egui callbacks or a live SDL touch event.
+            let keyboard_requested = app.input.text.take_keyboard_request();
+            if keyboard_requested
+                && app.input.text.editing()
+                && !app.pass
+                && !app.hidden
+                && !app.suspended
+                && !app.picking
+                && !app.screenshot.active()
+                && !file_dialog.pending()
+                && canvases[active].visible
+            {
+                gui.sync_text_input(&toolbar, false);
+                canvases[active].focus_text_editor();
+                if let Err(error) = text::show_screen_keyboard(&video) {
+                    app.status = text(
+                        "On-screen keyboard unavailable",
+                        "无法呼出屏幕键盘",
+                        "無法開啟螢幕鍵盤",
+                    )
+                    .detail(error);
+                    toolbar_dirty = true;
+                }
+            }
             // Consume requests even when the picker cannot start, so an old
             // click does not unexpectedly launch a picker after switching modes.
             if app.input.text.take_screen_pick()
