@@ -327,8 +327,18 @@ fn repeated_finger_down_after_missing_up_starts_an_independent_stroke() {
     finger_contact(&mut app, SDL_EVENT_FINGER_UP, 0.75);
 
     assert_eq!(app.history.strokes().len(), 2);
-    assert!(app.history.strokes()[0].points.iter().all(|point| point.x <= 100.));
-    assert!(app.history.strokes()[1].points.iter().all(|point| point.x >= 700.));
+    assert!(
+        app.history.strokes()[0]
+            .points
+            .iter()
+            .all(|point| point.x <= 100.)
+    );
+    assert!(
+        app.history.strokes()[1]
+            .points
+            .iter()
+            .all(|point| point.x >= 700.)
+    );
 }
 
 #[cfg(target_os = "macos")]
@@ -340,7 +350,12 @@ fn macos_pen_up_at_distant_stale_position_does_not_draw_connector() {
     // SDL receives the release near the next touchdown rather than the old tip.
     contact(&mut app, CANVAS, false, 700.);
     assert_eq!(app.history.strokes().len(), 1);
-    assert!(app.history.strokes()[0].points.iter().all(|point| point.x <= 100.));
+    assert!(
+        app.history.strokes()[0]
+            .points
+            .iter()
+            .all(|point| point.x <= 100.)
+    );
     contact(&mut app, CANVAS, true, 750.);
     contact(&mut app, CANVAS, false, 760.);
     assert_eq!(app.history.strokes().len(), 2);
@@ -354,5 +369,10 @@ fn macos_finger_up_at_distant_stale_position_does_not_draw_connector() {
     finger_contact(&mut app, SDL_EVENT_FINGER_MOTION, 0.10);
     finger_contact(&mut app, SDL_EVENT_FINGER_UP, 0.70);
     assert_eq!(app.history.strokes().len(), 1);
-    assert!(app.history.strokes()[0].points.iter().all(|point| point.x <= 100.));
+    assert!(
+        app.history.strokes()[0]
+            .points
+            .iter()
+            .all(|point| point.x <= 100.)
+    );
 }
