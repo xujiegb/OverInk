@@ -17,7 +17,7 @@ use unicode_segmentation::UnicodeSegmentation;
 pub const INCLUDED_FONT: &str = "Sarasa Fixed Slab SC";
 const COLOR: &str = "OpenMoji Color";
 const MONO: &str = "OpenMoji Black";
- const ANNOTATION: &str = "Annotations";
+const ANNOTATION: &str = "Annotations";
 const MAX_FONT_BYTES: u64 = 64 * 1024 * 1024;
 
 pub struct TextFonts {
@@ -188,8 +188,15 @@ impl CustomFont {
                     .map(|name| name.chars().take(100).collect())
             })
             .unwrap_or_else(|| "Imported font".into());
-        let id = path.file_stem().and_then(|name| name.to_str()).unwrap_or("legacy");
-        Ok(Self { id: id.to_owned(), name, face })
+        let id = path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or("legacy");
+        Ok(Self {
+            id: id.to_owned(),
+            name,
+            face,
+        })
     }
 }
 
@@ -264,7 +271,11 @@ impl TextFonts {
             return Err("At most 32 imported annotation fonts can be enabled".into());
         }
         let mut font = CustomFont::read(source)?;
-        if self.custom.iter().any(|existing| existing.name == font.name) {
+        if self
+            .custom
+            .iter()
+            .any(|existing| existing.name == font.name)
+        {
             return Err("Font is already in the priority list".into());
         }
         let base = legacy_path.parent().ok_or("No font settings directory")?;
@@ -305,7 +316,10 @@ impl TextFonts {
         if !is_custom_id(id) {
             return Err("Built-in fonts cannot be removed".into());
         }
-        let index = self.order.iter().position(|item| item == id)
+        let index = self
+            .order
+            .iter()
+            .position(|item| item == id)
             .ok_or("Font is not in the priority list")?;
         let base = legacy_path.parent().ok_or("No font settings directory")?;
         let file = font_file(base, legacy_path, id);
@@ -428,12 +442,13 @@ impl TextFonts {
     }
 }
 
-
 fn is_custom_id(id: &str) -> bool {
     id == "legacy"
         || (id.starts_with("font-")
             && id.len() <= 80
-            && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'))
+            && id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'))
 }
 
 fn font_file(base: &Path, legacy_path: &Path, id: &str) -> PathBuf {
@@ -486,9 +501,15 @@ pub fn installed_system_fonts() -> Vec<SystemFont> {
                 }
                 continue;
             }
-            let supported = path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| {
-                matches!(ext.to_ascii_lowercase().as_str(), "ttf" | "otf" | "ttc" | "otc")
-            });
+            let supported = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| {
+                    matches!(
+                        ext.to_ascii_lowercase().as_str(),
+                        "ttf" | "otf" | "ttc" | "otc"
+                    )
+                });
             if !supported {
                 continue;
             }
@@ -508,7 +529,8 @@ pub fn installed_system_fonts() -> Vec<SystemFont> {
             let Ok(font) = FontRef::from_index(&data, 0) else {
                 continue;
             };
-            let name = font.localized_strings(StringId::FULL_NAME)
+            let name = font
+                .localized_strings(StringId::FULL_NAME)
                 .english_or_first()
                 .map(|name| name.chars().take(100).collect::<String>());
             if let Some(name) = name.filter(|name| !name.is_empty()) {
@@ -519,7 +541,10 @@ pub fn installed_system_fonts() -> Vec<SystemFont> {
             break;
         }
     }
-    available.into_iter().map(|(name, path)| SystemFont { name, path }).collect()
+    available
+        .into_iter()
+        .map(|(name, path)| SystemFont { name, path })
+        .collect()
 }
 
 #[cfg(test)]
