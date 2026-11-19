@@ -2329,6 +2329,7 @@ fn run_inner(options: Options) -> Result<(), String> {
             let target_panel = app.panel.filter(|_| !app.picking);
             if target_panel != toolbar_panel_target {
                 toolbar_panel_target = target_panel;
+                toolbar_panel_at = Instant::now();
                 if let Some(panel) = target_panel {
                     app.panel_visual = Some(panel);
                     app.panel_opacity = 0.;
