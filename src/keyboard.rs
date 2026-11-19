@@ -21,9 +21,16 @@ pub(crate) fn request(window: &Window, kind: KeyboardRequest) -> Result<(), Stri
     // SDL's "auto" otherwise suppresses it when hardware keys are attached.
     match kind {
         KeyboardRequest::Focus => {
-            window.sync_text_input(false);
-            window.sync_text_input(true);
-            Ok(())
+            // macOS 27's touch compatibility can arrive as an ordinary
+            // mouse click. Without new native touch hooks, treat a second
+            // click into a selected annotation as an explicit OSK request.
+            if cfg!(target_os = "macos") {
+                window.request_screen_keyboard()
+            } else {
+                window.sync_text_input(false);
+                window.sync_text_input(true);
+                Ok(())
+            }
         }
         KeyboardRequest::Touch | KeyboardRequest::Button => {
             window.request_screen_keyboard()?;
