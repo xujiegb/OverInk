@@ -470,20 +470,22 @@ impl Canvas {
             output.platform_output.ime = None;
             self.text_repaint_at = Some(Instant::now());
         }
-        // Keep the request queued until any active composition has finished:
-        // restarting SDL input mid-composition would lose preedit text.
-        if !composing
-            && app.input.text.editing()
-            && let Some(request) = app.input.text.take_keyboard_request()
-        {
-            self.focus_text_editor();
-            if let Err(error) = crate::keyboard::request(&self.window, request) {
-                app.status = text(
-                    "Cannot open the screen keyboard",
-                    "无法呼出屏幕键盘",
-                    "無法開啟螢幕鍵盤",
-                )
-                .detail(error);
+        // Keep the request pending through IME composition and asynchronous
+        // native window activation. Starting an OSK before Cocoa/Wayland
+        // grants focus can leave it invisible despite an active SDL IME.
+        if !composing && app.input.text.editing() && app.input.text.keyboard_request_pending() {
+            if !self.window.input_focused() {
+                self.focus_text_editor();
+            } else if let Some(request) = app.input.text.take_keyboard_request() {
+                self.focus_text_editor();
+                if let Err(error) = crate::keyboard::request(&self.window, request) {
+                    app.status = text(
+                        "Cannot open the screen keyboard",
+                        "无法呼出屏幕键盘",
+                        "無法開啟螢幕鍵盤",
+                    )
+                    .detail(error);
+                }
             }
         }
         Some(output)
