@@ -136,6 +136,9 @@ class CaptureBridge {
         // same absolute pathname can refer to an entirely different binary.
         // Resolve the running executable through /proc, then require that it
         // is the same inode we trust in the Shell's own mount namespace.
+        // Some Btrfs/OSTree configurations change st_dev after reboot: an
+        // existing persistent grant will then expire and prompt again.
+        // This intentionally fails closed rather than trusting only a path.
         if (!GLib.path_is_absolute(executable) || executable.endsWith(' (deleted)'))
             return null;
         try {

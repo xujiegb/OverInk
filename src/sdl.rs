@@ -1469,9 +1469,6 @@ impl Window {
         &self,
         property: NativeWindowProperty,
     ) -> Option<NativeWindowHandle<'_>> {
-        // SAFETY: SDL owns the window and its property list; the property
-        // value is borrowed and checked for null. PhantomData ties the native
-        // handle to this SDL Window's lifetime and thread restrictions.
         let key = property.key()?;
         // SAFETY: The known key belongs to SDL's live Window property
         // table; SDL returns a borrowed pointer or null without transferring
@@ -1586,7 +1583,8 @@ impl Window {
         // The display bounds and window position already have safe SDL
         // adapters. Compare in i64 to avoid overflow on unusual virtual
         // desktop layouts, without another raw FFI call here.
-        let [left, top, width, height] = usable_display_bounds(id).ok_or_else(error)?;
+        let [left, top, width, height] =
+            query_display_bounds(id, DisplayBoundsKind::Usable)?;
         let [x, y] = self.position()?;
         let size = self.size();
         let center_x = i64::from(x) + (size[0] * 0.5) as i64;

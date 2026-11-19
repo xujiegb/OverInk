@@ -440,6 +440,27 @@ mod tests {
     use super::*;
     use std::{sync::atomic::AtomicBool, time::Duration};
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fallback_waits_for_canvas_hide_before_portal_request() {
+        let (_sender, receiver) = mpsc::channel();
+        let (cancel, _cancelled) = async_channel::bounded(1);
+        let state = Arc::new(AtomicU8::new(0));
+        let job = SystemJob::<Image> {
+            receiver,
+            cancel,
+            portal_visibility: Some(Arc::clone(&state)),
+        };
+        assert!(!job.portal_fallback_pending());
+        job.acknowledge_portal_fallback_hidden();
+        assert_eq!(state.load(Ordering::Acquire), 0);
+        state.store(1, Ordering::Release);
+        assert!(job.portal_fallback_pending());
+        job.acknowledge_portal_fallback_hidden();
+        assert_eq!(state.load(Ordering::Acquire), 2);
+        assert!(job.portal_fallback_pending());
+    }
+
     struct MockScreenshot {
         await_close: AtomicBool,
         pending: mpsc::Sender<()>,
