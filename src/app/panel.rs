@@ -36,7 +36,7 @@ impl App {
             Panel::Settings,
         ] {
             let alpha = ui.ctx().animate_bool_with_time(
-                ui.id().with(("panel-transition", panel)),
+                ui.scope_id().with(("panel-transition", panel)),
                 opened == Some(panel),
                 0.18,
             );
