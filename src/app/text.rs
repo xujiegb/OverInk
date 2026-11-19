@@ -26,7 +26,7 @@ const MENU_GAP: f32 = 4.;
 const MENU_PADDING: f32 = 5.;
 const PALETTE_SIZE: Vec2 = vec2(240., 272.);
 const MENU_SIZE: Vec2 = vec2(
-    8. * MENU_BUTTON.x + 7. * MENU_GAP + 2. * MENU_PADDING,
+    9. * MENU_BUTTON.x + 8. * MENU_GAP + 2. * MENU_PADDING,
     MENU_BUTTON.y + 2. * MENU_PADDING,
 );
 
@@ -112,6 +112,7 @@ pub(super) struct TextInput {
     context_menu: Option<Pos2>,
     color_wheel: Option<ColorWheel>,
     screen_pick_requested: bool,
+    keyboard_requested: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -196,6 +197,10 @@ impl TextInput {
 
     pub fn take_screen_pick(&mut self) -> bool {
         std::mem::take(&mut self.screen_pick_requested)
+    }
+
+    pub fn take_keyboard_request(&mut self) -> bool {
+        std::mem::take(&mut self.keyboard_requested)
     }
 
     pub fn has_edit(&self, history: &History) -> bool {
@@ -293,6 +298,19 @@ impl App {
 
         let ty = event_type(event);
         let editing = self.input.text.editing();
+        // Record the ending primary finger before GUI processing removes it.
+        // Pointer-synthesized SDL mouse events are already filtered in Gui.
+        let touch_keyboard = editing
+            && ty == SDL_EVENT_FINGER_UP
+            && gui.primary_touch() == crate::touch::key_from_event(event)
+            && finger_event(event)
+                .and_then(|finger| crate::touch::point(finger, size))
+                .is_some_and(|point| {
+                    let units = self.input.canvas_units;
+                    self.text_menu_item().is_some_and(|item| {
+                        item.text_rect().contains(pos2(point.x / units, point.y / units))
+                    })
+                });
         if !editing && self.input.text.selected.is_none() {
             gui.clear_events();
         }
@@ -334,7 +352,10 @@ impl App {
             if touch_ended {
                 self.input.text.touch_press = false;
             }
-            return changed || gui.raw.events.len() != first;
+            if touch_keyboard {
+                self.input.text.keyboard_requested = true;
+            }
+            return changed || touch_keyboard || gui.raw.events.len() != first;
         }
         let mut queued = first;
         let canvas = Rect::from_min_size(Pos2::ZERO, Vec2::from(size));
@@ -452,7 +473,9 @@ impl App {
                             self.tool == Tool::Text || double
                         };
                         if edit {
+                            let from_touch = state.touch_press;
                             state.edit(Some(index), (**item).clone());
+                            state.keyboard_requested |= from_touch;
                         } else {
                             state.selected = Some(index);
                             state.click = Some((index, pos, now));
@@ -930,6 +953,64 @@ impl App {
         {
             self.input.text.color_wheel = (!wheel_open).then(|| ColorWheel::new(color));
             acted = true;
+        }
+        // Keep the keyboard action at the right end of the annotation bar.
+        // Its vector icon does not depend on platform emoji fonts.
+        let hint = tr.text(
+            "Show screen keyboard",
+            "呼出屏幕键盘",
+            "開啟螢幕鍵盤",
+        );
+        let (rect, response) = menu.allocate_exact_size(button, egui::Sense::click());
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, menu.is_enabled(), hint)
+        });
+        if response.hovered() || response.has_focus() {
+            menu.painter().rect_filled(
+                rect,
+                6. * scale,
+                menu.visuals().widgets.hovered.bg_fill,
+            );
+        }
+        let keyboard = rect.shrink2(vec2(7., 10.) * scale);
+        let ink = menu.visuals().text_color();
+        menu.painter().rect_stroke(
+            keyboard,
+            2. * scale,
+            Stroke::new(1.5 * scale, ink),
+            StrokeKind::Inside,
+        );
+        for (y, count) in [(0.32, 5), (0.62, 4)] {
+            let row = keyboard.width() / (count as f32 + 1.);
+            for index in 1..=count {
+                let point = pos2(
+                    keyboard.left() + row * index as f32,
+                    keyboard.top() + keyboard.height() * y,
+                );
+                menu.painter().circle_filled(point, 0.8 * scale, ink);
+            }
+        }
+        menu.painter().line_segment(
+            [
+                pos2(keyboard.left() + 6. * scale, keyboard.bottom() - 3. * scale),
+                pos2(keyboard.right() - 6. * scale, keyboard.bottom() - 3. * scale),
+            ],
+            Stroke::new(1.5 * scale, ink),
+        );
+        if response
+            .on_hover_text(egui::RichText::new(hint).size(toolbar::MENU_FONT_SIZE * scale))
+            .clicked()
+        {
+            if self.input.text.draft.is_none()
+                && let Some(index) = self.input.text.selected
+                && let Some(item) = self.history.text_boxes().get(index)
+            {
+                self.input.text.edit(Some(index), (**item).clone());
+            }
+            if self.input.text.editing() {
+                self.input.text.keyboard_requested = true;
+                acted = true;
+            }
         }
         if acted {
             ui.ctx().request_repaint();
