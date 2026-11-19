@@ -625,7 +625,9 @@ impl App {
             "拖动 ☰ 调整字体优先级；三个内置字体不可删除。",
             "拖曳 ☰ 調整字型優先順序；三個內建字型不可刪除。",
         ));
-        let font_rows: Vec<_> = self.text_fonts.entries()
+        let font_rows: Vec<_> = self
+            .text_fonts
+            .entries()
             .map(|(id, name, bundled)| (id.to_owned(), name.to_owned(), bundled))
             .collect();
         for (index, (id, name, bundled)) in font_rows.iter().enumerate() {
@@ -656,20 +658,30 @@ impl App {
                 commands.font_reorder = Some((*from, index));
             }
         }
-        if ui.add_enabled(!dialog_open, egui::Button::new(tr.text(
-            "+ Add system font",
-            "＋ 添加系统字体",
-            "＋ 新增系統字型",
-        ))).clicked() {
+        if ui
+            .add_enabled(
+                !dialog_open,
+                egui::Button::new(tr.text(
+                    "+ Add system font",
+                    "＋ 添加系统字体",
+                    "＋ 新增系統字型",
+                )),
+            )
+            .clicked()
+        {
             self.adding_font = !self.adding_font;
             if self.adding_font {
-                self.font_catalog.get_or_insert_with(crate::fonts::installed_system_fonts);
+                self.font_catalog
+                    .get_or_insert_with(crate::fonts::installed_system_fonts);
             }
         }
         if self.adding_font {
             ui.add(
-                egui::TextEdit::singleline(&mut self.font_search)
-                    .hint_text(tr.text("Search fonts", "搜索字体", "搜尋字型")),
+                egui::TextEdit::singleline(&mut self.font_search).hint_text(tr.text(
+                    "Search fonts",
+                    "搜索字体",
+                    "搜尋字型",
+                )),
             );
             let filter = self.font_search.to_lowercase();
             let mut added = false;
@@ -678,9 +690,10 @@ impl App {
                     .id_salt("installed-fonts")
                     .max_height(180.)
                     .show(ui, |ui| {
-                        for font in catalog.iter().filter(|font| {
-                            font.name.to_lowercase().contains(&filter)
-                        }) {
+                        for font in catalog
+                            .iter()
+                            .filter(|font| font.name.to_lowercase().contains(&filter))
+                        {
                             if ui.selectable_label(false, &font.name).clicked() {
                                 commands.font_path = Some(font.path.clone());
                                 added = true;
