@@ -233,9 +233,7 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
                 SdlNativeResult::Success(SDL_WaitEventTimeout(ptr::null_mut(), timeout))
             }
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-            SdlNativeAction::PushUserEvent(event) => {
-                SdlNativeResult::Success(SDL_PushEvent(event))
-            }
+            SdlNativeAction::PushUserEvent(event) => SdlNativeResult::Success(SDL_PushEvent(event)),
             #[cfg(target_os = "linux")]
             SdlNativeAction::FlushQuitEvent => {
                 SDL_FlushEvent(SDL_EVENT_QUIT.0);
