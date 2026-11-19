@@ -179,7 +179,10 @@ fn clipboard_menu(
 ) -> Option<ClipboardAction> {
     let mut action = None;
     let entries = [
-        (ClipboardAction::SelectAll, tr.text("Select all", "全选", "全選")),
+        (
+            ClipboardAction::SelectAll,
+            tr.text("Select all", "全选", "全選"),
+        ),
         (ClipboardAction::Copy, tr.text("Copy", "拷贝", "複製")),
         (ClipboardAction::Paste, tr.text("Paste", "粘贴", "貼上")),
         (ClipboardAction::Cut, tr.text("Cut", "剪切", "剪下")),
@@ -192,8 +195,9 @@ fn clipboard_menu(
         }
         let enabled = match item {
             ClipboardAction::Copy | ClipboardAction::Cut => !editing || selected,
-            ClipboardAction::Paste => crate::sdl::clipboard_text()
-                .is_some_and(|value| !value.is_empty()),
+            ClipboardAction::Paste => {
+                crate::sdl::clipboard_text().is_some_and(|value| !value.is_empty())
+            }
             ClipboardAction::SelectAll => true,
         };
         if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
@@ -215,15 +219,15 @@ fn apply_clipboard(
         .map(|cursor| cursor.as_sorted_char_range())
         .filter(|range| range.start != range.end);
     match action {
-        ClipboardAction::SelectAll => Some(CCursorRange::two(
-            CCursor::new(length),
-            CCursor::new(0),
-        )),
+        ClipboardAction::SelectAll => {
+            Some(CCursorRange::two(CCursor::new(length), CCursor::new(0)))
+        }
         ClipboardAction::Copy | ClipboardAction::Cut => {
             // A collapsed caret is not a selection. Never copy or erase
             // all editor text merely because no characters are selected.
             let range = range?;
-            ui.ctx().copy_text(text.char_range(range.clone()).to_owned());
+            ui.ctx()
+                .copy_text(text.char_range(range.clone()).to_owned());
             if action == ClipboardAction::Cut {
                 text.delete_char_range(range.clone());
                 Some(CCursorRange::one(CCursor::new(range.start)))
@@ -394,9 +398,14 @@ impl App {
             changed |= pointer_changed;
             let menu = self.text_menus(canvas);
             let forward = self.input.text.menu_pointer.wants_event(event, menu)
-                || (pointer_changed && matches!(event, Event::PointerButton {
-                    button: PointerButton::Secondary, ..
-                }));
+                || (pointer_changed
+                    && matches!(
+                        event,
+                        Event::PointerButton {
+                            button: PointerButton::Secondary,
+                            ..
+                        }
+                    ));
             changed |= forward;
             forward
         });
@@ -444,7 +453,11 @@ impl App {
                 pressed: true,
                 ..
             } if canvas.contains(pos) => {
-                let hit = self.history.text_boxes().iter().enumerate()
+                let hit = self
+                    .history
+                    .text_boxes()
+                    .iter()
+                    .enumerate()
                     .rev()
                     .find(|(_, box_item)| box_item.rect().contains(pos))
                     .map(|(index, _)| index);
@@ -461,7 +474,9 @@ impl App {
                 button: PointerButton::Secondary,
                 pressed: false,
                 ..
-            } => state.selected.and_then(|index| self.history.text_boxes().get(index))
+            } => state
+                .selected
+                .and_then(|index| self.history.text_boxes().get(index))
                 .is_some_and(|item| item.rect().contains(pos)),
             Event::PointerMoved(pos) if state.press.is_some() => {
                 self.move_text_pointer(pos, canvas);
@@ -1000,8 +1015,7 @@ impl App {
                             {
                                 // Paste text only. Never copy source markup,
                                 // original font size or box styling.
-                                let origin = rect.min
-                                    + vec2(18., 18.) * self.input.canvas_units;
+                                let origin = rect.min + vec2(18., 18.) * self.input.canvas_units;
                                 let mut pasted = TextBox::new(
                                     origin,
                                     screen,
@@ -1155,17 +1169,24 @@ impl App {
             }
         }
         let mut action = None;
-        let range = output.state.cursor.char_range().or(output.cursor_range).or(draft.cursor);
+        let range = output
+            .state
+            .cursor
+            .char_range()
+            .or(output.cursor_range)
+            .or(draft.cursor);
         let has_selection = range.is_some_and(|cursor| !cursor.is_empty());
         output.response.context_menu(|ui| {
             action = clipboard_menu(
-                ui, self.language, !draft.item.text.is_empty(), true, has_selection,
+                ui,
+                self.language,
+                !draft.item.text.is_empty(),
+                true,
+                has_selection,
             );
         });
         if let Some(action) = action {
-            if let Some(next) = apply_clipboard(
-                ui, &mut draft.item.text, range, action,
-            ) {
+            if let Some(next) = apply_clipboard(ui, &mut draft.item.text, range, action) {
                 draft.cursor = Some(next);
                 let mut state = output.state.clone();
                 state.cursor.set_char_range(Some(next));
