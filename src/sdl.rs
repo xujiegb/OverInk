@@ -106,6 +106,8 @@ enum SdlNativeAction<'a> {
     InkTextureUpload(&'a OwnedTexture, &'a [u8], i32),
     TextureModulation(&'a OwnedTexture, [f32; 3], f32),
     GuiTextureUpload(&'a OwnedTexture, Option<&'a SDL_Rect>, &'a [u8], i32),
+    ClipboardWrite(&'a CStr),
+    ClipboardRead,
     SystemTheme,
     IndirectTouch(SDL_TouchID),
     CaptureMouse(bool),
@@ -127,6 +129,7 @@ enum SdlNativeResult {
     Properties(SDL_PropertiesID),
     Cursor(Option<NonNull<SDL_Cursor>>),
     Success(bool),
+    ClipboardText(Option<String>),
     Theme(SDL_SystemTheme),
 }
 
@@ -149,6 +152,14 @@ impl SdlNativeResult {
 
     fn succeeded(self) -> bool {
         matches!(self, Self::Success(true))
+    }
+
+    fn clipboard_text(self) -> Option<String> {
+        if let Self::ClipboardText(text) = self {
+            text
+        } else {
+            None
+        }
     }
 
     fn mod_state(self) -> SDL_Keymod {
@@ -294,6 +305,19 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
                     rgba.as_ptr().cast(),
                     pitch,
                 ))
+            }
+            SdlNativeAction::ClipboardWrite(value) => {
+                SdlNativeResult::Success(SDL_SetClipboardText(value.as_ptr()))
+            }
+            SdlNativeAction::ClipboardRead => {
+                // SDL owns the returned allocation until the RAII guard drops.
+                let text = NonNull::new(SDL_GetClipboardText()).map(|raw| {
+                    let owned = SdlAllocation(raw);
+                    CStr::from_ptr(owned.0.as_ptr())
+                        .to_string_lossy()
+                        .into_owned()
+                });
+                SdlNativeResult::ClipboardText(text)
             }
             SdlNativeAction::SystemTheme => SdlNativeResult::Theme(SDL_GetSystemTheme()),
             SdlNativeAction::IndirectTouch(device) => SdlNativeResult::Success(matches!(
@@ -801,44 +825,15 @@ pub fn mod_state() -> SDL_Keymod {
     }
 }
 
-/// Clipboard writes borrow a terminated Rust string; reads take ownership
-/// of the returned allocation and release it through SDL_free.
-enum ClipboardAction<'a> {
-    Write(&'a CStr),
-    Read,
-}
-
-fn clipboard_action(action: ClipboardAction<'_>) -> Option<String> {
-    // SAFETY: The only write argument is a borrowed, NUL-terminated CStr,
-    // valid for SDL's synchronous copy. SDL_GetClipboardText returns a
-    // caller-owned SDL allocation, released by SdlAllocation on drop.
-    unsafe {
-        match action {
-            ClipboardAction::Write(value) => {
-                SDL_SetClipboardText(value.as_ptr());
-                None
-            }
-            ClipboardAction::Read => {
-                let text = SdlAllocation(NonNull::new(SDL_GetClipboardText())?);
-                Some(
-                    CStr::from_ptr(text.0.as_ptr())
-                        .to_string_lossy()
-                        .into_owned(),
-                )
-            }
-        }
-    }
-}
-
-/// Copy text to the native clipboard.
+/// Copy text to the native clipboard using an owned NUL-terminated argument.
 pub fn set_clipboard_text(value: &str) {
     let text = cstring(value);
-    clipboard_action(ClipboardAction::Write(&text));
+    let _ = sdl_native(SdlNativeAction::ClipboardWrite(&text));
 }
 
-/// Copy SDL-owned clipboard text before releasing its allocation.
+/// Copy SDL-owned clipboard text before releasing its allocation through RAII.
 pub fn clipboard_text() -> Option<String> {
-    clipboard_action(ClipboardAction::Read)
+    sdl_native(SdlNativeAction::ClipboardRead).clipboard_text()
 }
 
 /// The two SDL text event types share a single validated native string
