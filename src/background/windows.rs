@@ -44,8 +44,8 @@ pub fn start<T: Send + 'static>(
     display: u32,
     prepare: impl FnOnce(Image) -> Result<T, String> + Send + 'static,
 ) -> Result<Job<T>, String> {
-    let handle = windows_monitor_handle(display)
-        .ok_or("The Windows display handle is unavailable")?;
+    let handle =
+        windows_monitor_handle(display).ok_or("The Windows display handle is unavailable")?;
     Job::start(
         move |cancelled| {
             capture(
