@@ -1594,7 +1594,11 @@ impl Window {
                         pixels.as_mut_ptr().cast(),
                         pitch,
                     );
-                    if let Some(surface) = NonNull::new(surface).map(OwnedSurface) {
+                    if let Some(surface) = NonNull::new(surface).map(OwnedSurface)
+                        && !cfg!(target_os = "macos")
+                    {
+                        // Cocoa maps SDL_SetWindowIcon to NSApplication's Dock icon.
+                        // Keep the correctly sized .icns from the macOS app bundle.
                         SDL_SetWindowIcon(self.raw.as_ptr(), surface.as_non_null().as_ptr());
                     }
                     Ok(())
