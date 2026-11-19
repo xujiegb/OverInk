@@ -647,9 +647,9 @@ impl App {
         };
         let total = draft.item.text.chars().count();
         let selected = draft.cursor
-            .map(CCursorRange::as_sorted_char_range)
+            .map(|range| range.as_sorted_char_range())
             .filter(|range| range.start != range.end);
-        let range = selected.unwrap_or(0..total);
+        let range = selected.clone().unwrap_or(0..total);
         match action {
             TextContextAction::SelectAll => {
                 draft.cursor = Some(CCursorRange::two(CCursor::new(0), CCursor::new(total)));
@@ -672,7 +672,7 @@ impl App {
                 let Some(clipboard) = clipboard_text() else {
                     return false;
                 };
-                let caret = selected.map_or(
+                let caret = selected.as_ref().map_or(
                     draft.cursor.map_or(total, |range| range.primary.index),
                     |range| range.start,
                 );
