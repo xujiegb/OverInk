@@ -358,7 +358,10 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
                         .map(SdlAllocation)
                 {
                     let bytes = if size > 0 && size <= 16 * 1024 * 1024 {
-                        Some(std::slice::from_raw_parts(profile.0.as_ptr().cast::<u8>(), size).to_vec())
+                        Some(
+                            std::slice::from_raw_parts(profile.0.as_ptr().cast::<u8>(), size)
+                                .to_vec(),
+                        )
                     } else {
                         None
                     };
