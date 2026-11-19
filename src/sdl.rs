@@ -878,6 +878,7 @@ pub fn event_window(event: &SDL_Event, ty: SDL_EventType) -> Option<SDL_WindowID
             pen_proximity_event(event)?.windowID
         }
         SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP => pen_touch_event(event)?.windowID,
+        SDL_EVENT_PEN_BUTTON_DOWN | SDL_EVENT_PEN_BUTTON_UP => pen_button_event(event)?.windowID,
         SDL_EVENT_PEN_MOTION => pen_motion_event(event)?.windowID,
         SDL_EVENT_PEN_AXIS => pen_axis_event(event)?.windowID,
         SDL_EVENT_KEY_DOWN | SDL_EVENT_KEY_UP => key_event(event)?.windowID,
@@ -1161,6 +1162,14 @@ pub fn pen_touch_event(event: &SDL_Event) -> Option<SDL_PenTouchEvent> {
     tagged_event!(event, ptouch, SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP)
 }
 
+pub fn pen_button_event(event: &SDL_Event) -> Option<SDL_PenButtonEvent> {
+    tagged_event!(
+        event,
+        pbutton,
+        SDL_EVENT_PEN_BUTTON_DOWN | SDL_EVENT_PEN_BUTTON_UP
+    )
+}
+
 pub fn pen_axis_event(event: &SDL_Event) -> Option<SDL_PenAxisEvent> {
     tagged_event!(event, paxis, SDL_EVENT_PEN_AXIS)
 }
@@ -1333,6 +1342,7 @@ enum WindowCommand<'a> {
     Show(bool),
     SetParent(Option<&'a Window>),
     ToolbarSetup([i32; 2], &'a mut [u8]),
+    RoundedCorners([i32; 2], i32),
     #[cfg(not(target_os = "windows"))]
     ShapeRegions([i32; 2], Option<&'a [SDL_Rect]>),
 }
@@ -1589,6 +1599,102 @@ impl Window {
                     }
                     Ok(())
                 }
+                WindowCommand::RoundedCorners([width, height], radius) => {
+                    if width <= 0 || height <= 0 || radius <= 0 {
+                        return Err("Invalid toolbar shape geometry".into());
+                    }
+                    let radius = radius.min(width / 2).min(height / 2);
+                    if radius == 0 {
+                        return Err("Toolbar window is too small for rounded corners".into());
+                    }
+                    let surface = OwnedSurface(
+                        NonNull::new(SDL_CreateSurface(width, height, SDL_PIXELFORMAT_RGBA32))
+                            .ok_or_else(error)?,
+                    );
+                    let surface_handle = surface.as_non_null();
+                    let transparent = SDL_MapSurfaceRGBA(surface_handle.as_ptr(), 0, 0, 0, 0);
+                    let opaque = SDL_MapSurfaceRGBA(surface_handle.as_ptr(), 255, 255, 255, 255);
+                    check(SDL_FillSurfaceRect(
+                        surface_handle.as_ptr(),
+                        ptr::null(),
+                        transparent,
+                    ))?;
+
+                    let middle = SDL_Rect {
+                        x: 0,
+                        y: radius,
+                        w: width,
+                        h: height - radius * 2,
+                    };
+                    if middle.h > 0 {
+                        check(SDL_FillSurfaceRect(
+                            surface_handle.as_ptr(),
+                            &middle,
+                            opaque,
+                        ))?;
+                    }
+                    // Alpha antialiasing at the extreme two outer edges of
+                    // each row, and mirrored geometry on all four corners.
+                    for y in 0..radius {
+                        let vertical = f64::from(radius) - (f64::from(y) + 0.5);
+                        let x_edge = f64::from(radius)
+                            - (f64::from(radius).powi(2) - vertical.powi(2))
+                                .max(0.)
+                                .sqrt();
+                        let inset = (x_edge.ceil() as i32).clamp(0, radius);
+                        let row_width = width - inset * 2;
+                        if row_width > 0 {
+                            let top = SDL_Rect {
+                                x: inset,
+                                y,
+                                w: row_width,
+                                h: 1,
+                            };
+                            let bottom = SDL_Rect {
+                                y: height - y - 1,
+                                ..top
+                            };
+                            check(SDL_FillSurfaceRect(surface_handle.as_ptr(), &top, opaque))?;
+                            check(SDL_FillSurfaceRect(
+                                surface_handle.as_ptr(),
+                                &bottom,
+                                opaque,
+                            ))?;
+                        }
+                        if inset > 0 {
+                            let coverage = (f64::from(inset) - x_edge).clamp(0., 1.);
+                            let edge_alpha = (coverage * 255.).round() as u8;
+                            if edge_alpha > 0 {
+                                let edge_color = SDL_MapSurfaceRGBA(
+                                    surface_handle.as_ptr(),
+                                    255,
+                                    255,
+                                    255,
+                                    edge_alpha,
+                                );
+                                for x in [inset - 1, width - inset] {
+                                    for row in [y, height - y - 1] {
+                                        let pixel = SDL_Rect {
+                                            x,
+                                            y: row,
+                                            w: 1,
+                                            h: 1,
+                                        };
+                                        check(SDL_FillSurfaceRect(
+                                            surface_handle.as_ptr(),
+                                            &pixel,
+                                            edge_color,
+                                        ))?;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    check(SDL_SetWindowShape(
+                        self.raw.as_ptr(),
+                        surface_handle.as_ptr(),
+                    ))
+                }
                 #[cfg(not(target_os = "windows"))]
                 WindowCommand::ShapeRegions(size, opaque_regions) => {
                     let Some(regions) = opaque_regions else {
@@ -1746,6 +1852,13 @@ impl Window {
         Self::construct(WindowCreation::Main(&title, w, h, overlay))
     }
 
+    /// Controller windows need a transparent back buffer for a native rounded
+    /// alpha/hit-test mask. Canvas windows continue to use their original path.
+    pub fn toolbar(title: &str, w: i32, h: i32) -> Result<Self, String> {
+        let title = cstring(title);
+        Self::construct(WindowCreation::Main(&title, w, h, true))
+    }
+
     pub fn tooltip(parent: &Self, x: i32, y: i32, w: i32, h: i32) -> Result<Self, String> {
         Self::construct(WindowCreation::Tooltip(parent, [x, y, w, h]))
     }
@@ -1780,6 +1893,19 @@ impl Window {
         let mut pixels = icon.into_raw();
         let _ = self.run_command(WindowCommand::ToolbarSetup(size, &mut pixels));
     }
+    /// Rebuild the native shape only after an actual pixel-size/DPI change.
+    /// It masks both the compositor output and pointer hit-testing region.
+    pub fn update_rounded_shape(&self, applied: &mut Option<[i32; 2]>) -> Result<(), String> {
+        let pixels = self.pixel_size();
+        if *applied == Some(pixels) {
+            return Ok(());
+        }
+        let radius = (15. * self.ui_scale() * self.pixel_density()).round() as i32;
+        self.run_command(WindowCommand::RoundedCorners(pixels, radius.max(1)))?;
+        *applied = Some(pixels);
+        Ok(())
+    }
+
     pub fn arrange_toolbar(&self, expanded: bool, on_display: Option<u32>) -> Result<(), String> {
         let units = self.ui_scale();
         let width = crate::toolbar::WIDTH

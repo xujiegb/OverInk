@@ -7,28 +7,45 @@ use egui::{
 use skrifa::{FontRef, GlyphId, MetadataProvider, string::StringId};
 use std::{
     fs::{self, File},
-    io::{self, Read},
-    path::Path,
+    io::{self, Read, Write},
+    path::{Path, PathBuf},
     sync::{Arc, OnceLock},
+    time::{SystemTime, UNIX_EPOCH},
 };
 use unicode_segmentation::UnicodeSegmentation;
 
 pub const INCLUDED_FONT: &str = "Sarasa Fixed Slab SC";
 const COLOR: &str = "OpenMoji Color";
 const MONO: &str = "OpenMoji Black";
-const CUSTOM: &str = "Custom annotation font";
 const ANNOTATION: &str = "Annotations";
 const MAX_FONT_BYTES: u64 = 64 * 1024 * 1024;
 
-#[derive(Default)]
 pub struct TextFonts {
-    custom: Option<CustomFont>,
+    custom: Vec<CustomFont>,
+    order: Vec<String>,
     pub revision: u64,
 }
 
+impl Default for TextFonts {
+    fn default() -> Self {
+        Self {
+            custom: Vec::new(),
+            order: FALLBACK.iter().map(|name| (*name).to_owned()).collect(),
+            revision: 0,
+        }
+    }
+}
+
 struct CustomFont {
+    id: String,
     name: String,
     face: FontFace,
+}
+
+/// A font installed in the operating system, displayed by its font name.
+pub struct SystemFont {
+    pub name: String,
+    pub path: PathBuf,
 }
 
 struct FontFace {
@@ -170,70 +187,232 @@ impl CustomFont {
                     .english_or_first()
                     .map(|name| name.chars().take(100).collect())
             })
-            .unwrap_or_else(|| CUSTOM.into());
-        Ok(Self { name, face })
+            .unwrap_or_else(|| "Imported font".into());
+        let id = path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or("legacy");
+        Ok(Self {
+            id: id.to_owned(),
+            name,
+            face,
+        })
     }
 }
 
 impl TextFonts {
-    pub fn load(path: &Path) -> Self {
-        Self {
-            custom: CustomFont::read(path).ok(),
-            revision: 0,
+    /// Restore the last saved priority order. Built-in fonts are always present,
+    /// and invalid or missing user-font entries are ignored.
+    pub fn load(legacy_path: &Path) -> Self {
+        let mut result = Self::default();
+        let Some(base) = legacy_path.parent() else {
+            return result;
+        };
+        let saved: Vec<String> = std::fs::read(base.join("annotation-fonts.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+        let mut priorities = Vec::new();
+        for id in saved.into_iter().take(35) {
+            if priorities.contains(&id) {
+                continue;
+            }
+            if FALLBACK.contains(&id.as_str()) {
+                priorities.push(id);
+            } else if is_custom_id(&id) {
+                let file = font_file(base, legacy_path, &id);
+                if let Ok(mut font) = CustomFont::read(&file) {
+                    font.id = id.clone();
+                    result.custom.push(font);
+                    priorities.push(id);
+                }
+            }
         }
+        if !priorities.iter().any(|id| id == "legacy")
+            && result.custom.is_empty()
+            && let Ok(mut font) = CustomFont::read(legacy_path)
+        {
+            font.id = "legacy".into();
+            result.custom.push(font);
+            priorities.insert(0, "legacy".into());
+        }
+        for included in FALLBACK {
+            if !priorities.iter().any(|id| id == included) {
+                priorities.push(included.to_owned());
+            }
+        }
+        result.order = priorities;
+        result
     }
 
-    pub fn name(&self) -> Option<&str> {
-        self.custom.as_ref().map(|font| font.name.as_str())
+    pub fn entries(&self) -> impl Iterator<Item = (&str, &str, bool)> {
+        self.order.iter().filter_map(|id| {
+            if FALLBACK.contains(&id.as_str()) {
+                return Some((id.as_str(), id.as_str(), true));
+            }
+            self.custom
+                .iter()
+                .find(|font| font.id == *id)
+                .map(|font| (id.as_str(), font.name.as_str(), false))
+        })
     }
 
-    pub fn install(&mut self, source: &Path, path: &Path) -> Result<(), String> {
-        let font = CustomFont::read(source)?;
-        let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-        }
-        fs::write(&temporary, font.face.data.bytes())
-            .and_then(|()| fs::rename(&temporary, path))
-            .inspect_err(|_| {
-                let _ = fs::remove_file(&temporary);
-            })
+    fn save_priority(&self, legacy_path: &Path) -> Result<(), String> {
+        let base = legacy_path.parent().ok_or("No font settings directory")?;
+        fs::create_dir_all(base).map_err(|error| error.to_string())?;
+        // Keep the previous configuration intact if serialization or a
+        // storage write fails. The tempfile lives in the same directory, so
+        // persist can replace the destination without a partial JSON write.
+        let mut temporary =
+            tempfile::NamedTempFile::new_in(base).map_err(|error| error.to_string())?;
+        serde_json::to_writer_pretty(&mut temporary, &self.order)
             .map_err(|error| error.to_string())?;
-        self.custom = Some(font);
+        temporary.flush().map_err(|error| error.to_string())?;
+        temporary
+            .as_file()
+            .sync_all()
+            .map_err(|error| error.to_string())?;
+        temporary
+            .persist(base.join("annotation-fonts.json"))
+            .map_err(|error| error.error.to_string())?;
+        Ok(())
+    }
+
+    /// Add a system font to a private copy, without retaining a dependency on
+    /// the OS installation path or distributing an additional bundled font.
+    pub fn install(&mut self, source: &Path, legacy_path: &Path) -> Result<(), String> {
+        if self.custom.len() >= 32 {
+            return Err("At most 32 imported annotation fonts can be enabled".into());
+        }
+        let mut font = CustomFont::read(source)?;
+        if self
+            .custom
+            .iter()
+            .any(|existing| existing.name == font.name)
+        {
+            return Err("Font is already in the priority list".into());
+        }
+        let base = legacy_path.parent().ok_or("No font settings directory")?;
+        let folder = base.join("annotation-fonts");
+        fs::create_dir_all(&folder).map_err(|error| error.to_string())?;
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_nanos();
+        let id = format!("font-{nanos}-{}", std::process::id());
+        let path = folder.join(format!("{id}.font"));
+        fs::write(&path, font.face.data.bytes()).map_err(|error| error.to_string())?;
+        font.id = id.clone();
+        self.order.insert(0, id);
+        self.custom.insert(0, font);
+        if let Err(error) = self.save_priority(legacy_path) {
+            self.order.remove(0);
+            self.custom.remove(0);
+            let _ = fs::remove_file(path);
+            return Err(error);
+        }
         self.revision = self.revision.wrapping_add(1);
         Ok(())
     }
 
-    pub fn reset(&mut self, path: &Path) -> Result<(), String> {
-        match fs::remove_file(path) {
-            Ok(()) => (),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => (),
-            Err(error) => return Err(error.to_string()),
+    pub fn move_font(&mut self, from: usize, to: usize, legacy_path: &Path) -> Result<(), String> {
+        if from >= self.order.len() || to >= self.order.len() || from == to {
+            return Ok(());
         }
-        self.custom = None;
+        let item = self.order.remove(from);
+        self.order.insert(to, item);
+        if let Err(error) = self.save_priority(legacy_path) {
+            // A write failure must not leave the displayed order different
+            // from the one that will be loaded on the next launch.
+            let item = self.order.remove(to);
+            self.order.insert(from, item);
+            return Err(error);
+        }
+        self.revision = self.revision.wrapping_add(1);
+        Ok(())
+    }
+
+    pub fn remove_font(&mut self, id: &str, legacy_path: &Path) -> Result<(), String> {
+        if !is_custom_id(id) {
+            return Err("Built-in fonts cannot be removed".into());
+        }
+        let index = self
+            .order
+            .iter()
+            .position(|item| item == id)
+            .ok_or("Font is not in the priority list")?;
+        let custom_index = self
+            .custom
+            .iter()
+            .position(|font| font.id == id)
+            .ok_or("Imported font data is missing")?;
+        let removed_order = self.order.remove(index);
+        let removed_font = self.custom.remove(custom_index);
+        if let Err(error) = self.save_priority(legacy_path) {
+            self.order.insert(index, removed_order);
+            self.custom.insert(custom_index, removed_font);
+            return Err(error);
+        }
+        // Only delete the private font copy once the settings have been
+        // saved. An OS-level unlink failure can leave an orphaned file, but
+        // must never restore a font the user has already removed.
+        let base = legacy_path.parent().ok_or("No font settings directory")?;
+        let file = font_file(base, legacy_path, id);
+        if let Err(error) = fs::remove_file(file)
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            eprintln!("OverInk: could not clean up removed font {id}: {error}");
+        }
+        self.revision = self.revision.wrapping_add(1);
+        Ok(())
+    }
+
+    pub fn reset(&mut self, legacy_path: &Path) -> Result<(), String> {
+        // One persisted transaction instead of rewriting the settings file
+        // once for every imported font. Restore both collections on failure.
+        let previous_order = std::mem::replace(
+            &mut self.order,
+            FALLBACK.iter().map(|name| (*name).to_owned()).collect(),
+        );
+        let previous_custom = std::mem::take(&mut self.custom);
+        if let Err(error) = self.save_priority(legacy_path) {
+            self.order = previous_order;
+            self.custom = previous_custom;
+            return Err(error);
+        }
+        let base = legacy_path.parent().ok_or("No font settings directory")?;
+        for font in &previous_custom {
+            if let Err(error) = fs::remove_file(font_file(base, legacy_path, &font.id))
+                && error.kind() != io::ErrorKind::NotFound
+            {
+                eprintln!(
+                    "OverInk: could not clean up reset font {}: {error}",
+                    font.id
+                );
+            }
+        }
         self.revision = self.revision.wrapping_add(1);
         Ok(())
     }
 
     pub fn definitions(&self) -> FontDefinitions {
         let mut definitions = bundled().definitions.clone();
-        if let Some(custom) = &self.custom {
+        for font in &self.custom {
             definitions
                 .font_data
-                .insert(CUSTOM.into(), custom.face.data.clone());
-            definitions
-                .families
-                .insert(FontFamily::Name(CUSTOM.into()), vec![CUSTOM.into()]);
-            definitions
-                .families
-                .entry(FontFamily::Name(ANNOTATION.into()))
-                .or_default()
-                .insert(0, CUSTOM.into());
+                .insert(font.id.as_str().into(), font.face.data.clone());
+            definitions.families.insert(
+                FontFamily::Name(font.id.as_str().into()),
+                vec![font.id.as_str().into()],
+            );
         }
+        definitions
+            .families
+            .insert(FontFamily::Name(ANNOTATION.into()), self.order.to_vec());
         definitions
     }
 
-    fn family_for_cluster(&self, cluster: &str) -> &'static str {
+    fn family_for_cluster(&self, cluster: &str) -> &str {
         let mut chars = cluster.chars();
         let Some(base) = chars.next() else {
             return ANNOTATION;
@@ -252,25 +431,24 @@ impl TextFonts {
             return ANNOTATION;
         }
 
-        // egui resolves a cluster from its first character. Choose a face for
-        // emoji sequences before shaping so a plain digit or a partially
-        // supported flag does not mask the remaining fonts in the chain.
-        let faces = self
-            .custom
-            .iter()
-            .map(|font| (CUSTOM, &font.face))
-            .chain(FALLBACK.into_iter().zip(&bundled().faces));
         let mut monochrome_fallback = None;
-        for (name, face) in faces {
+        for id in &self.order {
+            let face = if let Some(index) = FALLBACK.iter().position(|name| *name == id) {
+                &bundled().faces[index]
+            } else if let Some(font) = self.custom.iter().find(|font| font.id == *id) {
+                &font.face
+            } else {
+                continue;
+            };
             let Some(glyph) = face.shape_cluster(cluster) else {
                 continue;
             };
             match selector {
                 Some('\u{fe0f}') if !face.has_color_glyph(glyph) => {
-                    monochrome_fallback.get_or_insert(name);
+                    monochrome_fallback.get_or_insert(id.as_str());
                 }
-                Some('\u{fe0e}') if name == COLOR || face.has_color_glyph(glyph) => (),
-                _ => return name,
+                Some('\u{fe0e}') if id == COLOR || face.has_color_glyph(glyph) => (),
+                _ => return id,
             }
         }
         monochrome_fallback.unwrap_or(ANNOTATION)
@@ -312,6 +490,116 @@ impl TextFonts {
     }
 }
 
+fn is_custom_id(id: &str) -> bool {
+    id == "legacy"
+        || (id.starts_with("font-")
+            && id.len() <= 80
+            && id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'))
+}
+
+fn font_file(base: &Path, legacy_path: &Path, id: &str) -> PathBuf {
+    if id == "legacy" {
+        legacy_path.to_owned()
+    } else {
+        base.join("annotation-fonts").join(format!("{id}.font"))
+    }
+}
+
+/// Read font names from standard OS font directories. Paths remain internal;
+/// the settings UI only exposes family names and never asks for a file path.
+pub fn installed_system_fonts() -> Vec<SystemFont> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(windir) = std::env::var_os("WINDIR") {
+            roots.push(PathBuf::from(windir).join("Fonts"));
+        }
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            roots.push(PathBuf::from(local).join("Microsoft/Windows/Fonts"));
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        roots.extend(["/System/Library/Fonts", "/Library/Fonts"].map(PathBuf::from));
+    }
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    {
+        roots.extend(["/usr/share/fonts", "/usr/local/share/fonts"].map(PathBuf::from));
+    }
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd"))]
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        #[cfg(target_os = "macos")]
+        roots.push(home.join("Library/Fonts"));
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        roots.push(home.join(".local/share/fonts"));
+    }
+    let mut available = std::collections::BTreeMap::<String, PathBuf>::new();
+    let mut examined = 0usize;
+    while let Some(folder) = roots.pop() {
+        let Ok(entries) = fs::read_dir(folder) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            // Never recurse through directory symlinks (which can form cycles).
+            if kind.is_dir() {
+                if roots.len() < 4096 {
+                    roots.push(path);
+                }
+                continue;
+            }
+            let supported = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| {
+                    matches!(
+                        ext.to_ascii_lowercase().as_str(),
+                        "ttf" | "otf" | "ttc" | "otc"
+                    )
+                });
+            if !supported {
+                continue;
+            }
+            examined += 1;
+            if examined > 512 {
+                break;
+            }
+            let Ok(meta) = fs::metadata(&path) else {
+                continue;
+            };
+            if !meta.is_file() || meta.len() > MAX_FONT_BYTES {
+                continue;
+            }
+            let Ok(data) = fs::read(&path) else {
+                continue;
+            };
+            let Ok(font) = FontRef::from_index(&data, 0) else {
+                continue;
+            };
+            let name = font
+                .localized_strings(StringId::FULL_NAME)
+                .english_or_first()
+                .map(|name| name.chars().take(100).collect::<String>());
+            if let Some(name) = name.filter(|name| !name.is_empty()) {
+                available.entry(name).or_insert(path);
+            }
+        }
+        if examined > 512 {
+            break;
+        }
+    }
+    available
+        .into_iter()
+        .map(|(name, path)| SystemFont { name, path })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,6 +620,58 @@ mod tests {
         });
         frame.drop_without_applying_deltas();
         glyphs
+    }
+
+    #[test]
+    fn failed_font_move_restores_the_original_priority_order()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let blocker = temp.path().join("not-a-directory");
+        fs::write(&blocker, b"block")?;
+        let mut fonts = TextFonts::default();
+        let before = fonts.order.to_vec();
+
+        assert!(
+            fonts
+                .move_font(0, 2, &blocker.join("annotation-font"))
+                .is_err()
+        );
+        assert_eq!(fonts.order, before);
+        assert_eq!(fonts.revision, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn failed_removal_and_reset_preserve_font_entries() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let source = temp.path().join("system-font.ttf");
+        fs::write(
+            &source,
+            include_bytes!("../assets/fonts/SarasaFixedSlabSC-Regular.ttf"),
+        )?;
+        let settings = temp.path().join("annotation-font");
+        let mut fonts = TextFonts::default();
+        fonts.install(&source, &settings)?;
+        let id = fonts.custom[0].id.to_owned();
+        let private_file = font_file(temp.path(), &settings, &id);
+        assert!(private_file.exists());
+        let before_revision = fonts.revision;
+
+        let blocker = temp.path().join("blocked");
+        fs::write(&blocker, b"block")?;
+        let invalid_settings = blocker.join("annotation-font");
+        assert!(fonts.remove_font(&id, &invalid_settings).is_err());
+        assert!(fonts.reset(&invalid_settings).is_err());
+        assert_eq!(fonts.custom.len(), 1);
+        assert_eq!(fonts.order.first().map(String::as_str), Some(id.as_str()));
+        assert_eq!(fonts.revision, before_revision);
+        assert!(private_file.exists());
+
+        fonts.reset(&settings)?;
+        assert!(fonts.custom.is_empty());
+        assert_eq!(fonts.order, FALLBACK.map(str::to_owned));
+        assert!(!private_file.exists());
+        Ok(())
     }
 
     #[test]

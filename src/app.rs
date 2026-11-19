@@ -3,7 +3,10 @@
 mod canvas;
 mod ink;
 mod panel;
+#[cfg(test)]
+mod pen_input_tests;
 mod screenshot;
+mod stylus;
 mod text;
 
 use crate::sdl::dialog::{DialogKind, FileDialog};
@@ -83,7 +86,6 @@ const LEFT_BUTTON: u8 = SDL_BUTTON_LEFT as u8;
 const RIGHT_BUTTON: u8 = SDL_BUTTON_RIGHT as u8;
 const LASER_LIFETIME: Duration = Duration::from_millis(900);
 const MAX_LASER_SAMPLES: usize = 4096;
-const FONT_PATH_FIELD: &str = "annotation-font-path";
 #[derive(Default)]
 struct Commands {
     mode: bool,
@@ -96,9 +98,10 @@ struct Commands {
     #[cfg(target_os = "linux")]
     gnome_action: Option<crate::gnome::Action>,
     redraw_canvas: bool,
-    choose_font: bool,
     font_path: Option<PathBuf>,
     reset_font: bool,
+    font_reorder: Option<(usize, usize)>,
+    font_remove: Option<String>,
     screenshot: bool,
     screenshot_folder: bool,
 }
@@ -172,6 +175,7 @@ enum Board {
 
 struct App {
     input: CanvasInput,
+    pen_double: stylus::PenDoubleTap,
     parked_input: BTreeMap<u32, CanvasInput>,
     multi: bool,
     history: History,
@@ -193,7 +197,9 @@ struct App {
     frame_rate: FrameRate,
     preferences: Preferences,
     text_fonts: TextFonts,
-    font_path_input: Option<String>,
+    font_catalog: Option<Vec<crate::fonts::SystemFont>>,
+    font_search: String,
+    adding_font: bool,
     screenshot: Screenshot,
     #[cfg(target_os = "linux")]
     gnome_guide: Option<crate::gnome::Guide>,
@@ -201,6 +207,7 @@ struct App {
     suspended: bool,
     frozen: bool,
     panel: Option<crate::toolbar::Panel>,
+    panel_retiring: Option<crate::toolbar::Panel>,
     touch_enabled: bool,
     status: Status,
     path: String,
@@ -239,6 +246,7 @@ impl App {
         }
         Self {
             input: CanvasInput::default(),
+            pen_double: stylus::PenDoubleTap::default(),
             parked_input: BTreeMap::new(),
             multi: false,
             history,
@@ -261,13 +269,16 @@ impl App {
             language: preferences.language.unwrap_or_else(Language::system),
             preferences,
             text_fonts: TextFonts::load(&base.join("annotation-font")),
-            font_path_input: None,
+            font_catalog: None,
+            font_search: String::new(),
+            adding_font: false,
             screenshot: Screenshot::default(),
             #[cfg(target_os = "linux")]
             gnome_guide: None,
             suspended,
             frozen: false,
             panel: None,
+            panel_retiring: None,
             touch_enabled: true,
             status,
             path: base
@@ -567,6 +578,20 @@ impl App {
             self.status = hint.into();
         }
     }
+    fn switch_pen_eraser(&mut self) -> bool {
+        if self.pass || self.picking || self.screenshot.active() {
+            return false;
+        }
+        let next = match self.tool {
+            Tool::Pen => Tool::Eraser,
+            Tool::Eraser => Tool::Pen,
+            _ => Tool::Pen,
+        };
+        self.use_tool(next);
+        self.panel = None;
+        true
+    }
+
     fn toggle_mouse(&mut self) {
         if self.pass {
             self.use_tool(self.tool);
@@ -650,8 +675,16 @@ impl App {
     }
     fn for_each_page(&mut self, mut f: impl FnMut(&mut Self)) {
         f(self);
-        for id in self.parked_input.keys().copied().collect::<Vec<_>>() {
+        // Traversing ordered page IDs avoids allocating a temporary Vec on
+        // every Sidecar pen event. on_page restores the key set on return.
+        let mut next = self.parked_input.keys().next().copied();
+        while let Some(id) = next {
             self.on_page(Some(id), &mut f);
+            next = self
+                .parked_input
+                .range((std::ops::Bound::Excluded(id), std::ops::Bound::Unbounded))
+                .next()
+                .map(|(id, _)| *id);
         }
     }
     fn finish_all_contacts(&mut self) {
@@ -920,6 +953,23 @@ impl App {
         }
         self.touch_motion(key, point);
     }
+    // Release state is global to the physical pen, but proximity remains
+    // local to the canvas. This helper is safe to call on all parked pages:
+    // unlike track_pen, it does not mark an unrelated page as pen-proximate
+    // or cancel the page's ongoing finger gestures.
+    fn release_pen(&mut self, id: u32, definitive: bool) {
+        let had_contact = self
+            .input
+            .contact
+            .is_some_and(|contact| contact.source == Source::Pen(id));
+        self.end(Source::Pen(id));
+        if (definitive || had_contact)
+            && let Some(pen) = self.input.pens.get_mut(&id)
+        {
+            pen.finish();
+        }
+    }
+
     // Device proximity is independent of the current tool or modal picker.
     fn track_pen(&mut self, event: &SDL_Event) {
         let ty = event_type(event);
@@ -941,13 +991,35 @@ impl App {
             self.input.pen_proximity.remove(&id);
             return;
         }
+        // Sidecar and some tablet drivers can deliver hover motion/axis
+        // before (or instead of) PEN_UP. SDL's pen_state is the contact
+        // truth for these packets: a hovering pen must NEVER extend ink,
+        // even if a previous PEN_UP packet was lost or routed elsewhere.
+        let lifted = match ty {
+            SDL_EVENT_PEN_UP => true,
+            SDL_EVENT_PEN_MOTION => {
+                pen_motion_event(event).is_some_and(|pen| pen.pen_state & SDL_PEN_INPUT_DOWN == 0)
+            }
+            SDL_EVENT_PEN_AXIS => {
+                pen_axis_event(event).is_some_and(|pen| pen.pen_state & SDL_PEN_INPUT_DOWN == 0)
+            }
+            _ => false,
+        };
+        if lifted {
+            self.release_pen(id, ty == SDL_EVENT_PEN_UP);
+        }
         if self.input.pen_proximity.insert(id) {
             self.discard_touches();
         }
     }
     fn event(&mut self, e: &SDL_Event, overlay: SDL_WindowID, size: [f32; 2]) {
-        self.track_pen(e);
         let ty = event_type(e);
+        // Preserve PEN_UP's final endpoint sample before reconciling its
+        // released state. Hover packets, in contrast, must end the stroke
+        // *before* motion() or axis processing can append their coordinates.
+        if ty != SDL_EVENT_PEN_UP {
+            self.track_pen(e);
+        }
         match ty {
             SDL_EVENT_MOUSE_BUTTON_DOWN
                 if mouse_button_event(e).is_some_and(|button| button.windowID == overlay) =>
@@ -1095,6 +1167,9 @@ impl App {
                 self.finish_contact();
             }
             _ => {}
+        }
+        if ty == SDL_EVENT_PEN_UP {
+            self.track_pen(e);
         }
     }
     fn keyboard(&mut self, e: &SDL_Event, toolbar_keyboard: bool) -> Commands {
@@ -1244,7 +1319,6 @@ impl App {
     fn install_annotation_font(&mut self, source: &Path, destination: &Path) -> bool {
         match self.text_fonts.install(source, destination) {
             Ok(()) => {
-                self.font_path_input = None;
                 self.status = text(
                     "Annotation font updated",
                     "已更新标注字体",
@@ -1528,14 +1602,21 @@ fn run_inner(options: Options) -> Result<(), String> {
         canvas::Canvas::new(window, app.displays.get(app.display), &options)
     })?];
     let toolbar = with_autorelease_pool(|| {
-        Window::new(
+        Window::toolbar(
             "OverInk",
             crate::toolbar::WIDTH as i32,
             crate::toolbar::HEIGHT as i32,
-            false,
         )
     })?;
     with_autorelease_pool(|| toolbar.setup_toolbar());
+    #[cfg(target_os = "macos")]
+    let pencil_mode = match crate::native::macos::PencilModeMonitor::install() {
+        Ok(monitor) => Some(monitor),
+        Err(error) => {
+            eprintln!("OverInk: Sidecar Apple Pencil double-tap unavailable: {error}");
+            None
+        }
+    };
     if !options.smoke {
         let _ = with_autorelease_pool(|| toolbar.arrange_toolbar(false, app.pages.active));
         with_autorelease_pool(|| canvas::reconcile(&mut canvases, &mut app, &toolbar, &options))?;
@@ -1566,6 +1647,7 @@ fn run_inner(options: Options) -> Result<(), String> {
     let mut tooltips = crate::toolbar::Tooltips::default();
     let mut toolbar_hidden = false;
     let mut toolbar_expanded = false;
+    let mut toolbar_shape_size = None;
     let mut running = true;
     let mut frame = 0;
     let mut last_color = Instant::now();
@@ -1718,6 +1800,22 @@ fn run_inner(options: Options) -> Result<(), String> {
                     app.for_each_page(|page| page.input.text.refocus());
                 }
 
+                // The owning canvas can differ from the SDL hover packet's
+                // windowID. End its pen contact on every parked page, but do
+                // not mark the other pages as pen-proximate.
+                let hover_pen = match ty {
+                    SDL_EVENT_PEN_MOTION => pen_motion_event(&event)
+                        .filter(|pen| pen.pen_state & SDL_PEN_INPUT_DOWN == 0)
+                        .map(|pen| pen.which.0),
+                    SDL_EVENT_PEN_AXIS => pen_axis_event(&event)
+                        .filter(|pen| pen.pen_state & SDL_PEN_INPUT_DOWN == 0)
+                        .map(|pen| pen.which.0),
+                    _ => None,
+                };
+                if let Some(id) = hover_pen {
+                    app.for_each_page(|page| page.release_pen(id, false));
+                }
+
                 if screenshot_owns_input {
                     // Keep pen proximity and palm rejection current even while
                     // screenshot selection owns the event batch.
@@ -1773,6 +1871,22 @@ fn run_inner(options: Options) -> Result<(), String> {
                     && !toolbar_hidden
                     && !app.suspended
                     && !file_dialog.pending();
+                if drawing
+                    && ty == SDL_EVENT_PEN_BUTTON_DOWN
+                    && !app.pass
+                    && pen_button_event(&event).is_some_and(|button| {
+                        app.pen_double
+                            .pressed(button.which.0, button.button, button.timestamp)
+                    })
+                    && app.switch_pen_eraser()
+                {
+                    mode_changed = true;
+                    toolbar_dirty = true;
+                    for canvas in &mut canvases {
+                        canvas.dirty = true;
+                    }
+                    continue;
+                }
                 if !file_dialog.pending() {
                     gui.event(&event, toolbar.id, toolbar.size());
                 }
@@ -1781,6 +1895,9 @@ fn run_inner(options: Options) -> Result<(), String> {
                     && !toolbar.input_focused()
                 {
                     gui.sync_text_input(&toolbar, false);
+                }
+                if ty == SDL_EVENT_WINDOW_FOCUS_LOST {
+                    app.pen_double.clear();
                 }
                 if ty == SDL_EVENT_PEN_PROXIMITY_OUT {
                     // A pen can leave proximity over a different window from the
@@ -1919,6 +2036,41 @@ fn run_inner(options: Options) -> Result<(), String> {
                         break;
                     }
                 }
+                if ty == SDL_EVENT_PEN_UP
+                    && let Some(pen) = pen_touch_event(&event)
+                {
+                    // The normal target already consumed its release endpoint.
+                    // Commit orphaned contacts without changing other pages'
+                    // pen proximity or invalidating their touch gestures.
+                    app.for_each_page(|page| page.release_pen(pen.which.0, true));
+                }
+            }
+            #[cfg(target_os = "macos")]
+            if let Some(monitor) = &pencil_mode {
+                let taps = monitor.take();
+                // AppKit callbacks do not mutate App inside the Cocoa pump.
+                // Apply gestures only after SDL's event batch, outside modal
+                // pickers and native dialogs.
+                if taps > 0
+                    && !file_dialog.pending()
+                    && !picker.active()
+                    && !toolbar_hidden
+                    && !app.suspended
+                    && !app.picking
+                    && !app.screenshot.active()
+                {
+                    for _ in 0..taps.min(16) {
+                        if app.switch_pen_eraser() {
+                            mode_changed = true;
+                            toolbar_dirty = true;
+                        }
+                    }
+                    if mode_changed {
+                        for canvas in &mut canvases {
+                            canvas.dirty = true;
+                        }
+                    }
+                }
             }
             if app.screenshot.active()
                 && app.screenshot.recover_mouse_drag(mouse_released())
@@ -1938,29 +2090,6 @@ fn run_inner(options: Options) -> Result<(), String> {
                 toolbar_dirty = true;
                 restore_toolbar_focus = !app.screenshot.active();
                 match kind {
-                    DialogKind::Font => match result {
-                        Ok(Some(path))
-                            if app.install_annotation_font(&path, &annotation_font_path) =>
-                        {
-                            for canvas in &mut canvases {
-                                canvas.dirty = true;
-                            }
-                        }
-                        Ok(_) => (),
-                        Err(error) => {
-                            app.panel = Some(crate::toolbar::Panel::Settings);
-                            app.font_path_input.get_or_insert_with(String::new);
-                            gui.ctx.memory_mut(|mem| {
-                                mem.request_focus(egui::Id::unique(FONT_PATH_FIELD))
-                            });
-                            app.status = text(
-                                "Enter a font file path",
-                                "请输入字体文件路径",
-                                "請輸入字型檔案路徑",
-                            )
-                            .detail(error);
-                        }
-                    },
                     DialogKind::ScreenshotFolder => match result {
                         Ok(Some(path)) => {
                             let previous = app.preferences.screenshot_folder.replace(path);
@@ -2323,7 +2452,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 }
                 last_color = Instant::now();
             }
-            let expanded = app.panel.is_some() && !app.picking;
+            let expanded = (app.panel.is_some() || app.panel_retiring.is_some()) && !app.picking;
             if expanded != toolbar_expanded || controller_scale_changed {
                 toolbar_dirty = true;
                 controller_bounds_changed = true;
@@ -2392,17 +2521,6 @@ fn run_inner(options: Options) -> Result<(), String> {
                 return Ok(());
             }
             mode_changed |= cmd.mode;
-            if cmd.choose_font && !file_dialog.pending() {
-                app.finish_all_contacts();
-                tooltips.clear();
-                for canvas in &mut canvases {
-                    canvas.show(&toolbar, false)?;
-                }
-                gui.suspend_input(&toolbar);
-                file_dialog.open(DialogKind::Font, &toolbar, None);
-                cmd.redraw_canvas = true;
-                toolbar_dirty = true;
-            }
             if cmd.screenshot_folder && !file_dialog.pending() {
                 app.finish_all_contacts();
                 tooltips.clear();
@@ -2433,6 +2551,30 @@ fn run_inner(options: Options) -> Result<(), String> {
             if let Some(source) = cmd.font_path.take() {
                 app.finish_all_contacts();
                 cmd.redraw_canvas |= app.install_annotation_font(&source, &annotation_font_path);
+                toolbar_dirty = true;
+            }
+            if let Some((from, to)) = cmd.font_reorder {
+                match app.text_fonts.move_font(from, to, &annotation_font_path) {
+                    Ok(()) => cmd.redraw_canvas = true,
+                    Err(error) => {
+                        app.status = text(
+                            "Could not reorder fonts",
+                            "无法调整字体顺序",
+                            "無法調整字型順序",
+                        )
+                        .detail(error);
+                    }
+                }
+                toolbar_dirty = true;
+            }
+            if let Some(id) = cmd.font_remove.take() {
+                match app.text_fonts.remove_font(&id, &annotation_font_path) {
+                    Ok(()) => cmd.redraw_canvas = true,
+                    Err(error) => {
+                        app.status = text("Could not remove font", "无法删除字体", "無法刪除字型")
+                            .detail(error);
+                    }
+                }
                 toolbar_dirty = true;
             }
             if cmd.reset_font {
@@ -2602,8 +2744,14 @@ fn run_inner(options: Options) -> Result<(), String> {
                 if !toolbar_ime_active {
                     output.platform_output.ime = None;
                 }
-                let rail = crate::toolbar::colors(theme == egui::Theme::Dark).rail;
-                toolbar_render.begin(&toolbar, rail.to_array().map(|c| f32::from(c) / 255.))?;
+                if let Err(error) = toolbar.update_rounded_shape(&mut toolbar_shape_size) {
+                    // Some compositors lack native shape masks. Keep a visible
+                    // rounded, alpha-composited UI rather than terminating the
+                    // entire application; retry after a real size/DPI change.
+                    eprintln!("OverInk: native toolbar shape unavailable: {error}");
+                    toolbar_shape_size = Some(toolbar.pixel_size());
+                }
+                toolbar_render.begin(&toolbar, [0.; 4])?;
                 gui.paint(&toolbar_render, &toolbar, &toolbar_color, output)?;
                 toolbar_render.present()?;
                 tooltips.update(&toolbar, &gui, app.language, &toolbar_color);
@@ -3048,6 +3196,7 @@ mod touch_tests {
     pub(super) fn app() -> App {
         App {
             input: CanvasInput::default(),
+            pen_double: stylus::PenDoubleTap::default(),
             parked_input: BTreeMap::new(),
             multi: false,
             history: History::default(),
@@ -3069,7 +3218,9 @@ mod touch_tests {
             frame_rate: FrameRate::Auto,
             preferences: Preferences::default(),
             text_fonts: TextFonts::default(),
-            font_path_input: None,
+            font_catalog: None,
+            font_search: String::new(),
+            adding_font: false,
             screenshot: Screenshot::default(),
             #[cfg(target_os = "linux")]
             gnome_guide: None,
@@ -3077,6 +3228,7 @@ mod touch_tests {
             suspended: false,
             frozen: false,
             panel: None,
+            panel_retiring: None,
             touch_enabled: true,
             status: Status::default(),
             path: String::new(),
@@ -3406,6 +3558,7 @@ mod touch_tests {
                     y: 80.,
                     axis: SDL_PEN_AXIS_XTILT,
                     value: 20.,
+                    pen_state: SDL_PEN_INPUT_DOWN,
                     ..Default::default()
                 },
             },

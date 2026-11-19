@@ -1,3 +1,6 @@
+mod pencil;
+pub use pencil::PencilModeMonitor;
+
 use crate::sdl::*;
 use objc2::{Encoding, RefEncode, msg_send, runtime::AnyObject};
 use std::{ffi::c_void, ptr::NonNull};

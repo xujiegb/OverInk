@@ -107,9 +107,19 @@ pub(super) struct TextInput {
     draft: Option<Draft>,
     press: Option<Press>,
     click: Option<(usize, Pos2, Instant)>,
+    touch_press: bool,
     menu_pointer: MenuPointer,
+    context_menu: Option<Pos2>,
     color_wheel: Option<ColorWheel>,
     screen_pick_requested: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TextContextAction {
+    SelectAll,
+    Copy,
+    Paste,
+    Cut,
 }
 
 #[derive(Default)]
@@ -119,8 +129,11 @@ struct MenuPointer {
 }
 
 impl MenuPointer {
-    fn wants_event(&mut self, event: &Event, menu: Option<TextMenus>) -> bool {
-        let contains = |pos| menu.is_some_and(|rect| rect.contains(pos));
+    fn wants_event(&mut self, event: &Event, menu: Option<TextMenus>, popup: Option<Rect>) -> bool {
+        let contains = |pos| {
+            menu.is_some_and(|rect| rect.contains(pos))
+                || popup.is_some_and(|rect| rect.contains(pos))
+        };
         match *event {
             Event::PointerMoved(pos) => {
                 let hovered = contains(pos);
@@ -245,6 +258,7 @@ impl TextInput {
     fn edit(&mut self, index: Option<usize>, item: TextBox) {
         self.cancel_press();
         self.menu_pointer = MenuPointer::default();
+        self.context_menu = None;
         self.color_wheel = None;
         self.selected = index;
         self.draft = Some(Draft {
@@ -294,7 +308,32 @@ impl App {
             changed |= self.cancel_text_touches(gui);
         }
         gui.event(event, window, size);
+        if editing
+            && ty == SDL_EVENT_MOUSE_BUTTON_DOWN
+            && let Some(button) = mouse_button_event(event)
+            && button.button == SDL_BUTTON_RIGHT as u8
+            && button.which != SDL_PEN_MOUSEID
+            && button.which != SDL_TOUCH_MOUSEID
+        {
+            let point = pos2(button.x, button.y);
+            if self
+                .text_menu_item()
+                .is_some_and(|item| item.rect().contains(point))
+            {
+                self.input.text.context_menu = Some(point);
+                changed = true;
+            }
+        }
+        if ty == SDL_EVENT_FINGER_DOWN && gui.primary_touch().is_some() {
+            self.input.text.touch_press = true;
+        } else if ty == SDL_EVENT_MOUSE_BUTTON_DOWN {
+            self.input.text.touch_press = false;
+        }
+        let touch_ended = matches!(ty, SDL_EVENT_FINGER_UP | SDL_EVENT_FINGER_CANCELED);
         if editing {
+            if touch_ended {
+                self.input.text.touch_press = false;
+            }
             return changed || gui.raw.events.len() != first;
         }
         let mut queued = first;
@@ -306,10 +345,14 @@ impl App {
             }
             changed |= self.text_pointer(event, size);
             let menu = self.text_menus(canvas);
-            let forward = self.input.text.menu_pointer.wants_event(event, menu);
+            let popup = self.text_context_rect(canvas);
+            let forward = self.input.text.menu_pointer.wants_event(event, menu, popup);
             changed |= forward;
             forward
         });
+        if touch_ended {
+            self.input.text.touch_press = false;
+        }
         changed
     }
 
@@ -317,6 +360,26 @@ impl App {
         let canvas = Rect::from_min_size(Pos2::ZERO, Vec2::from(size));
         let state = &mut self.input.text;
         match *event {
+            Event::PointerButton {
+                pos,
+                button: PointerButton::Secondary,
+                pressed: true,
+                ..
+            } => {
+                if !canvas.contains(pos) {
+                    return false;
+                }
+                if let Some((index, _)) =
+                    text_hit(&self.history, state.selected, pos, self.input.canvas_units)
+                {
+                    state.selected = Some(index);
+                    state.context_menu = Some(pos);
+                    state.click = None;
+                    return true;
+                }
+                state.context_menu = None;
+                false
+            }
             Event::PointerButton {
                 pos,
                 button: PointerButton::Primary,
@@ -335,10 +398,14 @@ impl App {
                 if self
                     .text_menus(canvas)
                     .is_some_and(|menus| menus.contains(pos))
+                    || self
+                        .text_context_rect(canvas)
+                        .is_some_and(|menu| menu.contains(pos))
                 {
                     return true;
                 }
                 let state = &mut self.input.text;
+                state.context_menu = None;
                 state.color_wheel = None;
                 state.press = Some(Press {
                     origin: pos,
@@ -376,7 +443,15 @@ impl App {
                                 && now.duration_since(when) < Duration::from_millis(400)
                                 && at.distance(pos) <= 8. * self.input.canvas_units
                         });
-                        if self.tool == Tool::Text || double {
+                        // Touch: first tap selects, subsequent tap enters the
+                        // editor, even after the mouse double-click timeout.
+                        let already_selected = state.selected == Some(index);
+                        let edit = if state.touch_press {
+                            already_selected
+                        } else {
+                            self.tool == Tool::Text || double
+                        };
+                        if edit {
                             state.edit(Some(index), (**item).clone());
                         } else {
                             state.selected = Some(index);
@@ -540,6 +615,156 @@ impl App {
             scale,
             palette,
         })
+    }
+
+    fn text_context_rect(&self, canvas: Rect) -> Option<Rect> {
+        let point = self.input.text.context_menu?;
+        let lines = if self.text_menu_item()?.text.is_empty() {
+            1.
+        } else {
+            4.
+        };
+        let size = vec2(170., lines * 32. + 12.) * self.input.canvas_units;
+        let min = pos2(
+            point
+                .x
+                .clamp(canvas.left(), (canvas.right() - size.x).max(canvas.left())),
+            point
+                .y
+                .clamp(canvas.top(), (canvas.bottom() - size.y).max(canvas.top())),
+        );
+        Some(Rect::from_min_size(min, size))
+    }
+
+    fn text_context_action(&mut self, action: TextContextAction) -> bool {
+        use crate::sdl::{clipboard_text, set_clipboard_text};
+        if action == TextContextAction::Paste && clipboard_text().is_none() {
+            return false;
+        }
+        if self.input.text.draft.is_none() {
+            let Some(index) = self.input.text.selected else {
+                return false;
+            };
+            let Some(item) = self.history.text_boxes().get(index) else {
+                return false;
+            };
+            if action == TextContextAction::Copy {
+                set_clipboard_text(&item.text);
+                return true;
+            }
+            self.input.text.edit(Some(index), (**item).clone());
+        }
+        let Some(draft) = self.input.text.draft.as_mut() else {
+            return false;
+        };
+        let total = draft.item.text.chars().count();
+        let selected = draft
+            .cursor
+            .map(|range| range.as_sorted_char_range())
+            .filter(|range| range.start != range.end)
+            .map(|range| (usize::from(range.start))..usize::from(range.end));
+        let range = selected.clone().unwrap_or(0..total);
+        match action {
+            TextContextAction::SelectAll => {
+                draft.cursor = Some(CCursorRange::two(CCursor::new(0), CCursor::new(total)));
+                draft.focus = true;
+            }
+            TextContextAction::Copy | TextContextAction::Cut => {
+                let start = draft
+                    .item
+                    .text
+                    .char_indices()
+                    .nth(range.start)
+                    .map_or(draft.item.text.len(), |(i, _)| i);
+                let end = draft
+                    .item
+                    .text
+                    .char_indices()
+                    .nth(range.end)
+                    .map_or(draft.item.text.len(), |(i, _)| i);
+                set_clipboard_text(&draft.item.text[start..end]);
+                if action == TextContextAction::Cut {
+                    draft.item.text.delete_char_range(
+                        egui::text::CharIndex(range.start)..egui::text::CharIndex(range.end),
+                    );
+                    draft.committed.clone_from(&draft.item.text);
+                    draft.cursor = Some(CCursorRange::one(CCursor::new(range.start)));
+                    draft.focus = true;
+                }
+            }
+            TextContextAction::Paste => {
+                let Some(clipboard) = clipboard_text() else {
+                    return false;
+                };
+                let caret = selected.as_ref().map_or(
+                    draft
+                        .cursor
+                        .map_or(total, |range| range.primary.index.into()),
+                    |range| range.start,
+                );
+                let to_replace = selected.unwrap_or(caret..caret);
+                let max = MAX_TEXT_CHARS
+                    .saturating_sub(total.saturating_sub(to_replace.end - to_replace.start));
+                let insertion: String = clipboard.chars().take(max).collect();
+                draft.item.text.delete_char_range(
+                    egui::text::CharIndex(to_replace.start)..egui::text::CharIndex(to_replace.end),
+                );
+                let inserted = draft
+                    .item
+                    .text
+                    .insert_text(&insertion, egui::text::CharIndex(caret));
+                draft.committed.clone_from(&draft.item.text);
+                draft.cursor = Some(CCursorRange::one(CCursor::new(caret + inserted)));
+                draft.focus = true;
+            }
+        }
+        true
+    }
+
+    fn text_context_popup(&mut self, ui: &mut Ui, rect: Rect) {
+        let tr = self.language;
+        let has_text = self
+            .text_menu_item()
+            .is_some_and(|item| !item.text.is_empty());
+        let mut action = None;
+        overlay(ui, "annotation-context-popup", rect, |ui| {
+            egui::Frame::new()
+                .fill(ui.visuals().window_fill())
+                .stroke(ui.visuals().window_stroke())
+                .corner_radius(egui::CornerRadius::same(12))
+                .inner_margin(egui::Margin::same(6))
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing = Vec2::ZERO;
+                    let entries = [
+                        (
+                            TextContextAction::SelectAll,
+                            tr.text("Select all", "全选", "全選"),
+                        ),
+                        (TextContextAction::Copy, tr.text("Copy", "拷贝", "複製")),
+                        (TextContextAction::Paste, tr.text("Paste", "粘贴", "貼上")),
+                        (TextContextAction::Cut, tr.text("Cut", "剪切", "剪下")),
+                    ];
+                    for (choice, title) in entries {
+                        if !has_text && choice != TextContextAction::Paste {
+                            continue;
+                        }
+                        if ui
+                            .add_sized(
+                                vec2(rect.width() - 12., 32. * self.input.canvas_units),
+                                egui::Button::new(title),
+                            )
+                            .clicked()
+                        {
+                            action = Some(choice);
+                        }
+                    }
+                });
+        });
+        if let Some(action) = action {
+            self.input.text.context_menu = None;
+            self.text_context_action(action);
+            ui.ctx().request_repaint();
+        }
     }
 
     pub(super) fn text_pick_target(&self) -> Option<TextPickTarget> {
@@ -884,6 +1109,9 @@ impl App {
                     });
                 }
             }
+            if let Some(rect) = self.text_context_rect(screen) {
+                self.text_context_popup(ui, rect);
+            }
         }
     }
 
@@ -895,6 +1123,7 @@ impl App {
         menus: Option<TextMenus>,
     ) {
         let wheel_open = self.input.text.color_wheel.is_some();
+        let context_rect = self.text_context_rect(ui.clip_rect());
         let Some(draft) = self.input.text.draft.as_mut() else {
             return;
         };
@@ -923,6 +1152,7 @@ impl App {
             let clicked = input.pointer.primary_clicked().then(|| input.pointer.interact_pos()).flatten();
             let menu_pointer = input.pointer.interact_pos().is_some_and(|point| {
                 menus.is_some_and(|menus| menus.contains(point))
+                    || context_rect.is_some_and(|rect| rect.contains(point))
             });
             let finish = lost_window_focus
                 || (!composing
