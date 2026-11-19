@@ -207,6 +207,7 @@ impl TextInput {
             .is_some_and(|draft| match self.selected {
                 Some(index) => history.text_boxes().get(index).is_some_and(|original| {
                     original.text != draft.committed
+                        || original.font != draft.item.font
                         || original.color != draft.item.color
                         || original.font_size != draft.item.font_size
                 }),
@@ -495,6 +496,7 @@ impl App {
             preview.origin = source.origin;
             preview.size = source.size;
             preview.font_size = source.font_size;
+            preview.font.clone_from(&source.font);
             preview.color = source.color;
             preview.scroll_offset = source.scroll_offset;
             if preview.text != source.text {
@@ -553,7 +555,7 @@ impl App {
         true
     }
 
-    fn text_menu_item(&self) -> Option<&TextBox> {
+    pub(super) fn text_menu_item(&self) -> Option<&TextBox> {
         let state = &self.input.text;
         state.draft.as_ref().map(|draft| &draft.item).or_else(|| {
             let item = self.history.text_boxes().get(state.selected?)?;
@@ -662,6 +664,27 @@ impl App {
         let color = color.converted(current.space);
         // Picking an already selected color is still a successful pick.
         (current == color || self.recolor_text(color)).then_some(color)
+    }
+
+    pub(super) fn set_text_box_font(&mut self, key: Option<String>) -> bool {
+        if self.text_fonts.display_name(key.as_deref().unwrap_or("")).is_none()
+            && key.is_some()
+        {
+            return false;
+        }
+        if let Some(draft) = &mut self.input.text.draft {
+            draft.item.font = key;
+            return true;
+        }
+        if let Some(index) = self.input.text.selected
+            && let Some(item) = self.history.text_boxes().get(index)
+        {
+            let mut updated = (**item).clone();
+            updated.font = key;
+            self.history.set_text_box(Some(index), updated);
+            return true;
+        }
+        false
     }
 
     fn resize_text_font(&mut self, step: f32) {
@@ -1140,13 +1163,14 @@ impl App {
         });
         draft.had_input_focus |= focused;
         let font_size = draft.item.font_size;
+        let font_family = draft.item.font.clone();
         let color = ink(&draft.item);
         let mut child = ui.new_child(UiBuilder::new().max_rect(text_rect));
         child.set_clip_rect(text_rect.intersect(ui.clip_rect()));
         child.spacing_mut().item_spacing = Vec2::ZERO;
         let mut layouter = |ui: &Ui, value: &dyn egui::TextBuffer, wrap: f32| {
             self.text_fonts
-                .layout(ui, value.as_str(), font_size, color, wrap)
+                .layout_preferred(ui, value.as_str(), font_size, color, wrap, font_family.as_deref())
         };
         let mut scroll = egui::ScrollArea::vertical()
             .id_salt("annotation-scroll")
@@ -1159,7 +1183,7 @@ impl App {
         let output = scroll.show(&mut child, |ui| {
             egui::TextEdit::multiline(&mut draft.item.text)
                 .id(id)
-                .font(TextFonts::font_id(font_size))
+                .font(self.text_fonts.font_id_preferred(font_size, font_family.as_deref()))
                 .event_filter(egui::EventFilter {
                     horizontal_arrows: true,
                     vertical_arrows: true,
@@ -1226,7 +1250,9 @@ fn draw_text_box(ui: &Ui, fonts: &TextFonts, item: &TextBox) {
     let rect = item.text_rect();
     if ui.is_rect_visible(rect) {
         let color = ink(item);
-        let galley = fonts.layout(ui, &item.text, item.font_size, color, rect.width());
+        let galley = fonts.layout_preferred(
+            ui, &item.text, item.font_size, color, rect.width(), item.font.as_deref()
+        );
         let offset = item.visible_scroll_offset(galley.size().y);
         ui.painter()
             .with_clip_rect(rect.intersect(ui.clip_rect()))
