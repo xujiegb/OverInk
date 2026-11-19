@@ -85,9 +85,6 @@ struct FingerStroke {
     stroke: Option<Stroke>,
     fragments: Vec<Stroke>,
     last: Option<Point>,
-    /// Whether this contact has supplied genuine positive pressure.
-    /// Normal touch drivers can legitimately report only zero pressure.
-    pressure_seen: bool,
 }
 struct LaserSample {
     point: Point,
@@ -97,107 +94,6 @@ struct LaserSample {
 const LEFT_BUTTON: u8 = SDL_BUTTON_LEFT as u8;
 const RIGHT_BUTTON: u8 = SDL_BUTTON_RIGHT as u8;
 const LASER_LIFETIME: Duration = Duration::from_millis(900);
-/// Sidecar occasionally supplies a release coordinate far beyond the last
-/// physical contact. It should never become a long pen/finger ink segment.
-const MACOS_MAX_RELEASE_JUMP: f32 = 128.;
-
-/// Opt-in, local-only diagnostic trace. Set OVERINK_TRACE_INPUT=1 when
-/// reproducing a Sidecar bridging issue to capture the event source and
-/// release state. Kept behind a cached flag to avoid formatting or I/O in
-/// ordinary pen and mouse hot paths.
-fn trace_input_event(event: &SDL_Event) {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if !*ENABLED
-        .get_or_init(|| std::env::var("OVERINK_TRACE_INPUT").is_ok_and(|value| value == "1"))
-    {
-        return;
-    }
-    match event_type(event) {
-        SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP => {
-            if let Some(pen) = pen_touch_event(event) {
-                eprintln!(
-                    "OverInk input PEN_TOUCH ts={} window={} pen={} down={} state={} xy=({:.1},{:.1})",
-                    pen.timestamp,
-                    pen.windowID.0,
-                    pen.which.0,
-                    pen.down,
-                    pen.pen_state.0,
-                    pen.x,
-                    pen.y
-                );
-            }
-        }
-        SDL_EVENT_PEN_MOTION => {
-            if let Some(pen) = pen_motion_event(event) {
-                eprintln!(
-                    "OverInk input PEN_MOTION ts={} window={} pen={} state={} xy=({:.1},{:.1})",
-                    pen.timestamp, pen.windowID.0, pen.which.0, pen.pen_state.0, pen.x, pen.y
-                );
-            }
-        }
-        SDL_EVENT_PEN_AXIS => {
-            if let Some(pen) = pen_axis_event(event) {
-                eprintln!(
-                    "OverInk input PEN_AXIS ts={} window={} pen={} state={} axis={} value={:.4} xy=({:.1},{:.1})",
-                    pen.timestamp,
-                    pen.windowID.0,
-                    pen.which.0,
-                    pen.pen_state.0,
-                    pen.axis.0,
-                    pen.value,
-                    pen.x,
-                    pen.y
-                );
-            }
-        }
-        SDL_EVENT_MOUSE_BUTTON_DOWN | SDL_EVENT_MOUSE_BUTTON_UP => {
-            if let Some(mouse) = mouse_button_event(event) {
-                eprintln!(
-                    "OverInk input MOUSE_BUTTON ts={} window={} mouse={} button={} down={} xy=({:.1},{:.1})",
-                    mouse.timestamp,
-                    mouse.windowID.0,
-                    mouse.which.0,
-                    mouse.button,
-                    mouse.down,
-                    mouse.x,
-                    mouse.y
-                );
-            }
-        }
-        SDL_EVENT_MOUSE_MOTION => {
-            if let Some(mouse) = mouse_motion_event(event) {
-                eprintln!(
-                    "OverInk input MOUSE_MOTION ts={} window={} mouse={} state={} xy=({:.1},{:.1})",
-                    mouse.timestamp,
-                    mouse.windowID.0,
-                    mouse.which.0,
-                    mouse.state.0,
-                    mouse.x,
-                    mouse.y
-                );
-            }
-        }
-        SDL_EVENT_FINGER_DOWN
-        | SDL_EVENT_FINGER_MOTION
-        | SDL_EVENT_FINGER_UP
-        | SDL_EVENT_FINGER_CANCELED => {
-            if let Some(finger) = finger_event(event) {
-                eprintln!(
-                    "OverInk input FINGER ts={} type={} window={} touch={} finger={} pressure={:.4} xy=({:.4},{:.4})",
-                    finger.timestamp,
-                    event_type(event).0,
-                    finger.windowID.0,
-                    finger.touchID.0,
-                    finger.fingerID.0,
-                    finger.pressure,
-                    finger.x,
-                    finger.y
-                );
-            }
-        }
-        _ => {}
-    }
-}
 const MAX_LASER_SAMPLES: usize = 4096;
 #[derive(Default)]
 struct Commands {
@@ -1025,22 +921,7 @@ impl App {
         }
         if event.r#type == SDL_EVENT_FINGER_UP {
             if let Some(point) = touch::point(event, size) {
-                // A sparse but valid touch can travel a long distance between
-                // DOWN and UP. Distance alone must not discard its endpoint.
-                // A macOS release is suspicious only after *positive* touch
-                // pressure was observed and the UP packet reports zero.
-                let stale_release = cfg!(target_os = "macos")
-                    && event.pressure <= 0.
-                    && self.input.touches.get(&key).is_some_and(|finger| {
-                        finger.pressure_seen
-                            && finger
-                                .last
-                                .or_else(|| finger.stroke.as_ref()?.points.last().copied())
-                                .is_some_and(|last| last.dist(point) > MACOS_MAX_RELEASE_JUMP)
-                    });
-                if !stale_release {
-                    self.touch_motion(key, point);
-                }
+                self.touch_motion(key, point);
             }
             if let Some(finger) = self.input.touches.remove(&key) {
                 self.commit_touch(finger);
@@ -1100,14 +981,8 @@ impl App {
                     stroke,
                     fragments: Vec::new(),
                     last: None,
-                    pressure_seen: event.pressure.is_finite() && event.pressure > 0.,
                 },
             );
-        } else if event.pressure.is_finite()
-            && event.pressure > 0.
-            && let Some(finger) = self.input.touches.get_mut(&key)
-        {
-            finger.pressure_seen = true;
         }
         self.touch_motion(key, point);
     }
@@ -1115,23 +990,6 @@ impl App {
     // local to the canvas. This helper is safe to call on all parked pages:
     // unlike track_pen, it does not mark an unrelated page as pen-proximate
     // or cancel the page's ongoing finger gestures.
-    fn release_mouse_if_button_up(&mut self, state: SDL_MouseButtonFlags) {
-        let Some(Source::Mouse(button)) = self.input.contact.map(|contact| contact.source) else {
-            return;
-        };
-        let pressed = match button {
-            LEFT_BUTTON => state.0 & SDL_BUTTON_LMASK.0 != 0,
-            RIGHT_BUTTON => state.0 & SDL_BUTTON_RMASK.0 != 0,
-            _ => true,
-        };
-        if !pressed {
-            // Sidecar's mouse-compatible motion can survive an absent or
-            // differently routed button-up event. It must not bridge two
-            // independent strokes while the button state is already released.
-            self.end(Source::Mouse(button));
-        }
-    }
-
     fn release_pen(&mut self, id: u32, definitive: bool) {
         let had_contact = self
             .input
@@ -1166,22 +1024,10 @@ impl App {
             self.input.pen_proximity.remove(&id);
             return;
         }
-        // Sidecar and some tablet drivers can deliver hover motion/axis
-        // before (or instead of) PEN_UP. SDL's pen_state is the contact
-        // truth for these packets: a hovering pen must NEVER extend ink,
-        // even if a previous PEN_UP packet was lost or routed elsewhere.
-        let lifted = match ty {
-            SDL_EVENT_PEN_UP => true,
-            SDL_EVENT_PEN_MOTION => {
-                pen_motion_event(event).is_some_and(|pen| pen.pen_state & SDL_PEN_INPUT_DOWN == 0)
-            }
-            SDL_EVENT_PEN_AXIS => {
-                pen_axis_event(event).is_some_and(|pen| pen.pen_state & SDL_PEN_INPUT_DOWN == 0)
-            }
-            _ => false,
-        };
-        if lifted {
-            self.release_pen(id, ty == SDL_EVENT_PEN_UP);
+        // Only an explicit pen-up ends contact here. Proximity-out already
+        // releases and forgets this pen above.
+        if ty == SDL_EVENT_PEN_UP {
+            self.release_pen(id, true);
         }
         if self.input.pen_proximity.insert(id) {
             self.discard_touches();
@@ -1189,9 +1035,7 @@ impl App {
     }
     fn event(&mut self, e: &SDL_Event, overlay: SDL_WindowID, size: [f32; 2]) {
         let ty = event_type(e);
-        // Preserve PEN_UP's final endpoint sample before reconciling its
-        // released state. Hover packets, in contrast, must end the stroke
-        // *before* motion() or axis processing can append their coordinates.
+        // Accept the final PEN_UP endpoint before ending the pen contact.
         if ty != SDL_EVENT_PEN_UP {
             self.track_pen(e);
         }
@@ -1244,7 +1088,6 @@ impl App {
                     return;
                 };
                 if m.which != SDL_PEN_MOUSEID && m.which != SDL_TOUCH_MOUSEID {
-                    self.release_mouse_if_button_up(m.state);
                     if let Some(contact) = self.input.contact
                         && matches!(contact.source, Source::Mouse(_))
                     {
@@ -1300,20 +1143,7 @@ impl App {
                         // In that case the stored DOWN coordinate is valid.
                         self.begin_pen(t.which.0, pending.point, pending.eraser, pen.has_pressure);
                     }
-                    // PEN_UP is a release signal, not an instruction to draw
-                    // a connector to any stale coordinate Cocoa/SDL supplies.
-                    // Keep nearby endpoint samples for natural stroke ends,
-                    // but reject implausibly distant Sidecar release positions.
-                    let accept_endpoint = !cfg!(target_os = "macos")
-                        || !pen.has_pressure
-                        || pen.pressure <= 0.
-                        || self.input.contact.is_none_or(|contact| {
-                            contact.source != source
-                                || contact.last.dist(p) <= MACOS_MAX_RELEASE_JUMP
-                        });
-                    if accept_endpoint {
-                        self.pen_motion(source, p, pen.has_pressure);
-                    }
+                    self.pen_motion(source, p, pen.has_pressure);
                     self.end(source);
                     // The common PEN_UP reconciliation at the end of event()
                     // resets the cached pen exactly once.
@@ -1324,28 +1154,6 @@ impl App {
                     return;
                 };
                 let source = Source::Pen(a.which.0);
-                // Cocoa reports pressure zero when the nib leaves the iPad,
-                // even if a compatibility packet still carries a stale DOWN
-                // bit. Only treat this as lift-off after real positive pressure
-                // has already been observed during this stroke. Never split
-                // on the normal zero-pressure sample preceding first contact.
-                if cfg!(target_os = "macos")
-                    && a.axis == SDL_PEN_AXIS_PRESSURE
-                    && a.value.is_finite()
-                    && a.value <= 0.
-                    && self
-                        .input
-                        .pens
-                        .get(&a.which.0)
-                        .is_some_and(|pen| pen.down && pen.has_pressure && pen.pressure > 0.)
-                    && self
-                        .input
-                        .contact
-                        .is_some_and(|contact| contact.source == source)
-                {
-                    self.release_pen(a.which.0, true);
-                    return;
-                }
                 let pen = self.input.pens.entry(a.which.0).or_default();
                 let in_contact = pen.down || a.pen_state & SDL_PEN_INPUT_DOWN != 0;
                 match a.axis {
@@ -1933,7 +1741,6 @@ fn run_inner(options: Options) -> Result<(), String> {
             let mut event = SDL_Event::default();
             while poll_event(&mut event) {
                 let ty = event_type(&event);
-                trace_input_event(&event);
                 if ty == SDL_EVENT_QUIT {
                     running = false;
                     break;
@@ -2056,34 +1863,6 @@ fn run_inner(options: Options) -> Result<(), String> {
                         tooltips.renderer_reset_window(id);
                     }
                     app.for_each_page(|page| page.input.text.refocus());
-                }
-
-                // The owning canvas can differ from the SDL hover packet's
-                // windowID. End its pen contact on every parked page, but do
-                // not mark the other pages as pen-proximate.
-                let hover_pen = match ty {
-                    SDL_EVENT_PEN_MOTION => pen_motion_event(&event)
-                        .filter(|pen| pen.pen_state & SDL_PEN_INPUT_DOWN == 0)
-                        .map(|pen| pen.which.0),
-                    SDL_EVENT_PEN_AXIS => pen_axis_event(&event)
-                        .filter(|pen| pen.pen_state & SDL_PEN_INPUT_DOWN == 0)
-                        .map(|pen| pen.which.0),
-                    _ => None,
-                };
-                if let Some(id) = hover_pen {
-                    app.for_each_page(|page| page.release_pen(id, false));
-                }
-
-                // AppKit may forward Sidecar input as ordinary SDL mouse
-                // packets, not PEN packets. Unlike the old pen-state-only
-                // fix, a mouse packet with its contact button *not pressed*
-                // now ends stale ink even if MOUSE_BUTTON_UP was lost, or a
-                // hover packet was routed to the toolbar/another canvas.
-                if let Some(mouse) = mouse_motion_event(&event)
-                    && mouse.which != SDL_PEN_MOUSEID
-                    && mouse.which != SDL_TOUCH_MOUSEID
-                {
-                    app.for_each_page(|page| page.release_mouse_if_button_up(mouse.state));
                 }
 
                 if screenshot_owns_input {
@@ -2305,15 +2084,6 @@ fn run_inner(options: Options) -> Result<(), String> {
                         running = false;
                         break;
                     }
-                }
-                if ty == SDL_EVENT_MOUSE_BUTTON_UP
-                    && let Some(mouse) = mouse_button_event(&event)
-                    && mouse.which != SDL_PEN_MOUSEID
-                    && mouse.which != SDL_TOUCH_MOUSEID
-                {
-                    // SDL can send mouse-up to a different window when the
-                    // controller steals focus between two Sidecar strokes.
-                    app.for_each_page(|page| page.end(Source::Mouse(mouse.button)));
                 }
                 if ty == SDL_EVENT_PEN_UP
                     && let Some(pen) = pen_touch_event(&event)
