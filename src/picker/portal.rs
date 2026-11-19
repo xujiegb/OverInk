@@ -9,11 +9,13 @@ use std::{
     collections::HashMap,
     path::PathBuf,
     sync::{
-        atomic::{AtomicU8, AtomicU64, Ordering},
-        mpsc, Arc,
+        atomic::{AtomicU64, Ordering},
+        mpsc,
     },
     thread,
 };
+#[cfg(target_os = "linux")]
+use std::sync::{Arc, atomic::AtomicU8};
 use zbus::{Connection, OwnedObjectPath, OwnedVariant, Proxy, Structure, Variant};
 
 type PortalResult<T> = Result<Option<T>, String>;
