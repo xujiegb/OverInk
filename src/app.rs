@@ -3970,13 +3970,21 @@ mod touch_tests {
         );
         assert!(app.pass);
         assert!(!app.wait_for_mouse_up);
+        assert!(app.mouse_ready());
         assert_eq!(app.tool, Tool::Pen);
         assert!(!app.hidden);
 
-        app.toggle_mouse();
+        let space = SDL_Event {
+            key: SDL_KeyboardEvent {
+                r#type: SDL_EVENT_KEY_DOWN,
+                key: SDLK_SPACE,
+                ..Default::default()
+            },
+        };
+        assert!(app.keyboard(&space, false).mode);
         assert!(!app.pass);
         assert_eq!(app.tool, Tool::Pen);
-        app.toggle_mouse();
+        assert!(app.keyboard(&space, false).mode);
         assert!(app.pass);
         Ok(())
     }
