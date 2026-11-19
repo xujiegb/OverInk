@@ -498,7 +498,7 @@ mod tests {
         assert!(fs::create_dir_all(&base).is_ok());
         let font_path = base.join("annotation-font");
         let mut fonts = TextFonts::default();
-        assert!(fonts.remove(DEFAULT, &font_path).is_err());
+        assert!(fonts.remove(INCLUDED_FONT, &font_path).is_err());
         assert!(fonts.move_priority(0, 2, &font_path).is_ok());
         let saved: Vec<String> = fonts
             .entries()
