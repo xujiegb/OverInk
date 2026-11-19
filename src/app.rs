@@ -2071,7 +2071,8 @@ fn run_inner(options: Options) -> Result<(), String> {
                 }
                 if requested.is_some()
                     && !wayland
-                    && let Err(error) = toolbar.arrange_toolbar_width(toolbar_panel_width, app.pages.active)
+                    && let Err(error) =
+                        toolbar.arrange_toolbar_width(toolbar_panel_width, app.pages.active)
                 {
                     app.status = text("Toolbar layout failed", "工具栏布局失败", "工具列配置失敗")
                         .detail(error);
@@ -2336,7 +2337,10 @@ fn run_inner(options: Options) -> Result<(), String> {
                 }
             }
             let now = Instant::now();
-            let elapsed = now.saturating_duration_since(toolbar_panel_at).as_secs_f32().min(0.1);
+            let elapsed = now
+                .saturating_duration_since(toolbar_panel_at)
+                .as_secs_f32()
+                .min(0.1);
             toolbar_panel_at = now;
             let motion = 1. - (-18. * elapsed).exp();
             let target_width = if target_panel.is_some() {
@@ -2357,8 +2361,8 @@ fn run_inner(options: Options) -> Result<(), String> {
             if target_panel.is_none() && toolbar_panel_width == 0. {
                 app.panel_visual = None;
             }
-            let animating = toolbar_panel_width != target_width
-                || app.panel_opacity != target_opacity;
+            let animating =
+                toolbar_panel_width != target_width || app.panel_opacity != target_opacity;
             if (toolbar_panel_width - previous_width).abs() > 0.01 || controller_scale_changed {
                 toolbar_dirty = true;
                 controller_bounds_changed = true;
@@ -2483,12 +2487,8 @@ fn run_inner(options: Options) -> Result<(), String> {
                 match app.text_fonts.remove_font(index, &annotation_font_path) {
                     Ok(changed) => cmd.redraw_canvas |= changed,
                     Err(error) => {
-                        app.status = text(
-                            "Could not remove font",
-                            "无法删除字体",
-                            "無法刪除字型",
-                        )
-                        .detail(error);
+                        app.status = text("Could not remove font", "无法删除字体", "無法刪除字型")
+                            .detail(error);
                     }
                 }
                 toolbar_dirty = true;
