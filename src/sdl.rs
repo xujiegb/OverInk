@@ -34,22 +34,8 @@ static WAYLAND_SCALE_TO_DISPLAY_FORCED: std::sync::atomic::AtomicBool =
 unsafe extern "C" {
     #[link_name = "SDL_IsMainThread"]
     safe fn native_is_main_thread() -> bool;
-    // The mouse getters synchronously copy optional float coordinates. Use
-    // real exclusive Rust borrows rather than arbitrary nullable pointers.
-    #[cfg(not(target_os = "macos"))]
-    #[link_name = "SDL_GetMouseState"]
-    safe fn native_mouse_state(x: &mut f32, y: &mut f32) -> SDL_MouseButtonFlags;
-    #[cfg(target_os = "macos")]
-    #[link_name = "SDL_GetGlobalMouseState"]
-    safe fn native_global_mouse_state(x: &mut f32, y: &mut f32) -> SDL_MouseButtonFlags;
     #[link_name = "SDL_GetModState"]
     safe fn native_mod_state() -> SDL_Keymod;
-    #[link_name = "SDL_GetSystemTheme"]
-    safe fn native_system_theme() -> SDL_SystemTheme;
-    #[link_name = "SDL_GetTouchDeviceType"]
-    safe fn native_touch_device_type(device: SDL_TouchID) -> SDL_TouchDeviceType;
-    #[link_name = "SDL_CaptureMouse"]
-    safe fn native_capture_mouse(enable: bool) -> bool;
     #[link_name = "SDL_DelayPrecise"]
     safe fn native_delay_precise(nanoseconds: u64);
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -65,21 +51,6 @@ unsafe extern "C" {
         out: &mut sdl3_sys::time::SDL_DateTime,
         local: bool,
     ) -> bool;
-    // SDL copies event values into/out of a borrowed Rust SDL_Event. The
-    // nullable wait result is expressed by Option rather than a raw pointer.
-    // The event wrappers restrict polling, waiting and flushing to SDL's
-    // main thread. SDL_PushEvent also supports other threads and copies the
-    // provided event before returning.
-    #[link_name = "SDL_PollEvent"]
-    safe fn native_poll_event(event: &mut SDL_Event) -> bool;
-    #[link_name = "SDL_WaitEventTimeout"]
-    safe fn native_wait_event_timeout(event: Option<&mut SDL_Event>, timeout_ms: i32) -> bool;
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    #[link_name = "SDL_PushEvent"]
-    safe fn native_push_event(event: &mut SDL_Event) -> bool;
-    #[cfg(target_os = "linux")]
-    #[link_name = "SDL_FlushEvent"]
-    safe fn native_flush_event(event_type: u32);
 }
 
 /// A borrowed native backend handle whose lifetime is tied to the SDL
@@ -139,7 +110,7 @@ struct SdlAllocation<T>(NonNull<T>);
 /// The only permitted SDL lifecycle operations. Native handles only enter
 /// these variants from their unique Rust owners; no foreign function pointer
 /// or raw buffer can be supplied by application code.
-enum SdlLifecycle {
+enum SdlNativeAction<'a> {
     Shutdown,
     FreeAllocation(NonNull<c_void>),
     CreateProperties,
@@ -149,16 +120,27 @@ enum SdlLifecycle {
     CurrentCursor,
     DefaultCursor,
     DestroyCursor(NonNull<SDL_Cursor>),
+    SystemTheme,
+    IndirectTouch(SDL_TouchID),
+    CaptureMouse(bool),
+    MouseButtonsReleased,
+    PollEvent(&'a mut SDL_Event),
+    WaitEvent(i32),
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    PushUserEvent(&'a mut SDL_Event),
+    #[cfg(target_os = "linux")]
+    FlushQuitEvent,
 }
 
-enum SdlLifecycleResult {
+enum SdlNativeResult {
     Done,
     Properties(SDL_PropertiesID),
     Cursor(Option<NonNull<SDL_Cursor>>),
     Success(bool),
+    Theme(SDL_SystemTheme),
 }
 
-impl SdlLifecycleResult {
+impl SdlNativeResult {
     fn properties(self) -> Option<SDL_PropertiesID> {
         if let Self::Properties(id) = self {
             Some(id)
@@ -178,48 +160,86 @@ impl SdlLifecycleResult {
     fn succeeded(self) -> bool {
         matches!(self, Self::Success(true))
     }
+
+    fn theme(self) -> SDL_SystemTheme {
+        if let Self::Theme(theme) = self {
+            theme
+        } else {
+            SDL_SYSTEM_THEME_UNKNOWN
+        }
+    }
 }
 
-/// One native lifecycle boundary shared by SDL allocation, property and
-/// cursor RAII guards and the main-thread Runtime shutdown.
-fn sdl_lifecycle(action: SdlLifecycle) -> SdlLifecycleResult {
-    // SAFETY: Every destruction variant is created only by its unique Rust
-    // owner (SdlAllocation, OwnedProperties, SystemCursor or Runtime).
-    // Cursor calls use SDL's main thread and live video subsystem; Runtime
-    // checks the SDL main thread before shutdown. The SDL allocation has
-    // its matching allocator, and none of these functions retain input.
+/// Native SDL operations are restricted to typed actions; application code
+/// never receives unsafe FFI functions or naked SDL-owned allocations.
+fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
+    // SAFETY: Destruction variants are created only by unique Rust owners.
+    // Cursor, device, event-poll and video operations are checked at the
+    // owning main-thread wrappers. SDL_PushEvent copies the locally built
+    // user event, and SDL_WaitEventTimeout receives no output buffer.
+    // Getter outputs are initialized local scalars. SDL_free only receives
+    // allocations created by SDL and kept in RAII guards.
     unsafe {
         match action {
-            SdlLifecycle::Shutdown => {
+            SdlNativeAction::Shutdown => {
                 SDL_Quit();
-                SdlLifecycleResult::Done
+                SdlNativeResult::Done
             }
-            SdlLifecycle::FreeAllocation(raw) => {
+            SdlNativeAction::FreeAllocation(raw) => {
                 SDL_free(raw.as_ptr());
-                SdlLifecycleResult::Done
+                SdlNativeResult::Done
             }
-            SdlLifecycle::CreateProperties => {
-                SdlLifecycleResult::Properties(SDL_CreateProperties())
+            SdlNativeAction::CreateProperties => {
+                SdlNativeResult::Properties(SDL_CreateProperties())
             }
-            SdlLifecycle::DestroyProperties(id) => {
+            SdlNativeAction::DestroyProperties(id) => {
                 SDL_DestroyProperties(id);
-                SdlLifecycleResult::Done
+                SdlNativeResult::Done
             }
-            SdlLifecycle::CreateCrosshair => SdlLifecycleResult::Cursor(NonNull::new(
+            SdlNativeAction::CreateCrosshair => SdlNativeResult::Cursor(NonNull::new(
                 SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_CROSSHAIR),
             )),
-            SdlLifecycle::SetCursor(cursor) => SdlLifecycleResult::Success(SDL_SetCursor(
+            SdlNativeAction::SetCursor(cursor) => SdlNativeResult::Success(SDL_SetCursor(
                 cursor.map_or(ptr::null_mut(), NonNull::as_ptr),
             )),
-            SdlLifecycle::CurrentCursor => {
-                SdlLifecycleResult::Cursor(NonNull::new(SDL_GetCursor()))
+            SdlNativeAction::CurrentCursor => {
+                SdlNativeResult::Cursor(NonNull::new(SDL_GetCursor()))
             }
-            SdlLifecycle::DefaultCursor => {
-                SdlLifecycleResult::Cursor(NonNull::new(SDL_GetDefaultCursor()))
+            SdlNativeAction::DefaultCursor => {
+                SdlNativeResult::Cursor(NonNull::new(SDL_GetDefaultCursor()))
             }
-            SdlLifecycle::DestroyCursor(cursor) => {
+            SdlNativeAction::DestroyCursor(cursor) => {
                 SDL_DestroyCursor(cursor.as_ptr());
-                SdlLifecycleResult::Done
+                SdlNativeResult::Done
+            }
+            SdlNativeAction::SystemTheme => SdlNativeResult::Theme(SDL_GetSystemTheme()),
+            SdlNativeAction::IndirectTouch(device) => SdlNativeResult::Success(matches!(
+                SDL_GetTouchDeviceType(device),
+                SDL_TOUCH_DEVICE_INDIRECT_ABSOLUTE | SDL_TOUCH_DEVICE_INDIRECT_RELATIVE
+            )),
+            SdlNativeAction::CaptureMouse(enabled) => {
+                SdlNativeResult::Success(SDL_CaptureMouse(enabled))
+            }
+            SdlNativeAction::MouseButtonsReleased => {
+                let (mut x, mut y) = (0.0, 0.0);
+                #[cfg(target_os = "macos")]
+                let buttons = SDL_GetGlobalMouseState(&mut x, &mut y);
+                #[cfg(not(target_os = "macos"))]
+                let buttons = SDL_GetMouseState(&mut x, &mut y);
+                SdlNativeResult::Success(buttons.0 == 0)
+            }
+            SdlNativeAction::PollEvent(event) => SdlNativeResult::Success(SDL_PollEvent(event)),
+            SdlNativeAction::WaitEvent(timeout) => {
+                SdlNativeResult::Success(SDL_WaitEventTimeout(ptr::null_mut(), timeout))
+            }
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            SdlNativeAction::PushUserEvent(event) => {
+                SdlNativeResult::Success(SDL_PushEvent(event))
+            }
+            #[cfg(target_os = "linux")]
+            SdlNativeAction::FlushQuitEvent => {
+                SDL_FlushEvent(SDL_EVENT_QUIT.0);
+                SdlNativeResult::Done
             }
         }
     }
@@ -227,7 +247,7 @@ fn sdl_lifecycle(action: SdlLifecycle) -> SdlLifecycleResult {
 
 impl<T> Drop for SdlAllocation<T> {
     fn drop(&mut self) {
-        let _ = sdl_lifecycle(SdlLifecycle::FreeAllocation(self.0.cast()));
+        let _ = sdl_native(SdlNativeAction::FreeAllocation(self.0.cast()));
     }
 }
 
@@ -368,7 +388,7 @@ impl Drop for Runtime {
         // down if a foreign callback somehow causes off-main destruction.
         if native_is_main_thread() {
             SDL_VIDEO_READY.store(false, std::sync::atomic::Ordering::Release);
-            let _ = sdl_lifecycle(SdlLifecycle::Shutdown);
+            let _ = sdl_native(SdlNativeAction::Shutdown);
         }
     }
 }
@@ -532,10 +552,7 @@ pub fn indirect_touch_device(device: SDL_TouchID) -> bool {
     // is live, and always on SDL's owning main thread.
     native_is_main_thread()
         && SDL_VIDEO_READY.load(std::sync::atomic::Ordering::Acquire)
-        && matches!(
-            native_touch_device_type(device),
-            SDL_TOUCH_DEVICE_INDIRECT_ABSOLUTE | SDL_TOUCH_DEVICE_INDIRECT_RELATIVE
-        )
+        && sdl_native(SdlNativeAction::IndirectTouch(device)).succeeded()
 }
 
 /// Sleep with SDL's precise delay without exposing raw native calls to users.
@@ -593,7 +610,7 @@ pub fn system_theme() -> SDL_SystemTheme {
     // SDL's video/theme query must run on the main thread. Avoid querying
     // shared video state from arbitrary safe Rust worker threads.
     if native_is_main_thread() {
-        native_system_theme()
+        sdl_native(SdlNativeAction::SystemTheme).theme()
     } else {
         SDL_SYSTEM_THEME_UNKNOWN
     }
@@ -618,7 +635,7 @@ pub fn push_user_event(ty: u32) -> bool {
     // zeroed and carries no borrowed native data.
     let mut event = SDL_Event::default();
     event.r#type = ty;
-    native_push_event(&mut event)
+    sdl_native(SdlNativeAction::PushUserEvent(&mut event)).succeeded()
 }
 
 /// Owned display metadata, copied from SDL before its native allocation is freed.
@@ -838,9 +855,7 @@ pub fn capture_mouse(enable: bool) -> bool {
     if !native_is_main_thread() {
         return false;
     }
-    // The SDL entry point has only a boolean argument. Its main-thread
-    // precondition is enforced before calling the private safe ABI binding.
-    native_capture_mouse(enable)
+    sdl_native(SdlNativeAction::CaptureMouse(enable)).succeeded()
 }
 
 /// Keep the cursor allocation owned and restore the default on drop.
@@ -851,9 +866,9 @@ impl SystemCursor {
         if !native_is_main_thread() || !SDL_VIDEO_READY.load(std::sync::atomic::Ordering::Acquire) {
             return None;
         }
-        let cursor = sdl_lifecycle(SdlLifecycle::CreateCrosshair).cursor()?;
-        if !sdl_lifecycle(SdlLifecycle::SetCursor(Some(cursor))).succeeded() {
-            let _ = sdl_lifecycle(SdlLifecycle::DestroyCursor(cursor));
+        let cursor = sdl_native(SdlNativeAction::CreateCrosshair).cursor()?;
+        if !sdl_native(SdlNativeAction::SetCursor(Some(cursor))).succeeded() {
+            let _ = sdl_native(SdlNativeAction::DestroyCursor(cursor));
             return None;
         }
         Some(Self(cursor))
@@ -864,11 +879,11 @@ impl Drop for SystemCursor {
     fn drop(&mut self) {
         // A later cursor may have replaced this one before Drop, so only
         // restore the default when we still own the active cursor.
-        if sdl_lifecycle(SdlLifecycle::CurrentCursor).cursor() == Some(self.0) {
-            let default = sdl_lifecycle(SdlLifecycle::DefaultCursor).cursor();
-            let _ = sdl_lifecycle(SdlLifecycle::SetCursor(default));
+        if sdl_native(SdlNativeAction::CurrentCursor).cursor() == Some(self.0) {
+            let default = sdl_native(SdlNativeAction::DefaultCursor).cursor();
+            let _ = sdl_native(SdlNativeAction::SetCursor(default));
         }
-        let _ = sdl_lifecycle(SdlLifecycle::DestroyCursor(self.0));
+        let _ = sdl_native(SdlNativeAction::DestroyCursor(self.0));
     }
 }
 
@@ -889,14 +904,14 @@ pub fn screenshot_file_stem() -> String {
 
 /// Take the next queued SDL event on the SDL-owning thread.
 pub fn poll_event(event: &mut SDL_Event) -> bool {
-    native_is_main_thread() && native_poll_event(event)
+    native_is_main_thread() && sdl_native(SdlNativeAction::PollEvent(event)).succeeded()
 }
 
 /// Remove the leftover SDL quit event when dismissing a temporary guide.
 #[cfg(target_os = "linux")]
 pub fn flush_quit_event() {
     if native_is_main_thread() {
-        native_flush_event(SDL_EVENT_QUIT.0);
+        let _ = sdl_native(SdlNativeAction::FlushQuitEvent);
     }
 }
 
@@ -928,23 +943,13 @@ pub fn render_reset_window_id(event: &SDL_Event) -> Option<SDL_WindowID> {
 
 /// Check physical buttons on macOS, and SDL's per-window state elsewhere.
 pub fn mouse_buttons_released() -> bool {
-    // Use initialized, exclusively borrowed output coordinates in place
-    // of nullable native pointers. macOS still checks global buttons.
-    if !native_is_main_thread() {
-        return false;
-    }
-    let (mut x, mut y) = (0.0, 0.0);
-    #[cfg(target_os = "macos")]
-    let buttons = native_global_mouse_state(&mut x, &mut y);
-    #[cfg(not(target_os = "macos"))]
-    let buttons = native_mouse_state(&mut x, &mut y);
-    buttons.0 == 0
+    native_is_main_thread() && sdl_native(SdlNativeAction::MouseButtonsReleased).succeeded()
 }
 
 /// Wait without dequeuing the SDL event, preserving the polling loop's order.
 pub fn wait_for_event(timeout_ms: i32) {
     if native_is_main_thread() {
-        let _ = native_wait_event_timeout(None, timeout_ms);
+        let _ = sdl_native(SdlNativeAction::WaitEvent(timeout_ms));
     }
 }
 
@@ -1729,7 +1734,7 @@ impl OwnedProperties {
     fn new() -> Result<Self, String> {
         // No caller can construct a property ID except the SDL lifecycle
         // boundary. The unique owner frees it through Drop.
-        let id = sdl_lifecycle(SdlLifecycle::CreateProperties)
+        let id = sdl_native(SdlNativeAction::CreateProperties)
             .properties()
             .ok_or_else(error)?;
         (id.0 != 0).then(|| Self(id)).ok_or_else(error)
@@ -1742,7 +1747,7 @@ impl OwnedProperties {
 
 impl Drop for OwnedProperties {
     fn drop(&mut self) {
-        let _ = sdl_lifecycle(SdlLifecycle::DestroyProperties(self.0));
+        let _ = sdl_native(SdlNativeAction::DestroyProperties(self.0));
     }
 }
 
