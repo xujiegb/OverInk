@@ -1504,7 +1504,8 @@ fn run_inner(options: Options) -> Result<(), String> {
     let _runtime = Runtime::new(options.x11, preferences.wayland, options.smoke)?;
     let video = crate::sdl::driver();
     let wayland = video == "wayland";
-    let window = with_autorelease_pool(|| Window::new("OverInk - canvas", 1100, 720, !options.smoke))?;
+    let window =
+        with_autorelease_pool(|| Window::new("OverInk - canvas", 1100, 720, !options.smoke))?;
     let topology = crate::display::Topology::new(&video);
     let displays = topology.connected(&window).unwrap_or_default();
     let xwayland = crate::background::is_xwayland(&window, &video);
