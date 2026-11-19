@@ -1273,9 +1273,8 @@ impl App {
                         self.pen_motion(source, p, pen.has_pressure);
                     }
                     self.end(source);
-                    if let Some(pen) = self.input.pens.get_mut(&t.which.0) {
-                        pen.finish();
-                    }
+                    // The common PEN_UP reconciliation at the end of event()
+                    // resets the cached pen exactly once.
                 }
             }
             SDL_EVENT_PEN_AXIS if pen_axis_event(e).is_some_and(|pen| pen.windowID == overlay) => {
