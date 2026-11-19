@@ -4,6 +4,7 @@ mod canvas;
 mod ink;
 mod panel;
 mod screenshot;
+mod stylus;
 mod text;
 
 use crate::sdl::dialog::{DialogKind, FileDialog};
@@ -172,6 +173,7 @@ enum Board {
 
 struct App {
     input: CanvasInput,
+    pen_double: stylus::PenDoubleTap,
     parked_input: BTreeMap<u32, CanvasInput>,
     multi: bool,
     history: History,
@@ -239,6 +241,7 @@ impl App {
         }
         Self {
             input: CanvasInput::default(),
+            pen_double: stylus::PenDoubleTap::default(),
             parked_input: BTreeMap::new(),
             multi: false,
             history,
@@ -567,6 +570,20 @@ impl App {
             self.status = hint.into();
         }
     }
+    fn switch_pen_eraser(&mut self) -> bool {
+        if self.pass || self.picking || self.screenshot.active() {
+            return false;
+        }
+        let next = match self.tool {
+            Tool::Pen => Tool::Eraser,
+            Tool::Eraser => Tool::Pen,
+            _ => Tool::Pen,
+        };
+        self.use_tool(next);
+        self.panel = None;
+        true
+    }
+
     fn toggle_mouse(&mut self) {
         if self.pass {
             self.use_tool(self.tool);
@@ -1773,6 +1790,22 @@ fn run_inner(options: Options) -> Result<(), String> {
                     && !toolbar_hidden
                     && !app.suspended
                     && !file_dialog.pending();
+                if drawing
+                    && ty == SDL_EVENT_PEN_BUTTON_DOWN
+                    && !app.pass
+                    && pen_button_event(&event).is_some_and(|button| {
+                        app.pen_double
+                            .pressed(button.which.0, button.button, button.timestamp)
+                    })
+                    && app.switch_pen_eraser()
+                {
+                    mode_changed = true;
+                    toolbar_dirty = true;
+                    for canvas in &mut canvases {
+                        canvas.dirty = true;
+                    }
+                    continue;
+                }
                 if !file_dialog.pending() {
                     gui.event(&event, toolbar.id, toolbar.size());
                 }
@@ -1781,6 +1814,9 @@ fn run_inner(options: Options) -> Result<(), String> {
                     && !toolbar.input_focused()
                 {
                     gui.sync_text_input(&toolbar, false);
+                }
+                if ty == SDL_EVENT_WINDOW_FOCUS_LOST {
+                    app.pen_double.clear();
                 }
                 if ty == SDL_EVENT_PEN_PROXIMITY_OUT {
                     // A pen can leave proximity over a different window from the
@@ -3048,6 +3084,7 @@ mod touch_tests {
     pub(super) fn app() -> App {
         App {
             input: CanvasInput::default(),
+            pen_double: stylus::PenDoubleTap::default(),
             parked_input: BTreeMap::new(),
             multi: false,
             history: History::default(),
