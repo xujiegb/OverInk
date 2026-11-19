@@ -313,8 +313,8 @@ impl App {
         if matches!(ty, SDL_EVENT_PEN_PROXIMITY_IN | SDL_EVENT_PEN_DOWN) {
             changed |= self.cancel_text_touches(gui);
         }
-        let primary_touch_released = ty == SDL_EVENT_FINGER_UP
-            && gui.primary_touch() == crate::touch::key_from_event(event);
+        let primary_touch_released =
+            ty == SDL_EVENT_FINGER_UP && gui.primary_touch() == crate::touch::key_from_event(event);
         gui.event(event, window, size);
         if editing
             && ty == SDL_EVENT_MOUSE_BUTTON_DOWN
@@ -981,7 +981,8 @@ impl App {
         }
         let board = icon.shrink2(vec2(8. * scale, 8. * scale));
         let stroke = Stroke::new(1.5 * scale, menu.visuals().text_color());
-        menu.painter().rect_stroke(board, 2. * scale, stroke, StrokeKind::Inside);
+        menu.painter()
+            .rect_stroke(board, 2. * scale, stroke, StrokeKind::Inside);
         for row in 0..2 {
             for col in 0..4 {
                 let key = pos2(
@@ -2200,8 +2201,8 @@ mod tests {
         let Some(row) = app.text_menus(screen).map(|menus| menus.actions) else {
             panic!("expected annotation palette row");
         };
-        let wheel_button = row.right_center()
-            - vec2(MENU_PADDING + MENU_BUTTON.x * 1.5 + MENU_GAP, 0.);
+        let wheel_button =
+            row.right_center() - vec2(MENU_PADDING + MENU_BUTTON.x * 1.5 + MENU_GAP, 0.);
         tap(&mut app, wheel_button);
         let Some((palette, scale)) = app.text_menus(screen).and_then(|menus| menus.palette) else {
             panic!("expected text color palette");
@@ -2360,11 +2361,7 @@ mod tests {
         let point = pos2(280., 180.);
         click(&mut app, point);
         assert_eq!(app.input.text.selected, Some(index));
-        app.input.text.click = Some((
-            index,
-            point,
-            Instant::now() - Duration::from_millis(700),
-        ));
+        app.input.text.click = Some((index, point, Instant::now() - Duration::from_millis(700)));
         click(&mut app, point);
         assert!(app.input.text.editing());
         assert_eq!(
