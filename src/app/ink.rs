@@ -857,7 +857,7 @@ mod tests {
         let red = canvas.pixel(50, 20);
         assert!((125..=129).contains(&red[0]), "{red:?}");
         assert_eq!(red[0], red[3]);
-        assert_eq!(ink.layer.as_ref().unwrap().count, 1);
+        assert_eq!(ink.layer.as_ref().map(|layer| layer.count), Some(1));
 
         ink.painter.vertices.clear();
         canvas.history(&mut ink, &mut app);
@@ -866,7 +866,7 @@ mod tests {
 
         commit(&mut app, Tool::Pen, [0, 255, 0], &[[10., 70.], [100., 70.]]);
         canvas.history(&mut ink, &mut app);
-        assert_eq!(ink.layer.as_ref().unwrap().count, 2);
+        assert_eq!(ink.layer.as_ref().map(|layer| layer.count), Some(2));
         assert_eq!(canvas.pixel(50, 20), red);
         let green = canvas.pixel(50, 70);
         assert!(green[1] > 120);
@@ -997,7 +997,10 @@ mod tests {
             app.erase_sample(id, Point::new(x, 60., 1., [0.; 2]));
             canvas.history(&mut ink, &mut app);
             // Exercise the lifetime policy with a software-backed target.
-            ink.layer.as_mut().unwrap().format = SDL_PIXELFORMAT_RGBA64_FLOAT;
+            let Some(layer) = ink.layer.as_mut() else {
+                panic!("expected a cached ink layer");
+            };
+            layer.format = SDL_PIXELFORMAT_RGBA64_FLOAT;
             ink.release_unused_extended_layer(&app);
             assert_eq!(ink.extended_bytes(), extended_bytes([320, 160]));
 
