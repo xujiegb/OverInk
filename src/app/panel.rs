@@ -24,6 +24,28 @@ impl App {
         let tr = self.language;
         let available = ui.available_size();
         let opened = self.panel.filter(|_| !self.picking);
+        let shown = opened.or(self.panel_retiring);
+        // Animate each panel independently so switching fades in and the
+        // previous panel stays on screen while the toolbar closes.
+        let mut panel_alpha = 0.;
+        for panel in [
+            Panel::Shapes,
+            Panel::Brush,
+            Panel::Colors,
+            Panel::Background,
+            Panel::Settings,
+        ] {
+            let alpha = ui.ctx().animate_bool_with_time(
+                ui.id().with(("panel-transition", panel)),
+                opened == Some(panel),
+                0.18,
+            );
+            if shown == Some(panel) {
+                panel_alpha = alpha;
+            }
+        }
+        let visible = shown.filter(|_| panel_alpha > 0.005).or(opened);
+        self.panel_retiring = visible;
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 0.;
             ui.allocate_ui_with_layout(
@@ -31,14 +53,16 @@ impl App {
                 Layout::top_down(Align::Center),
                 |ui| self.rail(ui, mark, &mut commands),
             );
-            if let Some(panel) = opened {
+            if let Some(panel) = visible {
                 let width = (available.x - toolbar::WIDTH).max(0.);
                 if width > 48. {
                     ui.allocate_ui_with_layout(
                         vec2(width, available.y),
                         Layout::top_down(Align::Min),
                         |ui| {
+                            ui.set_opacity(panel_alpha.clamp(0., 1.));
                             egui::Frame::new()
+                                .corner_radius(egui::CornerRadius::same(15))
                                 .fill(ui.visuals().window_fill())
                                 .inner_margin(egui::Margin::same(13))
                                 .show(ui, |ui| {
