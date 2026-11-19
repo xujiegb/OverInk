@@ -2493,6 +2493,7 @@ enum RenderCommand<'a> {
     SetColorScale(f32),
     ReadTarget(&'a mut Option<NonNull<SDL_Texture>>),
     SetTarget(RenderTarget<'a>),
+    Geometry(GeometryTexture<'a>, &'a [SDL_Vertex], &'a [u32], i32, i32),
     Flush,
     Present,
 }
@@ -2591,6 +2592,16 @@ impl Renderer {
                         }
                     };
                     check(SDL_SetRenderTarget(renderer.as_ptr(), raw))
+                }
+                RenderCommand::Geometry(texture, vertices, indices, vertex_count, index_count) => {
+                    check(SDL_RenderGeometry(
+                        renderer.as_ptr(),
+                        texture.raw().map_or(ptr::null_mut(), NonNull::as_ptr),
+                        vertices.as_ptr(),
+                        vertex_count,
+                        indices.as_ptr().cast(),
+                        index_count,
+                    ))
                 }
                 RenderCommand::Flush => check(SDL_FlushRenderer(renderer.as_ptr())),
                 RenderCommand::Present => check(SDL_RenderPresent(renderer.as_ptr())),
@@ -2825,9 +2836,9 @@ impl Renderer {
         vertices: &[SDL_Vertex],
         indices: &[u32],
     ) -> Result<(), String> {
-        let Some(renderer) = self.raw else {
+        if self.raw.is_none() {
             return Err("Renderer has been destroyed".into());
-        };
+        }
         if vertices.is_empty() || indices.is_empty() {
             return Ok(());
         }
@@ -2838,19 +2849,15 @@ impl Renderer {
         if indices.iter().any(|&index| index >= vertex_count as u32) {
             return Err("SDL geometry index refers outside the vertex buffer".into());
         }
-        // SAFETY: Both input slices remain valid throughout SDL's synchronous
-        // read, their lengths fit the C int ABI, and all indices reference
-        // vertices within the supplied slice.
-        unsafe {
-            check(SDL_RenderGeometry(
-                renderer.as_ptr(),
-                texture.raw().map_or(ptr::null_mut(), NonNull::as_ptr),
-                vertices.as_ptr(),
-                vertex_count,
-                indices.as_ptr().cast(),
-                index_count,
-            ))
-        }
+        // A closed command variant holds the live texture and both checked
+        // input slices through SDL's synchronous native geometry submission.
+        self.run_command(RenderCommand::Geometry(
+            texture,
+            vertices,
+            indices,
+            vertex_count,
+            index_count,
+        ))
     }
     pub fn present(&self) -> Result<(), String> {
         self.run_command(RenderCommand::Present)
