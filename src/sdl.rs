@@ -1791,7 +1791,11 @@ impl Window {
     }
     pub fn arrange_toolbar(&self, expanded: bool, on_display: Option<u32>) -> Result<(), String> {
         self.arrange_toolbar_width(
-            if expanded { crate::toolbar::PANEL_WIDTH } else { 0. },
+            if expanded {
+                crate::toolbar::PANEL_WIDTH
+            } else {
+                0.
+            },
             on_display,
         )
     }
