@@ -162,7 +162,11 @@ fn mouse_contact(app: &mut App, window: SDL_WindowID, down: bool, x: f32, button
     app.event(
         &SDL_Event {
             button: SDL_MouseButtonEvent {
-                r#type: if down { SDL_EVENT_MOUSE_BUTTON_DOWN } else { SDL_EVENT_MOUSE_BUTTON_UP },
+                r#type: if down {
+                    SDL_EVENT_MOUSE_BUTTON_DOWN
+                } else {
+                    SDL_EVENT_MOUSE_BUTTON_UP
+                },
                 windowID: window,
                 button,
                 down,
@@ -206,13 +210,23 @@ fn sidecar_mouse_compatibility_hover_never_connects_independent_strokes() {
     mouse_motion(&mut app, CANVAS, SDL_MouseButtonFlags::default(), 690.);
     assert!(app.history.active.is_none());
     assert_eq!(app.history.strokes().len(), 1);
-    assert!(app.history.strokes()[0].points.iter().all(|point| point.x <= 90.));
+    assert!(
+        app.history.strokes()[0]
+            .points
+            .iter()
+            .all(|point| point.x <= 90.)
+    );
 
     mouse_contact(&mut app, CANVAS, true, 720., LEFT_BUTTON);
     mouse_motion(&mut app, CANVAS, SDL_BUTTON_LMASK, 760.);
     mouse_contact(&mut app, CANVAS, false, 760., LEFT_BUTTON);
     assert_eq!(app.history.strokes().len(), 2);
-    assert!(app.history.strokes()[1].points.iter().all(|point| point.x >= 720.));
+    assert!(
+        app.history.strokes()[1]
+            .points
+            .iter()
+            .all(|point| point.x >= 720.)
+    );
 }
 
 #[test]
@@ -236,7 +250,10 @@ fn mouse_release_from_another_window_clears_orphaned_contact() {
     app.release_mouse_if_button_up(SDL_MouseButtonFlags::default());
     assert!(app.history.active.is_none());
     assert_eq!(app.history.strokes().len(), 1);
-    assert_eq!(app.history.strokes()[0].points.last().map(|point| point.x), Some(90.));
+    assert_eq!(
+        app.history.strokes()[0].points.last().map(|point| point.x),
+        Some(90.)
+    );
     mouse_contact(&mut app, CANVAS, true, 700., LEFT_BUTTON);
     mouse_contact(&mut app, CANVAS, false, 700., LEFT_BUTTON);
     assert_eq!(app.history.strokes().len(), 2);
@@ -255,7 +272,12 @@ fn sidecar_stale_down_bit_zero_pressure_ends_contact() {
     pressure(&mut app, CANVAS, true, 700., 0.);
     assert!(app.history.active.is_none());
     assert_eq!(app.history.strokes().len(), 1);
-    assert!(app.history.strokes()[0].points.iter().all(|point| point.x <= 90.));
+    assert!(
+        app.history.strokes()[0]
+            .points
+            .iter()
+            .all(|point| point.x <= 90.)
+    );
     motion(&mut app, CANVAS, true, 730.);
     assert!(app.history.active.is_none());
 
@@ -263,5 +285,10 @@ fn sidecar_stale_down_bit_zero_pressure_ends_contact() {
     motion(&mut app, CANVAS, true, 780.);
     contact(&mut app, CANVAS, false, 780.);
     assert_eq!(app.history.strokes().len(), 2);
-    assert!(app.history.strokes()[1].points.iter().all(|point| point.x >= 750.));
+    assert!(
+        app.history.strokes()[1]
+            .points
+            .iter()
+            .all(|point| point.x >= 750.)
+    );
 }

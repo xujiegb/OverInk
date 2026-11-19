@@ -1149,10 +1149,15 @@ impl App {
                     && a.axis == SDL_PEN_AXIS_PRESSURE
                     && a.value.is_finite()
                     && a.value <= 0.
-                    && self.input.pens.get(&a.which.0).is_some_and(|pen| {
-                        pen.down && pen.has_pressure && pen.pressure > 0.
-                    })
-                    && self.input.contact.is_some_and(|contact| contact.source == source)
+                    && self
+                        .input
+                        .pens
+                        .get(&a.which.0)
+                        .is_some_and(|pen| pen.down && pen.has_pressure && pen.pressure > 0.)
+                    && self
+                        .input
+                        .contact
+                        .is_some_and(|contact| contact.source == source)
                 {
                     self.release_pen(a.which.0, true);
                     return;
