@@ -786,6 +786,7 @@ mod tests {
             origin: [10., 10.],
             size: [150., 60.],
             font_size: 28.,
+            font: None,
             color: InkColor::default(),
             text: "Annotation".into(),
             scroll_offset: 0.,
