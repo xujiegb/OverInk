@@ -108,6 +108,8 @@ enum SdlNativeAction<'a> {
     GuiTextureUpload(&'a OwnedTexture, Option<&'a SDL_Rect>, &'a [u8], i32),
     ClipboardWrite(&'a CStr),
     ClipboardRead,
+    ReadString(SdlStringSource),
+    WindowIccProfile(&'a Window),
     SystemTheme,
     IndirectTouch(SDL_TouchID),
     CaptureMouse(bool),
@@ -129,7 +131,8 @@ enum SdlNativeResult {
     Properties(SDL_PropertiesID),
     Cursor(Option<NonNull<SDL_Cursor>>),
     Success(bool),
-    ClipboardText(Option<String>),
+    Text(Option<String>),
+    Profile(Option<Vec<u8>>),
     Theme(SDL_SystemTheme),
 }
 
@@ -154,9 +157,17 @@ impl SdlNativeResult {
         matches!(self, Self::Success(true))
     }
 
-    fn clipboard_text(self) -> Option<String> {
-        if let Self::ClipboardText(text) = self {
+    fn text(self) -> Option<String> {
+        if let Self::Text(text) = self {
             text
+        } else {
+            None
+        }
+    }
+
+    fn profile(self) -> Option<Vec<u8>> {
+        if let Self::Profile(bytes) = self {
+            bytes
         } else {
             None
         }
@@ -317,7 +328,42 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
                         .to_string_lossy()
                         .into_owned()
                 });
-                SdlNativeResult::ClipboardText(text)
+                SdlNativeResult::Text(text)
+            }
+            SdlNativeAction::ReadString(source) => {
+                // SDL owns these borrowed NUL-terminated strings. Copy while
+                // the native getter's returned storage remains valid.
+                let text = match source {
+                    SdlStringSource::Error => SDL_GetError(),
+                    SdlStringSource::VideoDriver => SDL_GetCurrentVideoDriver(),
+                };
+                SdlNativeResult::Text((!text.is_null()).then(|| {
+                    CStr::from_ptr(text).to_string_lossy().into_owned()
+                }))
+            }
+            SdlNativeAction::WindowIccProfile(window) => {
+                // SDL returns an owned profile allocation. The typed Window
+                // borrow keeps its SDL handle live through the synchronous
+                // copy, and the guard frees the allocation even on rejection.
+                let mut size = 0;
+                if let Some(profile) =
+                    NonNull::new(SDL_GetWindowICCProfile(window.raw.as_ptr(), &mut size))
+                        .map(SdlAllocation)
+                {
+                    SdlNativeResult::Profile(
+                        (size > 0 && size <= 16 * 1024 * 1024).then(|| {
+                            std::slice::from_raw_parts(
+                                profile.0.as_ptr().cast::<u8>(),
+                                size,
+                            )
+                            .to_vec()
+                        }),
+                    )
+                } else {
+                    // A missing ICC profile is normal; clear SDL's stale error.
+                    SDL_ClearError();
+                    SdlNativeResult::Profile(None)
+                }
             }
             SdlNativeAction::SystemTheme => SdlNativeResult::Theme(SDL_GetSystemTheme()),
             SdlNativeAction::IndirectTouch(device) => SdlNativeResult::Success(matches!(
@@ -363,22 +409,9 @@ enum SdlStringSource {
     VideoDriver,
 }
 
-/// Copy a borrowed SDL C string while its provider's allocation is live.
+/// Copy a borrowed SDL C string through the audited native boundary.
 fn sdl_string(source: SdlStringSource) -> Option<String> {
-    // SAFETY: These exact SDL getters return null or valid NUL-terminated
-    // borrowed strings. Copy the bytes before another SDL call can replace
-    // the underlying storage.
-    unsafe {
-        let text = match source {
-            SdlStringSource::Error => SDL_GetError(),
-            SdlStringSource::VideoDriver => SDL_GetCurrentVideoDriver(),
-        };
-        if text.is_null() {
-            None
-        } else {
-            Some(CStr::from_ptr(text).to_string_lossy().into_owned())
-        }
-    }
+    sdl_native(SdlNativeAction::ReadString(source)).text()
 }
 
 pub fn error() -> String {
@@ -833,7 +866,7 @@ pub fn set_clipboard_text(value: &str) {
 
 /// Copy SDL-owned clipboard text before releasing its allocation through RAII.
 pub fn clipboard_text() -> Option<String> {
-    sdl_native(SdlNativeAction::ClipboardRead).clipboard_text()
+    sdl_native(SdlNativeAction::ClipboardRead).text()
 }
 
 /// The two SDL text event types share a single validated native string
@@ -1727,23 +1760,7 @@ impl Window {
     }
 
     pub fn icc_profile(&self) -> Option<Vec<u8>> {
-        // SAFETY: The live Window owns the SDL handle. SDL allocates the
-        // profile bytes, and the checked slice is copied before RAII release.
-        unsafe {
-            let mut size = 0;
-            let Some(profile) = NonNull::new(SDL_GetWindowICCProfile(self.raw.as_ptr(), &mut size))
-                .map(SdlAllocation)
-            else {
-                // A missing ICC profile is normal; avoid leaving a stale SDL error.
-                SDL_ClearError();
-                return None;
-            };
-            if size > 0 && size <= 16 * 1024 * 1024 {
-                Some(std::slice::from_raw_parts(profile.0.as_ptr().cast::<u8>(), size).to_vec())
-            } else {
-                None
-            }
-        }
+        sdl_native(SdlNativeAction::WindowIccProfile(self)).profile()
     }
 
     pub fn hdr_enabled(&self) -> bool {
