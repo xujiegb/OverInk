@@ -1076,8 +1076,8 @@ mod tests {
             &[[390., 122.], [540., 122.]],
         );
         let mut compare = |app: &mut App| -> TestResult {
-            canvas.renderer.clear([0.; 4]).unwrap();
-            full.renderer.clear([0.; 4]).unwrap();
+            canvas.renderer.clear([0.; 4])?;
+            full.renderer.clear([0.; 4])?;
             ink.committed(&frame, app)?;
             reference.invalidate_layer();
             reference.committed(&reference_frame, app)?;
@@ -1174,7 +1174,7 @@ mod tests {
         frame.scale = [2.; 2];
         frame.aa = 0.4;
         canvas.renderer.set_render_scale([2., 2.])?;
-        canvas.renderer.clear([0.; 4]).unwrap();
+        canvas.renderer.clear([0.; 4])?;
         ink.committed(&frame, &mut app)?;
         assert!(canvas.pixel(100, 32)?[3] > 120);
         assert_eq!(canvas.pixel(35, 16)?, [0; 4]);
