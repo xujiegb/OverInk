@@ -1494,7 +1494,12 @@ pub fn run(options: Options) -> Result<(), String> {
 }
 
 fn run_inner(options: Options) -> Result<(), String> {
-    let base = state_dir();
+    // Collect startup's temporary Objective-C objects in a separate pool.
+    // Returning the event-loop closure drains it *before* the first frame,
+    // while ownership of initialized Rust/SDL resources moves into the loop.
+    // The outer run() pool still covers native shutdown and error unwinding.
+    let mut run_loop = with_autorelease_pool(|| -> Result<_, String> {
+        let base = state_dir();
     let preferences_path = base.join("ui.json");
     let preferences = Preferences::load(&preferences_path);
     #[cfg(target_os = "linux")]
@@ -1580,7 +1585,11 @@ fn run_inner(options: Options) -> Result<(), String> {
     let mut restore_toolbar_focus = false;
     let mut text_focus = text::ToolbarTextFocus::default();
     let mut text_pick = None;
-    while running {
+    Ok(move || -> Result<(), String> {
+        // The SDL Runtime is intentionally retained until all windows,
+        // renderers and other native owners have finished shutting down.
+        let _runtime = _runtime;
+        while running {
         with_autorelease_pool(|| -> Result<(), String> {
             let mut disconnected = BTreeSet::new();
             let mut controller_scale_changed = false;
@@ -2850,10 +2859,13 @@ fn run_inner(options: Options) -> Result<(), String> {
             Ok(())
         })?;
     }
-    if !options.smoke {
-        app.finish_session()?;
-    }
-    Ok(())
+        if !options.smoke {
+            app.finish_session()?;
+        }
+        Ok(())
+    })
+    })?;
+    run_loop()
 }
 
 fn smoke_text_history(app: &mut App, canvas: &mut canvas::Canvas) -> Result<(), String> {
