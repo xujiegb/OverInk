@@ -24,11 +24,9 @@ impl PencilModeMonitor {
         let pending = Arc::new(AtomicU32::new(0));
         let signal = Arc::clone(&pending);
         let handler = RcBlock::new(move |event: NonNull<NSEvent>| {
-            signal
-                .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |count| {
-                    Some(count.saturating_add(1))
-                })
-                .ok();
+            let _ = signal.try_update(Ordering::AcqRel, Ordering::Relaxed, |count| {
+                Some(count.saturating_add(1))
+            });
             // AppKit owns the NSEvent for this callback and expects the same
             // event back for normal responder dispatch. Never retain it.
             event.as_ptr()
