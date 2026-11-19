@@ -131,14 +131,32 @@ class CaptureBridge {
         this._trusted = next;
     }
 
+    _binaryDigest(executable) {
+        // Hash the verified root-owned executable in bounded chunks. Unlike
+        // st_dev/inode, its SHA-256 identity survives Btrfs and OSTree remounts.
+        const checksum = GLib.Checksum.new(GLib.ChecksumType.SHA256);
+        if (!checksum)
+            return null;
+        const stream = Gio.File.new_for_path(executable).read(null);
+        try {
+            while (true) {
+                const chunk = stream.read_bytes(64 * 1024, null);
+                if (chunk.get_size() === 0)
+                    break;
+                checksum.update(chunk.get_data());
+            }
+            return checksum.get_string();
+        } finally {
+            stream.close(null);
+        }
+    }
+
     _persistentIdentity(pid, executable) {
-        // A path alone is not a process identity: in a mount namespace the
-        // same absolute pathname can refer to an entirely different binary.
-        // Resolve the running executable through /proc, then require that it
-        // is the same inode we trust in the Shell's own mount namespace.
-        // Some Btrfs/OSTree configurations change st_dev after reboot: an
-        // existing persistent grant will then expire and prompt again.
-        // This intentionally fails closed rather than trusting only a path.
+        // Validate /proc/<pid>/exe against the root-owned path in this mount
+        // namespace using device AND inode. These live-process checks must
+        // remain even though the persistent key is content-based: trusting a
+        // path or a hash alone would let another mount namespace impersonate
+        // the installed executable. An upgrade requires new consent.
         if (!GLib.path_is_absolute(executable) || executable.endsWith(' (deleted)'))
             return null;
         try {
@@ -147,7 +165,7 @@ class CaptureBridge {
             const runningDevice = String(running.get_attribute_uint32('unix::device'));
             const runningInode = String(running.get_attribute_uint64('unix::inode'));
             let path = executable;
-            let binary = null;
+            let installedSize = null;
             while (true) {
                 const info = Gio.File.new_for_path(path).query_info(
                     'unix::uid,unix::mode,unix::device,unix::inode,standard::size,time::modified',
@@ -161,12 +179,11 @@ class CaptureBridge {
                         String(info.get_attribute_uint32('unix::device')) !== runningDevice ||
                         String(info.get_attribute_uint64('unix::inode')) !== runningInode)
                         return null;
-                    binary = [
-                        info.get_attribute_uint32('unix::device'),
-                        info.get_attribute_uint64('unix::inode'),
-                        info.get_size(),
-                        info.get_attribute_uint64('time::modified'),
-                    ].map(String).join(':');
+                    installedSize = info.get_size();
+                    // Reject unreasonably large executables rather than
+                    // blocking GNOME Shell while hashing unbounded content.
+                    if (installedSize <= 0 || installedSize > 256 * 1024 * 1024)
+                        return null;
                 } else if ((mode & 0o170000) !== 0o040000) {
                     return null;
                 }
@@ -174,9 +191,21 @@ class CaptureBridge {
                     break;
                 path = GLib.path_get_dirname(path);
             }
-            const identity = `${executable}:${binary}`;
-            // A key we cannot reload is never eligible for permanent consent.
-            // Such installations can still request per-process approval.
+            const digest = this._binaryDigest(executable);
+            if (!digest)
+                return null;
+            // Root-managed updates can replace a file between the initial
+            // stat and read. Accept only the same running executable inode.
+            const after = Gio.File.new_for_path(executable).query_info(
+                'unix::device,unix::inode,standard::size',
+                Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS, null);
+            if (String(after.get_attribute_uint32('unix::device')) !== runningDevice ||
+                String(after.get_attribute_uint64('unix::inode')) !== runningInode ||
+                after.get_size() !== installedSize)
+                return null;
+            // Version the key deliberately: old st_dev/inode grants require
+            // one fresh opt-in, and do not silently migrate to content trust.
+            const identity = `v2:${executable}:sha256:${digest}`;
             return identity.length <= MAX_TRUST_KEY_LENGTH ? identity : null;
         } catch (error) {
             return null;
@@ -317,13 +346,15 @@ class CaptureBridge {
             const now = GLib.get_monotonic_time();
             if ((this._deniedUntil.get(processIdentity) ?? 0) > now)
                 throw new Error('Screen capture denied recently; retry in 30 seconds');
-            const trusted = this._persistentIdentity(pid, executable);
+            const approved = this._approved.has(processIdentity);
+            // Already authorized processes need not rehash their executable
+            // on each frame; PID + start time prevents inheriting this grant.
+            const trusted = approved ? null : this._persistentIdentity(pid, executable);
             // Re-read user permissions for each unapproved process. Deleting
             // capture-trust.json now revokes future approvals immediately.
-            if (!this._approved.has(processIdentity))
+            if (!approved)
                 this._trusted = this._loadTrusted();
-            if (!this._approved.has(processIdentity) &&
-                !(trusted && this._trusted.has(trusted))) {
+            if (!approved && !(trusted && this._trusted.has(trusted))) {
                 const choice = await this._requestPermission(executable, state, !!trusted);
                 if (!choice) {
                     this._checkActive(state);
