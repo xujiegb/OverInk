@@ -1093,22 +1093,3 @@ jobs:
             exit 1
           fi
           gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false
-
-  format-snapshot:
-    if: github.event_name == 'pull_request'
-    name: Temporary source format snapshot
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v7
-      - name: Generate rustfmt source snapshot
-        shell: bash
-        run: |
-          set -euo pipefail
-          rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt
-          rustup override set "$RUST_VERSION"
-          cargo fmt --all
-          for file in src/app.rs src/app/text.rs src/app/panel.rs src/fonts.rs src/sdl.rs src/model/text_box.rs src/model.rs; do
-            printf '@@FORMATTED:%s@@\\n' "$file"
-            base64 -w76 "$file"
-            printf '@@END:%s@@\\n' "$file"
-          done
