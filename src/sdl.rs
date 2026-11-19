@@ -205,9 +205,9 @@ fn sdl_lifecycle(action: SdlLifecycle) -> SdlLifecycleResult {
                 SDL_DestroyProperties(id);
                 SdlLifecycleResult::Done
             }
-            SdlLifecycle::CreateCrosshair => SdlLifecycleResult::Cursor(
-                NonNull::new(SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_CROSSHAIR)),
-            ),
+            SdlLifecycle::CreateCrosshair => SdlLifecycleResult::Cursor(NonNull::new(
+                SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_CROSSHAIR),
+            )),
             SdlLifecycle::SetCursor(cursor) => SdlLifecycleResult::Success(SDL_SetCursor(
                 cursor.map_or(ptr::null_mut(), NonNull::as_ptr),
             )),
