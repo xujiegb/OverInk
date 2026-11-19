@@ -211,26 +211,17 @@ fn apple_silicon() -> bool {
     return true;
     #[cfg(target_arch = "x86_64")]
     {
-        // A translated x86_64 build can use the HDR API on Apple silicon.
-        // Only the fixed, NUL-terminated sysctl.proc_translated name is
-        // queried. The kernel writes at most the initialized i32 buffer size
-        // supplied in len; the new-value input is always absent.
-        unsafe extern "C" {
-            safe fn sysctlbyname(
-                name: NonNull<c_char>,
-                value: &mut i32,
-                len: &mut usize,
-                new_value: Option<NonNull<c_void>>,
-                new_len: usize,
-            ) -> i32;
-        }
-        let mut translated = 0;
-        let mut len = size_of::<i32>();
-        let Some(name) = NonNull::new(c"sysctl.proc_translated".as_ptr().cast_mut()) else {
-            return false;
-        };
-        let result = sysctlbyname(name, &mut translated, &mut len, None, 0);
-        result == 0 && len == size_of::<i32>() && translated == 1
+        // The native sysctlbyname API takes raw buffer pointers and must not
+        // be imported as a safe Rust 2024 FFI function. Use the fixed system
+        // utility instead; hdr_supported caches this check once per process.
+        std::process::Command::new("/usr/sbin/sysctl")
+            .args(["-n", "sysctl.proc_translated"])
+            .output()
+            .is_ok_and(|result| {
+                result.status.success()
+                    && std::str::from_utf8(&result.stdout)
+                        .is_ok_and(|value| value.trim() == "1")
+            })
     }
 }
 

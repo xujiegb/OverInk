@@ -220,11 +220,14 @@ mod tests {
     #[test]
     fn owned_resource_drops_exactly_once() {
         let freed = Arc::new(AtomicUsize::new(0));
-        let mut resource = Box::new(CountDrop(Arc::clone(&freed)));
-        let raw = NonNull::from(resource.as_mut());
-        *TEST_RESOURCE
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(resource);
+        let raw = {
+            let mut registry = TEST_RESOURCE
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // Obtain the handle only after the Box has reached its final
+            // owner; the allocation stays stable until the Drop callback.
+            NonNull::from(registry.insert(Box::new(CountDrop(Arc::clone(&freed)))).as_mut())
+        };
         // The test registry owns the stable allocation. This verified pair
         // exercises the same Drop path without manufacturing a native owner.
         let owned = OwnedRandr {

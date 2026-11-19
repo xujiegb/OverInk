@@ -646,11 +646,14 @@ mod tests {
     #[test]
     fn owned_wayland_handle_releases_exactly_once() {
         let releases = Arc::new(AtomicUsize::new(0));
-        let mut resource = Box::new(DropCounter(Arc::clone(&releases)));
-        let raw = NonNull::from(resource.as_mut()).cast();
-        *TEST_HANDLE
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(resource);
+        let raw = {
+            let mut registry = TEST_HANDLE
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // Form the native identity after the Box moves into the registry.
+            NonNull::from(registry.insert(Box::new(DropCounter(Arc::clone(&releases)))).as_mut())
+                .cast()
+        };
         // This registered Rust allocation has a stable address and a
         // known matching destructor, so no foreign ownership assumption
         // is needed to exercise the native guard's Drop implementation.
