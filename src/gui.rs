@@ -33,6 +33,8 @@ impl Gui {
             let colors = crate::toolbar::colors(s.visuals.dark_mode);
             s.visuals.panel_fill = colors.rail;
             s.visuals.window_fill = colors.panel;
+            s.visuals.window_corner_radius = egui::CornerRadius::same(15);
+            s.visuals.menu_corner_radius = egui::CornerRadius::same(11);
             if s.visuals.dark_mode {
                 s.visuals.widgets.noninteractive.fg_stroke.color =
                     egui::Color32::from_rgb(192, 207, 223);
