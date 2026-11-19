@@ -3,10 +3,7 @@
 //! All AppKit pointer and monitor lifetime handling stays in this macOS-only
 //! module. The app sees only the number of pending gestures.
 use block2::RcBlock;
-use objc2::{
-    rc::Retained,
-    runtime::AnyObject,
-};
+use objc2::{rc::Retained, runtime::AnyObject};
 use objc2_app_kit::{NSEvent, NSEventMask};
 use std::{
     ptr::NonNull,
@@ -27,9 +24,11 @@ impl PencilModeMonitor {
         let pending = Arc::new(AtomicU32::new(0));
         let signal = Arc::clone(&pending);
         let handler = RcBlock::new(move |event: NonNull<NSEvent>| {
-            signal.fetch_update(Ordering::AcqRel, Ordering::Relaxed, |count| {
-                Some(count.saturating_add(1))
-            }).ok();
+            signal
+                .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |count| {
+                    Some(count.saturating_add(1))
+                })
+                .ok();
             // AppKit owns the NSEvent for this callback and expects the same
             // event back for normal responder dispatch. Never retain it.
             event.as_ptr()
@@ -39,10 +38,7 @@ impl PencilModeMonitor {
         // or synthetic pointer). The retained token is removed on this same
         // main thread before the SDL/Cocoa runtime shuts down.
         let token = unsafe {
-            NSEvent::addLocalMonitorForEventsMatchingMask_handler(
-                NSEventMask::ChangeMode,
-                &handler,
-            )
+            NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::ChangeMode, &handler)
         }
         .ok_or("AppKit did not create an Apple Pencil change-mode monitor")?;
         Ok(Self { token, pending })
