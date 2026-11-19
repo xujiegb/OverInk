@@ -493,18 +493,24 @@ mod tests {
 
     #[test]
     fn font_order_persists_and_bundled_faces_cannot_be_removed() {
-        let base = std::env::temp_dir().join(format!(
-            "overink-font-order-test-{}",
-            std::process::id()
-        ));
+        let base =
+            std::env::temp_dir().join(format!("overink-font-order-test-{}", std::process::id()));
         assert!(fs::create_dir_all(&base).is_ok());
         let font_path = base.join("annotation-font");
         let mut fonts = TextFonts::default();
         assert!(fonts.remove(DEFAULT, &font_path).is_err());
         assert!(fonts.move_priority(0, 2, &font_path).is_ok());
-        let saved: Vec<String> = fonts.entries().iter().map(|font| font.key.to_owned()).collect();
+        let saved: Vec<String> = fonts
+            .entries()
+            .iter()
+            .map(|font| font.key.to_owned())
+            .collect();
         let loaded = TextFonts::load(&font_path);
-        let restored: Vec<String> = loaded.entries().iter().map(|font| font.key.to_owned()).collect();
+        let restored: Vec<String> = loaded
+            .entries()
+            .iter()
+            .map(|font| font.key.to_owned())
+            .collect();
         assert_eq!(saved, restored);
         assert_eq!(restored.len(), 3);
         assert!(fs::remove_dir_all(base).is_ok());
