@@ -271,6 +271,22 @@ mod x11 {
         green_mask: c_ulong,
         blue_mask: c_ulong,
     }
+    // Validate XImage's row stride before passing image coordinates to
+    // XGetPixel. Foreign metadata may not describe enough storage for a row.
+    fn valid_row_stride(width: i32, xoffset: i32, bits_per_pixel: i32, stride: i32) -> bool {
+        if width <= 0 || xoffset < 0 || !(1..=64).contains(&bits_per_pixel) || stride <= 0 {
+            return false;
+        }
+        let Some(required_bits) = i64::from(width)
+            .checked_add(i64::from(xoffset))
+            .and_then(|pixels| pixels.checked_mul(i64::from(bits_per_pixel)))
+            .and_then(|bits| bits.checked_add(7))
+        else {
+            return false;
+        };
+        required_bits / 8 <= i64::from(stride)
+    }
+
     // The Xlib image constructor takes an exact fixed C ABI. Keeping the
     // symbol signature named prevents large inferred types in capture paths.
     type GetXImage = unsafe extern "C" fn(
@@ -381,9 +397,14 @@ mod x11 {
             let header = image.raw.as_ref();
             if header.width != width
                 || header.height != height
+                || header.format != 2 // XGetImage requested ZPixmap
                 || header.data.is_none()
-                || header.bytes_per_line <= 0
-                || header.bits_per_pixel <= 0
+                || !valid_row_stride(
+                    header.width,
+                    header.xoffset,
+                    header.bits_per_pixel,
+                    header.bytes_per_line,
+                )
             {
                 return Err(image_error.into());
             }
@@ -464,6 +485,18 @@ mod x11 {
     #[cfg(test)]
     mod tests {
         use super::*;
+        #[test]
+        fn rejects_truncated_ximage_rows_before_native_pixel_reads() {
+            assert!(valid_row_stride(10, 0, 32, 40));
+            assert!(!valid_row_stride(10, 0, 32, 39));
+            assert!(valid_row_stride(9, 1, 24, 32));
+            assert!(!valid_row_stride(9, 1, 24, 29));
+            assert!(valid_row_stride(5, 0, 1, 1));
+            assert!(!valid_row_stride(5, 0, 0, 1));
+            assert!(!valid_row_stride(5, -1, 32, 32));
+            assert!(!valid_row_stride(i32::MAX, 0, 32, i32::MAX));
+        }
+
         #[test]
         fn decodes_eight_ten_and_sixteen_bit_visuals() {
             assert_eq!(channel(0x12abef, 0xff0000), Ok(18. / 255.));
