@@ -246,6 +246,7 @@ impl TextInput {
 
     pub fn finish(&mut self, history: &mut History) {
         self.color_wheel = None;
+        self.keyboard_request = None;
         if let Some((index, item)) = self.take_draft(history) {
             self.selected = history.set_text_box(index, item);
         }
@@ -603,8 +604,9 @@ impl App {
         {
             self.input.text.edit(Some(index), (**item).clone());
         }
-        if let Some(draft) = &mut self.input.text.draft {
-            draft.focus = true;
+        if self.input.text.editing() {
+            // A focused editor already owns its caret/IME composition.
+            // Resetting its egui TextEditState would discard selection.
             self.input.text.keyboard_request = Some(KeyboardRequest::Button);
         }
     }
