@@ -292,3 +292,67 @@ fn sidecar_stale_down_bit_zero_pressure_ends_contact() {
             .all(|point| point.x >= 750.)
     );
 }
+
+fn finger_contact(app: &mut App, ty: SDL_EventType, x: f32) {
+    app.event(
+        &SDL_Event {
+            tfinger: SDL_TouchFingerEvent {
+                r#type: ty,
+                touchID: SDL_TouchID(9),
+                fingerID: SDL_FingerID(3),
+                windowID: CANVAS,
+                x,
+                y: 0.2,
+                pressure: 1.,
+                ..Default::default()
+            },
+        },
+        CANVAS,
+        SIZE,
+    );
+}
+
+#[test]
+fn repeated_finger_down_after_missing_up_starts_an_independent_stroke() {
+    let mut app = super::touch_tests::app();
+    finger_contact(&mut app, SDL_EVENT_FINGER_DOWN, 0.05);
+    finger_contact(&mut app, SDL_EVENT_FINGER_MOTION, 0.1);
+    assert_eq!(app.input.touches.len(), 1);
+
+    // Another DOWN with the very same finger ID must commit the old stroke.
+    finger_contact(&mut app, SDL_EVENT_FINGER_DOWN, 0.7);
+    assert_eq!(app.history.strokes().len(), 1);
+    assert_eq!(app.input.touches.len(), 1);
+    finger_contact(&mut app, SDL_EVENT_FINGER_MOTION, 0.73);
+    finger_contact(&mut app, SDL_EVENT_FINGER_UP, 0.75);
+
+    assert_eq!(app.history.strokes().len(), 2);
+    assert!(app.history.strokes()[0].points.iter().all(|point| point.x <= 100.));
+    assert!(app.history.strokes()[1].points.iter().all(|point| point.x >= 700.));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_pen_up_at_distant_stale_position_does_not_draw_connector() {
+    let mut app = super::touch_tests::app();
+    contact(&mut app, CANVAS, true, 40.);
+    motion(&mut app, CANVAS, true, 100.);
+    // SDL receives the release near the next touchdown rather than the old tip.
+    contact(&mut app, CANVAS, false, 700.);
+    assert_eq!(app.history.strokes().len(), 1);
+    assert!(app.history.strokes()[0].points.iter().all(|point| point.x <= 100.));
+    contact(&mut app, CANVAS, true, 750.);
+    contact(&mut app, CANVAS, false, 760.);
+    assert_eq!(app.history.strokes().len(), 2);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_finger_up_at_distant_stale_position_does_not_draw_connector() {
+    let mut app = super::touch_tests::app();
+    finger_contact(&mut app, SDL_EVENT_FINGER_DOWN, 0.04);
+    finger_contact(&mut app, SDL_EVENT_FINGER_MOTION, 0.10);
+    finger_contact(&mut app, SDL_EVENT_FINGER_UP, 0.70);
+    assert_eq!(app.history.strokes().len(), 1);
+    assert!(app.history.strokes()[0].points.iter().all(|point| point.x <= 100.));
+}

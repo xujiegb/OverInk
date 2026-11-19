@@ -85,6 +85,9 @@ struct LaserSample {
 const LEFT_BUTTON: u8 = SDL_BUTTON_LEFT as u8;
 const RIGHT_BUTTON: u8 = SDL_BUTTON_RIGHT as u8;
 const LASER_LIFETIME: Duration = Duration::from_millis(900);
+/// Sidecar occasionally supplies a release coordinate far beyond the last
+/// physical contact. It should never become a long pen/finger ink segment.
+const MACOS_MAX_RELEASE_JUMP: f32 = 128.;
 const MAX_LASER_SAMPLES: usize = 4096;
 #[derive(Default)]
 struct Commands {
@@ -892,7 +895,15 @@ impl App {
             return;
         }
         if event.r#type == SDL_EVENT_FINGER_UP {
-            if let Some(point) = touch::point(event, size) {
+            if let Some(point) = touch::point(event, size)
+                && (!cfg!(target_os = "macos")
+                    || self
+                        .input
+                        .touches
+                        .get(&key)
+                        .and_then(|finger| finger.last)
+                        .is_some_and(|last| last.dist(point) <= MACOS_MAX_RELEASE_JUMP))
+            {
                 self.touch_motion(key, point);
             }
             if let Some(finger) = self.input.touches.remove(&key) {
@@ -913,6 +924,12 @@ impl App {
             return;
         };
         if event.r#type == SDL_EVENT_FINGER_DOWN {
+            // Some touch/Sidecar backends reuse the same touch/finger IDs
+            // without delivering the previous UP. A new DOWN is an explicit
+            // stroke boundary: commit the stale stroke, never append to it.
+            if let Some(previous) = self.input.touches.remove(&key) {
+                self.commit_touch(previous);
+            }
             if self
                 .input
                 .protected
@@ -920,8 +937,7 @@ impl App {
             {
                 return;
             }
-            if self.input.touches.contains_key(&key)
-                || self.input.touches.len() >= 16
+            if self.input.touches.len() >= 16
                 || touch::is_indirect(event.touchID)
                 || !(0.0..=1.0).contains(&event.x)
                 || !(0.0..=1.0).contains(&event.y)
@@ -1128,7 +1144,18 @@ impl App {
                         contact.measured_pressure = pen.has_pressure;
                     }
                 } else {
-                    self.pen_motion(source, p, pen.has_pressure);
+                    // PEN_UP is a release signal, not an instruction to draw
+                    // a connector to any stale coordinate Cocoa/SDL supplies.
+                    // Keep nearby endpoint samples for natural stroke ends,
+                    // but reject implausibly distant Sidecar release positions.
+                    let accept_endpoint = !cfg!(target_os = "macos")
+                        || self.input.contact.is_none_or(|contact| {
+                            contact.source != source
+                                || contact.last.dist(p) <= MACOS_MAX_RELEASE_JUMP
+                        });
+                    if accept_endpoint {
+                        self.pen_motion(source, p, pen.has_pressure);
+                    }
                     self.end(source);
                     if let Some(pen) = self.input.pens.get_mut(&t.which.0) {
                         pen.finish();
