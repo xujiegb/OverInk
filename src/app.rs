@@ -3,6 +3,8 @@
 mod canvas;
 mod ink;
 mod panel;
+#[cfg(test)]
+mod pen_input_tests;
 mod screenshot;
 mod stylus;
 mod text;
