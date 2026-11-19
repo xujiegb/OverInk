@@ -3955,8 +3955,8 @@ mod touch_tests {
         assert!(trail[1].point.x < 100. && trail[2].point.x > 300.);
     }
     #[test]
-    fn startup_uses_mouse_mode_and_space_restores_the_pen()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn startup_uses_mouse_mode_and_space_restores_the_pen() -> Result<(), Box<dyn std::error::Error>>
+    {
         let state = tempfile::tempdir()?;
         let mut app = App::new(
             false,
