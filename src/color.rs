@@ -257,7 +257,7 @@ impl HexEntry {
 mod hex_tests {
     use super::*;
     #[test]
-    fn parses_common_hex_formats_and_roundtrips() {
+    fn parses_common_hex_formats_and_roundtrips() -> Result<(), &'static str> {
         for (text, expected) in [
             ("#FFFFFF", [255; 3]),
             ("ffffff", [255; 3]),
@@ -265,23 +265,24 @@ mod hex_tests {
             ("000", [0; 3]),
             ("#3C775E", PRESETS[1]),
         ] {
-            let color = parse_hex(text, Space::Srgb).unwrap();
+            let color = parse_hex(text, Space::Srgb)?;
             assert_eq!(color.srgb8(), expected);
             assert_eq!(
-                parse_hex(&color.css(), Space::Srgb).unwrap().srgb8(),
+                parse_hex(&color.css(), Space::Srgb)?.srgb8(),
                 expected
             );
             assert_eq!(color.space, Space::Srgb);
         }
+        Ok(())
     }
     #[test]
-    fn p3_hex_and_srgb_presets_keep_the_selected_space() {
+    fn p3_hex_and_srgb_presets_keep_the_selected_space() -> Result<(), &'static str> {
         let color = InkColor::from_channels([255, 0, 0], Space::DisplayP3);
         let mut entry = HexEntry::new(color);
         assert_eq!(entry.text, "#FF0000");
         assert_ne!(color.css(), entry.text);
         entry.text = "#00FF00".into();
-        let green = entry.apply(Space::DisplayP3).unwrap();
+        let green = entry.apply(Space::DisplayP3).ok_or("valid P3 hex color")?;
         assert_eq!(green.space, Space::DisplayP3);
         assert_eq!(green.channels8(), [0, 255, 0]);
         assert_eq!(green.hex(), entry.text);
@@ -290,6 +291,7 @@ mod hex_tests {
             assert_eq!(preset.space, Space::DisplayP3);
             assert_eq!(preset.srgb8(), rgb);
         }
+        Ok(())
     }
     #[test]
     fn rejects_incomplete_alpha_and_non_ascii_codes() {
@@ -309,7 +311,8 @@ mod hex_tests {
         }
     }
     #[test]
-    fn invalid_edit_retains_the_last_color_and_external_choices_resynchronize() {
+    fn invalid_edit_retains_the_last_color_and_external_choices_resynchronize()
+    -> Result<(), &'static str> {
         let initial = InkColor::default();
         let mut entry = HexEntry::new(initial);
         entry.text = "#12".into();
@@ -318,12 +321,13 @@ mod hex_tests {
         entry.revert();
         assert_eq!(entry.text, initial.css());
         entry.text = "#abc".into();
-        let color = entry.apply(Space::Srgb).unwrap();
+        let color = entry.apply(Space::Srgb).ok_or("valid sRGB hex color")?;
         entry.sync(color);
         assert_eq!(entry.text, "#abc");
         entry.normalize();
         assert_eq!(entry.text, "#AABBCC");
         entry.sync(InkColor::from_rgb8(PRESETS[3]));
         assert_eq!(entry.text, "#ECAD45");
+        Ok(())
     }
 }
