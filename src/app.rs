@@ -1534,7 +1534,7 @@ fn run_inner(options: Options) -> Result<(), String> {
             "OverInk",
             crate::toolbar::WIDTH as i32,
             crate::toolbar::HEIGHT as i32,
-            false,
+            true,
         )
     })?;
     with_autorelease_pool(|| toolbar.setup_toolbar());
@@ -2637,8 +2637,9 @@ fn run_inner(options: Options) -> Result<(), String> {
                 if !toolbar_ime_active {
                     output.platform_output.ime = None;
                 }
-                let rail = crate::toolbar::colors(theme == egui::Theme::Dark).rail;
-                toolbar_render.begin(&toolbar, rail.to_array().map(|c| f32::from(c) / 255.))?;
+                // The rounded egui root draws the background. Clear the
+                // transparent native window so all four outer corners remain clear.
+                toolbar_render.begin(&toolbar, [0., 0., 0., 0.])?;
                 gui.paint(&toolbar_render, &toolbar, &toolbar_color, output)?;
                 toolbar_render.present()?;
                 tooltips.update(&toolbar, &gui, app.language, &toolbar_color);
