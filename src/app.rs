@@ -203,6 +203,7 @@ struct App {
     suspended: bool,
     frozen: bool,
     panel: Option<crate::toolbar::Panel>,
+    panel_retiring: Option<crate::toolbar::Panel>,
     touch_enabled: bool,
     status: Status,
     path: String,
@@ -271,6 +272,7 @@ impl App {
             suspended,
             frozen: false,
             panel: None,
+            panel_retiring: None,
             touch_enabled: true,
             status,
             path: base
@@ -2359,7 +2361,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 }
                 last_color = Instant::now();
             }
-            let expanded = app.panel.is_some() && !app.picking;
+            let expanded = (app.panel.is_some() || app.panel_retiring.is_some()) && !app.picking;
             if expanded != toolbar_expanded || controller_scale_changed {
                 toolbar_dirty = true;
                 controller_bounds_changed = true;
@@ -3114,6 +3116,7 @@ mod touch_tests {
             suspended: false,
             frozen: false,
             panel: None,
+            panel_retiring: None,
             touch_enabled: true,
             status: Status::default(),
             path: String::new(),
