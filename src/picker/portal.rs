@@ -5,6 +5,8 @@ use crate::{
     color::{InkColor, Space},
 };
 use futures_lite::{StreamExt, future};
+#[cfg(target_os = "linux")]
+use std::sync::{Arc, atomic::AtomicU8};
 use std::{
     collections::HashMap,
     path::PathBuf,
@@ -14,8 +16,6 @@ use std::{
     },
     thread,
 };
-#[cfg(target_os = "linux")]
-use std::sync::{Arc, atomic::AtomicU8};
 use zbus::{Connection, OwnedObjectPath, OwnedVariant, Proxy, Structure, Variant};
 
 type PortalResult<T> = Result<Option<T>, String>;
@@ -149,9 +149,7 @@ impl SystemJob<Image> {
                     // can hide the annotation canvas and toolbar; wait for
                     // that acknowledgement before requesting portal pixels.
                     worker_visibility.store(1, Ordering::Release);
-                    while !cancelled.is_closed()
-                        && worker_visibility.load(Ordering::Acquire) != 2
-                    {
+                    while !cancelled.is_closed() && worker_visibility.load(Ordering::Acquire) != 2 {
                         thread::sleep(std::time::Duration::from_millis(8));
                     }
                     if cancelled.is_closed() {

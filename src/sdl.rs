@@ -1583,8 +1583,7 @@ impl Window {
         // The display bounds and window position already have safe SDL
         // adapters. Compare in i64 to avoid overflow on unusual virtual
         // desktop layouts, without another raw FFI call here.
-        let [left, top, width, height] =
-            query_display_bounds(id, DisplayBoundsKind::Usable)?;
+        let [left, top, width, height] = query_display_bounds(id, DisplayBoundsKind::Usable)?;
         let [x, y] = self.position()?;
         let size = self.size();
         let center_x = i64::from(x) + (size[0] * 0.5) as i64;
