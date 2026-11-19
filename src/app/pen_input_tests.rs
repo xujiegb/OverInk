@@ -466,3 +466,125 @@ fn sparse_pen_without_pressure_retains_valid_distant_up_position() {
     assert_eq!(stroke.points.len(), 2);
     assert_eq!(stroke.points[1].x, 300.);
 }
+
+#[cfg(target_os = "macos")]
+fn cocoa_touch(app: &mut App, timestamp: u64, down: bool, x: f32) {
+    app.event(
+        &SDL_Event {
+            ptouch: SDL_PenTouchEvent {
+                r#type: if down { SDL_EVENT_PEN_DOWN } else { SDL_EVENT_PEN_UP },
+                timestamp,
+                windowID: CANVAS,
+                which: PEN,
+                pen_state: if down { SDL_PEN_INPUT_DOWN } else { Default::default() },
+                down,
+                x,
+                y: 140.,
+                ..Default::default()
+            },
+        },
+        CANVAS,
+        SIZE,
+    );
+}
+
+#[cfg(target_os = "macos")]
+fn cocoa_motion(app: &mut App, timestamp: u64, x: f32) {
+    app.event(
+        &SDL_Event {
+            pmotion: SDL_PenMotionEvent {
+                r#type: SDL_EVENT_PEN_MOTION,
+                timestamp,
+                windowID: CANVAS,
+                which: PEN,
+                pen_state: SDL_PEN_INPUT_DOWN,
+                x,
+                y: 140.,
+                ..Default::default()
+            },
+        },
+        CANVAS,
+        SIZE,
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn cocoa_pen_down_uses_same_nsevent_motion_instead_of_previous_cached_position() {
+    let mut app = super::touch_tests::app();
+
+    // SDL 3.4.20 calls SendPenTouch BEFORE SendPenMotion in one
+    // Cocoa_HandlePenPointEvent. Its DOWN coordinates therefore refer
+    // to the previous pen sample, not the actual new contact position.
+    cocoa_touch(&mut app, 100_000, true, 0.);
+    assert!(app.history.active.is_none());
+    cocoa_motion(&mut app, 100_000, 30.);
+    cocoa_motion(&mut app, 101_000, 85.);
+    cocoa_touch(&mut app, 102_000, false, 85.);
+    assert_eq!(app.history.strokes().len(), 1);
+    assert_eq!(app.history.strokes()[0].points[0].x, 30.);
+    assert_eq!(app.history.strokes()[0].points.last().map(|p| p.x), Some(85.));
+
+    // The next PEN_DOWN reports 85: that was the previous stroke's end.
+    // A following PEN_MOTION with the very same timestamp carries the
+    // true fresh contact position at 690. It must START there, not draw
+    // a line from 85 to 690.
+    cocoa_touch(&mut app, 200_000, true, 85.);
+    assert!(app.history.active.is_none());
+    cocoa_motion(&mut app, 200_000, 690.);
+    let active = app.history.active.as_ref().expect("pen motion begins a new stroke");
+    assert_eq!(active.points.len(), 1);
+    assert_eq!(active.points[0].x, 690.);
+    cocoa_motion(&mut app, 201_000, 740.);
+    cocoa_touch(&mut app, 202_000, false, 740.);
+
+    assert_eq!(app.history.strokes().len(), 2);
+    assert!(app.history.strokes()[0].points.iter().all(|p| p.x <= 85.));
+    assert!(app.history.strokes()[1].points.iter().all(|p| p.x >= 690.));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn cocoa_pen_axis_can_start_stationary_contact_with_fresh_position() {
+    let mut app = super::touch_tests::app();
+    cocoa_touch(&mut app, 300_000, true, 50.);
+    app.event(
+        &SDL_Event {
+            paxis: SDL_PenAxisEvent {
+                r#type: SDL_EVENT_PEN_AXIS,
+                timestamp: 300_000,
+                windowID: CANVAS,
+                which: PEN,
+                pen_state: SDL_PEN_INPUT_DOWN,
+                axis: SDL_PEN_AXIS_PRESSURE,
+                value: 0.4,
+                x: 510.,
+                y: 140.,
+                ..Default::default()
+            },
+        },
+        CANVAS,
+        SIZE,
+    );
+    let Some(active) = app.history.active.as_ref() else {
+        panic!("same-timestamp pen axis should start an active stroke");
+    };
+    assert_eq!(active.points[0].x, 510.);
+    assert_eq!(active.points.len(), 1);
+    cocoa_touch(&mut app, 301_000, false, 510.);
+    assert_eq!(app.history.strokes().len(), 1);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn cocoa_stationary_dot_without_motion_falls_back_to_touch_position() {
+    let mut app = super::touch_tests::app();
+    cocoa_touch(&mut app, 400_000, true, 44.);
+    assert!(app.history.active.is_none());
+    cocoa_touch(&mut app, 401_000, false, 44.);
+    let [stroke] = app.history.strokes() else {
+        panic!("a stationary pen tap must leave one dot");
+    };
+    assert_eq!(stroke.points.len(), 1);
+    assert_eq!(stroke.points[0].x, 44.);
+}
