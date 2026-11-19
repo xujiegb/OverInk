@@ -426,17 +426,6 @@ impl TextFonts {
         monochrome_fallback.unwrap_or(ANNOTATION)
     }
 
-    pub fn layout(
-        &self,
-        ui: &Ui,
-        text: &str,
-        size: f32,
-        color: Color32,
-        width: f32,
-    ) -> Arc<Galley> {
-        self.layout_preferred(ui, text, size, color, width, None)
-    }
-
     pub fn layout_preferred(
         &self,
         ui: &Ui,
@@ -477,10 +466,6 @@ impl TextFonts {
         ui.fonts_mut(|fonts| fonts.layout_job(job))
     }
 
-    pub fn font_id(size: f32) -> FontId {
-        FontId::new(size, FontFamily::Name(ANNOTATION.into()))
-    }
-
     pub fn font_id_preferred(&self, size: f32, preferred: Option<&str>) -> FontId {
         let name = preferred
             .filter(|name| self.known(name))
@@ -498,7 +483,7 @@ mod tests {
         context.set_fonts(fonts.definitions());
         let mut glyphs = Vec::new();
         let frame = context.run_ui(egui::RawInput::default(), |ui| {
-            let galley = fonts.layout(ui, text, 28., Color32::WHITE, 800.);
+            let galley = fonts.layout_preferred(ui, text, 28., Color32::WHITE, 800., None);
             glyphs = galley
                 .rows
                 .iter()
