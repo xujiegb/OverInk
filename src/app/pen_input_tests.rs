@@ -11,10 +11,18 @@ fn contact(app: &mut App, window: SDL_WindowID, down: bool, x: f32) {
     app.event(
         &SDL_Event {
             ptouch: SDL_PenTouchEvent {
-                r#type: if down { SDL_EVENT_PEN_DOWN } else { SDL_EVENT_PEN_UP },
+                r#type: if down {
+                    SDL_EVENT_PEN_DOWN
+                } else {
+                    SDL_EVENT_PEN_UP
+                },
                 windowID: window,
                 which: PEN,
-                pen_state: if down { SDL_PEN_INPUT_DOWN } else { Default::default() },
+                pen_state: if down {
+                    SDL_PEN_INPUT_DOWN
+                } else {
+                    Default::default()
+                },
                 x,
                 y: 140.,
                 down,
@@ -33,7 +41,11 @@ fn motion(app: &mut App, window: SDL_WindowID, down: bool, x: f32) {
                 r#type: SDL_EVENT_PEN_MOTION,
                 windowID: window,
                 which: PEN,
-                pen_state: if down { SDL_PEN_INPUT_DOWN } else { Default::default() },
+                pen_state: if down {
+                    SDL_PEN_INPUT_DOWN
+                } else {
+                    Default::default()
+                },
                 x,
                 y: 140.,
                 ..Default::default()
@@ -51,7 +63,11 @@ fn pressure(app: &mut App, window: SDL_WindowID, down: bool, x: f32, value: f32)
                 r#type: SDL_EVENT_PEN_AXIS,
                 windowID: window,
                 which: PEN,
-                pen_state: if down { SDL_PEN_INPUT_DOWN } else { Default::default() },
+                pen_state: if down {
+                    SDL_PEN_INPUT_DOWN
+                } else {
+                    Default::default()
+                },
                 axis: SDL_PEN_AXIS_PRESSURE,
                 value,
                 x,
@@ -97,11 +113,17 @@ fn sidecar_hover_motion_ends_stroke_without_pen_up() {
     motion(&mut app, CANVAS, false, 550.);
     assert!(app.history.active.is_none());
     assert_eq!(app.history.strokes().len(), 1);
-    assert_eq!(app.history.strokes()[0].points.last().map(|p| p.x), Some(90.));
+    assert_eq!(
+        app.history.strokes()[0].points.last().map(|p| p.x),
+        Some(90.)
+    );
     contact(&mut app, CANVAS, true, 570.);
     contact(&mut app, CANVAS, false, 580.);
     assert_eq!(app.history.strokes().len(), 2);
-    assert_eq!(app.history.strokes()[1].points.first().map(|p| p.x), Some(570.));
+    assert_eq!(
+        app.history.strokes()[1].points.first().map(|p| p.x),
+        Some(570.)
+    );
 }
 
 #[test]
@@ -114,7 +136,10 @@ fn pen_up_routed_to_another_window_must_commit_active_canvas() {
     contact(&mut app, OTHER_WINDOW, false, 700.);
     assert!(app.history.active.is_none());
     assert_eq!(app.history.strokes().len(), 1);
-    assert_eq!(app.history.strokes()[0].points.last().map(|p| p.x), Some(100.));
+    assert_eq!(
+        app.history.strokes()[0].points.last().map(|p| p.x),
+        Some(100.)
+    );
 
     motion(&mut app, CANVAS, false, 800.);
     contact(&mut app, CANVAS, true, 820.);
