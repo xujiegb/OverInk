@@ -266,10 +266,9 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
                 }
                 SdlNativeResult::Done
             }
-            SdlNativeAction::SaveBmp(surface, name) => SdlNativeResult::Success(SDL_SaveBMP(
-                surface.as_non_null().as_ptr(),
-                name.as_ptr(),
-            )),
+            SdlNativeAction::SaveBmp(surface, name) => {
+                SdlNativeResult::Success(SDL_SaveBMP(surface.as_non_null().as_ptr(), name.as_ptr()))
+            }
             SdlNativeAction::SystemTheme => SdlNativeResult::Theme(SDL_GetSystemTheme()),
             SdlNativeAction::IndirectTouch(device) => SdlNativeResult::Success(matches!(
                 SDL_GetTouchDeviceType(device),

@@ -157,8 +157,8 @@ mod tests {
         let profile = moxcms::ColorProfile::new_srgb()
             .encode()
             .map_err(|error| error.to_string())?;
-        let transform = Transform::from_srgb_to_display(&profile)
-            .map_err(|error| format!("{error:?}"))?;
+        let transform =
+            Transform::from_srgb_to_display(&profile).map_err(|error| format!("{error:?}"))?;
         let manager = ColorManager {
             transform: Some(transform),
             status: SYSTEM_SRGB,
