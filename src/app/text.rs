@@ -308,14 +308,18 @@ impl App {
             changed |= self.cancel_text_touches(gui);
         }
         gui.event(event, window, size);
-        if editing && ty == SDL_EVENT_MOUSE_BUTTON_DOWN
+        if editing
+            && ty == SDL_EVENT_MOUSE_BUTTON_DOWN
             && let Some(button) = mouse_button_event(event)
             && button.button == SDL_BUTTON_RIGHT as u8
             && button.which != SDL_PEN_MOUSEID
             && button.which != SDL_TOUCH_MOUSEID
         {
             let point = pos2(button.x, button.y);
-            if self.text_menu_item().is_some_and(|item| item.rect().contains(point)) {
+            if self
+                .text_menu_item()
+                .is_some_and(|item| item.rect().contains(point))
+            {
                 self.input.text.context_menu = Some(point);
                 changed = true;
             }
@@ -615,11 +619,19 @@ impl App {
 
     fn text_context_rect(&self, canvas: Rect) -> Option<Rect> {
         let point = self.input.text.context_menu?;
-        let lines = if self.text_menu_item()?.text.is_empty() { 1. } else { 4. };
+        let lines = if self.text_menu_item()?.text.is_empty() {
+            1.
+        } else {
+            4.
+        };
         let size = vec2(170., lines * 32. + 12.) * self.input.canvas_units;
         let min = pos2(
-            point.x.clamp(canvas.left(), (canvas.right() - size.x).max(canvas.left())),
-            point.y.clamp(canvas.top(), (canvas.bottom() - size.y).max(canvas.top())),
+            point
+                .x
+                .clamp(canvas.left(), (canvas.right() - size.x).max(canvas.left())),
+            point
+                .y
+                .clamp(canvas.top(), (canvas.bottom() - size.y).max(canvas.top())),
         );
         Some(Rect::from_min_size(min, size))
     }
@@ -646,7 +658,8 @@ impl App {
             return false;
         };
         let total = draft.item.text.chars().count();
-        let selected = draft.cursor
+        let selected = draft
+            .cursor
             .map(|range| range.as_sorted_char_range())
             .filter(|range| range.start != range.end);
         let range = selected.clone().unwrap_or(0..total);
@@ -656,10 +669,18 @@ impl App {
                 draft.focus = true;
             }
             TextContextAction::Copy | TextContextAction::Cut => {
-                let start = draft.item.text.char_indices()
-                    .nth(range.start).map_or(draft.item.text.len(), |(i, _)| i);
-                let end = draft.item.text.char_indices()
-                    .nth(range.end).map_or(draft.item.text.len(), |(i, _)| i);
+                let start = draft
+                    .item
+                    .text
+                    .char_indices()
+                    .nth(range.start)
+                    .map_or(draft.item.text.len(), |(i, _)| i);
+                let end = draft
+                    .item
+                    .text
+                    .char_indices()
+                    .nth(range.end)
+                    .map_or(draft.item.text.len(), |(i, _)| i);
                 set_clipboard_text(&draft.item.text[start..end]);
                 if action == TextContextAction::Cut {
                     draft.item.text.delete_char_range(range.clone());
@@ -691,7 +712,9 @@ impl App {
 
     fn text_context_popup(&mut self, ui: &mut Ui, rect: Rect) {
         let tr = self.language;
-        let has_text = self.text_menu_item().is_some_and(|item| !item.text.is_empty());
+        let has_text = self
+            .text_menu_item()
+            .is_some_and(|item| !item.text.is_empty());
         let mut action = None;
         overlay(ui, "annotation-context-popup", rect, |ui| {
             egui::Frame::new()
@@ -702,7 +725,10 @@ impl App {
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing = Vec2::ZERO;
                     let entries = [
-                        (TextContextAction::SelectAll, tr.text("Select all", "全选", "全選")),
+                        (
+                            TextContextAction::SelectAll,
+                            tr.text("Select all", "全选", "全選"),
+                        ),
                         (TextContextAction::Copy, tr.text("Copy", "拷贝", "複製")),
                         (TextContextAction::Paste, tr.text("Paste", "粘贴", "貼上")),
                         (TextContextAction::Cut, tr.text("Cut", "剪切", "剪下")),
