@@ -6,12 +6,12 @@ use egui::{
 };
 use skrifa::{FontRef, GlyphId, MetadataProvider, string::StringId};
 use std::{
+    ffi::OsStr,
     fs::{self, File},
     io::{self, Read, Write},
-    ffi::OsStr,
-    time::{SystemTime, UNIX_EPOCH},
     path::Path,
     sync::{Arc, OnceLock},
+    time::{SystemTime, UNIX_EPOCH},
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -190,7 +190,11 @@ impl CustomFont {
                     .map(|name| name.chars().take(100).collect())
             })
             .unwrap_or_else(|| CUSTOM.into());
-        Ok(Self { id: String::new(), name, face })
+        Ok(Self {
+            id: String::new(),
+            name,
+            face,
+        })
     }
 }
 
@@ -232,8 +236,8 @@ impl TextFonts {
             .chain(fonts.customs.iter().map(|font| font.id.clone()))
             .chain(FALLBACK.into_iter().map(str::to_owned))
         {
-            let valid = FALLBACK.contains(&id.as_str())
-                || fonts.customs.iter().any(|font| font.id == id);
+            let valid =
+                FALLBACK.contains(&id.as_str()) || fonts.customs.iter().any(|font| font.id == id);
             if valid && !fonts.order.contains(&id) {
                 fonts.order.push(id);
             }
@@ -263,7 +267,9 @@ impl TextFonts {
         let data = serde_json::to_vec_pretty(&self.order).map_err(|error| error.to_string())?;
         fs::write(&temporary, data)
             .and_then(|()| fs::rename(&temporary, target))
-            .inspect_err(|_| { let _ = fs::remove_file(&temporary); })
+            .inspect_err(|_| {
+                let _ = fs::remove_file(&temporary);
+            })
             .map_err(|error| error.to_string())
     }
 
@@ -357,10 +363,9 @@ impl TextFonts {
                 vec![font.id.clone()],
             );
         }
-        definitions.families.insert(
-            FontFamily::Name(ANNOTATION.into()),
-            self.order.clone(),
-        );
+        definitions
+            .families
+            .insert(FontFamily::Name(ANNOTATION.into()), self.order.clone());
         definitions
     }
 
@@ -369,7 +374,11 @@ impl TextFonts {
             INCLUDED_FONT => Some(&bundled().faces[0]),
             COLOR => Some(&bundled().faces[1]),
             MONO => Some(&bundled().faces[2]),
-            _ => self.customs.iter().find(|font| font.id == id).map(|font| &font.face),
+            _ => self
+                .customs
+                .iter()
+                .find(|font| font.id == id)
+                .map(|font| &font.face),
         }
     }
 
