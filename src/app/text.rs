@@ -694,7 +694,7 @@ impl App {
             let length = draft.committed.chars().count();
             let cursor_range = draft.cursor
                 .as_ref()
-                .map(CCursorRange::as_sorted_char_range)
+                .map(|range| range.as_sorted_char_range())
                 .unwrap_or(length..length);
             let selection = if cursor_range.is_empty() && action != EditAction::Paste {
                 0..length
@@ -1093,6 +1093,7 @@ impl App {
         menus: Option<TextMenus>,
     ) {
         let wheel_open = self.input.text.color_wheel.is_some();
+        let context_rect = self.text_context_rect(ui.clip_rect());
         let Some(draft) = self.input.text.draft.as_mut() else {
             return;
         };
@@ -1121,7 +1122,7 @@ impl App {
             let clicked = input.pointer.primary_clicked().then(|| input.pointer.interact_pos()).flatten();
             let menu_pointer = input.pointer.interact_pos().is_some_and(|point| {
                 menus.is_some_and(|menus| menus.contains(point))
-                    || self.text_context_rect(ui.clip_rect()).is_some_and(|rect| rect.contains(point))
+                    || context_rect.is_some_and(|rect| rect.contains(point))
             });
             let finish = lost_window_focus
                 || (!composing
