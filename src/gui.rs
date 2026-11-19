@@ -225,14 +225,12 @@ impl Gui {
                 if let Some(w) = mouse_wheel_event(e)
                     && w.windowID == id
                 {
-                    let sign = if w.direction == SDL_MOUSEWHEEL_FLIPPED {
-                        -1.
-                    } else {
-                        1.
-                    };
+                    // SDL already includes the OS natural-scrolling preference
+                    // in x/y. FLIPPED describes that preference, not a second
+                    // conversion to apply before forwarding to egui.
                     self.raw.events.push(Event::MouseWheel {
                         unit: egui::MouseWheelUnit::Line,
-                        delta: egui::vec2(w.x * sign, w.y * sign),
+                        delta: egui::vec2(w.x, w.y),
                         phase: egui::TouchPhase::Move,
                         source: egui::MouseWheelSource::Unknown,
                         modifiers: modifiers(mod_state()),
@@ -667,6 +665,33 @@ mod tests {
                 });
             });
             output.textures_delta.clear();
+        }
+    }
+
+    #[test]
+    fn mouse_wheel_respects_system_natural_scroll_direction() {
+        let mut gui = Gui::new();
+        let window = SDL_WindowID(1);
+        for (direction, expected) in [
+            (SDL_MOUSEWHEEL_NORMAL, egui::vec2(1.25, -2.5)),
+            (SDL_MOUSEWHEEL_FLIPPED, egui::vec2(-3.5, 2.25)),
+        ] {
+            let wheel = SDL_Event {
+                wheel: SDL_MouseWheelEvent {
+                    r#type: SDL_EVENT_MOUSE_WHEEL,
+                    windowID: window,
+                    x: expected.x,
+                    y: expected.y,
+                    direction,
+                    ..Default::default()
+                },
+            };
+            gui.event(&wheel, window, [800., 600.]);
+            assert!(
+                matches!(gui.raw.events.as_slice(), [Event::MouseWheel { delta, .. }] if *delta == expected),
+                "the SDL wheel delta must not be inverted again"
+            );
+            gui.raw.events.clear();
         }
     }
 
