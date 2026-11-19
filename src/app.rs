@@ -2499,12 +2499,8 @@ fn run_inner(options: Options) -> Result<(), String> {
                 match app.text_fonts.remove_font(&id, &annotation_font_path) {
                     Ok(()) => cmd.redraw_canvas = true,
                     Err(error) => {
-                        app.status = text(
-                            "Could not remove font",
-                            "无法删除字体",
-                            "無法刪除字型",
-                        )
-                        .detail(error);
+                        app.status = text("Could not remove font", "无法删除字体", "無法刪除字型")
+                            .detail(error);
                     }
                 }
                 toolbar_dirty = true;
