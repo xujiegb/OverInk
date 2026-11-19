@@ -10,6 +10,7 @@ import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
 const APP_ID = 'org.overink.OverInk';
 const MAX_TRUST_KEY_LENGTH = 2048;
+const MAX_EXECUTABLE_BYTES = 256 * 1024 * 1024;
 const CANVAS = 'OverInk - canvas';
 const TOOLBAR = 'OverInk';
 const BUS_NAME = 'org.overink.Overlay';
@@ -131,21 +132,28 @@ class CaptureBridge {
         this._trusted = next;
     }
 
-    _binaryDigest(executable) {
+    _binaryDigest(executable, installedSize) {
         // Hash the verified root-owned executable in bounded chunks. Unlike
         // st_dev/inode, its SHA-256 identity survives Btrfs and OSTree remounts.
         const checksum = GLib.Checksum.new(GLib.ChecksumType.SHA256);
         if (!checksum)
             return null;
         const stream = Gio.File.new_for_path(executable).read(null);
+        let readSize = 0;
         try {
             while (true) {
                 const chunk = stream.read_bytes(64 * 1024, null);
-                if (chunk.get_size() === 0)
+                const size = chunk.get_size();
+                if (size === 0)
                     break;
+                readSize += size;
+                // A root update can grow the file after its initial stat.
+                // Bound actual I/O rather than trusting only that first size.
+                if (readSize > MAX_EXECUTABLE_BYTES || readSize > installedSize)
+                    return null;
                 checksum.update(chunk.get_data());
             }
-            return checksum.get_string();
+            return readSize === installedSize ? checksum.get_string() : null;
         } finally {
             stream.close(null);
         }
@@ -182,7 +190,7 @@ class CaptureBridge {
                     installedSize = info.get_size();
                     // Reject unreasonably large executables rather than
                     // blocking GNOME Shell while hashing unbounded content.
-                    if (installedSize <= 0 || installedSize > 256 * 1024 * 1024)
+                    if (installedSize <= 0 || installedSize > MAX_EXECUTABLE_BYTES)
                         return null;
                 } else if ((mode & 0o170000) !== 0o040000) {
                     return null;
@@ -191,7 +199,7 @@ class CaptureBridge {
                     break;
                 path = GLib.path_get_dirname(path);
             }
-            const digest = this._binaryDigest(executable);
+            const digest = this._binaryDigest(executable, installedSize);
             if (!digest)
                 return null;
             // Root-managed updates can replace a file between the initial
