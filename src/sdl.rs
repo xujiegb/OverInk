@@ -1324,6 +1324,7 @@ enum WindowFloatQuery {
 enum WindowCommand<'a> {
     InputArea(&'a SDL_Rect),
     SyncInput(bool),
+    RequestScreenKeyboard,
     ClearComposition,
     SyncAndPumpEvents,
     SetSize([i32; 2]),
@@ -1505,12 +1506,31 @@ impl Window {
                 WindowCommand::SyncInput(enabled) => {
                     if enabled != SDL_TextInputActive(self.raw.as_ptr()) {
                         if enabled {
-                            SDL_StartTextInput(self.raw.as_ptr());
+                            // Mouse/pen editor activation must not summon an OSK.
+                            // The explicit touch/button request below opts in.
+                            SDL_SetHint(SDL_HINT_ENABLE_SCREEN_KEYBOARD, c"0".as_ptr());
+                            check(SDL_StartTextInput(self.raw.as_ptr()))
                         } else {
-                            SDL_StopTextInput(self.raw.as_ptr());
+                            check(SDL_StopTextInput(self.raw.as_ptr()))
                         }
+                    } else {
+                        Ok(())
                     }
-                    Ok(())
+                }
+                WindowCommand::RequestScreenKeyboard => {
+                    // SDL's hint must be set before StartTextInput. Restart
+                    // just this editor's input method, then restore the normal
+                    // non-OSK policy for subsequent mouse/pen editor activation.
+                    check(SDL_SetHint(
+                        SDL_HINT_ENABLE_SCREEN_KEYBOARD,
+                        c"1".as_ptr(),
+                    ))?;
+                    if SDL_TextInputActive(self.raw.as_ptr()) {
+                        let _ = SDL_StopTextInput(self.raw.as_ptr());
+                    }
+                    let result = check(SDL_StartTextInput(self.raw.as_ptr()));
+                    let _ = SDL_SetHint(SDL_HINT_ENABLE_SCREEN_KEYBOARD, c"0".as_ptr());
+                    result
                 }
                 WindowCommand::ClearComposition => {
                     SDL_ClearComposition(self.raw.as_ptr());
@@ -1744,6 +1764,10 @@ impl Window {
 
     pub fn sync_text_input(&self, enabled: bool) {
         let _ = self.run_command(WindowCommand::SyncInput(enabled));
+    }
+
+    pub fn request_screen_keyboard(&self) -> Result<(), String> {
+        self.run_command(WindowCommand::RequestScreenKeyboard)
     }
 
     pub fn clear_composition(&self) {
