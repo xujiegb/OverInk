@@ -109,7 +109,7 @@ fn trace_input_event(event: &SDL_Event) {
                     pen.windowID.0,
                     pen.which.0,
                     pen.down,
-                    pen.pen_state,
+                    pen.pen_state.0,
                     pen.x,
                     pen.y
                 );
@@ -119,7 +119,7 @@ fn trace_input_event(event: &SDL_Event) {
             if let Some(pen) = pen_motion_event(event) {
                 eprintln!(
                     "OverInk input PEN_MOTION ts={} window={} pen={} state={} xy=({:.1},{:.1})",
-                    pen.timestamp, pen.windowID.0, pen.which.0, pen.pen_state, pen.x, pen.y
+                    pen.timestamp, pen.windowID.0, pen.which.0, pen.pen_state.0, pen.x, pen.y
                 );
             }
         }
@@ -130,7 +130,7 @@ fn trace_input_event(event: &SDL_Event) {
                     pen.timestamp,
                     pen.windowID.0,
                     pen.which.0,
-                    pen.pen_state,
+                    pen.pen_state.0,
                     pen.axis.0,
                     pen.value,
                     pen.x,
