@@ -1445,6 +1445,68 @@ mod tests {
         }
     }
 
+    #[test]
+    fn second_finger_tap_requests_keyboard_without_mouse_synthesis() {
+        let mut app = app();
+        app.use_tool(Tool::Select);
+        let canvas = Rect::from_min_size(Pos2::ZERO, Vec2::from(SIZE));
+        let mut box_item = TextBox::new(
+            pos2(150., 120.),
+            canvas,
+            InkColor::default(),
+            1.,
+        );
+        box_item.text = "Touch input".into();
+        let Some(index) = app.history.set_text_box(None, box_item) else {
+            panic!("expected a text box");
+        };
+        let mut gui = Gui::new();
+        let finger = |ty| SDL_Event {
+            tfinger: SDL_TouchFingerEvent {
+                r#type: ty,
+                windowID: SDL_WindowID(1),
+                touchID: SDL_TouchID(42),
+                fingerID: SDL_FingerID(7),
+                x: 160. / SIZE[0],
+                y: 130. / SIZE[1],
+                ..Default::default()
+            },
+        };
+        for ty in [SDL_EVENT_FINGER_DOWN, SDL_EVENT_FINGER_UP] {
+            app.text_event(&mut gui, &finger(ty), SDL_WindowID(1), SIZE);
+        }
+        assert_eq!(app.input.text.selected, Some(index));
+        assert!(!app.input.text.editing());
+        assert!(!app.input.text.take_keyboard_request());
+
+        for ty in [SDL_EVENT_FINGER_DOWN, SDL_EVENT_FINGER_UP] {
+            app.text_event(&mut gui, &finger(ty), SDL_WindowID(1), SIZE);
+        }
+        assert!(app.input.text.editing());
+        assert!(app.input.text.take_keyboard_request());
+        assert!(!app.input.text.take_keyboard_request());
+
+        // A subsequent touch inside the editor may summon the keyboard again.
+        for ty in [SDL_EVENT_FINGER_DOWN, SDL_EVENT_FINGER_UP] {
+            app.text_event(&mut gui, &finger(ty), SDL_WindowID(1), SIZE);
+        }
+        assert!(app.input.text.take_keyboard_request());
+    }
+
+    #[test]
+    fn mouse_editing_does_not_launch_an_on_screen_keyboard() {
+        let mut app = app();
+        app.use_tool(Tool::Select);
+        let canvas = Rect::from_min_size(Pos2::ZERO, Vec2::from(SIZE));
+        let mut item = TextBox::new(pos2(150., 120.), canvas, InkColor::default(), 1.);
+        item.text = "Mouse input".into();
+        app.history.set_text_box(None, item);
+        click(&mut app, pos2(160., 130.));
+        click(&mut app, pos2(160., 130.));
+        assert!(app.input.text.editing());
+        assert!(!app.input.text.take_keyboard_request());
+    }
+
     fn render(app: &mut App, gui: &mut Gui) {
         render_with_toolbar_focus(app, gui, false);
     }
