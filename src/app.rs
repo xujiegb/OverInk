@@ -2388,7 +2388,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 app.closing_panel = Some(panel);
             }
             let phase = gui.ctx.animate_bool_with_time(
-                egui::Id::new("toolbar-panel-expansion"),
+                egui::Id::unique("toolbar-panel-expansion"),
                 panel_target.is_some(),
                 0.20,
             );
@@ -2462,7 +2462,6 @@ fn run_inner(options: Options) -> Result<(), String> {
                             .unavailable(),
                         mark.id(),
                         file_dialog.pending(),
-                        phase,
                     )
                 });
                 toolbar_text_input = frame.platform_output.ime.is_some();
