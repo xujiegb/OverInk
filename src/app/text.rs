@@ -965,7 +965,7 @@ impl App {
         }
         let label = tr.text("Show screen keyboard", "呼出屏幕键盘", "開啟螢幕鍵盤");
         let (icon, response) = menu.allocate_exact_size(button, egui::Sense::click());
-        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, menu.is_enabled(), label));
+        response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, menu.is_enabled(), false, label));
         if response.hovered() || response.has_focus() {
             menu.painter()
                 .rect_filled(icon, 6. * scale, menu.visuals().widgets.hovered.bg_fill);
@@ -982,9 +982,11 @@ impl App {
                 menu.painter().circle_filled(key, 1.2 * scale, stroke.color);
             }
         }
-        menu.painter().hline(
-            board.x_range().shrink(6. * scale),
-            board.bottom() - 4. * scale,
+        menu.painter().line_segment(
+            [
+                pos2(board.left() + 6. * scale, board.bottom() - 4. * scale),
+                pos2(board.right() - 6. * scale, board.bottom() - 4. * scale),
+            ],
             stroke,
         );
         if response
