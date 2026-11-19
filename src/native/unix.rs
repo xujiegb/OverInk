@@ -651,8 +651,12 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             // Form the native identity after the Box moves into the registry.
-            NonNull::from(registry.insert(Box::new(DropCounter(Arc::clone(&releases)))).as_mut())
-                .cast()
+            NonNull::from(
+                registry
+                    .insert(Box::new(DropCounter(Arc::clone(&releases))))
+                    .as_mut(),
+            )
+            .cast()
         };
         // This registered Rust allocation has a stable address and a
         // known matching destructor, so no foreign ownership assumption

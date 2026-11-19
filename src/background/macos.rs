@@ -219,8 +219,7 @@ fn apple_silicon() -> bool {
             .output()
             .is_ok_and(|result| {
                 result.status.success()
-                    && std::str::from_utf8(&result.stdout)
-                        .is_ok_and(|value| value.trim() == "1")
+                    && std::str::from_utf8(&result.stdout).is_ok_and(|value| value.trim() == "1")
             })
     }
 }
