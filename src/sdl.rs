@@ -1350,7 +1350,7 @@ enum WindowCommand<'a> {
 /// Closed SDL window constructors, retaining borrowed title and parent
 /// references only until native creation completes.
 enum WindowCreation<'a> {
-    Main(&'a CStr, i32, i32, bool, bool),
+    Main(&'a CStr, i32, i32, bool),
     Tooltip(&'a Window, [i32; 4]),
 }
 
@@ -1611,10 +1611,10 @@ impl Window {
                         NonNull::new(SDL_CreateSurface(width, height, SDL_PIXELFORMAT_RGBA32))
                             .ok_or_else(error)?,
                     );
-                    let surface_ptr = surface.as_non_null().as_ptr();
-                    let transparent = SDL_MapSurfaceRGBA(surface_ptr, 0, 0, 0, 0);
-                    let opaque = SDL_MapSurfaceRGBA(surface_ptr, 255, 255, 255, 255);
-                    check(SDL_FillSurfaceRect(surface_ptr, ptr::null(), transparent))?;
+                    let surface_handle = surface.as_non_null();
+                    let transparent = SDL_MapSurfaceRGBA(surface_handle.as_ptr(), 0, 0, 0, 0);
+                    let opaque = SDL_MapSurfaceRGBA(surface_handle.as_ptr(), 255, 255, 255, 255);
+                    check(SDL_FillSurfaceRect(surface_handle.as_ptr(), ptr::null(), transparent))?;
 
                     let middle = SDL_Rect {
                         x: 0,
@@ -1623,7 +1623,7 @@ impl Window {
                         h: height - radius * 2,
                     };
                     if middle.h > 0 {
-                        check(SDL_FillSurfaceRect(surface_ptr, &middle, opaque))?;
+                        check(SDL_FillSurfaceRect(surface_handle.as_ptr(), &middle, opaque))?;
                     }
                     // Alpha antialiasing at the extreme two outer edges of
                     // each row, and mirrored geometry on all four corners.
@@ -1646,15 +1646,15 @@ impl Window {
                                 y: height - y - 1,
                                 ..top
                             };
-                            check(SDL_FillSurfaceRect(surface_ptr, &top, opaque))?;
-                            check(SDL_FillSurfaceRect(surface_ptr, &bottom, opaque))?;
+                            check(SDL_FillSurfaceRect(surface_handle.as_ptr(), &top, opaque))?;
+                            check(SDL_FillSurfaceRect(surface_handle.as_ptr(), &bottom, opaque))?;
                         }
                         if inset > 0 {
                             let coverage = (f64::from(inset) - x_edge).clamp(0., 1.);
                             let edge_alpha = (coverage * 255.).round() as u8;
                             if edge_alpha > 0 {
                                 let edge_color =
-                                    SDL_MapSurfaceRGBA(surface_ptr, 255, 255, 255, edge_alpha);
+                                    SDL_MapSurfaceRGBA(surface_handle.as_ptr(), 255, 255, 255, edge_alpha);
                                 for x in [inset - 1, width - inset] {
                                     for row in [y, height - y - 1] {
                                         let pixel = SDL_Rect {
@@ -1664,7 +1664,7 @@ impl Window {
                                             h: 1,
                                         };
                                         check(SDL_FillSurfaceRect(
-                                            surface_ptr,
+                                            surface_handle.as_ptr(),
                                             &pixel,
                                             edge_color,
                                         ))?;
@@ -1673,7 +1673,7 @@ impl Window {
                             }
                         }
                     }
-                    check(SDL_SetWindowShape(self.raw.as_ptr(), surface_ptr))
+                    check(SDL_SetWindowShape(self.raw.as_ptr(), surface_handle.as_ptr()))
                 }
                 #[cfg(not(target_os = "windows"))]
                 WindowCommand::ShapeRegions(size, opaque_regions) => {
@@ -1783,12 +1783,12 @@ impl Window {
         // SDL fails to assign an ID. A valid pointer is owned only by Self.
         unsafe {
             let raw = match &kind {
-                WindowCreation::Main(title, w, h, overlay, toolbar) => {
+                WindowCreation::Main(title, w, h, overlay) => {
                     let mut flags = SDL_WINDOW_HIDDEN
                         | SDL_WINDOW_HIGH_PIXEL_DENSITY
                         | SDL_WINDOW_ALWAYS_ON_TOP
                         | SDL_WINDOW_RESIZABLE;
-                    if *overlay || *toolbar {
+                    if *overlay {
                         flags |= SDL_WINDOW_BORDERLESS | SDL_WINDOW_TRANSPARENT;
                     }
                     SDL_ClearError();
@@ -1829,14 +1829,14 @@ impl Window {
 
     pub fn new(title: &str, w: i32, h: i32, overlay: bool) -> Result<Self, String> {
         let title = cstring(title);
-        Self::construct(WindowCreation::Main(&title, w, h, overlay, false))
+        Self::construct(WindowCreation::Main(&title, w, h, overlay))
     }
 
     /// Controller windows need a transparent back buffer for a native rounded
     /// alpha/hit-test mask. Canvas windows continue to use their original path.
     pub fn toolbar(title: &str, w: i32, h: i32) -> Result<Self, String> {
         let title = cstring(title);
-        Self::construct(WindowCreation::Main(&title, w, h, false, true))
+        Self::construct(WindowCreation::Main(&title, w, h, true))
     }
 
     pub fn tooltip(parent: &Self, x: i32, y: i32, w: i32, h: i32) -> Result<Self, String> {
