@@ -26,7 +26,7 @@ const MENU_GAP: f32 = 4.;
 const MENU_PADDING: f32 = 5.;
 const PALETTE_SIZE: Vec2 = vec2(240., 272.);
 const MENU_SIZE: Vec2 = vec2(
-    8. * MENU_BUTTON.x + 7. * MENU_GAP + 2. * MENU_PADDING,
+    9. * MENU_BUTTON.x + 8. * MENU_GAP + 2. * MENU_PADDING,
     MENU_BUTTON.y + 2. * MENU_PADDING,
 );
 
@@ -112,6 +112,7 @@ pub(super) struct TextInput {
     context_menu: Option<Pos2>,
     color_wheel: Option<ColorWheel>,
     screen_pick_requested: bool,
+    keyboard_requested: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -196,6 +197,10 @@ impl TextInput {
 
     pub fn take_screen_pick(&mut self) -> bool {
         std::mem::take(&mut self.screen_pick_requested)
+    }
+
+    pub fn take_keyboard_request(&mut self) -> bool {
+        std::mem::take(&mut self.keyboard_requested)
     }
 
     pub fn has_edit(&self, history: &History) -> bool {
@@ -307,6 +312,7 @@ impl App {
         if matches!(ty, SDL_EVENT_PEN_PROXIMITY_IN | SDL_EVENT_PEN_DOWN) {
             changed |= self.cancel_text_touches(gui);
         }
+        let primary_touch = gui.primary_touch();
         gui.event(event, window, size);
         if editing
             && ty == SDL_EVENT_MOUSE_BUTTON_DOWN
@@ -331,6 +337,22 @@ impl App {
         }
         let touch_ended = matches!(ty, SDL_EVENT_FINGER_UP | SDL_EVENT_FINGER_CANCELED);
         if editing {
+            // The editor is already active, but the native keyboard may have
+            // been dismissed. A *direct finger* tap in the text can reopen it.
+            // Pen and mouse pointer events must never request it automatically.
+            if ty == SDL_EVENT_FINGER_UP
+                && self.input.text.touch_press
+                && crate::touch::key_from_event(event) == primary_touch
+                && finger_event(event)
+                    .and_then(|finger| crate::touch::point(finger, size))
+                    .is_some_and(|point| {
+                        self.text_menu_item().is_some_and(|item| {
+                            item.rect().contains(pos2(point.x, point.y))
+                        })
+                    })
+            {
+                self.input.text.keyboard_requested = true;
+            }
             if touch_ended {
                 self.input.text.touch_press = false;
             }
@@ -452,7 +474,9 @@ impl App {
                             self.tool == Tool::Text || double
                         };
                         if edit {
+                            let touch = state.touch_press;
                             state.edit(Some(index), (**item).clone());
+                            state.keyboard_requested |= touch;
                         } else {
                             state.selected = Some(index);
                             state.click = Some((index, pos, now));
@@ -910,6 +934,29 @@ impl App {
             {
                 acted |= self.recolor_text(preset.converted(color.space));
                 self.input.text.color_wheel = None;
+            }
+        }
+        if menu
+            .add_sized(button, toolbar::menu_button("⌨", scale))
+            .on_hover_text(
+                egui::RichText::new(tr.text(
+                    "Show on-screen keyboard",
+                    "呼出屏幕键盘",
+                    "開啟螢幕鍵盤",
+                ))
+                .size(toolbar::MENU_FONT_SIZE * scale),
+            )
+            .clicked()
+        {
+            if !self.input.text.editing()
+                && let Some(index) = self.input.text.selected
+                && let Some(item) = self.history.text_boxes().get(index)
+            {
+                self.input.text.edit(Some(index), (**item).clone());
+            }
+            if self.input.text.editing() {
+                self.input.text.keyboard_requested = true;
+                acted = true;
             }
         }
         let wheel_open = self.input.text.color_wheel.is_some();
