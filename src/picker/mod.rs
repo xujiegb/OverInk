@@ -20,10 +20,7 @@ impl SystemJob {
     fn cancel(&mut self) {}
 }
 use crate::{color::InkColor, sdl::*};
-use std::{
-    ptr,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 pub type PickResult = Result<Option<InkColor>, String>;
 enum Stage {
     Idle,
@@ -35,7 +32,7 @@ enum Stage {
 pub struct Picker {
     stage: Stage,
     result: Option<PickResult>,
-    cursor: *mut SDL_Cursor,
+    cursor: Option<SystemCursor>,
     started: Instant,
 }
 impl Default for Picker {
@@ -43,7 +40,7 @@ impl Default for Picker {
         Self {
             stage: Stage::Idle,
             result: None,
-            cursor: ptr::null_mut(),
+            cursor: None,
             started: Instant::now(),
         }
     }
@@ -69,24 +66,11 @@ impl Picker {
             self.stage = Stage::LaunchAfter(Instant::now() + Duration::from_millis(100));
         } else {
             self.stage = Stage::Choosing;
-            if unsafe { SDL_WasInit(SDL_INIT_VIDEO) } != 0 {
-                unsafe {
-                    self.cursor = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_CROSSHAIR);
-                    if !self.cursor.is_null() {
-                        SDL_SetCursor(self.cursor);
-                    }
-                }
-            }
+            self.cursor = SystemCursor::crosshair();
         }
     }
     fn reset_cursor(&mut self) {
-        if !self.cursor.is_null() {
-            unsafe {
-                SDL_SetCursor(SDL_GetDefaultCursor());
-                SDL_DestroyCursor(self.cursor);
-            }
-            self.cursor = ptr::null_mut();
-        }
+        self.cursor = None;
     }
     fn finish(&mut self, result: PickResult) {
         self.stage = Stage::Idle;
@@ -103,45 +87,48 @@ impl Picker {
         if !self.active() {
             return;
         }
-        unsafe {
-            let ty = SDL_EventType(event.r#type);
-            if ty == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE {
-                self.cancel();
-                return;
-            }
-            if !self.choosing() {
-                return;
-            }
-            if ty == SDL_EVENT_MOUSE_BUTTON_UP
-                && event.button.windowID == window.id
-                && event.button.button == 3
-            {
-                self.cancel();
-                return;
-            }
-            let selected = (ty == SDL_EVENT_MOUSE_BUTTON_UP
-                && event.button.windowID == window.id
-                && event.button.button == 1
-                && event.button.which != SDL_TOUCH_MOUSEID
-                && event.button.which != SDL_PEN_MOUSEID)
-                || (ty == SDL_EVENT_PEN_UP && event.ptouch.windowID == window.id)
-                || (ty == SDL_EVENT_FINGER_UP && event.tfinger.windowID == window.id);
-            if selected {
-                let local = if ty == SDL_EVENT_FINGER_UP {
+        let ty = event_type(event);
+        if ty == SDL_EVENT_KEY_DOWN && key_event(event).is_some_and(|key| key.key == SDLK_ESCAPE) {
+            self.cancel();
+            return;
+        }
+        if !self.choosing() {
+            return;
+        }
+        if ty == SDL_EVENT_MOUSE_BUTTON_UP
+            && mouse_button_event(event)
+                .is_some_and(|button| button.windowID == window.id && button.button == 3)
+        {
+            self.cancel();
+            return;
+        }
+        let local = match ty {
+            SDL_EVENT_MOUSE_BUTTON_UP => mouse_button_event(event)
+                .filter(|button| {
+                    button.windowID == window.id
+                        && button.button == 1
+                        && button.which != SDL_TOUCH_MOUSEID
+                        && button.which != SDL_PEN_MOUSEID
+                })
+                .map(|button| [button.x, button.y]),
+            SDL_EVENT_PEN_UP => pen_touch_event(event)
+                .filter(|pen| pen.windowID == window.id)
+                .map(|pen| [pen.x, pen.y]),
+            SDL_EVENT_FINGER_UP => finger_event(event)
+                .filter(|finger| finger.windowID == window.id)
+                .map(|finger| {
                     let size = window.size();
-                    [event.tfinger.x * size[0], event.tfinger.y * size[1]]
-                } else if ty == SDL_EVENT_PEN_UP {
-                    [event.ptouch.x, event.ptouch.y]
-                } else {
-                    [event.button.x, event.button.y]
-                };
-                match desktop::position(window, local) {
-                    Ok(point) => {
-                        self.stage =
-                            Stage::SampleAfter(point, Instant::now() + Duration::from_millis(100))
-                    }
-                    Err(e) => self.finish(Err(e)),
+                    [finger.x * size[0], finger.y * size[1]]
+                }),
+            _ => None,
+        };
+        if let Some(local) = local {
+            match desktop::position(window, local) {
+                Ok(point) => {
+                    self.stage =
+                        Stage::SampleAfter(point, Instant::now() + Duration::from_millis(100));
                 }
+                Err(error) => self.finish(Err(error)),
             }
         }
     }

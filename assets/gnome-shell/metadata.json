@@ -1,8 +1,8 @@
 {
   "uuid": "overink-overlay@overink",
   "name": "OverInk Overlay",
-  "version": 5,
-  "description": "Keep OverInk above windows and provide confirmed, user-selected region capture on GNOME Wayland.",
+  "version": 6,
+  "description": "Keep OverInk above windows and provide consent-based region capture on GNOME Wayland and XWayland.",
   "shell-version": ["47", "48", "49"],
   "url": "https://github.com/xujiegb/OverInk"
 }

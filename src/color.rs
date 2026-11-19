@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! Scene colors are tagged. Hex presets are always sRGB, regardless of monitor gamut.
 use serde::{Deserialize, Serialize};
 
@@ -196,9 +198,9 @@ fn parse_hex(text: &str, space: Space) -> Result<InkColor, &'static str> {
     let mut rgb = [0; 3];
     for (i, component) in rgb.iter_mut().enumerate() {
         *component = if digits.len() == 3 {
-            u8::from_str_radix(&digits[i..i + 1], 16).unwrap() * 17
+            u8::from_str_radix(&digits[i..i + 1], 16).map_err(|_| "Use #RRGGBB or #RGB")? * 17
         } else {
-            u8::from_str_radix(&digits[i * 2..i * 2 + 2], 16).unwrap()
+            u8::from_str_radix(&digits[i * 2..i * 2 + 2], 16).map_err(|_| "Use #RRGGBB or #RGB")?
         };
     }
     Ok(InkColor::from_channels(rgb, space))
@@ -207,22 +209,23 @@ fn parse_hex(text: &str, space: Space) -> Result<InkColor, &'static str> {
 pub struct HexEntry {
     pub text: String,
     pub invalid: bool,
-    last_color: String,
+    // The last committed hex value is always canonical. Store its three
+    // channels rather than duplicating the UI's editable String.
+    last_color: [u8; 3],
 }
 impl HexEntry {
     pub fn new(color: InkColor) -> Self {
-        let text = color.hex();
         Self {
-            last_color: text.clone(),
-            text,
+            text: color.hex(),
+            last_color: color.channels8(),
             invalid: false,
         }
     }
     pub fn sync(&mut self, color: InkColor) {
-        let hex = color.hex();
-        if self.last_color != hex {
-            self.text = hex.clone();
-            self.last_color = hex;
+        let channels = color.channels8();
+        if self.last_color != channels {
+            self.text = hex(channels);
+            self.last_color = channels;
             self.invalid = false;
         }
     }
@@ -230,7 +233,7 @@ impl HexEntry {
         match parse_hex(&self.text, space) {
             Ok(color) => {
                 self.invalid = false;
-                self.last_color = color.hex();
+                self.last_color = color.channels8();
                 Some(color)
             }
             Err(_) => {
@@ -241,11 +244,11 @@ impl HexEntry {
     }
     pub fn normalize(&mut self) {
         if !self.invalid {
-            self.text = self.last_color.clone();
+            self.text = hex(self.last_color);
         }
     }
     pub fn revert(&mut self) {
-        self.text = self.last_color.clone();
+        self.text = hex(self.last_color);
         self.invalid = false;
     }
 }

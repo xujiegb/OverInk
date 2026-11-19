@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use egui::{
     Color32, FontData, FontDefinitions, FontFamily, FontId, Ui,
     text::{Galley, LayoutJob, TextFormat},
@@ -53,19 +55,22 @@ impl FontFace {
         })
     }
 
-    fn font(&self) -> FontRef<'_> {
-        FontRef::from_index(self.data.bytes(), self.data.index).expect("validated annotation font")
+    fn font(&self) -> Option<FontRef<'_>> {
+        FontRef::from_index(self.data.bytes(), self.data.index).ok()
     }
 
     fn has_base(&self, base: char) -> bool {
-        self.font().charmap().map(base).is_some()
+        self.font()
+            .is_some_and(|font| font.charmap().map(base).is_some())
     }
 
     fn has_color_glyph(&self, glyph: GlyphId) -> bool {
         if !self.color {
             return false;
         }
-        let font = self.font();
+        let Some(font) = self.font() else {
+            return false;
+        };
         font.color_glyphs().get(glyph).is_some()
             || font
                 .bitmap_strikes()
@@ -74,7 +79,8 @@ impl FontFace {
     }
 
     fn shape_cluster(&self, cluster: &str) -> Option<GlyphId> {
-        if !self.has_base(cluster.chars().next().unwrap()) {
+        let base = cluster.chars().next()?;
+        if !self.has_base(base) {
             return None;
         }
         let font = harfrust::ShaperFont::new(&self.shaping_font);
@@ -159,9 +165,12 @@ impl CustomFont {
         let face = FontFace::new(FontData::from_owned(data))?;
         let name = face
             .font()
-            .localized_strings(StringId::FULL_NAME)
-            .english_or_first()
-            .map_or_else(|| CUSTOM.into(), |name| name.chars().take(100).collect());
+            .and_then(|font| {
+                font.localized_strings(StringId::FULL_NAME)
+                    .english_or_first()
+                    .map(|name| name.chars().take(100).collect())
+            })
+            .unwrap_or_else(|| CUSTOM.into());
         Ok(Self { name, face })
     }
 }
@@ -217,8 +226,8 @@ impl TextFonts {
                 .insert(FontFamily::Name(CUSTOM.into()), vec![CUSTOM.into()]);
             definitions
                 .families
-                .get_mut(&FontFamily::Name(ANNOTATION.into()))
-                .unwrap()
+                .entry(FontFamily::Name(ANNOTATION.into()))
+                .or_default()
                 .insert(0, CUSTOM.into());
         }
         definitions
@@ -226,14 +235,19 @@ impl TextFonts {
 
     fn family_for_cluster(&self, cluster: &str) -> &'static str {
         let mut chars = cluster.chars();
-        let base = chars.next().unwrap();
-        let selector = chars
-            .clone()
-            .find(|ch| matches!(ch, '\u{fe0e}' | '\u{fe0f}'));
-        let sequence = chars.any(|ch| {
-            matches!(ch, '\u{200d}' | '\u{20e3}' | '\u{1f3fb}'..='\u{1f3ff}' | '\u{e0020}'..='\u{e007f}')
-                || matches!(base, '\u{1f1e6}'..='\u{1f1ff}') && matches!(ch, '\u{1f1e6}'..='\u{1f1ff}')
-        });
+        let Some(base) = chars.next() else {
+            return ANNOTATION;
+        };
+        let mut selector = None;
+        let mut sequence = false;
+        for ch in chars {
+            if selector.is_none() && matches!(ch, '\u{fe0e}' | '\u{fe0f}') {
+                selector = Some(ch);
+            }
+            sequence |= matches!(ch, '\u{200d}' | '\u{20e3}' | '\u{1f3fb}'..='\u{1f3ff}' | '\u{e0020}'..='\u{e007f}')
+                || matches!(base, '\u{1f1e6}'..='\u{1f1ff}')
+                    && matches!(ch, '\u{1f1e6}'..='\u{1f1ff}');
+        }
         if selector.is_none() && !sequence {
             return ANNOTATION;
         }
@@ -318,6 +332,13 @@ mod tests {
         });
         frame.drop_without_applying_deltas();
         glyphs
+    }
+
+    #[test]
+    fn empty_cluster_has_a_safe_default_family() {
+        let fonts = TextFonts::default();
+        assert_eq!(fonts.family_for_cluster(""), ANNOTATION);
+        assert_eq!(fonts.family_for_cluster("ABC"), ANNOTATION);
     }
 
     #[test]

@@ -1,10 +1,9 @@
-use super::{Window, error};
-use sdl3_sys::dialog::*;
+#![forbid(unsafe_code)]
+
+use super::{Window, dialog_native as native};
 use std::{
     collections::BTreeMap,
-    ffi::{CStr, CString, c_char, c_int, c_void},
     path::{Path, PathBuf},
-    ptr,
     sync::{Mutex, MutexGuard},
 };
 
@@ -20,11 +19,6 @@ type ResultPath = Result<Option<PathBuf>, String>;
 // Cocoa can access the SDL parent from the sheet completion handler, and
 // Windows can look up its native handle from a worker thread.
 pub const USE_WINDOW_PARENT: bool = !cfg!(any(windows, target_os = "macos"));
-
-const PNG_FILTER: &SDL_DialogFileFilter = &SDL_DialogFileFilter {
-    name: c"PNG".as_ptr(),
-    pattern: c"png".as_ptr(),
-};
 
 struct Callbacks {
     last_id: usize,
@@ -55,10 +49,7 @@ impl FileDialog {
             return None;
         }
         let mut callbacks = callbacks();
-        let id = callbacks
-            .last_id
-            .checked_add(1)
-            .expect("File dialog IDs exhausted");
+        let id = callbacks.last_id.checked_add(1)?;
         callbacks.last_id = id;
         callbacks.results.insert(id, None);
         self.0 = Some((id, kind));
@@ -66,56 +57,10 @@ impl FileDialog {
     }
 
     pub fn open(&mut self, kind: DialogKind, window: &Window, location: Option<&Path>) -> bool {
-        // This callback is only passed to SDL. Its result list and strings
-        // are borrowed from SDL for the duration of the call.
-        extern "C" fn chosen(user: *mut c_void, files: *const *const c_char, _filter: c_int) {
-            complete(user.addr(), || {
-                if files.is_null() {
-                    return Err(error());
-                }
-                // SDL's file list has at least its null terminator.
-                let file = unsafe { *files };
-                if file.is_null() {
-                    return Ok(None);
-                }
-                path_from_c(unsafe { CStr::from_ptr(file) }).map(Some)
-            });
-        }
-
         let Some(id) = self.begin(kind) else {
             return false;
         };
-        // SDL can call back during this call or from another thread. Userdata
-        // is an opaque ID with no borrowed Rust storage.
-        let user = ptr::without_provenance_mut(id);
-        let location = location.and_then(location_to_c);
-        let initial = location.as_ref().map_or(ptr::null(), |path| path.as_ptr());
-        let parent = if USE_WINDOW_PARENT {
-            window.raw
-        } else {
-            ptr::null_mut()
-        };
-        // SDL copies the initial location during the call. The filter must
-        // remain valid until the callback and uses static storage.
-        unsafe {
-            match kind {
-                DialogKind::Font => SDL_ShowOpenFileDialog(
-                    Some(chosen),
-                    user,
-                    parent,
-                    ptr::null(),
-                    0,
-                    initial,
-                    false,
-                ),
-                DialogKind::ScreenshotFolder => {
-                    SDL_ShowOpenFolderDialog(Some(chosen), user, parent, initial, false)
-                }
-                DialogKind::ScreenshotFile => {
-                    SDL_ShowSaveFileDialog(Some(chosen), user, parent, PNG_FILTER, 1, initial)
-                }
-            }
-        }
+        native::show(id, kind, window, location);
         true
     }
 
@@ -137,7 +82,7 @@ impl Drop for FileDialog {
     }
 }
 
-fn complete(id: usize, value: impl FnOnce() -> ResultPath) {
+pub(super) fn complete(id: usize, value: impl FnOnce() -> ResultPath) {
     let mut callbacks = callbacks();
     let Some(result) = callbacks.results.get_mut(&id) else {
         return;
@@ -148,73 +93,52 @@ fn complete(id: usize, value: impl FnOnce() -> ResultPath) {
 }
 
 pub fn downloads() -> Option<PathBuf> {
-    use sdl3_sys::filesystem::{SDL_FOLDER_DOWNLOADS, SDL_GetUserFolder};
-    unsafe {
-        let path = SDL_GetUserFolder(SDL_FOLDER_DOWNLOADS);
-        if path.is_null() {
-            return None;
-        }
-        path_from_c(CStr::from_ptr(path)).ok()
-    }
-}
-
-fn location_to_c(path: &Path) -> Option<CString> {
-    #[cfg(any(windows, target_os = "macos"))]
-    let bytes = path.to_str()?.as_bytes();
-    #[cfg(not(any(windows, target_os = "macos")))]
-    let bytes = path.as_os_str().as_encoded_bytes();
-    CString::new(bytes).ok()
-}
-
-fn path_from_c(path: &CStr) -> Result<PathBuf, String> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt as _;
-        Ok(PathBuf::from(std::ffi::OsStr::from_bytes(path.to_bytes())))
-    }
-    #[cfg(not(unix))]
-    {
-        path.to_str()
-            .map(PathBuf::from)
-            .map_err(|error| format!("Invalid UTF-8 file dialog path: {error}"))
-    }
+    native::downloads()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ptr;
 
     #[test]
-    fn delivers_a_callback_from_another_thread_once() {
+    fn delivers_a_callback_from_another_thread_once() -> Result<(), String> {
         let mut dialog = FileDialog::default();
-        let id = dialog.begin(DialogKind::ScreenshotFile).unwrap();
+        let id = dialog
+            .begin(DialogKind::ScreenshotFile)
+            .ok_or("Cannot begin file dialog")?;
         assert!(dialog.begin(DialogKind::Font).is_none());
         assert!(dialog.poll().is_none());
 
         std::thread::spawn(move || {
-            complete(id, || path_from_c(c"截图.png").map(Some));
+            complete(id, || native::path_from_c(c"截图.png").map(Some));
             complete(id, || panic!("A duplicate callback must be ignored"));
         })
         .join()
-        .unwrap();
+        .map_err(|_| "File dialog callback thread panicked")?;
 
-        let (kind, result) = dialog.poll().unwrap();
+        let (kind, result) = dialog.poll().ok_or("Expected a file dialog result")?;
         assert!(matches!(kind, DialogKind::ScreenshotFile));
         assert_eq!(result, Ok(Some(PathBuf::from("截图.png"))));
         assert!(!dialog.pending());
         assert!(!callbacks().results.contains_key(&id));
         assert!(dialog.poll().is_none());
+        Ok(())
     }
 
     #[test]
-    fn drop_unregisters_a_request_without_a_callback() {
+    fn drop_unregisters_a_request_without_a_callback() -> Result<(), String> {
         let mut dialog = FileDialog::default();
-        let id = dialog.begin(DialogKind::Font).unwrap();
+        let id = dialog
+            .begin(DialogKind::Font)
+            .ok_or("Cannot begin font dialog")?;
         drop(dialog);
         assert!(!callbacks().results.contains_key(&id));
 
         let mut next = FileDialog::default();
-        let next_id = next.begin(DialogKind::ScreenshotFolder).unwrap();
+        let next_id = next
+            .begin(DialogKind::ScreenshotFolder)
+            .ok_or("Cannot begin folder dialog")?;
         assert_ne!(id, next_id);
         complete(0, || panic!("Request ID zero is reserved"));
         complete(id, || panic!("A dropped request must be ignored"));
@@ -224,18 +148,62 @@ mod tests {
             next.poll(),
             Some((DialogKind::ScreenshotFolder, Ok(None)))
         ));
+        Ok(())
     }
 
     #[test]
-    fn handles_non_utf8_paths_with_platform_encoding() {
+    fn native_callback_copies_selected_path() -> Result<(), String> {
+        let mut dialog = FileDialog::default();
+        let id = dialog
+            .begin(DialogKind::ScreenshotFile)
+            .ok_or("Cannot begin file dialog")?;
+        let files = [c"sample.png".as_ptr(), ptr::null()];
+        native::chosen(ptr::without_provenance_mut(id), files.as_ptr(), -1);
+        let (kind, result) = dialog.poll().ok_or("Expected a file dialog result")?;
+        assert!(matches!(kind, DialogKind::ScreenshotFile));
+        assert_eq!(result, Ok(Some(PathBuf::from("sample.png"))));
+        Ok(())
+    }
+
+    #[test]
+    fn native_callback_cancellation_is_owned_and_consumed_once() -> Result<(), String> {
+        let mut dialog = FileDialog::default();
+        let id = dialog
+            .begin(DialogKind::Font)
+            .ok_or("Cannot begin font dialog")?;
+        let list = [ptr::null()];
+        native::chosen(ptr::without_provenance_mut(id), list.as_ptr(), -1);
+        assert!(matches!(dialog.poll(), Some((DialogKind::Font, Ok(None)))));
+        assert!(dialog.poll().is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn native_callback_error_returns_a_result_not_a_pending_dialog() -> Result<(), String> {
+        let mut dialog = FileDialog::default();
+        let id = dialog
+            .begin(DialogKind::ScreenshotFolder)
+            .ok_or("Cannot begin folder dialog")?;
+        native::chosen(ptr::without_provenance_mut(id), ptr::null(), -1);
+        assert!(matches!(
+            dialog.poll(),
+            Some((DialogKind::ScreenshotFolder, Err(_)))
+        ));
+        assert!(!dialog.pending());
+        Ok(())
+    }
+
+    #[test]
+    fn handles_non_utf8_paths_with_platform_encoding() -> Result<(), String> {
         let path = c"\xff";
         #[cfg(unix)]
         {
             use std::os::unix::ffi::OsStrExt as _;
-            let native = path_from_c(path).unwrap();
+            let native = native::path_from_c(path)?;
             assert_eq!(native.as_os_str().as_bytes(), path.to_bytes());
         }
         #[cfg(not(unix))]
-        assert!(path_from_c(path).is_err());
+        assert!(native::path_from_c(path).is_err());
+        Ok(())
     }
 }

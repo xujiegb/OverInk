@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! One pressure ribbon per stroke. No series of overlapping translucent stamps.
 use crate::model::{Point, PointSpan, Stroke, Tool};
 use std::ops::RangeInclusive;
@@ -112,7 +114,9 @@ fn ribbon(m: &mut Mesh, p: &[Point], range: RangeInclusive<usize>, stroke: &Stro
     }
     let a = p[0];
     let b = p[1];
-    let end = *p.last().unwrap();
+    let Some(&end) = p.last() else {
+        return;
+    };
     let prev = p[p.len() - 2];
     if first == 0 {
         fan(
@@ -191,7 +195,9 @@ pub fn prepare_samples(
         // Preserve grain in SVG and on renderers without a repeating
         // texture. Limit subdivisions while retaining the whole path.
         let max_steps = (100_000 / count).clamp(1, 32);
-        let mut previous = points.next().unwrap();
+        let Some(mut previous) = points.next() else {
+            return;
+        };
         samples.push(previous);
         for point in points {
             let steps = ((previous.dist(point) / 2.0).ceil() as usize).clamp(1, max_steps);
@@ -360,7 +366,7 @@ mod tests {
         }
     }
     #[test]
-    fn pencil_density_is_stable_and_tilt_changes_its_width() {
+    fn pencil_density_is_stable_and_tilt_changes_its_width() -> Result<(), serde_json::Error> {
         let mut stroke = Stroke {
             tool: Tool::Pencil,
             color: InkColor::default(),
@@ -395,11 +401,9 @@ mod tests {
                 .iter()
                 .all(|v| v.coverage.is_finite() && (0.0..=1.0).contains(&v.coverage))
         );
-        assert_eq!(
-            serde_json::from_str::<Stroke>(&serde_json::to_string(&stroke).unwrap())
-                .unwrap()
-                .tool,
-            Tool::Pencil
-        );
+        let encoded = serde_json::to_string(&stroke)?;
+        let decoded: Stroke = serde_json::from_str(&encoded)?;
+        assert_eq!(decoded.tool, Tool::Pencil);
+        Ok(())
     }
 }

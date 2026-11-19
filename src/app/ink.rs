@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use super::{App, LASER_LIFETIME};
 use crate::{
     appearance::text,
@@ -9,7 +11,7 @@ use crate::{
     model::{Bounds, Erasure, Point, PointSpan, Stroke, Tool},
     sdl::*,
 };
-use std::{ptr, time::Instant};
+use std::time::Instant;
 
 const PAPER_SIZE: i32 = 64;
 const MARKER_TILE: i32 = 1024;
@@ -22,47 +24,7 @@ pub(super) const MAX_EXTENDED_INK_TEXTURE_BYTES: usize = 64 * 1024 * 1024;
 const EXTENDED_CACHE_STROKES: usize = 64;
 const EXTENDED_CACHE_POINTS: usize = 8192;
 
-struct Texture(*mut SDL_Texture);
-impl Texture {
-    fn new(
-        renderer: &Renderer,
-        [width, height]: [i32; 2],
-        access: SDL_TextureAccess,
-        blend: SDL_BlendMode,
-    ) -> Result<Self, String> {
-        Self::with_format(
-            renderer,
-            [width, height],
-            access,
-            blend,
-            SDL_PIXELFORMAT_RGBA32,
-        )
-    }
-
-    fn with_format(
-        renderer: &Renderer,
-        [width, height]: [i32; 2],
-        access: SDL_TextureAccess,
-        blend: SDL_BlendMode,
-        format: SDL_PixelFormat,
-    ) -> Result<Self, String> {
-        unsafe {
-            let raw = SDL_CreateTexture(renderer.raw, format, access, width, height);
-            if raw.is_null() {
-                return Err(error());
-            }
-            let texture = Self(raw);
-            check(SDL_SetTextureBlendMode(raw, blend))?;
-            check(SDL_SetTextureScaleMode(raw, SDL_SCALEMODE_NEAREST))?;
-            Ok(texture)
-        }
-    }
-}
-impl Drop for Texture {
-    fn drop(&mut self) {
-        unsafe { SDL_DestroyTexture(self.0) };
-    }
-}
+use crate::sdl::InkTexture as Texture;
 
 struct Frame<'a> {
     renderer: &'a Renderer,
@@ -105,6 +67,8 @@ impl Ink {
     }
 
     pub fn reset_textures(&mut self) {
+        // A render-target reset loses contents, not ownership of SDL_Texture.
+        // Destroy each live object before rebuilding its contents.
         self.invalidate_layer();
         self.painter.paper = None;
         self.painter.marker_mask = None;
@@ -302,14 +266,7 @@ impl Ink {
                 color: frame.color.revision,
                 history: app.history.ink_revision(),
                 white: if renderer.extended {
-                    unsafe {
-                        SDL_GetFloatProperty(
-                            SDL_GetRendererProperties(renderer.raw),
-                            SDL_PROP_RENDERER_SDR_WHITE_POINT_FLOAT,
-                            1.,
-                        )
-                        .max(f32::MIN_POSITIVE)
-                    }
+                    renderer.sdr_white_point().max(f32::MIN_POSITIVE)
                 } else {
                     0.
                 },
@@ -325,7 +282,7 @@ impl Ink {
             layer.append = append;
             layer.erase = erase;
             if rebuild || damage.is_some() || first < count {
-                let result = renderer.with_target(layer.texture.0, || {
+                let result = renderer.with_target(&layer.texture, || {
                     self.painter.queued = 0;
                     // Match the SDR white point used when drawing directly to
                     // the window. A highlighter builds its mask at scale 1.
@@ -348,13 +305,8 @@ impl Ink {
 
             // The history was painted with source-over into a transparent
             // texture, so its stored RGB is already premultiplied by alpha.
-            return with_color_scale(renderer, revision_white_scale(layer), || unsafe {
-                check(SDL_RenderTexture(
-                    renderer.raw,
-                    layer.texture.0,
-                    ptr::null(),
-                    ptr::null(),
-                ))
+            return with_color_scale(renderer, revision_white_scale(layer), || {
+                layer.texture.draw(renderer, None, None)
             });
         }
         self.painter.history(frame, app, 0, None, 1.)
@@ -386,21 +338,11 @@ fn with_color_scale(
     scale: f32,
     draw: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
-    if scale == 1. {
-        return draw();
-    }
-    unsafe {
-        let mut previous = 1.;
-        check(SDL_GetRenderColorScale(renderer.raw, &mut previous))?;
-        check(SDL_SetRenderColorScale(renderer.raw, previous * scale))?;
-        let result = draw();
-        let restore = check(SDL_SetRenderColorScale(renderer.raw, previous));
-        result.and(restore)
-    }
+    renderer.with_color_scale(scale, draw)
 }
 
-fn set_scale(renderer: &Renderer, [x, y]: [f32; 2]) -> Result<(), String> {
-    unsafe { check(SDL_SetRenderScale(renderer.raw, x, y)) }
+fn set_scale(renderer: &Renderer, scale: [f32; 2]) -> Result<(), String> {
+    renderer.set_render_scale(scale)
 }
 
 fn dirty_rect(frame: &Frame<'_>, bounds: Bounds) -> Option<SDL_Rect> {
@@ -432,16 +374,7 @@ fn clear_hole(renderer: &Renderer, rect: Rect) -> Result<(), String> {
 }
 
 fn clear_rect(renderer: &Renderer, rect: SDL_FRect) -> Result<(), String> {
-    unsafe {
-        check(SDL_SetRenderDrawColorFloat(renderer.raw, 0., 0., 0., 0.))?;
-        check(SDL_SetRenderDrawBlendMode(renderer.raw, SDL_BLENDMODE_NONE))?;
-        let draw = check(SDL_RenderFillRect(renderer.raw, &rect));
-        let restore = check(SDL_SetRenderDrawBlendMode(
-            renderer.raw,
-            SDL_BLENDMODE_BLEND,
-        ));
-        draw.and(restore)
-    }
+    renderer.clear_rect_transparent(&rect)
 }
 
 #[derive(Default)]
@@ -482,7 +415,7 @@ impl StrokePainter {
         if let Some(region) = damage.and_then(|bounds| dirty_rect(frame, bounds)) {
             // Set the clip in device pixels, including at fractional scale.
             set_scale(renderer, [1.; 2])?;
-            unsafe { check(SDL_SetRenderClipRect(renderer.raw, &region))? };
+            renderer.try_set_clip_rect(Some(&region))?;
             let rect = SDL_FRect {
                 x: region.x as f32,
                 y: region.y as f32,
@@ -498,7 +431,7 @@ impl StrokePainter {
             };
             let result = clear_rect(renderer, rect)
                 .and_then(|()| self.history(frame, app, 0, Some(bounds), white));
-            let reset_clip = unsafe { check(SDL_SetRenderClipRect(renderer.raw, ptr::null())) };
+            let reset_clip = renderer.try_set_clip_rect(None);
             result.and(reset_clip)?;
         }
         Ok(())
@@ -515,9 +448,15 @@ impl StrokePainter {
         let bounds = region.map(|_| app.history.stroke_bounds());
         for (index, stroke) in app.history.strokes().iter().enumerate().skip(first) {
             if let Some(region) = region
-                && bounds.as_ref().unwrap()[index].is_none_or(|bounds| {
-                    !region.intersects(bounds.path.padded(stroke.max_radius() * 2. + frame.aa))
-                })
+                && bounds
+                    .as_ref()
+                    .and_then(|bounds| bounds.get(index))
+                    .is_some_and(|entry| {
+                        entry.as_ref().is_none_or(|bounds| {
+                            !region
+                                .intersects(bounds.path.padded(stroke.max_radius() * 2. + frame.aa))
+                        })
+                    })
             {
                 continue;
             }
@@ -566,18 +505,12 @@ impl StrokePainter {
             return Ok(());
         }
         let renderer = frame.renderer;
-        let paper = if stroke.tool == Tool::Pencil {
-            self.paper_texture(renderer)
-        } else {
-            ptr::null_mut()
-        };
-        let vertex_grain = paper.is_null();
+        let use_paper = stroke.tool == Tool::Pencil && self.ensure_paper_texture(renderer);
+        let vertex_grain = !use_paper;
         geometry::prepare_samples(stroke, points, vertex_grain, &mut self.samples);
         let rgb = frame.color.map(stroke.color.output_rgb(renderer.extended));
-        if stroke.tool == Tool::Marker
-            && let Some(mask) = self.marker_texture(renderer)
-        {
-            return self.marker(frame, mask, rgb, stroke, region, white);
+        if stroke.tool == Tool::Marker && self.ensure_marker_texture(renderer) {
+            return self.marker(frame, rgb, stroke, region, white);
         }
         with_color_scale(renderer, white, || {
             let margin = stroke.max_radius() * 2. + frame.aa;
@@ -610,7 +543,7 @@ impl StrokePainter {
                 }
                 submit(
                     renderer,
-                    paper,
+                    if use_paper { self.paper.as_ref() } else { None },
                     &self.vertices,
                     &self.mesh.indices,
                     &mut self.queued,
@@ -620,7 +553,7 @@ impl StrokePainter {
         })
     }
 
-    fn paper_texture(&mut self, renderer: &Renderer) -> *mut SDL_Texture {
+    fn ensure_paper_texture(&mut self, renderer: &Renderer) -> bool {
         if self.paper.is_none() && !self.paper_unavailable && renderer.name != "software" {
             let create = || -> Result<Texture, String> {
                 let texture = Texture::new(
@@ -640,25 +573,16 @@ impl StrokePainter {
                         ]);
                     }
                 }
-                unsafe {
-                    check(SDL_UpdateTexture(
-                        texture.0,
-                        ptr::null(),
-                        pixels.as_ptr().cast(),
-                        PAPER_SIZE * 4,
-                    ))?;
-                }
+                texture.update_rgba8(&pixels)?;
                 Ok(texture)
             };
             self.paper = create().ok();
             self.paper_unavailable = self.paper.is_none();
         }
-        self.paper
-            .as_ref()
-            .map_or(ptr::null_mut(), |texture| texture.0)
+        self.paper.is_some()
     }
 
-    fn marker_texture(&mut self, renderer: &Renderer) -> Option<*mut SDL_Texture> {
+    fn ensure_marker_texture(&mut self, renderer: &Renderer) -> bool {
         if self.marker_mask.is_none() && !self.marker_unavailable {
             self.marker_mask = Texture::new(
                 renderer,
@@ -669,13 +593,12 @@ impl StrokePainter {
             .ok();
             self.marker_unavailable = self.marker_mask.is_none();
         }
-        self.marker_mask.as_ref().map(|texture| texture.0)
+        self.marker_mask.is_some()
     }
 
     fn marker(
         &mut self,
         frame: &Frame<'_>,
-        mask: *mut SDL_Texture,
         rgb: [f32; 3],
         stroke: &Stroke,
         region: Option<Bounds>,
@@ -707,10 +630,10 @@ impl StrokePainter {
         if left >= right || top >= bottom {
             return Ok(());
         }
-        unsafe {
-            check(SDL_SetTextureColorModFloat(mask, rgb[0], rgb[1], rgb[2]))?;
-            check(SDL_SetTextureAlphaModFloat(mask, stroke.opacity))?;
-        }
+        self.marker_mask
+            .as_ref()
+            .ok_or("Missing marker mask")?
+            .set_modulation(rgb, stroke.opacity)?;
         let tiled = right - left > MARKER_TILE || bottom - top > MARKER_TILE;
         for y in (top..bottom).step_by(MARKER_TILE as usize) {
             for x in (left..right).step_by(MARKER_TILE as usize) {
@@ -729,56 +652,53 @@ impl StrokePainter {
                 // The mask accumulates coverage at full opacity. Tint it and
                 // apply the marker's opacity only once, after intersections.
                 self.queued = 0;
-                renderer.with_target(mask, || {
-                    unsafe { check(SDL_SetRenderScale(renderer.raw, 1., 1.))? };
-                    renderer.clear([1., 1., 1., 0.])?;
-                    let visible = |a, b| {
-                        region.is_none_or(|region| {
-                            region.intersects(Bounds::between(a, b).padded(margin))
-                        })
-                    };
-                    for range in geometry::mesh_ranges(&self.samples, MESH_SEGMENTS, visible) {
-                        self.mesh
-                            .update(stroke, &self.samples, range, frame.aa, false);
-                        set_vertices(
-                            &self.mesh,
-                            &mut self.vertices,
-                            [1.; 3],
-                            1.,
-                            frame.scale,
-                            [x, y],
-                            false,
-                        );
-                        let indices = if tiled {
-                            self.tile_indices.clear();
-                            for triangle in self.mesh.indices.as_chunks::<3>().0 {
-                                let p = triangle.map(|i| self.vertices[i as usize].position);
-                                if p.iter().any(|p| p.x >= 0.)
-                                    && p.iter().any(|p| p.x < width)
-                                    && p.iter().any(|p| p.y >= 0.)
-                                    && p.iter().any(|p| p.y < height)
-                                {
-                                    self.tile_indices.extend(triangle);
-                                }
-                            }
-                            self.tile_indices.as_slice()
-                        } else {
-                            self.mesh.indices.as_slice()
+                renderer.with_target(
+                    self.marker_mask.as_ref().ok_or("Missing marker mask")?,
+                    || {
+                        renderer.set_render_scale([1., 1.])?;
+                        renderer.clear([1., 1., 1., 0.])?;
+                        let visible = |a, b| {
+                            region.is_none_or(|region| {
+                                region.intersects(Bounds::between(a, b).padded(margin))
+                            })
                         };
-                        #[cfg(test)]
-                        {
-                            self.submitted_indices += indices.len();
+                        for range in geometry::mesh_ranges(&self.samples, MESH_SEGMENTS, visible) {
+                            self.mesh
+                                .update(stroke, &self.samples, range, frame.aa, false);
+                            set_vertices(
+                                &self.mesh,
+                                &mut self.vertices,
+                                [1.; 3],
+                                1.,
+                                frame.scale,
+                                [x, y],
+                                false,
+                            );
+                            let indices = if tiled {
+                                self.tile_indices.clear();
+                                for triangle in self.mesh.indices.as_chunks::<3>().0 {
+                                    let p = triangle.map(|i| self.vertices[i as usize].position);
+                                    if p.iter().any(|p| p.x >= 0.)
+                                        && p.iter().any(|p| p.x < width)
+                                        && p.iter().any(|p| p.y >= 0.)
+                                        && p.iter().any(|p| p.y < height)
+                                    {
+                                        self.tile_indices.extend(triangle);
+                                    }
+                                }
+                                self.tile_indices.as_slice()
+                            } else {
+                                self.mesh.indices.as_slice()
+                            };
+                            #[cfg(test)]
+                            {
+                                self.submitted_indices += indices.len();
+                            }
+                            submit(renderer, None, &self.vertices, indices, &mut self.queued)?;
                         }
-                        submit(
-                            renderer,
-                            ptr::null_mut(),
-                            &self.vertices,
-                            indices,
-                            &mut self.queued,
-                        )?;
-                    }
-                    Ok(())
-                })?;
+                        Ok(())
+                    },
+                )?;
                 self.queued = 0;
                 let src = SDL_FRect {
                     x: 0.,
@@ -801,8 +721,11 @@ impl StrokePainter {
                         h: height / frame.scale[1],
                     }
                 };
-                with_color_scale(renderer, white, || unsafe {
-                    check(SDL_RenderTexture(renderer.raw, mask, &src, &dst))
+                with_color_scale(renderer, white, || {
+                    self.marker_mask
+                        .as_ref()
+                        .ok_or("Missing marker mask")?
+                        .draw(renderer, Some(&src), Some(&dst))
                 })?;
             }
         }
@@ -845,17 +768,21 @@ fn set_vertices(
 
 fn submit(
     renderer: &Renderer,
-    texture: *mut SDL_Texture,
+    texture: Option<&Texture>,
     vertices: &[SDL_Vertex],
     indices: &[u32],
     queued: &mut usize,
 ) -> Result<(), String> {
     for batch in indices.chunks(GEOMETRY_BATCH) {
         if *queued + batch.len() > GEOMETRY_BATCH {
-            unsafe { check(SDL_FlushRenderer(renderer.raw))? };
+            renderer.flush()?;
             *queued = 0;
         }
-        renderer.geometry(texture, vertices, batch)?;
+        renderer.geometry(
+            texture.map_or(GeometryTexture::Solid, GeometryTexture::Ink),
+            vertices,
+            batch,
+        )?;
         *queued += batch.len();
     }
     Ok(())
@@ -866,74 +793,37 @@ mod tests {
     use super::*;
     use crate::app::touch_tests::app;
 
-    struct Surface(*mut SDL_Surface);
-    impl Drop for Surface {
-        fn drop(&mut self) {
-            unsafe { SDL_DestroySurface(self.0) };
-        }
-    }
-
     struct TestCanvas {
-        renderer: Renderer,
-        _surface: Surface,
+        renderer: TestRenderer,
+        pixels: [i32; 2],
         color: ColorManager,
     }
     impl TestCanvas {
         fn new([width, height]: [i32; 2]) -> Self {
-            unsafe {
-                let surface = Surface(SDL_CreateSurface(width, height, SDL_PIXELFORMAT_RGBA32));
-                assert!(!surface.0.is_null());
-                let raw = SDL_CreateSoftwareRenderer(surface.0);
-                assert!(!raw.is_null(), "{}", error());
-                assert!(SDL_SetRenderDrawBlendMode(raw, SDL_BLENDMODE_BLEND));
-                Self {
-                    renderer: Renderer {
-                        raw,
-                        extended: false,
-                        name: "software".into(),
-                    },
-                    _surface: surface,
-                    color: ColorManager::default(),
-                }
+            let surface = TestSurface::new([width, height]).unwrap();
+            let pixels = surface.size();
+            let renderer = surface.software_renderer().unwrap();
+            Self {
+                renderer,
+                pixels,
+                color: ColorManager::default(),
             }
         }
         fn frame(&self) -> Frame<'_> {
             Frame {
                 renderer: &self.renderer,
                 color: &self.color,
-                pixels: unsafe { [(*self._surface.0).w, (*self._surface.0).h] },
+                pixels: self.pixels,
                 scale: [1.; 2],
                 aa: 0.8,
                 extended_budget: MAX_EXTENDED_INK_TEXTURE_BYTES,
             }
         }
         fn pixel(&self, x: i32, y: i32) -> [u8; 4] {
-            unsafe {
-                let image = Surface(SDL_RenderReadPixels(self.renderer.raw, ptr::null()));
-                assert!(!image.0.is_null(), "{}", error());
-                let [mut r, mut g, mut b, mut a] = [0; 4];
-                assert!(SDL_ReadSurfacePixel(
-                    image.0, x, y, &mut r, &mut g, &mut b, &mut a
-                ));
-                [r, g, b, a]
-            }
+            TestSurface::pixel(&self.renderer, x, y).unwrap()
         }
         fn pixels(&self) -> Vec<[u8; 4]> {
-            unsafe {
-                let image = Surface(SDL_RenderReadPixels(self.renderer.raw, ptr::null()));
-                assert!(!image.0.is_null(), "{}", error());
-                let mut pixels = Vec::new();
-                for y in 0..(*image.0).h {
-                    for x in 0..(*image.0).w {
-                        let [mut r, mut g, mut b, mut a] = [0; 4];
-                        assert!(SDL_ReadSurfacePixel(
-                            image.0, x, y, &mut r, &mut g, &mut b, &mut a
-                        ));
-                        pixels.push([r, g, b, a]);
-                    }
-                }
-                pixels
-            }
+            TestSurface::pixels(&self.renderer).unwrap()
         }
         fn history(&self, ink: &mut Ink, app: &mut App) {
             self.renderer.clear([0.; 4]).unwrap();
@@ -1272,9 +1162,7 @@ mod tests {
         let mut frame = canvas.frame();
         frame.scale = [2.; 2];
         frame.aa = 0.4;
-        unsafe {
-            assert!(SDL_SetRenderScale(canvas.renderer.raw, 2., 2.));
-        }
+        canvas.renderer.set_render_scale([2., 2.]).unwrap();
         canvas.renderer.clear([0.; 4]).unwrap();
         ink.committed(&frame, &mut app).unwrap();
         assert!(canvas.pixel(100, 32)[3] > 120);

@@ -1,4 +1,5 @@
-use crate::sdl::*;
+#![forbid(unsafe_code)]
+
 use egui::Theme;
 use futures_lite::{StreamExt, future};
 use std::{
@@ -22,7 +23,7 @@ impl Monitor {
         let (stop, stopped) = async_channel::bounded::<()>(1);
         let scheme = Arc::new(Mutex::new(Some(0)));
         let update = scheme.clone();
-        let wake = *WAKE_EVENT.get_or_init(|| unsafe { SDL_RegisterEvents(1) });
+        let wake = *WAKE_EVENT.get_or_init(crate::sdl::register_user_event);
         let _ = thread::Builder::new()
             .name("overink-system-theme".into())
             .spawn(move || {
@@ -42,7 +43,11 @@ impl Monitor {
     }
 
     pub fn theme(&self) -> Option<Theme> {
-        match *self.scheme.lock().unwrap() {
+        match *self
+            .scheme
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
             Some(1) => Some(Theme::Dark),
             Some(2) => Some(Theme::Light),
             _ => None,
@@ -53,7 +58,10 @@ impl Monitor {
 impl Drop for Monitor {
     fn drop(&mut self) {
         // Serialize the last wake with teardown of the SDL event queue.
-        *self.scheme.lock().unwrap() = None;
+        *self
+            .scheme
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 }
 
@@ -114,15 +122,15 @@ fn scheme(value: &Variant<'_>) -> u32 {
 }
 
 fn publish(update: &Mutex<Option<u32>>, wake: u32, value: u32) {
-    let mut state = update.lock().unwrap();
+    let mut state = update
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(current) = state.as_mut()
         && *current != value
     {
         *current = value;
         if wake != 0 {
-            let mut event = SDL_Event::default();
-            event.r#type = wake;
-            unsafe { SDL_PushEvent(&mut event) };
+            crate::sdl::push_user_event(wake);
         }
     }
 }
@@ -135,15 +143,16 @@ mod tests {
 
     #[zbus::interface(name = "org.freedesktop.portal.Settings")]
     impl LegacySettings {
-        fn read(&self, namespace: &str, key: &str) -> OwnedVariant {
+        fn read(&self, namespace: &str, key: &str) -> zbus::fdo::Result<OwnedVariant> {
             assert_eq!((namespace, key), (APPEARANCE, COLOR_SCHEME));
-            OwnedVariant::try_from(Variant::Variant(Box::new(Variant::U32(1)))).unwrap()
+            OwnedVariant::try_from(Variant::Variant(Box::new(Variant::U32(1))))
+                .map_err(|error| zbus::fdo::Error::Failed(error.to_string()))
         }
     }
 
     #[test]
     #[ignore = "requires an isolated session bus: dbus-run-session cargo test portal_response -- --ignored"]
-    fn portal_response_falls_back_to_legacy_settings_read() {
+    fn portal_response_falls_back_to_legacy_settings_read() -> zbus::Result<()> {
         zbus::block_on(async {
             let name = "org.freedesktop.portal.LegacySettingsTest";
             let path = "/org/freedesktop/portal/desktop";
@@ -151,12 +160,10 @@ mod tests {
                 .name(name)
                 .serve_at(path, LegacySettings)
                 .build()
-                .await
-                .unwrap();
-            let proxy = Proxy::new(&service, name, path, "org.freedesktop.portal.Settings")
-                .await
-                .unwrap();
-            assert_eq!(read_scheme(&proxy).await.unwrap(), 1);
-        });
+                .await?;
+            let proxy = Proxy::new(&service, name, path, "org.freedesktop.portal.Settings").await?;
+            assert_eq!(read_scheme(&proxy).await?, 1);
+            Ok(())
+        })
     }
 }

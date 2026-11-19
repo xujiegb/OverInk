@@ -1,5 +1,6 @@
 //! Small egui/SDL3 integration. SDL_RenderGeometry makes the same UI usable on
 //! s390x, LoongArch and FreeBSD without assuming a Vulkan driver.
+#![forbid(unsafe_code)]
 use crate::{
     icc::ColorManager,
     sdl::*,
@@ -8,14 +9,12 @@ use crate::{
 use egui::{Context, Event, Key, Modifiers, RawInput, TextureId};
 use std::{
     collections::{BTreeMap, HashMap},
-    ffi::CStr,
-    ptr,
     time::{Duration, Instant},
 };
 pub struct Gui {
     pub ctx: Context,
     pub raw: RawInput,
-    textures: HashMap<TextureId, *mut SDL_Texture>,
+    textures: HashMap<TextureId, GuiTexture>,
     started: Instant,
     pub units: f32,
     touch_primary: Option<TouchKey>,
@@ -27,7 +26,7 @@ impl Gui {
     pub fn new() -> Self {
         let ctx = Context::default();
         // Apply input actions once per native frame, including mode toggles.
-        ctx.options_mut(|options| options.max_passes = std::num::NonZeroUsize::new(1).unwrap());
+        ctx.options_mut(|options| options.max_passes = std::num::NonZeroUsize::MIN);
         ctx.set_theme(egui::Theme::Light);
         ctx.set_fonts(crate::fonts::ui_definitions());
         ctx.all_styles_mut(|s| {
@@ -57,13 +56,6 @@ impl Gui {
             composition_ended: None,
         }
     }
-    // A renderer reset invalidates SDL textures without notifying egui.
-    // Discard their handles before dropping this Gui, then build a fresh
-    // Context so the glyph atlas and custom textures are uploaded again.
-    pub fn forget_renderer_textures(&mut self) {
-        self.textures.clear();
-    }
-
     pub fn input(&mut self, w: &Window) -> RawInput {
         self.input_with_units(w, w.ui_scale().max(0.5))
     }
@@ -96,15 +88,7 @@ impl Gui {
     }
 
     pub fn sync_text_input(&mut self, window: &Window, enabled: bool) {
-        unsafe {
-            if enabled != SDL_TextInputActive(window.raw) {
-                if enabled {
-                    SDL_StartTextInput(window.raw);
-                } else {
-                    SDL_StopTextInput(window.raw);
-                }
-            }
-        }
+        window.sync_text_input(enabled);
         if !enabled {
             self.composing = false;
             self.composition_ended = None;
@@ -120,7 +104,7 @@ impl Gui {
             egui::vec2(logical[0] / self.units, logical[1] / self.units),
         ));
         self.raw.time = Some(self.started.elapsed().as_secs_f64());
-        let current = modifiers(unsafe { SDL_GetModState() });
+        let current = modifiers(mod_state());
         // A synthetic input event would ask egui for another frame.
         if current != self.ctx.input(|input| input.modifiers) {
             self.raw.events.push(Event::ModifiersChanged(current));
@@ -143,7 +127,7 @@ impl Gui {
     }
 
     pub fn clear_composition(&mut self, window: &Window) {
-        unsafe { SDL_ClearComposition(window.raw) };
+        window.clear_composition();
         self.cancel_composition(0);
     }
 
@@ -162,28 +146,28 @@ impl Gui {
         }
         was_composing
     }
-    /// SDL_Event is a tagged C union. Only the field selected by `type` is read.
+    /// Decode tagged SDL events through the checked, owning SDL API.
     pub fn event(&mut self, e: &SDL_Event, id: SDL_WindowID, size: [f32; 2]) {
-        unsafe {
-            let ty = event_type(e);
-            let scale = self.units;
-            match ty {
-                SDL_EVENT_MOUSE_MOTION
-                    if e.motion.windowID == id
-                        && e.motion.which != SDL_TOUCH_MOUSEID
-                        && e.motion.which != SDL_PEN_MOUSEID =>
+        let ty = event_type(e);
+        let scale = self.units;
+        match ty {
+            SDL_EVENT_MOUSE_MOTION => {
+                if let Some(m) = mouse_motion_event(e)
+                    && m.windowID == id
+                    && m.which != SDL_TOUCH_MOUSEID
+                    && m.which != SDL_PEN_MOUSEID
                 {
-                    self.raw.events.push(Event::PointerMoved(egui::pos2(
-                        e.motion.x / scale,
-                        e.motion.y / scale,
-                    )))
+                    self.raw
+                        .events
+                        .push(Event::PointerMoved(egui::pos2(m.x / scale, m.y / scale)));
                 }
-                SDL_EVENT_MOUSE_BUTTON_DOWN | SDL_EVENT_MOUSE_BUTTON_UP
-                    if e.button.windowID == id
-                        && e.button.which != SDL_TOUCH_MOUSEID
-                        && e.button.which != SDL_PEN_MOUSEID =>
+            }
+            SDL_EVENT_MOUSE_BUTTON_DOWN | SDL_EVENT_MOUSE_BUTTON_UP => {
+                if let Some(b) = mouse_button_event(e)
+                    && b.windowID == id
+                    && b.which != SDL_TOUCH_MOUSEID
+                    && b.which != SDL_PEN_MOUSEID
                 {
-                    let b = e.button;
                     let button = match b.button {
                         1 => egui::PointerButton::Primary,
                         2 => egui::PointerButton::Middle,
@@ -194,33 +178,51 @@ impl Gui {
                         pos: egui::pos2(b.x / scale, b.y / scale),
                         button,
                         pressed: b.down,
-                        modifiers: modifiers(SDL_GetModState()),
+                        modifiers: modifiers(mod_state()),
                     });
                 }
-                SDL_EVENT_FINGER_DOWN | SDL_EVENT_FINGER_MOTION | SDL_EVENT_FINGER_UP
-                    if e.tfinger.windowID == id =>
+            }
+            SDL_EVENT_FINGER_DOWN | SDL_EVENT_FINGER_MOTION | SDL_EVENT_FINGER_UP => {
+                if let Some(finger) = finger_event(e)
+                    && finger.windowID == id
                 {
-                    self.touch_event(e.tfinger, size);
+                    self.touch_event(finger, size);
                 }
-                SDL_EVENT_FINGER_CANCELED if self.has_touch(TouchKey::from(e.tfinger)) => {
-                    self.touch_event(e.tfinger, size);
-                }
-                SDL_EVENT_PEN_MOTION if e.pmotion.windowID == id => self.raw.events.push(
-                    Event::PointerMoved(egui::pos2(e.pmotion.x / scale, e.pmotion.y / scale)),
-                ),
-                SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP
-                    if e.ptouch.windowID == id && !e.ptouch.eraser =>
+            }
+            SDL_EVENT_FINGER_CANCELED => {
+                if let Some(finger) = finger_event(e)
+                    && self.has_touch(TouchKey::from(finger))
                 {
-                    let p = e.ptouch;
+                    self.touch_event(finger, size);
+                }
+            }
+            SDL_EVENT_PEN_MOTION => {
+                if let Some(pen) = pen_motion_event(e)
+                    && pen.windowID == id
+                {
+                    self.raw.events.push(Event::PointerMoved(egui::pos2(
+                        pen.x / scale,
+                        pen.y / scale,
+                    )));
+                }
+            }
+            SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP => {
+                if let Some(p) = pen_touch_event(e)
+                    && p.windowID == id
+                    && !p.eraser
+                {
                     self.raw.events.push(Event::PointerButton {
                         pos: egui::pos2(p.x / scale, p.y / scale),
                         button: egui::PointerButton::Primary,
                         pressed: p.down,
-                        modifiers: modifiers(SDL_GetModState()),
+                        modifiers: modifiers(mod_state()),
                     });
                 }
-                SDL_EVENT_MOUSE_WHEEL if e.wheel.windowID == id => {
-                    let w = e.wheel;
+            }
+            SDL_EVENT_MOUSE_WHEEL => {
+                if let Some(w) = mouse_wheel_event(e)
+                    && w.windowID == id
+                {
                     let sign = if w.direction == SDL_MOUSEWHEEL_FLIPPED {
                         -1.
                     } else {
@@ -231,109 +233,105 @@ impl Gui {
                         delta: egui::vec2(w.x * sign, w.y * sign),
                         phase: egui::TouchPhase::Move,
                         source: egui::MouseWheelSource::Unknown,
-                        modifiers: modifiers(SDL_GetModState()),
+                        modifiers: modifiers(mod_state()),
                     });
                 }
-                SDL_EVENT_WINDOW_FOCUS_LOST if e.window.windowID == id => {
-                    self.cancel_touches();
-                    self.cancel_composition(0);
-                    self.composition_ended = None;
-                    self.raw.focused = false;
-                    self.raw.events.push(Event::WindowFocused(false));
-                }
-                SDL_EVENT_WINDOW_FOCUS_GAINED if e.window.windowID == id => {
-                    self.raw.focused = true;
-                    self.raw.events.push(Event::WindowFocused(true));
-                }
-                SDL_EVENT_WINDOW_MOUSE_LEAVE if e.window.windowID == id => {
-                    self.raw.events.push(Event::PointerGone)
-                }
-                SDL_EVENT_KEY_DOWN | SDL_EVENT_KEY_UP if e.key.windowID == id => {
-                    let k = e.key;
-                    let m = modifiers(k.r#mod);
-                    let same_ime_key = k.down
-                        && self.composition_ended.take().is_some_and(|at| {
-                            k.timestamp != 0 && k.timestamp.abs_diff(at) < 2_000_000
-                        });
-                    // Some backends deliver the composition and its initiating key together.
-                    if self.composing
-                        || (same_ime_key
-                            && !m.command
-                            && !m.alt
-                            && matches!(
-                                k.key,
-                                SDLK_BACKSPACE | SDLK_ESCAPE | SDLK_RETURN | SDLK_KP_ENTER
-                            ))
-                    {
-                        return;
-                    }
-                    if k.down && m.command && k.key == SDLK_V {
-                        let p = SDL_GetClipboardText();
-                        if !p.is_null() {
-                            let text = CStr::from_ptr(p).to_string_lossy().into_owned();
-                            SDL_free(p.cast());
-                            self.raw.events.push(Event::Paste(text));
-                        }
-                        return;
-                    }
-                    if k.down && m.command && k.key == SDLK_C {
-                        self.raw.events.push(Event::Copy);
-                        return;
-                    }
-                    if k.down && m.command && k.key == SDLK_X {
-                        self.raw.events.push(Event::Cut);
-                        return;
-                    }
-                    if let Some(key) = key(k.key) {
-                        self.raw.events.push(Event::Key {
-                            key,
-                            physical_key: None,
-                            pressed: k.down,
-                            repeat: k.repeat,
-                            modifiers: m,
-                        });
-                    }
-                }
-                SDL_EVENT_TEXT_INPUT if e.text.windowID == id => {
-                    let p = e.text.text;
-                    if !p.is_null() {
-                        let text = CStr::from_ptr(p).to_string_lossy().into_owned();
-                        let event = if self.end_composition(e.text.timestamp) {
-                            Event::Ime(egui::ImeEvent::Commit(text))
-                        } else {
-                            Event::Text(text)
-                        };
-                        self.raw.events.push(event);
-                    }
-                }
-                SDL_EVENT_TEXT_EDITING if e.edit.windowID == id => {
-                    let edit = e.edit;
-                    let text = if edit.text.is_null() {
-                        String::new()
-                    } else {
-                        CStr::from_ptr(edit.text).to_string_lossy().into_owned()
-                    };
-                    if text.is_empty() {
-                        self.cancel_composition(edit.timestamp);
-                        return;
-                    }
-                    self.composing = true;
-                    self.composition_ended = None;
-                    let active_range_chars = if edit.start >= 0 && edit.length >= 0 {
-                        let count = text.chars().count();
-                        let start = (edit.start as usize).min(count);
-                        let end = (start + edit.length as usize).min(count);
-                        Some(start..end)
-                    } else {
-                        None
-                    };
-                    self.raw.events.push(Event::Ime(egui::ImeEvent::Preedit {
-                        text,
-                        active_range_chars,
-                    }));
-                }
-                _ => {}
             }
+            SDL_EVENT_WINDOW_FOCUS_LOST if window_event_id(e) == Some(id) => {
+                self.cancel_touches();
+                self.cancel_composition(0);
+                self.composition_ended = None;
+                self.raw.focused = false;
+                self.raw.events.push(Event::WindowFocused(false));
+            }
+            SDL_EVENT_WINDOW_FOCUS_GAINED if window_event_id(e) == Some(id) => {
+                self.raw.focused = true;
+                self.raw.events.push(Event::WindowFocused(true));
+            }
+            SDL_EVENT_WINDOW_MOUSE_LEAVE if window_event_id(e) == Some(id) => {
+                self.raw.events.push(Event::PointerGone);
+            }
+            SDL_EVENT_KEY_DOWN | SDL_EVENT_KEY_UP => {
+                let Some(k) = key_event(e).filter(|key| key.windowID == id) else {
+                    return;
+                };
+                let m = modifiers(k.r#mod);
+                let same_ime_key = k.down
+                    && self
+                        .composition_ended
+                        .take()
+                        .is_some_and(|at| k.timestamp != 0 && k.timestamp.abs_diff(at) < 2_000_000);
+                // Some backends deliver the composition and its initiating key together.
+                if self.composing
+                    || (same_ime_key
+                        && !m.command
+                        && !m.alt
+                        && matches!(
+                            k.key,
+                            SDLK_BACKSPACE | SDLK_ESCAPE | SDLK_RETURN | SDLK_KP_ENTER
+                        ))
+                {
+                    return;
+                }
+                if k.down && m.command && k.key == SDLK_V {
+                    if let Some(text) = clipboard_text() {
+                        self.raw.events.push(Event::Paste(text));
+                    }
+                    return;
+                }
+                if k.down && m.command && k.key == SDLK_C {
+                    self.raw.events.push(Event::Copy);
+                    return;
+                }
+                if k.down && m.command && k.key == SDLK_X {
+                    self.raw.events.push(Event::Cut);
+                    return;
+                }
+                if let Some(key) = key(k.key) {
+                    self.raw.events.push(Event::Key {
+                        key,
+                        physical_key: None,
+                        pressed: k.down,
+                        repeat: k.repeat,
+                        modifiers: m,
+                    });
+                }
+            }
+            SDL_EVENT_TEXT_INPUT => {
+                if let Some((text, timestamp)) = text_input_data(e, id) {
+                    let event = if self.end_composition(timestamp) {
+                        Event::Ime(egui::ImeEvent::Commit(text))
+                    } else {
+                        Event::Text(text)
+                    };
+                    self.raw.events.push(event);
+                }
+            }
+            SDL_EVENT_TEXT_EDITING => {
+                let Some(edit) = text_editing_data(e, id) else {
+                    return;
+                };
+                let text = edit.text;
+                if text.is_empty() {
+                    self.cancel_composition(edit.timestamp);
+                    return;
+                }
+                self.composing = true;
+                self.composition_ended = None;
+                let active_range_chars = if edit.start >= 0 && edit.length >= 0 {
+                    let count = text.chars().count();
+                    let start = (edit.start as usize).min(count);
+                    let end = (start + edit.length as usize).min(count);
+                    Some(start..end)
+                } else {
+                    None
+                };
+                self.raw.events.push(Event::Ime(egui::ImeEvent::Preedit {
+                    text,
+                    active_range_chars,
+                }));
+            }
+            _ => {}
         }
     }
     fn touch_event(&mut self, event: SDL_TouchFingerEvent, size: [f32; 2]) {
@@ -440,162 +438,133 @@ impl Gui {
         color: &ColorManager,
         mut output: egui::FullOutput,
     ) -> Result<(), String> {
-        unsafe {
-            if let Some(ime) = output.platform_output.ime {
-                let cursor = ime.cursor_rect;
-                let area = SDL_Rect {
-                    x: (cursor.left() * self.units).round() as i32,
-                    y: (cursor.top() * self.units).round() as i32,
-                    w: 1,
-                    h: (cursor.height() * self.units).ceil() as i32,
-                };
-                SDL_SetTextInputArea(window.raw, &area, 0);
-                if ime.should_interrupt_composition {
-                    self.clear_composition(window);
-                }
+        if let Some(ime) = output.platform_output.ime {
+            let cursor = ime.cursor_rect;
+            let area = SDL_Rect {
+                x: (cursor.left() * self.units).round() as i32,
+                y: (cursor.top() * self.units).round() as i32,
+                w: 1,
+                h: (cursor.height() * self.units).ceil() as i32,
+            };
+            window.set_text_input_area(&area);
+            if ime.should_interrupt_composition {
+                self.clear_composition(window);
             }
-            for (id, deltas) in output.textures_delta.set.drain() {
-                for delta in deltas {
-                    let egui::ImageData::Color(image) = delta.image;
-                    let [w, h] = image.size;
-                    let mut bytes: Vec<u8> = image
-                        .pixels
-                        .iter()
-                        .flat_map(|p| p.to_srgba_unmultiplied())
-                        .collect();
-                    if id == TextureId::default() && !color.is_identity() {
-                        // The font atlas carries the color of emoji, while
-                        // monochrome glyphs are tinted with mapped vertices.
-                        for (rgba, pixel) in bytes
-                            .as_chunks_mut::<4>()
-                            .0
-                            .iter_mut()
-                            .zip(image.pixels.iter())
-                        {
-                            let [red, green, blue, _] = *rgba;
-                            if pixel.a() != 0 && [red, green, blue] != [255; 3] {
-                                let rgb = color.map(
-                                    [red, green, blue].map(|channel| f32::from(channel) / 255.),
-                                );
-                                rgba[..3].copy_from_slice(
-                                    &rgb.map(|channel| (channel * 255.).round() as u8),
-                                );
-                            }
+        }
+        for (id, deltas) in output.textures_delta.set.drain() {
+            for delta in deltas {
+                let egui::ImageData::Color(image) = delta.image;
+                let [w, h] = image.size;
+                let mut bytes: Vec<u8> = image
+                    .pixels
+                    .iter()
+                    .flat_map(|p| p.to_srgba_unmultiplied())
+                    .collect();
+                if id == TextureId::default() && !color.is_identity() {
+                    // The font atlas carries the color of emoji, while
+                    // monochrome glyphs are tinted with mapped vertices.
+                    for (rgba, pixel) in bytes
+                        .as_chunks_mut::<4>()
+                        .0
+                        .iter_mut()
+                        .zip(image.pixels.iter())
+                    {
+                        let [red, green, blue, _] = *rgba;
+                        if pixel.a() != 0 && [red, green, blue] != [255; 3] {
+                            let rgb = color
+                                .map([red, green, blue].map(|channel| f32::from(channel) / 255.));
+                            rgba[..3].copy_from_slice(
+                                &rgb.map(|channel| (channel * 255.).round() as u8),
+                            );
                         }
                     }
-                    let texture = if delta.pos.is_none() {
-                        if let Some(old) = self.textures.remove(&id) {
-                            SDL_DestroyTexture(old)
-                        }
-                        let p = SDL_CreateTexture(
-                            r.raw,
-                            SDL_PIXELFORMAT_RGBA32,
-                            SDL_TEXTUREACCESS_STATIC,
-                            w as i32,
-                            h as i32,
-                        );
-                        if p.is_null() {
-                            return Err(crate::sdl::error());
-                        }
-                        check(SDL_SetTextureBlendMode(p, SDL_BLENDMODE_BLEND))?;
-                        SDL_SetTextureScaleMode(p, SDL_SCALEMODE_LINEAR);
-                        self.textures.insert(id, p);
-                        p
-                    } else {
-                        *self
-                            .textures
-                            .get(&id)
-                            .ok_or("Missing partial egui texture")?
-                    };
-                    let rect = delta.pos.map(|pos| SDL_Rect {
-                        x: pos[0] as i32,
-                        y: pos[1] as i32,
-                        w: w as i32,
-                        h: h as i32,
-                    });
-                    check(SDL_UpdateTexture(
-                        texture,
-                        rect.as_ref().map_or(ptr::null(), |r| r),
-                        bytes.as_ptr().cast(),
-                        (w * 4) as i32,
-                    ))?;
                 }
-            }
-            let px = window.pixel_size();
-            let logical = window.size();
-            let scale = [px[0] as f32 / logical[0], px[1] as f32 / logical[1]];
-            for p in self.ctx.tessellate(output.shapes, output.pixels_per_point) {
-                let egui::epaint::Primitive::Mesh(mesh) = p.primitive else {
-                    continue;
-                };
-                let Some(&texture) = self.textures.get(&mesh.texture_id) else {
-                    continue;
-                };
-                let rect = p.clip_rect;
-                let x = (rect.min.x * self.units * scale[0])
-                    .floor()
-                    .clamp(0., px[0] as f32) as i32;
-                let y = (rect.min.y * self.units * scale[1])
-                    .floor()
-                    .clamp(0., px[1] as f32) as i32;
-                let x2 = (rect.max.x * self.units * scale[0])
-                    .ceil()
-                    .clamp(0., px[0] as f32) as i32;
-                let y2 = (rect.max.y * self.units * scale[1])
-                    .ceil()
-                    .clamp(0., px[1] as f32) as i32;
-                if x2 <= x || y2 <= y {
-                    continue;
+                if delta.pos.is_none() {
+                    self.textures.insert(id, GuiTexture::new(r, w, h)?);
                 }
-                // SDL clip rectangles are in renderer logical units, before RenderScale.
-                let clip = SDL_Rect {
-                    x: (x as f32 / scale[0]).floor() as i32,
-                    y: (y as f32 / scale[1]).floor() as i32,
-                    w: ((x2 - x) as f32 / scale[0]).ceil() as i32,
-                    h: ((y2 - y) as f32 / scale[1]).ceil() as i32,
-                };
-                SDL_SetRenderClipRect(r.raw, &clip);
-                let vertices: Vec<SDL_Vertex> = mesh
-                    .vertices
-                    .iter()
-                    .map(|v| {
-                        let [red, green, blue, alpha] = v.color.to_srgba_unmultiplied();
-                        let c =
-                            color.map([red as f32 / 255., green as f32 / 255., blue as f32 / 255.]);
-                        SDL_Vertex {
-                            position: SDL_FPoint {
-                                x: v.pos.x * self.units,
-                                y: v.pos.y * self.units,
-                            },
-                            color: SDL_FColor {
-                                r: c[0],
-                                g: c[1],
-                                b: c[2],
-                                a: alpha as f32 / 255.,
-                            },
-                            tex_coord: SDL_FPoint {
-                                x: v.uv.x,
-                                y: v.uv.y,
-                            },
-                        }
-                    })
-                    .collect();
-                r.geometry(texture, &vertices, &mesh.indices)?;
+                let texture = self
+                    .textures
+                    .get(&id)
+                    .ok_or("Missing partial egui texture")?;
+                let rect = delta.pos.map(|pos| SDL_Rect {
+                    x: pos[0] as i32,
+                    y: pos[1] as i32,
+                    w: w as i32,
+                    h: h as i32,
+                });
+                texture.update([w, h], &bytes, rect.as_ref())?;
             }
-            SDL_SetRenderClipRect(r.raw, ptr::null());
-            for id in output.textures_delta.free.drain() {
-                if let Some(p) = self.textures.remove(&id) {
-                    SDL_DestroyTexture(p)
-                }
-            }
-            for command in output.platform_output.commands {
-                if let egui::OutputCommand::CopyText(text) = command {
-                    let text = crate::sdl::cstring(&text);
-                    SDL_SetClipboardText(text.as_ptr());
-                }
-            }
-            Ok(())
         }
+        let px = window.pixel_size();
+        let logical = window.size();
+        let scale = [px[0] as f32 / logical[0], px[1] as f32 / logical[1]];
+        for p in self.ctx.tessellate(output.shapes, output.pixels_per_point) {
+            let egui::epaint::Primitive::Mesh(mesh) = p.primitive else {
+                continue;
+            };
+            let Some(texture) = self.textures.get(&mesh.texture_id) else {
+                continue;
+            };
+            let rect = p.clip_rect;
+            let x = (rect.min.x * self.units * scale[0])
+                .floor()
+                .clamp(0., px[0] as f32) as i32;
+            let y = (rect.min.y * self.units * scale[1])
+                .floor()
+                .clamp(0., px[1] as f32) as i32;
+            let x2 = (rect.max.x * self.units * scale[0])
+                .ceil()
+                .clamp(0., px[0] as f32) as i32;
+            let y2 = (rect.max.y * self.units * scale[1])
+                .ceil()
+                .clamp(0., px[1] as f32) as i32;
+            if x2 <= x || y2 <= y {
+                continue;
+            }
+            // SDL clip rectangles are in renderer logical units, before RenderScale.
+            let clip = SDL_Rect {
+                x: (x as f32 / scale[0]).floor() as i32,
+                y: (y as f32 / scale[1]).floor() as i32,
+                w: ((x2 - x) as f32 / scale[0]).ceil() as i32,
+                h: ((y2 - y) as f32 / scale[1]).ceil() as i32,
+            };
+            r.set_clip_rect(Some(&clip));
+            let vertices: Vec<SDL_Vertex> = mesh
+                .vertices
+                .iter()
+                .map(|v| {
+                    let [red, green, blue, alpha] = v.color.to_srgba_unmultiplied();
+                    let c = color.map([red as f32 / 255., green as f32 / 255., blue as f32 / 255.]);
+                    SDL_Vertex {
+                        position: SDL_FPoint {
+                            x: v.pos.x * self.units,
+                            y: v.pos.y * self.units,
+                        },
+                        color: SDL_FColor {
+                            r: c[0],
+                            g: c[1],
+                            b: c[2],
+                            a: alpha as f32 / 255.,
+                        },
+                        tex_coord: SDL_FPoint {
+                            x: v.uv.x,
+                            y: v.uv.y,
+                        },
+                    }
+                })
+                .collect();
+            texture.geometry(r, &vertices, &mesh.indices)?;
+        }
+        r.set_clip_rect(None);
+        for id in output.textures_delta.free.drain() {
+            self.textures.remove(&id);
+        }
+        for command in output.platform_output.commands {
+            if let egui::OutputCommand::CopyText(text) = command {
+                set_clipboard_text(&text);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -609,13 +578,6 @@ pub fn repaint_at(output: &egui::FullOutput) -> Option<Instant> {
         })
 }
 
-impl Drop for Gui {
-    fn drop(&mut self) {
-        for (_, texture) in self.textures.drain() {
-            unsafe { SDL_DestroyTexture(texture) };
-        }
-    }
-}
 pub fn modifiers(m: SDL_Keymod) -> Modifiers {
     let ctrl = m & SDL_KMOD_CTRL != 0;
     let mac_cmd = m & SDL_KMOD_GUI != 0;

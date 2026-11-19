@@ -1,29 +1,8 @@
 use crate::sdl::*;
 use objc2::{Encoding, RefEncode, msg_send, runtime::AnyObject};
-use std::ffi::c_void;
+use std::{ffi::c_void, ptr::NonNull};
 
-#[link(name = "objc")]
-unsafe extern "C" {
-    fn objc_autoreleasePoolPush() -> *mut c_void;
-    fn objc_autoreleasePoolPop(pool: *mut c_void);
-}
-
-// The raw pointer also keeps the pool on the thread that created it.
-pub struct AutoreleasePool(*mut c_void);
-
-impl AutoreleasePool {
-    pub fn new() -> Self {
-        Self(unsafe { objc_autoreleasePoolPush() })
-    }
-}
-
-impl Drop for AutoreleasePool {
-    fn drop(&mut self) {
-        unsafe { objc_autoreleasePoolPop(self.0) };
-    }
-}
-
-pub fn configure_metal(raw: *mut SDL_Renderer, extended: bool) {
+pub fn configure_metal(raw: NonNull<SDL_Renderer>, extended: bool) {
     #[repr(C)]
     struct ColorSpace {
         _opaque: [u8; 0],
@@ -34,46 +13,49 @@ pub fn configure_metal(raw: *mut SDL_Renderer, extended: bool) {
     }
     #[link(name = "CoreGraphics", kind = "framework")]
     unsafe extern "C" {
-        static kCGColorSpaceSRGB: *const c_void;
-        fn CGColorSpaceCreateWithName(name: *const c_void) -> *const c_void;
+        static kCGColorSpaceSRGB: Option<NonNull<c_void>>;
+        fn CGColorSpaceCreateWithName(name: NonNull<c_void>) -> Option<NonNull<c_void>>;
     }
     #[link(name = "CoreFoundation", kind = "framework")]
     unsafe extern "C" {
-        fn CFRelease(value: *const c_void);
+        fn CFRelease(value: NonNull<c_void>);
     }
     unsafe {
-        let layer = SDL_GetRenderMetalLayer(raw).cast::<AnyObject>();
+        let layer = SDL_GetRenderMetalLayer(raw.as_ptr()).cast::<AnyObject>();
         if layer.is_null() {
             return;
         }
         let _: () = msg_send![layer, setMaximumDrawableCount: 2_usize];
-        if !extended {
-            let srgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-            if !srgb.is_null() {
-                let _: () = msg_send![layer, setColorspace: srgb.cast::<ColorSpace>()];
-                CFRelease(srgb);
-            }
+        if !extended
+            && let Some(name) = kCGColorSpaceSRGB
+            && let Some(srgb) = CGColorSpaceCreateWithName(name)
+        {
+            let _: () = msg_send![layer, setColorspace: srgb.as_ptr().cast::<ColorSpace>()];
+            CFRelease(srgb);
         }
     }
 }
 
 pub fn remove_metal_view(window: &Window) {
+    let Some(tag) = window.cocoa_metal_view_tag() else {
+        return;
+    };
+    let Some(ns) = window.cocoa_window() else {
+        return;
+    };
+    // SAFETY: The NSWindow is borrowed from the live SDL window and the
+    // selectors use their Cocoa object-pointer and NSInteger signatures.
+    // Check the intermediate contentView before messaging it.
     unsafe {
-        let props = SDL_GetWindowProperties(window.raw);
-        let tag = SDL_GetNumberProperty(props, SDL_PROP_WINDOW_COCOA_METAL_VIEW_TAG_NUMBER, 0);
-        let ns = SDL_GetPointerProperty(
-            props,
-            SDL_PROP_WINDOW_COCOA_WINDOW_POINTER,
-            std::ptr::null_mut(),
-        )
-        .cast::<AnyObject>();
-        if tag == 0 || ns.is_null() {
+        let ns = ns.as_non_null().as_ptr().cast::<AnyObject>();
+        let content: Option<NonNull<AnyObject>> = NonNull::new(msg_send![ns, contentView]);
+        let Some(content) = content else {
             return;
-        }
-        let content: *mut AnyObject = msg_send![ns, contentView];
-        let metal: *mut AnyObject = msg_send![content, viewWithTag: tag as isize];
-        if !metal.is_null() {
-            let _: () = msg_send![metal, removeFromSuperview];
+        };
+        let metal: Option<NonNull<AnyObject>> =
+            NonNull::new(msg_send![content.as_ptr(), viewWithTag: tag]);
+        if let Some(metal) = metal {
+            let _: () = msg_send![metal.as_ptr(), removeFromSuperview];
         }
     }
 }

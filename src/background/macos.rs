@@ -11,7 +11,7 @@ use objc2::{
 };
 use std::{
     ffi::{CStr, c_char, c_void},
-    ptr,
+    ptr::{self, NonNull},
     sync::{
         OnceLock,
         atomic::{AtomicBool, Ordering},
@@ -74,45 +74,63 @@ struct CGRect {
     size: Size,
 }
 
+// The only permitted array count is one. The ABI-compatible repr(u32)
+// prevents safe Rust callers from requesting more elements than the single
+// initialized output slot provided to Core Graphics.
+#[repr(u32)]
+enum SingleDisplay {
+    One = 1,
+}
+
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
-    fn CGGetDisplaysWithPoint(point: Point, max: u32, displays: *mut u32, count: *mut u32) -> i32;
-    fn CGDisplayCreateImage(display: u32) -> *const c_void;
-    fn CGPreflightScreenCaptureAccess() -> bool;
-    fn CGRequestScreenCaptureAccess() -> bool;
-    fn CGColorSpaceCreateWithName(name: *const c_void) -> *const c_void;
+    safe fn CGGetDisplaysWithPoint(
+        point: Point,
+        max: SingleDisplay,
+        displays: &mut u32,
+        count: &mut u32,
+    ) -> i32;
+    // CGDisplayCreateImage takes only a scalar display ID. It returns an
+    // owned (+1) image reference or null, without borrowing Rust memory.
+    safe fn CGDisplayCreateImage(display: u32) -> Option<NonNull<c_void>>;
+    // Both APIs take and return scalar values and do not borrow or retain
+    // Rust memory. The UI-thread permission flow remains in capture_permission.
+    safe fn CGPreflightScreenCaptureAccess() -> bool;
+    safe fn CGRequestScreenCaptureAccess() -> bool;
+    fn CGColorSpaceCreateWithName(name: NonNull<c_void>) -> Option<NonNull<c_void>>;
     fn CGBitmapContextCreate(
-        data: *mut c_void,
+        data: NonNull<c_void>,
         width: usize,
         height: usize,
         bits_per_component: usize,
         bytes_per_row: usize,
-        color_space: *const c_void,
+        color_space: NonNull<c_void>,
         bitmap_info: u32,
-    ) -> *mut c_void;
-    fn CGContextDrawImage(context: *mut c_void, rect: CGRect, image: *const c_void);
+    ) -> Option<NonNull<c_void>>;
+    fn CGContextDrawImage(context: NonNull<c_void>, rect: CGRect, image: NonNull<c_void>);
     #[cfg(test)]
-    fn CGBitmapContextCreateImage(context: *mut c_void) -> *const c_void;
-    fn CGImageGetWidth(image: *const c_void) -> usize;
-    fn CGImageGetHeight(image: *const c_void) -> usize;
-    fn CGImageGetBitsPerComponent(image: *const c_void) -> usize;
-    fn CGImageGetBitsPerPixel(image: *const c_void) -> usize;
-    fn CGImageGetBytesPerRow(image: *const c_void) -> usize;
-    fn CGImageGetBitmapInfo(image: *const c_void) -> u32;
-    fn CGImageGetColorSpace(image: *const c_void) -> *const c_void;
-    fn CGColorSpaceGetName(space: *const c_void) -> *const c_void;
-    fn CGImageGetDataProvider(image: *const c_void) -> *const c_void;
-    fn CGDataProviderCopyData(provider: *const c_void) -> *const c_void;
-    static kCGColorSpaceExtendedLinearSRGB: *const c_void;
-    static kCGColorSpaceSRGB: *const c_void;
+    fn CGBitmapContextCreateImage(context: NonNull<c_void>) -> Option<NonNull<c_void>>;
+    fn CGImageGetWidth(image: NonNull<c_void>) -> usize;
+    fn CGImageGetHeight(image: NonNull<c_void>) -> usize;
+    fn CGImageGetBitsPerComponent(image: NonNull<c_void>) -> usize;
+    fn CGImageGetBitsPerPixel(image: NonNull<c_void>) -> usize;
+    fn CGImageGetBytesPerRow(image: NonNull<c_void>) -> usize;
+    fn CGImageGetBitmapInfo(image: NonNull<c_void>) -> u32;
+    fn CGImageGetColorSpace(image: NonNull<c_void>) -> Option<NonNull<c_void>>;
+    fn CGColorSpaceGetName(space: NonNull<c_void>) -> Option<NonNull<c_void>>;
+    fn CGImageGetDataProvider(image: NonNull<c_void>) -> Option<NonNull<c_void>>;
+    fn CGDataProviderCopyData(provider: NonNull<c_void>) -> Option<NonNull<c_void>>;
+    // CoreGraphics constants are nullable C object pointers.
+    static kCGColorSpaceExtendedLinearSRGB: Option<NonNull<c_void>>;
+    static kCGColorSpaceSRGB: Option<NonNull<c_void>>;
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
-    fn CFEqual(left: *const c_void, right: *const c_void) -> u8;
-    fn CFDataGetLength(data: *const c_void) -> isize;
-    fn CFDataGetBytePtr(data: *const c_void) -> *const u8;
-    fn CFRelease(value: *const c_void);
+    fn CFEqual(left: NonNull<c_void>, right: NonNull<c_void>) -> u8;
+    fn CFDataGetLength(data: NonNull<c_void>) -> isize;
+    fn CFDataGetBytePtr(data: NonNull<c_void>) -> Option<NonNull<u8>>;
+    fn CFRelease(value: NonNull<c_void>);
 }
 
 fn display_id([x, y, w, h]: [i32; 4]) -> Result<u32, String> {
@@ -121,7 +139,7 @@ fn display_id([x, y, w, h]: [i32; 4]) -> Result<u32, String> {
         y: f64::from(y) + f64::from(h) / 2.,
     };
     let (mut id, mut count) = (0, 0);
-    if unsafe { CGGetDisplaysWithPoint(center, 1, &mut id, &mut count) } != 0 || count == 0 {
+    if CGGetDisplaysWithPoint(center, SingleDisplay::One, &mut id, &mut count) != 0 || count == 0 {
         return Err("Cannot find the selected macOS display".into());
     }
     Ok(id)
@@ -141,13 +159,13 @@ fn screen_capture_kit() -> Result<(), String> {
 }
 
 fn capture_permission() -> Result<(), String> {
-    if unsafe { CGPreflightScreenCaptureAccess() } {
+    if CGPreflightScreenCaptureAccess() {
         return Ok(());
     }
     // TCC may cache a denial until the application is restarted. Request once
     // per process rather than showing another OS alert for every screenshot.
     static REQUESTED: OnceLock<bool> = OnceLock::new();
-    if *REQUESTED.get_or_init(|| unsafe { CGRequestScreenCaptureAccess() }) {
+    if *REQUESTED.get_or_init(|| CGRequestScreenCaptureAccess()) {
         // A newly granted permission may be usable immediately even if TCC's
         // preflight result remains cached until the next process launch.
         Ok(())
@@ -160,10 +178,10 @@ fn sdr_supported() -> bool {
     screen_capture_kit().is_ok()
         && AnyClass::get(c"SCShareableContent").is_some()
         && AnyClass::get(c"SCStreamConfiguration").is_some()
-        && AnyClass::get(c"SCScreenshotManager").is_some_and(|manager| unsafe {
-            msg_send![
-                manager, respondsToSelector: sel!(captureImageWithFilter:configuration:completionHandler:)
-            ]
+        && AnyClass::get(c"SCScreenshotManager").is_some_and(|manager| {
+            manager
+                .class_method(sel!(captureImageWithFilter:configuration:completionHandler:))
+                .is_some()
         })
 }
 
@@ -179,15 +197,12 @@ pub fn hdr_supported() -> bool {
         let Some(manager) = AnyClass::get(c"SCScreenshotManager") else {
             return false;
         };
-        unsafe {
-            let preset: bool = msg_send![
-                configuration, respondsToSelector: sel!(streamConfigurationWithPreset:)
-            ];
-            let capture: bool = msg_send![
-                manager, respondsToSelector: sel!(captureImageWithFilter:configuration:completionHandler:)
-            ];
-            preset && capture
-        }
+        configuration
+            .class_method(sel!(streamConfigurationWithPreset:))
+            .is_some()
+            && manager
+                .class_method(sel!(captureImageWithFilter:configuration:completionHandler:))
+                .is_some()
     })
 }
 
@@ -196,28 +211,16 @@ fn apple_silicon() -> bool {
     return true;
     #[cfg(target_arch = "x86_64")]
     {
-        // A translated x86_64 build can use the HDR API on Apple silicon.
-        unsafe extern "C" {
-            fn sysctlbyname(
-                name: *const c_char,
-                value: *mut i32,
-                len: *mut usize,
-                new_value: *const c_void,
-                new_len: usize,
-            ) -> i32;
-        }
-        let mut translated = 0;
-        let mut len = size_of::<i32>();
-        let result = unsafe {
-            sysctlbyname(
-                c"sysctl.proc_translated".as_ptr(),
-                &mut translated,
-                &mut len,
-                ptr::null(),
-                0,
-            )
-        };
-        result == 0 && len == size_of::<i32>() && translated == 1
+        // The native sysctlbyname API takes raw buffer pointers and must not
+        // be imported as a safe Rust 2024 FFI function. Use the fixed system
+        // utility instead; hdr_supported caches this check once per process.
+        std::process::Command::new("/usr/sbin/sysctl")
+            .args(["-n", "sysctl.proc_translated"])
+            .output()
+            .is_ok_and(|result| {
+                result.status.success()
+                    && std::str::from_utf8(&result.stdout).is_ok_and(|value| value.trim() == "1")
+            })
     }
 }
 
@@ -241,12 +244,14 @@ fn screen_capture(
         let completion =
             block2::RcBlock::new(move |content: *mut AnyObject, error: *mut AnyObject| {
                 autoreleasepool(|_| {
-                    if content.is_null() {
-                        let _ = sender.send(Err(capture_error(error, hdr)));
-                    } else if let Err(error) =
-                        begin_screenshot(content, id, pixels, hdr, sender.clone())
-                    {
-                        let _ = sender.send(Err(error));
+                    if let Some(content) = NonNull::new(content) {
+                        if let Err(error) =
+                            begin_screenshot(content, id, pixels, hdr, sender.clone())
+                        {
+                            let _ = sender.send(Err(error));
+                        }
+                    } else {
+                        let _ = sender.send(Err(capture_error(NonNull::new(error), hdr)));
                     }
                 });
             });
@@ -272,20 +277,21 @@ fn screen_capture(
     Ok(None)
 }
 
-fn capture_error(error: *mut AnyObject, hdr: bool) -> String {
-    if error.is_null() {
+fn capture_error(error: Option<NonNull<AnyObject>>, hdr: bool) -> String {
+    let Some(error) = error else {
         return "macOS screenshot returned no image or error".into();
-    }
+    };
     let description = unsafe {
-        let message: *mut AnyObject = msg_send![error, localizedDescription];
-        if message.is_null() {
+        let message: Option<NonNull<AnyObject>> =
+            NonNull::new(msg_send![error.as_ptr(), localizedDescription]);
+        let Some(message) = message else {
             return "macOS screenshot returned an error without a description".into();
-        }
-        let text: *const c_char = msg_send![message, UTF8String];
-        if text.is_null() {
-            "No image returned".into()
+        };
+        let text: Option<NonNull<c_char>> = NonNull::new(msg_send![message.as_ptr(), UTF8String]);
+        if let Some(text) = text {
+            CStr::from_ptr(text.as_ptr()).to_string_lossy()
         } else {
-            CStr::from_ptr(text).to_string_lossy()
+            "No image returned".into()
         }
     };
     let mode = if hdr { "HDR" } else { "SDR" };
@@ -293,7 +299,7 @@ fn capture_error(error: *mut AnyObject, hdr: bool) -> String {
 }
 
 fn begin_screenshot(
-    content: *mut AnyObject,
+    content: NonNull<AnyObject>,
     id: u32,
     [width, height]: [i32; 2],
     hdr: bool,
@@ -309,60 +315,78 @@ fn begin_screenshot(
         return Err("Invalid macOS screenshot dimensions".into());
     }
     unsafe {
-        let displays: *mut AnyObject = msg_send![content, displays];
-        let count: usize = msg_send![displays, count];
-        let mut display = ptr::null_mut::<AnyObject>();
+        let displays: Option<NonNull<AnyObject>> =
+            NonNull::new(msg_send![content.as_ptr(), displays]);
+        let displays = displays.ok_or("ScreenCaptureKit returned no display list")?;
+        let count: usize = msg_send![displays.as_ptr(), count];
+        let mut selected = None;
         for index in 0..count {
-            let item: *mut AnyObject = msg_send![displays, objectAtIndex: index];
-            let display_id: u32 = msg_send![item, displayID];
+            let item: Option<NonNull<AnyObject>> =
+                NonNull::new(msg_send![displays.as_ptr(), objectAtIndex: index]);
+            let Some(item) = item else {
+                continue;
+            };
+            let display_id: u32 = msg_send![item.as_ptr(), displayID];
             if display_id == id {
-                display = item;
+                selected = Some(item);
                 break;
             }
         }
-        if display.is_null() {
-            return Err("ScreenCaptureKit did not return the selected display".into());
-        }
-        let empty: *mut AnyObject = msg_send![array, array];
-        let filter: *mut AnyObject = msg_send![filter_class, alloc];
-        let filter: *mut AnyObject =
-            msg_send![filter, initWithDisplay: display, excludingWindows: empty];
-        let filter = Retained::from_raw(filter).ok_or("Cannot configure the selected display")?;
+        let display = selected.ok_or("ScreenCaptureKit did not return the selected display")?;
+        let empty: Option<NonNull<AnyObject>> = NonNull::new(msg_send![array, array]);
+        let filter: Option<NonNull<AnyObject>> = NonNull::new(msg_send![filter_class, alloc]);
+        let filter = filter.ok_or("Cannot allocate the selected display filter")?;
+        let filter: Option<NonNull<AnyObject>> = NonNull::new(msg_send![
+            filter.as_ptr(),
+            initWithDisplay: display.as_ptr(),
+            excludingWindows: empty.map_or(ptr::null_mut(), NonNull::as_ptr)
+        ]);
+        let filter = filter
+            .and_then(|filter| Retained::from_raw(filter.as_ptr()))
+            .ok_or("Cannot configure the selected display")?;
         // The HDR preset is available on supported Apple silicon systems.
         // Ordinary SDR captures use the standard configuration on macOS 14+.
         // The HDR preset is autoreleased (+0); +new returns an owned (+1)
         // object. Retained balances both cases, including early returns.
-        let config: *mut AnyObject = if hdr {
+        let config: Option<NonNull<AnyObject>> = NonNull::new(if hdr {
             msg_send![configuration, streamConfigurationWithPreset: 2_isize]
         } else {
             msg_send![configuration, new]
-        };
-        let config = if hdr {
-            Retained::retain(config)
-        } else {
-            Retained::from_raw(config)
-        }
-        .ok_or("Cannot configure the macOS screenshot")?;
+        });
+        let config = config
+            .and_then(|config| {
+                if hdr {
+                    Retained::retain(config.as_ptr())
+                } else {
+                    Retained::from_raw(config.as_ptr())
+                }
+            })
+            .ok_or("Cannot configure the macOS screenshot")?;
         let _: () = msg_send![&*config, setWidth: width as usize];
         let _: () = msg_send![&*config, setHeight: height as usize];
         let _: () = msg_send![&*config, setShowsCursor: false];
         let _: () = msg_send![&*config, setCapturesAudio: false];
         if hdr {
             let _: () = msg_send![&*config, setPixelFormat: u32::from_be_bytes(*b"RGhA")];
-            let _: () = msg_send![&*config, setColorSpaceName: kCGColorSpaceExtendedLinearSRGB];
+            let space = kCGColorSpaceExtendedLinearSRGB
+                .map_or(ptr::null(), |name| name.as_ptr().cast_const());
+            let _: () = msg_send![&*config, setColorSpaceName: space];
         } else {
             let _: () = msg_send![&*config, setPixelFormat: u32::from_be_bytes(*b"BGRA")];
-            let _: () = msg_send![&*config, setColorSpaceName: kCGColorSpaceSRGB];
+            let space = kCGColorSpaceSRGB.map_or(ptr::null(), |name| name.as_ptr().cast_const());
+            let _: () = msg_send![&*config, setColorSpaceName: space];
         }
         let completion =
             block2::RcBlock::new(move |image: *const c_void, error: *mut AnyObject| {
                 autoreleasepool(|_| {
-                    let result = if image.is_null() {
-                        Err(capture_error(error, hdr))
-                    } else if hdr {
-                        copy_screenshot(image).map(Some)
+                    let result = if let Some(image) = NonNull::new(image.cast_mut()) {
+                        if hdr {
+                            copy_screenshot(image).map(Some)
+                        } else {
+                            copy_sdr_screenshot(image).map(Some)
+                        }
                     } else {
-                        copy_sdr_screenshot(image).map(Some)
+                        Err(capture_error(NonNull::new(error), hdr))
                     };
                     let _ = sender.send(result);
                 });
@@ -373,14 +397,16 @@ fn begin_screenshot(
     Ok(())
 }
 
-struct Data(*const c_void);
+struct Data(NonNull<c_void>);
 impl Drop for Data {
     fn drop(&mut self) {
+        // SAFETY: Data exclusively owns a non-null Core Foundation object
+        // created by a +1 Copy/Create API and releases it exactly once.
         unsafe { CFRelease(self.0) }
     }
 }
 
-fn copy_screenshot(image: *const c_void) -> Result<Image, String> {
+fn copy_screenshot(image: NonNull<c_void>) -> Result<Image, String> {
     unsafe {
         let bitmap = CGImageGetBitmapInfo(image);
         let float_components = bitmap & (1 << 8) != 0;
@@ -394,35 +420,23 @@ fn copy_screenshot(image: *const c_void) -> Result<Image, String> {
         {
             return Err("ScreenCaptureKit did not return an FP16 HDR screenshot".into());
         }
-        let space = CGImageGetColorSpace(image);
-        let name = if space.is_null() {
-            ptr::null()
-        } else {
-            CGColorSpaceGetName(space)
-        };
-        if name.is_null() || CFEqual(name, kCGColorSpaceExtendedLinearSRGB) == 0 {
+        let name = CGImageGetColorSpace(image).and_then(|space| CGColorSpaceGetName(space));
+        let expected =
+            kCGColorSpaceExtendedLinearSRGB.ok_or("Extended linear sRGB is unavailable")?;
+        if !name.is_some_and(|name| CFEqual(name, expected) != 0) {
             return Err("The HDR screenshot did not use extended linear sRGB".into());
         }
         let width = u32::try_from(CGImageGetWidth(image)).map_err(|_| "Capture is too large")?;
         let height = u32::try_from(CGImageGetHeight(image)).map_err(|_| "Capture is too large")?;
         let mut snapshot = Image::hdr_buffer(width, height)?;
-        let provider = CGImageGetDataProvider(image);
-        if provider.is_null() {
-            return Err("The HDR screenshot has no pixel data".into());
-        }
-        let data = CGDataProviderCopyData(provider);
-        if data.is_null() {
-            return Err("Cannot read the HDR screenshot".into());
-        }
-        let data = Data(data);
+        let provider =
+            CGImageGetDataProvider(image).ok_or("The HDR screenshot has no pixel data")?;
+        let data = Data(CGDataProviderCopyData(provider).ok_or("Cannot read the HDR screenshot")?);
         let len =
             usize::try_from(CFDataGetLength(data.0)).map_err(|_| "Invalid screenshot data")?;
-        let bytes = CFDataGetBytePtr(data.0);
-        if bytes.is_null() {
-            return Err("The HDR screenshot has no pixel data".into());
-        }
+        let bytes = CFDataGetBytePtr(data.0).ok_or("The HDR screenshot has no pixel data")?;
         // CFData owns the initialized byte buffer until the row copy completes.
-        let pixels = std::slice::from_raw_parts(bytes, len);
+        let pixels = std::slice::from_raw_parts(bytes.as_ptr(), len);
         snapshot.copy_hdr_rows(len, CGImageGetBytesPerRow(image), |offset, row| {
             row.copy_from_slice(&pixels[offset..offset + row.len()]);
         })?;
@@ -430,7 +444,7 @@ fn copy_screenshot(image: *const c_void) -> Result<Image, String> {
     }
 }
 
-fn copy_sdr_screenshot(image: *const c_void) -> Result<Image, String> {
+fn copy_sdr_screenshot(image: NonNull<c_void>) -> Result<Image, String> {
     unsafe {
         let width = u32::try_from(CGImageGetWidth(image)).map_err(|_| "Capture is too large")?;
         let height = u32::try_from(CGImageGetHeight(image)).map_err(|_| "Capture is too large")?;
@@ -439,14 +453,16 @@ fn copy_sdr_screenshot(image: *const c_void) -> Result<Image, String> {
             .ok()
             .and_then(|width| width.checked_mul(4))
             .ok_or("Invalid SDR screenshot row width")?;
-        let space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-        if space.is_null() {
-            return Err("Cannot create an sRGB screenshot color space".into());
-        }
-        let space = Data(space);
+        let srgb = kCGColorSpaceSRGB.ok_or("The sRGB screenshot color space is unavailable")?;
+        let space = Data(
+            CGColorSpaceCreateWithName(srgb)
+                .ok_or("Cannot create an sRGB screenshot color space")?,
+        );
         // kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big is RGBA8.
+        let buffer = NonNull::new(snapshot.rgba.as_mut_ptr().cast())
+            .ok_or("Cannot obtain SDR screenshot pixel storage")?;
         let context = CGBitmapContextCreate(
-            snapshot.rgba.as_mut_ptr().cast(),
+            buffer,
             width as usize,
             height as usize,
             8,
@@ -454,15 +470,12 @@ fn copy_sdr_screenshot(image: *const c_void) -> Result<Image, String> {
             space.0,
             0x4001,
         );
-        if context.is_null() {
-            return Err("Cannot create the SDR screenshot bitmap".into());
-        }
-        let context = Data(context);
+        let context = Data(context.ok_or("Cannot create the SDR screenshot bitmap")?);
         // The bitmap context stores top-to-bottom RGBA rows. The Core
         // Graphics user-space convention already maps the image into them.
         // Flipping the CTM here would invert the output scanlines.
         CGContextDrawImage(
-            context.0.cast_mut(),
+            context.0,
             CGRect {
                 origin: Point { x: 0., y: 0. },
                 size: Size {
@@ -483,14 +496,9 @@ fn sdr_capture(bounds: [i32; 4], cancelled: &AtomicBool) -> CaptureResult {
     // macOS 11–13 fallback: capture directly in OverInk instead of spawning
     // /usr/sbin/screencapture, which could trigger a different TCC identity.
     let id = display_id(bounds)?;
-    let image = unsafe { CGDisplayCreateImage(id) };
-    if image.is_null() {
-        return Err(
-            "Core Graphics could not capture the display. Check Screen Recording permission."
-                .into(),
-        );
-    }
-    let image = Data(image);
+    let image = Data(CGDisplayCreateImage(id).ok_or(
+        "Core Graphics could not capture the display. Check Screen Recording permission.",
+    )?);
     if cancelled.load(Ordering::Relaxed) {
         return Ok(None);
     }
@@ -502,25 +510,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sdr_conversion_preserves_top_and_bottom_rows() {
+    fn sdr_conversion_preserves_top_and_bottom_rows() -> Result<(), String> {
         // Two opaque rows in raw CGImage pixel order: red above blue.
         let mut pixels = [255, 0, 0, 255, 0, 0, 255, 255_u8];
+        // SAFETY: This test creates and owns bitmap contexts through the
+        // same +1 Core Graphics APIs as production capture.
         unsafe {
-            let color = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-            assert!(!color.is_null());
-            let color = Data(color);
-            let context =
-                CGBitmapContextCreate(pixels.as_mut_ptr().cast(), 1, 2, 8, 4, color.0, 0x4001);
-            assert!(!context.is_null());
-            let context = Data(context);
-            let source = CGBitmapContextCreateImage(context.0.cast_mut());
-            assert!(!source.is_null());
-            let source = Data(source);
-            let actual = copy_sdr_screenshot(source.0).unwrap();
+            let srgb = kCGColorSpaceSRGB.ok_or("The test sRGB color space is unavailable")?;
+            let color =
+                Data(CGColorSpaceCreateWithName(srgb).ok_or("Cannot create a test color space")?);
+            let buffer = NonNull::new(pixels.as_mut_ptr().cast())
+                .ok_or("Cannot obtain the test pixel buffer")?;
+            let context = Data(
+                CGBitmapContextCreate(buffer, 1, 2, 8, 4, color.0, 0x4001)
+                    .ok_or("Cannot create a test bitmap")?,
+            );
+            let source =
+                Data(CGBitmapContextCreateImage(context.0).ok_or("Cannot create a test image")?);
+            let actual = copy_sdr_screenshot(source.0)?;
             assert_eq!(
                 actual.rgba, pixels,
                 "SDR screenshot must not flip vertically"
             );
         }
+        Ok(())
     }
 }

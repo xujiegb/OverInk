@@ -108,7 +108,10 @@ mod tests {
         let mut wheel = ColorWheel::new(InkColor::from_rgb8([0, 0, 0]));
         assert!(wheel.chosen_color().is_none());
         wheel.select(vec2(100., 0.), 100.);
-        assert_eq!(wheel.chosen_color().unwrap().srgb8(), [255, 0, 0]);
+        assert_eq!(
+            wheel.chosen_color().map(|color| color.srgb8()),
+            Some([255, 0, 0])
+        );
         assert_eq!(wheel.value.v, 1.);
     }
 
@@ -117,10 +120,16 @@ mod tests {
         let mut wheel = ColorWheel::new(InkColor::from_rgb8([128; 3]));
         assert!(wheel.chosen_color().is_none());
         wheel.select(vec2(100., 0.), 100.);
-        assert_eq!(wheel.chosen_color().unwrap().srgb8(), [128, 0, 0]);
+        assert_eq!(
+            wheel.chosen_color().map(|color| color.srgb8()),
+            Some([128, 0, 0])
+        );
         wheel.select(vec2(0., 150.), 100.);
         assert_eq!([wheel.value.h, wheel.value.s], [0.25, 1.]);
         wheel.select(Vec2::ZERO, 100.);
-        assert_eq!(wheel.chosen_color().unwrap().srgb8(), [128; 3]);
+        assert_eq!(
+            wheel.chosen_color().map(|color| color.srgb8()),
+            Some([128; 3])
+        );
     }
 }

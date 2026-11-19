@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use super::App;
 use crate::{
     appearance::text,
@@ -37,7 +39,7 @@ struct TextMenus {
 
 // A screen pick must not recolor a different annotation when the toolbar is
 // still interactive while the native picker is running.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub(super) struct TextPickTarget {
     selected: Option<usize>,
     editing: bool,
@@ -283,7 +285,7 @@ impl App {
         let first = gui.raw.events.len();
         let mut changed = false;
         if ty == SDL_EVENT_FINGER_CANCELED
-            && gui.primary_touch() == Some(unsafe { crate::touch::TouchKey::from(event.tfinger) })
+            && gui.primary_touch() == crate::touch::key_from_event(event)
         {
             self.input.text.cancel_press();
             changed = true;
@@ -358,7 +360,9 @@ impl App {
             } if state.press.is_some() => {
                 self.move_text_pointer(pos, canvas);
                 let state = &mut self.input.text;
-                let press = state.press.take().unwrap();
+                let Some(press) = state.press.take() else {
+                    return true;
+                };
                 if let Some((index, handle)) = press.target
                     && let Some(item) = self.history.text_boxes().get(index)
                 {
@@ -415,24 +419,39 @@ impl App {
 
     fn move_text_pointer(&mut self, point: Pos2, canvas: Rect) {
         let state = &mut self.input.text;
-        let press = state.press.as_mut().unwrap();
+        let Some(press) = state.press.as_mut() else {
+            return;
+        };
         let delta = point - press.origin;
         press.moved |= delta.length() >= 3. * self.input.canvas_units;
         if let Some((index, handle)) = press.target
             && press.moved
             && let Some(item) = self.history.text_boxes().get(index)
         {
-            let mut item = (**item).clone();
+            // Drag events can arrive at high refresh rates. Reuse the
+            // preview's text allocation instead of cloning the annotation's
+            // String for every pointer movement. Reset geometry from the
+            // committed source so deltas remain absolute, not cumulative.
+            let source = item.as_ref();
+            let mut preview = press.preview.take().unwrap_or_else(|| (*source).clone());
+            preview.origin = source.origin;
+            preview.size = source.size;
+            preview.font_size = source.font_size;
+            preview.color = source.color;
+            preview.scroll_offset = source.scroll_offset;
+            if preview.text != source.text {
+                preview.text.clone_from(&source.text);
+            }
             match handle {
-                Handle::Move => item.move_to(item.rect().min + delta, canvas),
-                Handle::Resize => item.resize(Vec2::from(item.size) + delta, canvas),
+                Handle::Move => preview.move_to(preview.rect().min + delta, canvas),
+                Handle::Resize => preview.resize(Vec2::from(preview.size) + delta, canvas),
                 Handle::FontSize => {
-                    item.font_size = (item.font_size - delta.y * 0.5)
+                    preview.font_size = (preview.font_size - delta.y * 0.5)
                         .clamp(*TextBox::FONT_SIZE.start(), *TextBox::FONT_SIZE.end());
                 }
             }
             state.selected = Some(index);
-            press.preview = Some(item);
+            press.preview = Some(preview);
         }
     }
 
@@ -504,15 +523,14 @@ impl App {
             toolbar::context_menu_rect(item.rect(), canvas, MENU_SIZE * scale, protected, scale);
         let palette = self.input.text.color_wheel.map(|_| {
             let scale = toolbar::menu_scale(canvas, PALETTE_SIZE, units);
-            let mut obstacles = vec![actions];
-            if let Some(hole) = protected {
-                obstacles.push(hole);
-            }
+            // At most two obstacles: avoid allocating a Vec every palette frame.
+            let obstacles = [actions, protected.unwrap_or(actions)];
+            let count = if protected.is_some() { 2 } else { 1 };
             let rect = toolbar::context_menu_rect_avoiding(
                 actions,
                 canvas,
                 PALETTE_SIZE * scale,
-                &obstacles,
+                &obstacles[..count],
                 scale,
             );
             (rect, scale)
@@ -541,11 +559,36 @@ impl App {
         })
     }
 
+    /// Compare a delayed pick with the current text state without copying the
+    /// annotation or its editable buffer again when the native picker closes.
+    pub(super) fn matches_text_pick_target(&self, target: &TextPickTarget) -> bool {
+        self.tool.is_text()
+            && !self.pass
+            && !self.hidden
+            && self.input.text.selected == target.selected
+            && self.input.text.editing() == target.editing
+            && self
+                .text_menu_item()
+                .is_some_and(|item| item == &target.item)
+            && self
+                .input
+                .text
+                .draft
+                .as_ref()
+                .map(|draft| draft.committed.as_str())
+                == target.committed.as_deref()
+    }
+
     pub(super) fn pick_text_color(&mut self, color: InkColor) -> Option<InkColor> {
-        let target = self.text_pick_target()?;
-        let color = color.converted(target.item.color.space);
+        if !self.tool.is_text() || self.pass || self.hidden {
+            return None;
+        }
+        // An immediate color pick only needs the current color. Do not copy
+        // the full text box and committed draft as a delayed screen pick does.
+        let current = self.text_menu_item()?.color;
+        let color = color.converted(current.space);
         // Picking an already selected color is still a successful pick.
-        (target.item.color == color || self.recolor_text(color)).then_some(color)
+        (current == color || self.recolor_text(color)).then_some(color)
     }
 
     fn resize_text_font(&mut self, step: f32) {
@@ -852,7 +895,9 @@ impl App {
         menus: Option<TextMenus>,
     ) {
         let wheel_open = self.input.text.color_wheel.is_some();
-        let draft = self.input.text.draft.as_mut().unwrap();
+        let Some(draft) = self.input.text.draft.as_mut() else {
+            return;
+        };
         let rect = draft.item.rect();
         let text_rect = draft.item.text_rect();
         let id = ui.make_persistent_id("annotation-editor");
@@ -1056,6 +1101,30 @@ mod tests {
         render_with_toolbar_focus(app, gui, false);
     }
 
+    fn draft_preview(app: &App) -> Option<&str> {
+        app.input
+            .text
+            .draft
+            .as_ref()
+            .map(|draft| draft.item.text.as_str())
+    }
+
+    fn draft_committed(app: &App) -> Option<&str> {
+        app.input
+            .text
+            .draft
+            .as_ref()
+            .map(|draft| draft.committed.as_str())
+    }
+
+    fn set_draft_committed(app: &mut App, text: &str) {
+        let Some(draft) = app.input.text.draft.as_mut() else {
+            panic!("Expected an active text draft");
+        };
+        draft.committed.clear();
+        draft.committed.push_str(text);
+    }
+
     fn render_with_toolbar_focus(app: &mut App, gui: &mut Gui, toolbar_focused: bool) {
         gui.raw.screen_rect = Some(Rect::from_min_size(Pos2::ZERO, Vec2::from(SIZE)));
         let composing = gui.composing();
@@ -1071,7 +1140,9 @@ mod tests {
     }
 
     fn ime_at(gui: &mut Gui, event_type: SDL_EventType, value: &str, timestamp: u64) {
-        let value = CString::new(value).unwrap();
+        let Ok(value) = CString::new(value) else {
+            panic!("IME test strings must not contain NUL bytes");
+        };
         let id = SDL_WindowID(1);
         let event = if event_type == SDL_EVENT_TEXT_EDITING {
             SDL_Event {
@@ -1132,15 +1203,15 @@ mod tests {
 
         ime(&mut gui, SDL_EVENT_TEXT_EDITING, "zhong");
         render(&mut app, &mut gui);
-        assert_eq!(app.input.text.draft.as_ref().unwrap().item.text, "zhong");
-        assert!(app.input.text.draft.as_ref().unwrap().committed.is_empty());
+        assert_eq!(draft_preview(&app), Some("zhong"));
+        assert_eq!(draft_committed(&app), Some(""));
 
         key_down(&mut gui, SDLK_RETURN);
         ime(&mut gui, SDL_EVENT_TEXT_INPUT, "中");
         ime(&mut gui, SDL_EVENT_TEXT_EDITING, "wen");
         render(&mut app, &mut gui);
-        assert_eq!(app.input.text.draft.as_ref().unwrap().item.text, "中wen");
-        assert_eq!(app.input.text.draft.as_ref().unwrap().committed, "中");
+        assert_eq!(draft_preview(&app), Some("中wen"));
+        assert_eq!(draft_committed(&app), Some("中"));
         assert!(!app.history.can_undo());
         app.stop();
         assert_eq!(app.history.text_boxes()[0].text, "中");
@@ -1186,7 +1257,7 @@ mod tests {
             ime_at(&mut gui, SDL_EVENT_TEXT_EDITING, "", 10_000_000);
             key_down_at(&mut gui, key, 10_000_000);
             render(&mut app, &mut gui);
-            assert_eq!(app.input.text.draft.as_ref().unwrap().committed, "甲");
+            assert_eq!(draft_committed(&app), Some("甲"));
         }
 
         ime(&mut gui, SDL_EVENT_TEXT_EDITING, "yi");
@@ -1195,18 +1266,18 @@ mod tests {
         ime_at(&mut gui, SDL_EVENT_TEXT_INPUT, "乙", 20_150_000);
         key_down_at(&mut gui, SDLK_RETURN, 20_200_000);
         render(&mut app, &mut gui);
-        assert_eq!(app.input.text.draft.as_ref().unwrap().committed, "甲乙");
+        assert_eq!(draft_committed(&app), Some("甲乙"));
 
         ime(&mut gui, SDL_EVENT_TEXT_EDITING, "bing");
         render(&mut app, &mut gui);
         ime_at(&mut gui, SDL_EVENT_TEXT_INPUT, "丙", 30_000_000);
         key_down_at(&mut gui, SDLK_RETURN, 30_400_000);
         render(&mut app, &mut gui);
-        assert_eq!(app.input.text.draft.as_ref().unwrap().committed, "甲乙丙");
+        assert_eq!(draft_committed(&app), Some("甲乙丙"));
 
         key_down(&mut gui, SDLK_RETURN);
         render(&mut app, &mut gui);
-        assert_eq!(app.input.text.draft.as_ref().unwrap().committed, "甲乙丙\n");
+        assert_eq!(draft_committed(&app), Some("甲乙丙\n"));
     }
 
     #[test]
@@ -1228,7 +1299,7 @@ mod tests {
             ime_at(&mut gui, SDL_EVENT_TEXT_INPUT, value, clock);
             key_down_at(&mut gui, key, clock + 15_000_000);
             render(&mut app, &mut gui);
-            assert_eq!(app.input.text.draft.as_ref().unwrap().committed, expected);
+            assert_eq!(draft_committed(&app), Some(expected));
         }
         ime(&mut gui, SDL_EVENT_TEXT_EDITING, "ding");
         render(&mut app, &mut gui);
@@ -1284,7 +1355,7 @@ mod tests {
         let mut app = app();
         app.use_tool(Tool::Text);
         click(&mut app, pos2(150., 120.));
-        app.input.text.draft.as_mut().unwrap().committed = "原文".into();
+        set_draft_committed(&mut app, "原文");
         app.stop();
         let original = app.history.text_boxes()[0].clone();
         let mut edited = (*original).clone();
@@ -1326,19 +1397,25 @@ mod tests {
             app.use_tool(Tool::Text);
             if has_prior_box {
                 click(&mut app, pos2(20., 20.));
-                app.input.text.draft.as_mut().unwrap().committed = "原批注".into();
+                set_draft_committed(&mut app, "原批注");
                 app.stop();
             }
             let previous = app.history.text_boxes().to_vec();
             click(&mut app, pos2(470., 280.));
-            app.input.text.draft.as_mut().unwrap().committed = "重要批注".into();
+            set_draft_committed(&mut app, "重要批注");
             assert!(app.history_buttons()[0]);
             app.change_history(HistoryAction::Undo);
             assert!(!app.input.text.editing());
             assert_eq!(app.history.text_boxes(), previous);
             assert_eq!(app.history.can_undo(), has_prior_box);
             app.change_history(HistoryAction::Redo);
-            assert_eq!(app.history.text_boxes().last().unwrap().text, "重要批注");
+            assert_eq!(
+                app.history
+                    .text_boxes()
+                    .last()
+                    .map(|item| item.text.as_str()),
+                Some("重要批注")
+            );
         }
     }
 
@@ -1347,7 +1424,7 @@ mod tests {
         let mut app = app();
         app.use_tool(Tool::Text);
         click(&mut app, pos2(150., 120.));
-        app.input.text.draft.as_mut().unwrap().committed = "首框".into();
+        set_draft_committed(&mut app, "首框");
         app.change_history(HistoryAction::Clear);
         assert!(app.history.document().is_empty());
         assert!(app.history.can_undo());
@@ -1414,7 +1491,7 @@ mod tests {
         let mut app = app();
         app.use_tool(Tool::Text);
         click(&mut app, pos2(150., 120.));
-        app.input.text.draft.as_mut().unwrap().committed = "首行\n\n\n\n\n末行".into();
+        set_draft_committed(&mut app, "首行\n\n\n\n\n末行");
         app.stop();
         assert!(app.text_key(SDLK_RETURN));
         let mut gui = Gui::new();
@@ -1452,7 +1529,7 @@ mod tests {
         gui.ctx.set_fonts(app.text_fonts.definitions());
         ime(&mut gui, SDL_EVENT_TEXT_INPUT, "乙");
         render(&mut app, &mut gui);
-        assert_eq!(app.input.text.draft.as_ref().unwrap().committed, "甲乙丙");
+        assert_eq!(draft_committed(&app), Some("甲乙丙"));
     }
 
     #[test]
@@ -1462,7 +1539,7 @@ mod tests {
         app.pages = crate::display::Pages::new(Some(1));
         app.use_tool(Tool::Text);
         click(&mut app, pos2(150., 120.));
-        app.input.text.draft.as_mut().unwrap().committed = "显示器一".into();
+        set_draft_committed(&mut app, "显示器一");
         app.on_page(Some(2), |app| assert!(!app.input.text.editing()));
         assert!(app.input.text.editing());
         app.select_page(2);
@@ -1521,7 +1598,7 @@ mod tests {
         assert!(event(&mut gui, &mut app, SDL_EVENT_FINGER_DOWN, 0.25, 0.25));
         render(&mut app, &mut gui);
         assert!(event(&mut gui, &mut app, SDL_EVENT_FINGER_UP, 0.25, 0.25));
-        app.input.text.draft.as_mut().unwrap().committed = "文字".into();
+        set_draft_committed(&mut app, "文字");
         app.use_tool(Tool::Select);
         let original = app.history.text_boxes()[0].clone();
         assert!(event(&mut gui, &mut app, SDL_EVENT_FINGER_DOWN, 0.3, 0.3));
@@ -1539,11 +1616,43 @@ mod tests {
     }
 
     #[test]
+    fn repeated_drag_motion_uses_absolute_offset_and_preserves_text() -> Result<(), &'static str> {
+        let mut app = app();
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::from(SIZE));
+        let mut item = TextBox::new(pos2(150., 120.), screen, InkColor::default(), 1.);
+        item.text = "中文 👩🏽‍🎨".into();
+        let index = app
+            .history
+            .set_text_box(None, item)
+            .ok_or("Cannot add text box")?;
+        app.input.text.press = Some(Press {
+            origin: pos2(150., 120.),
+            target: Some((index, Handle::Move)),
+            preview: None,
+            moved: false,
+        });
+
+        app.move_text_pointer(pos2(180., 150.), screen);
+        app.move_text_pointer(pos2(200., 160.), screen);
+        let preview = app
+            .input
+            .text
+            .press
+            .as_ref()
+            .and_then(|press| press.preview.as_ref())
+            .ok_or("Missing drag preview")?;
+        assert_eq!(preview.origin, [200., 160.]);
+        assert_eq!(preview.text, "中文 👩🏽‍🎨");
+        assert_eq!(app.history.text_boxes()[index].origin, [150., 120.]);
+        Ok(())
+    }
+
+    #[test]
     fn moving_resizing_and_deleting_text_boxes_are_undoable() {
         let mut app = app();
         app.use_tool(Tool::Text);
         click(&mut app, pos2(150., 120.));
-        app.input.text.draft.as_mut().unwrap().committed = "中文 👩🏽‍🎨".into();
+        set_draft_committed(&mut app, "中文 👩🏽‍🎨");
         app.stop();
         let original = app.history.text_boxes()[0].clone();
         app.use_tool(Tool::Select);
@@ -1622,9 +1731,10 @@ mod tests {
         app.history.undo();
         assert_eq!(app.history.text_boxes()[index].font_size, item.font_size);
         item.move_to(pos2(500., 580.), screen);
-        app.history.set_text_box(Some(index), item.clone());
+        let moved_rect = item.rect();
+        app.history.set_text_box(Some(index), item);
         let menu = app.text_menus(screen).unwrap().actions;
-        assert!(item.rect().intersects(menu));
+        assert!(moved_rect.intersects(menu));
         assert!(screen.contains_rect(menu));
         click(&mut app, pos2(50., 50.));
         assert!(app.text_menus(screen).is_none());
@@ -1732,7 +1842,7 @@ mod tests {
         app.use_tool(Tool::Text);
         let original_brush = app.color;
         click(&mut app, pos2(500., 338.));
-        app.input.text.draft.as_mut().unwrap().committed = "Draft".into();
+        set_draft_committed(&mut app, "Draft");
         app.input.text.refocus();
         let mut gui = Gui::new();
         gui.ctx.set_fonts(app.text_fonts.definitions());
@@ -1784,24 +1894,31 @@ mod tests {
         let mut app = app();
         app.use_tool(Tool::Text);
         click(&mut app, pos2(150., 120.));
-        let target = app.text_pick_target().unwrap();
+        let Some(target) = app.text_pick_target() else {
+            panic!("Expected a draft text pick target");
+        };
+        assert!(app.matches_text_pick_target(&target));
         let color = InkColor::from_rgb8([4, 171, 131]);
 
         // A different text draft is not the target captured when picking began.
-        app.input.text.draft.as_mut().unwrap().committed = "changed".into();
-        assert_ne!(app.text_pick_target(), Some(target));
+        set_draft_committed(&mut app, "changed");
+        assert!(!app.matches_text_pick_target(&target));
+        assert_ne!(app.text_pick_target().as_ref(), Some(&target));
         assert_eq!(app.pick_text_color(color), Some(color));
         assert_eq!(app.pick_text_color(color), Some(color));
 
         app.pass = true;
+        assert!(!app.matches_text_pick_target(&target));
         assert!(app.text_pick_target().is_none());
         assert!(app.pick_text_color(color).is_none());
         app.pass = false;
         app.hidden = true;
+        assert!(!app.matches_text_pick_target(&target));
         assert!(app.text_pick_target().is_none());
         assert!(app.pick_text_color(color).is_none());
         app.hidden = false;
         app.input.text = TextInput::default();
+        assert!(!app.matches_text_pick_target(&target));
         assert!(app.text_pick_target().is_none());
         assert!(app.pick_text_color(color).is_none());
     }
@@ -1812,7 +1929,7 @@ mod tests {
         app.use_tool(Tool::Text);
         click(&mut app, pos2(150., 120.));
         assert!(app.select_preset(crate::color::PRESETS[1]));
-        app.input.text.draft.as_mut().unwrap().committed = "文字".into();
+        set_draft_committed(&mut app, "文字");
         app.use_tool(Tool::Select);
         let original = app.history.text_boxes()[0].clone();
         assert_eq!(original.color.srgb8(), crate::color::PRESETS[1]);

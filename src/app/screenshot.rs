@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use crate::{
     appearance::{Language, Preferences},
     background::{Image, screenshot::Job},
@@ -8,6 +10,7 @@ use crate::{
 };
 use egui::{Color32, Pos2, Rect, Stroke, StrokeKind, Ui, UiBuilder, Vec2, pos2, vec2};
 use std::{
+    borrow::Cow,
     io::{self, BufWriter, Write},
     path::{Path, PathBuf},
     sync::{
@@ -71,74 +74,74 @@ enum SelectionEvent {
 impl SelectionEvent {
     fn from_sdl(event: &SDL_Event, size: [f32; 2], touch_enabled: bool) -> Option<Self> {
         let mouse = |id| id != SDL_TOUCH_MOUSEID && id != SDL_PEN_MOUSEID;
-        // Read only the union member selected by SDL's event type.
-        unsafe {
-            match event_type(event) {
-                ty @ (SDL_EVENT_MOUSE_BUTTON_DOWN | SDL_EVENT_MOUSE_BUTTON_UP) => {
-                    let b = event.button;
-                    if b.button != SDL_BUTTON_LEFT as u8 || !mouse(b.which) {
-                        return None;
-                    }
-                    let press = if ty == SDL_EVENT_MOUSE_BUTTON_DOWN {
-                        Self::Down
-                    } else {
-                        Self::Up
-                    };
-                    Some(press(Pointer::Mouse(b.which), pos2(b.x, b.y)))
+        match event_type(event) {
+            ty @ (SDL_EVENT_MOUSE_BUTTON_DOWN | SDL_EVENT_MOUSE_BUTTON_UP) => {
+                let b = mouse_button_event(event)?;
+                if b.button != SDL_BUTTON_LEFT as u8 || !mouse(b.which) {
+                    return None;
                 }
-                SDL_EVENT_MOUSE_MOTION if mouse(event.motion.which) => {
-                    let m = event.motion;
-                    Some(Self::Move(Pointer::Mouse(m.which), pos2(m.x, m.y)))
-                }
-                ty @ (SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP) if !event.ptouch.eraser => {
-                    let p = event.ptouch;
-                    let press = if ty == SDL_EVENT_PEN_DOWN {
-                        Self::Down
-                    } else {
-                        Self::Up
-                    };
-                    Some(press(Pointer::Pen(p.which), pos2(p.x, p.y)))
-                }
-                SDL_EVENT_PEN_MOTION => {
-                    let p = event.pmotion;
-                    Some(Self::Move(Pointer::Pen(p.which), pos2(p.x, p.y)))
-                }
-                SDL_EVENT_PEN_PROXIMITY_OUT => {
-                    Some(Self::Cancel(Some(Pointer::Pen(event.pproximity.which))))
-                }
-                ty @ (SDL_EVENT_FINGER_DOWN | SDL_EVENT_FINGER_MOTION | SDL_EVENT_FINGER_UP)
-                    if touch_enabled =>
-                {
-                    let finger = event.tfinger;
-                    let pointer = Pointer::Touch(finger.into());
-                    match ty {
-                        SDL_EVENT_FINGER_DOWN if !touch::is_indirect(finger.touchID) => {
-                            touch::point(finger, size).map(|p| Self::Down(pointer, pos2(p.x, p.y)))
-                        }
-                        SDL_EVENT_FINGER_MOTION => {
-                            touch::point(finger, size).map(|p| Self::Move(pointer, pos2(p.x, p.y)))
-                        }
-                        SDL_EVENT_FINGER_UP => Some(
-                            touch::point(finger, size).map_or(Self::Cancel(Some(pointer)), |p| {
-                                Self::Up(pointer, pos2(p.x, p.y))
-                            }),
-                        ),
-                        _ => None,
-                    }
-                }
-                SDL_EVENT_FINGER_CANCELED => {
-                    Some(Self::Cancel(Some(Pointer::Touch(event.tfinger.into()))))
-                }
-                SDL_EVENT_WINDOW_FOCUS_LOST => Some(Self::Cancel(None)),
-                _ => None,
+                let press = if ty == SDL_EVENT_MOUSE_BUTTON_DOWN {
+                    Self::Down
+                } else {
+                    Self::Up
+                };
+                Some(press(Pointer::Mouse(b.which), pos2(b.x, b.y)))
             }
+            SDL_EVENT_MOUSE_MOTION => {
+                let m = mouse_motion_event(event)?;
+                mouse(m.which).then_some(Self::Move(Pointer::Mouse(m.which), pos2(m.x, m.y)))
+            }
+            ty @ (SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP) => {
+                let p = pen_touch_event(event)?;
+                if p.eraser {
+                    return None;
+                }
+                let press = if ty == SDL_EVENT_PEN_DOWN {
+                    Self::Down
+                } else {
+                    Self::Up
+                };
+                Some(press(Pointer::Pen(p.which), pos2(p.x, p.y)))
+            }
+            SDL_EVENT_PEN_MOTION => {
+                let p = pen_motion_event(event)?;
+                Some(Self::Move(Pointer::Pen(p.which), pos2(p.x, p.y)))
+            }
+            SDL_EVENT_PEN_PROXIMITY_OUT => Some(Self::Cancel(Some(Pointer::Pen(
+                pen_proximity_event(event)?.which,
+            )))),
+            ty @ (SDL_EVENT_FINGER_DOWN | SDL_EVENT_FINGER_MOTION | SDL_EVENT_FINGER_UP)
+                if touch_enabled =>
+            {
+                let finger = finger_event(event)?;
+                let pointer = Pointer::Touch(finger.into());
+                match ty {
+                    SDL_EVENT_FINGER_DOWN if !touch::is_indirect(finger.touchID) => {
+                        touch::point(finger, size).map(|p| Self::Down(pointer, pos2(p.x, p.y)))
+                    }
+                    SDL_EVENT_FINGER_MOTION => {
+                        touch::point(finger, size).map(|p| Self::Move(pointer, pos2(p.x, p.y)))
+                    }
+                    SDL_EVENT_FINGER_UP => Some(
+                        touch::point(finger, size).map_or(Self::Cancel(Some(pointer)), |p| {
+                            Self::Up(pointer, pos2(p.x, p.y))
+                        }),
+                    ),
+                    _ => None,
+                }
+            }
+            SDL_EVENT_FINGER_CANCELED => Some(Self::Cancel(Some(Pointer::Touch(
+                finger_event(event)?.into(),
+            )))),
+            SDL_EVENT_WINDOW_FOCUS_LOST => Some(Self::Cancel(None)),
+            _ => None,
         }
     }
 }
 
 fn capture_mouse(pointer: Pointer, captured: bool) -> bool {
     if matches!(pointer, Pointer::Mouse(_)) {
-        unsafe { SDL_CaptureMouse(captured) }
+        crate::sdl::capture_mouse(captured)
     } else {
         true
     }
@@ -223,7 +226,7 @@ pub struct Screenshot {
     target: SDL_WindowID,
     hdr: bool,
     sdr_white: f32,
-    cursor: Option<Crosshair>,
+    cursor: Option<SystemCursor>,
     action: Option<MenuAction>,
     save_job: Option<SaveJob>,
     error: Option<String>,
@@ -236,20 +239,17 @@ impl Screenshot {
     pub fn start(&mut self, window: &Window, hdr: bool) {
         self.target = window.id;
         self.hdr = hdr && hdr_available(window);
-        let white = unsafe {
-            SDL_GetFloatProperty(
-                SDL_GetWindowProperties(window.raw),
-                SDL_PROP_WINDOW_SDR_WHITE_LEVEL_FLOAT,
-                1.,
-            )
-        };
+        let white = window.sdr_white_level();
         self.sdr_white = if white.is_finite() && white > 0. {
             white
         } else {
             1.
         };
         self.stage = Stage::Selecting(None);
-        self.cursor = Crosshair::new();
+        // Release the old cursor before creating its replacement: the old
+        // guard's Drop must not reset the newly selected crosshair.
+        self.cursor = None;
+        self.cursor = SystemCursor::crosshair();
         self.error = None;
         self.cancel_blocked = false;
         self.replace = None;
@@ -265,6 +265,24 @@ impl Screenshot {
 
     pub fn ready(&self) -> bool {
         matches!(self.stage, Stage::Ready(..))
+    }
+
+    /// Hide OverInk's annotations only after the Shell bridge is confirmed
+    /// absent; its normal capture path still needs a visible canvas actor.
+    pub fn portal_fallback_requested(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        if let Stage::Capturing(_, Job::Shell(job), _) = &self.stage {
+            return job.portal_fallback_pending();
+        }
+        false
+    }
+
+    /// Called only after SDL has hidden the canvas and toolbar successfully.
+    pub fn acknowledge_portal_fallback_hidden(&self) {
+        #[cfg(target_os = "linux")]
+        if let Stage::Capturing(_, Job::Shell(job), _) = &self.stage {
+            job.acknowledge_portal_fallback_hidden();
+        }
     }
 
     pub fn waiting(&self) -> bool {
@@ -531,8 +549,8 @@ impl Screenshot {
             }
         });
         if let Some(detail) = detail {
-            let detail = egui::RichText::new(detail).size(toolbar::MENU_FONT_SIZE * scale);
-            menu.add(egui::Label::new(detail.clone()).truncate())
+            let label = egui::RichText::new(detail).size(toolbar::MENU_FONT_SIZE * scale);
+            menu.add(egui::Label::new(label).truncate())
                 .on_hover_text(detail);
         }
     }
@@ -565,19 +583,13 @@ impl Screenshot {
         preferences: &Preferences,
     ) {
         let folder = if self.error.is_some() {
-            downloads_folder()
+            downloads_folder().map(Cow::Owned)
         } else {
             default_folder(preferences)
         };
-        let location = self
-            .replace
-            .clone()
-            .or_else(|| folder.map(|folder| folder.join(format!("{}.png", file_stem()))));
-        self.save_dialog |= dialog.open(
-            dialog::DialogKind::ScreenshotFile,
-            window,
-            location.as_deref(),
-        );
+        let suggested = folder.map(|folder| folder.join(format!("{}.png", file_stem())));
+        let location = self.replace.as_deref().or(suggested.as_deref());
+        self.save_dialog |= dialog.open(dialog::DialogKind::ScreenshotFile, window, location);
     }
 
     pub fn close_save_as(&mut self) {
@@ -659,33 +671,12 @@ fn shade(ui: &Ui, screen: Rect, region: Option<Rect>, units: f32) {
     }
 }
 
-struct Crosshair(*mut SDL_Cursor);
-impl Crosshair {
-    fn new() -> Option<Self> {
-        unsafe {
-            let cursor = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_CROSSHAIR);
-            if cursor.is_null() {
-                return None;
-            }
-            SDL_SetCursor(cursor);
-            Some(Self(cursor))
-        }
-    }
-}
-impl Drop for Crosshair {
-    fn drop(&mut self) {
-        unsafe {
-            SDL_SetCursor(SDL_GetDefaultCursor());
-            SDL_DestroyCursor(self.0);
-        }
-    }
-}
-
-pub fn default_folder(preferences: &Preferences) -> Option<PathBuf> {
+pub fn default_folder(preferences: &Preferences) -> Option<Cow<'_, Path>> {
     preferences
         .screenshot_folder
-        .clone()
-        .or_else(downloads_folder)
+        .as_deref()
+        .map(Cow::Borrowed)
+        .or_else(|| downloads_folder().map(Cow::Owned))
 }
 
 fn downloads_folder() -> Option<PathBuf> {
@@ -714,17 +705,7 @@ pub enum Destination {
 }
 
 fn file_stem() -> String {
-    use sdl3_sys::time::{SDL_DateTime, SDL_GetCurrentTime, SDL_TimeToDateTime};
-    let mut time = 0;
-    let mut date = SDL_DateTime::default();
-    if unsafe { SDL_GetCurrentTime(&mut time) && SDL_TimeToDateTime(time, &mut date, true) } {
-        format!(
-            "OverInk-{:04}-{:02}-{:02}_{:02}-{:02}-{:02}",
-            date.year, date.month, date.day, date.hour, date.minute, date.second
-        )
-    } else {
-        "OverInk".into()
-    }
+    crate::sdl::screenshot_file_stem()
 }
 
 struct CancellableWriter<'a, W> {
@@ -858,14 +839,13 @@ fn write_screenshot(
         }
         Destination::File(path) => {
             begin_publish(cancelled).map_err(|_| SaveError::Cancelled)?;
-            output.persist_noclobber(&path).map_err(|error| {
-                if error.error.kind() == io::ErrorKind::AlreadyExists {
-                    SaveError::Exists(path.clone())
-                } else {
-                    SaveError::Failed(error.error.to_string())
+            match output.persist_noclobber(&path) {
+                Ok(_) => Ok(path),
+                Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {
+                    Err(SaveError::Exists(path))
                 }
-            })?;
-            Ok(path)
+                Err(error) => Err(SaveError::Failed(error.error.to_string())),
+            }
         }
         Destination::Replace(path) => {
             begin_publish(cancelled).map_err(|_| SaveError::Cancelled)?;
@@ -881,8 +861,10 @@ fn write_screenshot(
 mod tests {
     use super::*;
 
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
     #[test]
-    fn screenshot_actions_accept_clicks_in_the_scaled_button_area() {
+    fn screenshot_actions_accept_clicks_in_the_scaled_button_area() -> TestResult {
         let screen = Rect::from_min_size(Pos2::ZERO, vec2(1440., 900.));
         let region = Rect::from_min_size(pos2(400., 200.), vec2(320., 240.));
         let units = 2.;
@@ -893,7 +875,7 @@ mod tests {
                 MENU_PADDING + MENU_BUTTON.y * 0.5,
             ) * units;
         let mut screenshot = Screenshot {
-            stage: Stage::Ready(region, Arc::new(Image::buffer(1, 1).unwrap())),
+            stage: Stage::Ready(region, Arc::new(Image::buffer(1, 1)?)),
             ..Default::default()
         };
         let ctx = egui::Context::default();
@@ -920,13 +902,15 @@ mod tests {
             }]);
         }
         assert!(matches!(screenshot.action(), Some(MenuAction::SaveAs)));
+        Ok(())
     }
 
     #[test]
-    fn saving_png_never_recreates_a_missing_default_folder_or_overwrites_an_automatic_name() {
-        let folder = tempfile::tempdir().unwrap();
+    fn saving_png_never_recreates_a_missing_default_folder_or_overwrites_an_automatic_name()
+    -> TestResult {
+        let folder = tempfile::tempdir()?;
         let missing = folder.path().join("missing");
-        let mut image = Image::buffer(2, 1).unwrap();
+        let mut image = Image::buffer(2, 1)?;
         image
             .rgba
             .copy_from_slice(&[255, 0, 0, 255, 0, 255, 0, 255]);
@@ -951,23 +935,24 @@ mod tests {
                 1.,
                 &AtomicU8::new(SAVE_PENDING),
             )
-            .unwrap()
+            .map_err(|error| format!("{error:?}"))
         };
-        let (first, second) = (save(), save());
+        let (first, second) = (save()?, save()?);
         assert_ne!(first, second);
         assert_eq!(
-            image::open(first).unwrap().into_rgb8().into_raw(),
+            image::open(first)?.into_rgb8().into_raw(),
             [255, 0, 0, 0, 255, 0]
         );
         assert!(second.is_file());
+        Ok(())
     }
 
     #[test]
-    fn save_as_confirms_the_final_png_path_before_replacing_it() {
-        let folder = tempfile::tempdir().unwrap();
+    fn save_as_confirms_the_final_png_path_before_replacing_it() -> TestResult {
+        let folder = tempfile::tempdir()?;
         let path = folder.path().join("capture.png");
-        std::fs::write(&path, b"existing file").unwrap();
-        let image = Image::buffer(1, 1).unwrap();
+        std::fs::write(&path, b"existing file")?;
+        let image = Image::buffer(1, 1)?;
         for chosen in [path.clone(), path.with_extension("")] {
             let result = write_screenshot(
                 &image,
@@ -977,7 +962,7 @@ mod tests {
                 &AtomicU8::new(SAVE_PENDING),
             );
             assert!(matches!(result, Err(SaveError::Exists(existing)) if existing == path));
-            assert_eq!(std::fs::read(&path).unwrap(), b"existing file");
+            assert_eq!(std::fs::read(&path)?, b"existing file");
         }
         let saved = write_screenshot(
             &image,
@@ -986,13 +971,14 @@ mod tests {
             1.,
             &AtomicU8::new(SAVE_PENDING),
         );
-        assert_eq!(saved.unwrap(), path);
+        assert_eq!(saved.map_err(|error| format!("{error:?}"))?, path);
         assert!(image::open(path).is_ok());
-        assert_eq!(std::fs::read_dir(folder.path()).unwrap().count(), 1);
+        assert_eq!(std::fs::read_dir(folder.path())?.count(), 1);
+        Ok(())
     }
 
     #[test]
-    fn cancelling_save_disconnects_its_result_and_prevents_file_creation() {
+    fn cancelling_save_disconnects_its_result_and_prevents_file_creation() -> TestResult {
         let cancelled = Arc::new(AtomicU8::new(SAVE_PENDING));
         let (sender, receiver) = mpsc::channel();
         let mut screenshot = Screenshot {
@@ -1005,8 +991,8 @@ mod tests {
         };
         screenshot.cancel();
         assert_eq!(cancelled.load(Ordering::Acquire), SAVE_CANCELLED);
-        let folder = tempfile::tempdir().unwrap();
-        let image = Image::buffer(1, 1).unwrap();
+        let folder = tempfile::tempdir()?;
+        let image = Image::buffer(1, 1)?;
         let result = write_screenshot(
             &image,
             Destination::Folder(folder.path().into()),
@@ -1017,15 +1003,16 @@ mod tests {
         assert!(result.is_err());
         assert!(sender.send(result).is_err());
         assert!(screenshot.poll_save().is_none());
-        assert_eq!(std::fs::read_dir(folder.path()).unwrap().count(), 0);
+        assert_eq!(std::fs::read_dir(folder.path())?.count(), 0);
+        Ok(())
     }
 
     #[test]
-    fn cancellation_cannot_hide_an_already_publishing_save() {
+    fn cancellation_cannot_hide_an_already_publishing_save() -> TestResult {
         let (sender, receiver) = mpsc::channel();
         let cancelled = Arc::new(AtomicU8::new(SAVE_PUBLISHING));
         let mut screenshot = Screenshot {
-            stage: Stage::Ready(Rect::NOTHING, Arc::new(Image::buffer(1, 1).unwrap())),
+            stage: Stage::Ready(Rect::NOTHING, Arc::new(Image::buffer(1, 1)?)),
             save_job: Some(SaveJob {
                 direct: true,
                 receiver,
@@ -1038,10 +1025,11 @@ mod tests {
         assert!(screenshot.saving());
         assert_eq!(cancelled.load(Ordering::Acquire), SAVE_CANCEL_REQUESTED);
         assert!(screenshot.cancel_blocked);
-        sender.send(Ok(PathBuf::from("saved.png"))).unwrap();
+        sender.send(Ok(PathBuf::from("saved.png")))?;
         assert!(matches!(screenshot.poll_save(), Some((true, Ok(_)))));
         screenshot.cancel();
         assert!(!screenshot.active());
+        Ok(())
     }
 
     #[test]
@@ -1060,11 +1048,11 @@ mod tests {
     }
 
     #[test]
-    fn detached_screenshot_keeps_publishing_save_until_result() {
+    fn detached_screenshot_keeps_publishing_save_until_result() -> TestResult {
         let (sender, receiver) = mpsc::channel();
         let cancelled = Arc::new(AtomicU8::new(SAVE_PUBLISHING));
         let mut screenshot = Screenshot {
-            stage: Stage::Ready(Rect::NOTHING, Arc::new(Image::buffer(1, 1).unwrap())),
+            stage: Stage::Ready(Rect::NOTHING, Arc::new(Image::buffer(1, 1)?)),
             save_job: Some(SaveJob {
                 direct: false,
                 receiver,
@@ -1076,17 +1064,18 @@ mod tests {
         assert!(!screenshot.active());
         assert!(screenshot.saving());
         assert_eq!(cancelled.load(Ordering::Acquire), SAVE_CANCEL_REQUESTED);
-        sender.send(Ok(PathBuf::from("detached.png"))).unwrap();
+        sender.send(Ok(PathBuf::from("detached.png")))?;
         assert!(matches!(screenshot.poll_save(), Some((false, Ok(_)))));
         assert!(!screenshot.saving());
+        Ok(())
     }
 
     #[test]
-    fn detached_screenshot_cancels_save_before_publication() {
+    fn detached_screenshot_cancels_save_before_publication() -> TestResult {
         let (sender, receiver) = mpsc::channel();
         let cancelled = Arc::new(AtomicU8::new(SAVE_PENDING));
         let mut screenshot = Screenshot {
-            stage: Stage::Ready(Rect::NOTHING, Arc::new(Image::buffer(1, 1).unwrap())),
+            stage: Stage::Ready(Rect::NOTHING, Arc::new(Image::buffer(1, 1)?)),
             save_job: Some(SaveJob {
                 direct: true,
                 receiver,
@@ -1099,6 +1088,7 @@ mod tests {
         assert!(!screenshot.saving());
         assert_eq!(cancelled.load(Ordering::Acquire), SAVE_CANCELLED);
         assert!(sender.send(Ok(PathBuf::from("never.png"))).is_err());
+        Ok(())
     }
 
     #[test]
@@ -1117,13 +1107,13 @@ mod tests {
     }
 
     #[test]
-    fn cancelling_before_publication_does_not_replace_existing_file() {
-        let folder = tempfile::tempdir().unwrap();
+    fn cancelling_before_publication_does_not_replace_existing_file() -> TestResult {
+        let folder = tempfile::tempdir()?;
         let path = folder.path().join("existing.png");
-        std::fs::write(&path, b"original").unwrap();
+        std::fs::write(&path, b"original")?;
         let state = AtomicU8::new(SAVE_PENDING);
         state.store(SAVE_CANCELLED, Ordering::Release);
-        let image = Image::buffer(1, 1).unwrap();
+        let image = Image::buffer(1, 1)?;
         assert!(matches!(
             write_screenshot(
                 &image,
@@ -1134,7 +1124,8 @@ mod tests {
             ),
             Err(SaveError::Cancelled)
         ));
-        assert_eq!(std::fs::read(path).unwrap(), b"original");
+        assert_eq!(std::fs::read(path)?, b"original");
+        Ok(())
     }
 
     #[test]

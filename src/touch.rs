@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use crate::{model::Point, sdl::*};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -37,13 +39,11 @@ pub fn point(event: SDL_TouchFingerEvent, size: [f32; 2]) -> Option<Point> {
 }
 
 pub fn is_indirect(device: SDL_TouchID) -> bool {
-    if unsafe { SDL_WasInit(SDL_INIT_VIDEO) } == 0 {
-        return false;
-    }
-    matches!(
-        unsafe { SDL_GetTouchDeviceType(device) },
-        SDL_TOUCH_DEVICE_INDIRECT_ABSOLUTE | SDL_TOUCH_DEVICE_INDIRECT_RELATIVE
-    )
+    crate::sdl::indirect_touch_device(device)
+}
+
+pub fn key_from_event(event: &SDL_Event) -> Option<TouchKey> {
+    crate::sdl::finger_event(event).map(TouchKey::from)
 }
 
 #[cfg(test)]
@@ -56,10 +56,14 @@ mod tests {
             y: 0.5,
             ..Default::default()
         };
-        let p = point(event, [800., 600.]).unwrap();
-        assert_eq!([p.x, p.y, p.pressure], [200., 300., 1.]);
-        let p = point(SDL_TouchFingerEvent { x: -0.1, ..event }, [800., 600.]).unwrap();
-        assert_eq!(p.x, -80.);
+        assert_eq!(
+            point(event, [800., 600.]).map(|p| [p.x, p.y, p.pressure]),
+            Some([200., 300., 1.])
+        );
+        assert_eq!(
+            point(SDL_TouchFingerEvent { x: -0.1, ..event }, [800., 600.]).map(|p| p.x),
+            Some(-80.)
+        );
     }
     #[test]
     fn invalid_coordinates_are_rejected_and_devices_keep_distinct_fingers() {

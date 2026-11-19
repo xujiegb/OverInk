@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use crate::color::InkColor;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -183,17 +185,19 @@ impl<'a> PointSpan<'a> {
             .chain(self.end)
     }
 
-    fn at(self, index: usize) -> Point {
+    fn at(self, index: usize) -> Option<Point> {
         if index == 0
             && let Some(start) = self.start
         {
-            return start;
+            return Some(start);
         }
         self.points
-            .get(index - usize::from(self.start.is_some()))
+            .get(index.checked_sub(usize::from(self.start.is_some()))?)
             .copied()
-            .or(self.end)
-            .unwrap()
+            .or_else(|| {
+                self.end
+                    .filter(|_| self.len().checked_sub(1) == Some(index))
+            })
     }
 }
 
@@ -226,10 +230,9 @@ impl Stroke {
         self.width * scale * tilt * 0.5
     }
     pub fn polyline(&self) -> Cow<'_, [Point]> {
-        let Some(a) = self.points.first() else {
+        let Some((a, b)) = self.points.first().zip(self.points.last()) else {
             return Cow::Borrowed(&self.points);
         };
-        let b = self.points.last().unwrap();
         let point = |x, y| Point::new(x, y, 1., [0.; 2]);
         Cow::Owned(match self.tool {
             Tool::Line | Tool::Arrow => vec![*a, *b],
@@ -285,8 +288,11 @@ impl StrokeBounds {
     fn new(stroke: &Stroke) -> Option<Self> {
         let points = stroke.polyline();
         let mut bounds = Self::measure(points.iter().copied())?;
-        if let Some(head) = stroke.arrow_head() {
-            bounds.path = bounds.path.union(Bounds::points(head.into_iter()).unwrap());
+        if let Some([left, tip, right]) = stroke.arrow_head() {
+            bounds.path = bounds
+                .path
+                .union(Bounds::between(left, tip))
+                .union(Bounds::between(right, right));
         }
         Some(bounds)
     }
@@ -696,6 +702,31 @@ mod tests {
                 Point::new(100., 0., 1., [0.; 2]),
             ],
         }
+    }
+
+    #[test]
+    fn point_span_rejects_out_of_bounds_without_reusing_end_point() {
+        let point = |x| Point::new(x, 0., 1., [0.; 2]);
+        let samples = [point(10.), point(20.)];
+        let span = PointSpan {
+            points: &samples,
+            start: Some(point(0.)),
+            end: Some(point(30.)),
+        };
+        assert_eq!(span.len(), 4);
+        for (index, x) in [0., 10., 20., 30.].into_iter().enumerate() {
+            assert_eq!(span.at(index).map(|point| point.x), Some(x));
+        }
+        assert!(span.at(4).is_none());
+        assert!(span.at(usize::MAX).is_none());
+        assert!(PointSpan::new(&[]).at(0).is_none());
+        let only_end = PointSpan {
+            points: &[],
+            start: None,
+            end: Some(point(5.)),
+        };
+        assert_eq!(only_end.at(0).map(|point| point.x), Some(5.));
+        assert!(only_end.at(1).is_none());
     }
 
     #[test]

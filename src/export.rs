@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use crate::{
     fonts::TextFonts,
     geometry,
@@ -54,18 +56,18 @@ pub fn svg(doc: &Document, fonts: &TextFonts) -> Result<String, String> {
 fn svg_text(out: &mut String, doc: &Document, fonts: &TextFonts) -> Result<(), String> {
     let ctx = egui::Context::default();
     ctx.set_fonts(fonts.definitions());
-    let input = egui::RawInput {
-        screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, doc.size.into())),
-        ..Default::default()
-    };
     let mut glyphs = HashMap::new();
     let mut next_glyph = 0;
     let mut definitions = String::new();
     let mut body = String::new();
     for (index, item) in doc.text_boxes.iter().enumerate() {
         let rect = item.text_rect();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, doc.size.into())),
+            ..Default::default()
+        };
         let mut layout = None;
-        let frame = ctx.run_ui(input.clone(), |ui| {
+        let frame = ctx.run_ui(input, |ui| {
             layout =
                 Some(fonts.layout(ui, &item.text, item.font_size, Color32::WHITE, rect.width()));
         });
@@ -91,7 +93,7 @@ fn svg_text(out: &mut String, doc: &Document, fonts: &TextFonts) -> Result<(), S
             escape(&item.text)
         );
         let color = item.color.srgb8();
-        let layout = layout.unwrap();
+        let layout = layout.ok_or("Failed to lay out annotation text")?;
         let start = rect.min - egui::vec2(0., item.visible_scroll_offset(layout.size().y));
         for row in &layout.rows {
             let origin = start + row.pos.to_vec2();

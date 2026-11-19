@@ -9,10 +9,15 @@ import * as ModalDialog from 'resource:///org/gnome/shell/ui/modalDialog.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
 const APP_ID = 'org.overink.OverInk';
+const MAX_TRUST_KEY_LENGTH = 2048;
+const MAX_EXECUTABLE_BYTES = 256 * 1024 * 1024;
 const CANVAS = 'OverInk - canvas';
 const TOOLBAR = 'OverInk';
 const BUS_NAME = 'org.overink.Overlay';
 const BUS_PATH = '/org/overink/Overlay';
+const TRUST_PATH = GLib.build_filenamev([
+    GLib.get_user_config_dir(), 'overink', 'capture-trust.json',
+]);
 const CAPTURE_INTERFACE = `<node>
     <interface name="org.overink.Overlay">
         <method name="CaptureArea">
@@ -41,9 +46,11 @@ class CaptureBridge {
         this._extension = extension;
         this._busy = false;
         this._active = true;
-        // Approval is ephemeral: one explicit Shell confirmation per live PID
-        // and /proc start time, never a persistent "trusted app name".
+        // Per-run grants are bound to the PID/start time, not a forgeable name.
         this._approved = new Set();
+        // Persistent grants are opt-in and pinned to a root-owned, non-writable
+        // executable and its metadata; replacing/upgrading it requires consent.
+        this._trusted = this._loadTrusted();
         this._deniedUntil = new Map();
         this._pending = null;
     }
@@ -51,6 +58,7 @@ class CaptureBridge {
     stop() {
         this._active = false;
         this._approved.clear();
+        this._trusted.clear();
         this._deniedUntil.clear();
         this._cancel(this._pending);
     }
@@ -90,7 +98,131 @@ class CaptureBridge {
         return `${pid}:${fields[19]}:${executable}`;
     }
 
-    _requestPermission(executable, state) {
+    _loadTrusted() {
+        try {
+            const [, data] = Gio.File.new_for_path(TRUST_PATH).load_contents(null);
+            const entries = JSON.parse(new TextDecoder().decode(data));
+            if (!Array.isArray(entries))
+                return new Set();
+            return new Set(entries.filter(entry =>
+                typeof entry === 'string' && entry.length <= MAX_TRUST_KEY_LENGTH).slice(-32));
+        } catch (error) {
+            // Missing or corrupt permission state must fail closed: re-prompt.
+            return new Set();
+        }
+    }
+
+    _rememberTrusted(key) {
+        // The writer and reader share the same JavaScript string-length limit.
+        // The normal caller already checks this before offering persistence.
+        if (typeof key !== 'string' || key.length > MAX_TRUST_KEY_LENGTH)
+            throw new Error('Screenshot permission identity is too long');
+        const folder = GLib.path_get_dirname(TRUST_PATH);
+        if (GLib.mkdir_with_parents(folder, 0o700) !== 0)
+            throw new Error('Cannot create OverInk permission directory');
+        const next = new Set(this._trusted);
+        next.delete(key);
+        next.add(key);
+        while (next.size > 32)
+            next.delete(next.values().next().value);
+        const data = new TextEncoder().encode(JSON.stringify([...next]));
+        // Atomic replace; PRIVATE creates files with mode 0600.
+        Gio.File.new_for_path(TRUST_PATH).replace_contents(
+            data, null, false, Gio.FileCreateFlags.PRIVATE, null);
+        this._trusted = next;
+    }
+
+    _binaryDigest(executable, installedSize) {
+        // Hash the verified root-owned executable in bounded chunks. Unlike
+        // st_dev/inode, its SHA-256 identity survives Btrfs and OSTree remounts.
+        const checksum = GLib.Checksum.new(GLib.ChecksumType.SHA256);
+        if (!checksum)
+            return null;
+        const stream = Gio.File.new_for_path(executable).read(null);
+        let readSize = 0;
+        try {
+            while (true) {
+                const chunk = stream.read_bytes(64 * 1024, null);
+                const size = chunk.get_size();
+                if (size === 0)
+                    break;
+                readSize += size;
+                // A root update can grow the file after its initial stat.
+                // Bound actual I/O rather than trusting only that first size.
+                if (readSize > MAX_EXECUTABLE_BYTES || readSize > installedSize)
+                    return null;
+                checksum.update(chunk.get_data());
+            }
+            return readSize === installedSize ? checksum.get_string() : null;
+        } finally {
+            stream.close(null);
+        }
+    }
+
+    _persistentIdentity(pid, executable) {
+        // Validate /proc/<pid>/exe against the root-owned path in this mount
+        // namespace using device AND inode. These live-process checks must
+        // remain even though the persistent key is content-based: trusting a
+        // path or a hash alone would let another mount namespace impersonate
+        // the installed executable. An upgrade requires new consent.
+        if (!GLib.path_is_absolute(executable) || executable.endsWith(' (deleted)'))
+            return null;
+        try {
+            const running = Gio.File.new_for_path(`/proc/${pid}/exe`).query_info(
+                'unix::device,unix::inode', Gio.FileQueryInfoFlags.NONE, null);
+            const runningDevice = String(running.get_attribute_uint32('unix::device'));
+            const runningInode = String(running.get_attribute_uint64('unix::inode'));
+            let path = executable;
+            let installedSize = null;
+            while (true) {
+                const info = Gio.File.new_for_path(path).query_info(
+                    'unix::uid,unix::mode,unix::device,unix::inode,standard::size,time::modified',
+                    Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS, null);
+                const mode = info.get_attribute_uint32('unix::mode');
+                if (info.get_attribute_uint32('unix::uid') !== 0 ||
+                    (mode & 0o022) !== 0)
+                    return null;
+                if (path === executable) {
+                    if ((mode & 0o170000) !== 0o100000 ||
+                        String(info.get_attribute_uint32('unix::device')) !== runningDevice ||
+                        String(info.get_attribute_uint64('unix::inode')) !== runningInode)
+                        return null;
+                    installedSize = Number(info.get_size());
+                    // GJS may expose 64-bit sizes as Number or BigInt. Keep
+                    // the digest's byte counter and initial size comparable.
+                    // Reject oversized values before reading any file bytes.
+                    if (!Number.isSafeInteger(installedSize) ||
+                        installedSize <= 0 || installedSize > MAX_EXECUTABLE_BYTES)
+                        return null;
+                } else if ((mode & 0o170000) !== 0o040000) {
+                    return null;
+                }
+                if (path === '/')
+                    break;
+                path = GLib.path_get_dirname(path);
+            }
+            const digest = this._binaryDigest(executable, installedSize);
+            if (!digest)
+                return null;
+            // Root-managed updates can replace a file between the initial
+            // stat and read. Accept only the same running executable inode.
+            const after = Gio.File.new_for_path(executable).query_info(
+                'unix::device,unix::inode,standard::size',
+                Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS, null);
+            if (String(after.get_attribute_uint32('unix::device')) !== runningDevice ||
+                String(after.get_attribute_uint64('unix::inode')) !== runningInode ||
+                Number(after.get_size()) !== installedSize)
+                return null;
+            // Version the key deliberately: old st_dev/inode grants require
+            // one fresh opt-in, and do not silently migrate to content trust.
+            const identity = `v2:${executable}:sha256:${digest}`;
+            return identity.length <= MAX_TRUST_KEY_LENGTH ? identity : null;
+        } catch (error) {
+            return null;
+        }
+    }
+
+    _requestPermission(executable, state, canRemember) {
         return new Promise(resolve => {
             // Only GNOME Shell can present this modal. A successful capture
             // must wait for the modal to finish closing, or the first PNG
@@ -98,49 +230,58 @@ class CaptureBridge {
             const dialog = new ModalDialog.ModalDialog({destroyOnClose: false});
             dialog.contentLayout.add_child(new Dialog.MessageDialogContent({
                 title: 'Allow OverInk screen capture?',
-                description: `A process at ${executable} requests access to screen pixels. Allow screenshots for this running process only? Your OverInk rectangle selection stays unchanged.`,
+                description: canRemember
+                    ? `A process at ${executable} requests screen pixels. Allow this run, or remember this verified installation? Your selected rectangle stays unchanged.`
+                    : `A process at ${executable} requests screen pixels. Allow this running process only? Your selected rectangle stays unchanged.`,
             }));
             let settled = false;
             let closing = false;
-            let approved = false;
-            const settle = allowed => {
+            let decision = null;
+            const settle = () => {
                 if (settled)
                     return;
                 settled = true;
                 state.dismissDialog = null;
-                resolve(allowed && this._active && !state.cancelled);
+                resolve(this._active && !state.cancelled ? decision : null);
             };
-            const close = allowed => {
-                approved = allowed && !state.cancelled;
+            const close = choice => {
                 if (closing) {
-                    if (state.cancelled)
-                        settle(false);
+                    if (state.cancelled) {
+                        decision = null;
+                        settle();
+                    }
                     return;
                 }
                 closing = true;
+                decision = !state.cancelled ? choice : null;
                 if (state.cancelled)
-                    settle(false);
+                    settle();
                 if (dialog.state === ModalDialog.State.OPENED ||
                     dialog.state === ModalDialog.State.OPENING) {
                     dialog.close(global.get_current_time());
                 } else {
-                    settle(false);
+                    settle();
                     dialog.destroy();
                 }
             };
-            state.dismissDialog = () => close(false);
+            state.dismissDialog = () => close(null);
             dialog.connect('closed', () => {
-                settle(approved);
+                settle();
                 dialog.destroy();
             });
-            dialog.connect('destroy', () => settle(false));
-            dialog.setButtons([
+            dialog.connect('destroy', () => settle());
+            const buttons = [
                 {label: 'Deny', key: Clutter.KEY_Escape, isDefault: true,
-                    action: () => close(false)},
-                {label: 'Allow for this run', action: () => close(true)},
-            ]);
+                    action: () => close(null)},
+                {label: 'Allow for this run', action: () => close('run')},
+            ];
+            if (canRemember) {
+                buttons.push({label: 'Always allow this installation',
+                    action: () => close('always')});
+            }
+            dialog.setButtons(buttons);
             if (!dialog.open(global.get_current_time()))
-                close(false);
+                close(null);
         });
     }
 
@@ -215,8 +356,17 @@ class CaptureBridge {
             const now = GLib.get_monotonic_time();
             if ((this._deniedUntil.get(processIdentity) ?? 0) > now)
                 throw new Error('Screen capture denied recently; retry in 30 seconds');
-            if (!this._approved.has(processIdentity)) {
-                if (!await this._requestPermission(executable, state)) {
+            const approved = this._approved.has(processIdentity);
+            // Already authorized processes need not rehash their executable
+            // on each frame; PID + start time prevents inheriting this grant.
+            const trusted = approved ? null : this._persistentIdentity(pid, executable);
+            // Re-read user permissions for each unapproved process. Deleting
+            // capture-trust.json now revokes future approvals immediately.
+            if (!approved)
+                this._trusted = this._loadTrusted();
+            if (!approved && !(trusted && this._trusted.has(trusted))) {
+                const choice = await this._requestPermission(executable, state, !!trusted);
+                if (!choice) {
                     this._checkActive(state);
                     // Rate-limit repeated permission prompts from an impostor.
                     if (this._deniedUntil.size > 32) {
@@ -235,8 +385,22 @@ class CaptureBridge {
                 if (this._processIdentity(pid, executable) !== processIdentity ||
                     !global.get_window_actors().includes(canvas))
                     throw new Error('OverInk changed while authorizing screen capture');
-                this._approved.add(processIdentity);
+                if (choice === 'always' && trusted) {
+                    // A changed binary during the modal cannot inherit consent.
+                    if (this._persistentIdentity(pid, executable) !== trusted)
+                        throw new Error('OverInk executable changed during approval');
+                    try {
+                        this._rememberTrusted(trusted);
+                    } catch (error) {
+                        // 'Always' also grants this verified process access
+                        // for the current run. A read-only configuration or
+                        // full disk must not turn that consent into a failed
+                        // screenshot; only the persistent grant is lost.
+                        logError(error, 'OverInk could not remember screenshot permission; allowed for this run only');
+                    }
+                }
             }
+            this._approved.add(processIdentity);
             this._checkActive(state);
             const frame = canvas.meta_window.get_frame_rect();
             if (frame.width <= 0 || frame.height <= 0)

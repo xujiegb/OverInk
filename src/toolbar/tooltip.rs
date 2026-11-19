@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use crate::{appearance::Language, gui::Gui, icc::ColorManager, sdl::*};
 use egui::{Color32, FontId, Id, Response, Theme, Tooltip, Vec2, pos2, vec2};
 
@@ -68,9 +70,9 @@ struct Content {
 
 impl Tooltips {
     pub fn renderer_reset(&mut self) {
-        if let Some(mut popup) = self.0.take() {
-            popup.gui.forget_renderer_textures();
-        }
+        // Popup declares Gui before Renderer, so owned SDL textures are
+        // dropped before the renderer they reference.
+        self.0 = None;
     }
 
     pub fn renderer_reset_window(&mut self, id: SDL_WindowID) {
@@ -164,18 +166,15 @@ impl Content {
             x = x.min(parent.size()[0] as i32);
             return [x, y, w, h];
         }
-        unsafe {
-            let mut bounds = SDL_Rect::default();
-            let mut parent_x = 0;
-            if parent
+        if let (Some([bx, _, bw, _]), Ok([parent_x, _])) = (
+            parent
                 .display_id()
-                .is_some_and(|id| SDL_GetDisplayUsableBounds(SDL_DisplayID(id), &mut bounds))
-                && SDL_GetWindowPosition(parent.raw, &mut parent_x, std::ptr::null_mut())
-                && parent_x + x + w > bounds.x + bounds.w
-                && parent_x + left >= bounds.x
-            {
-                x = left;
-            }
+                .and_then(crate::sdl::usable_display_bounds),
+            parent.position(),
+        ) && parent_x + x + w > bx + bw
+            && parent_x + left >= bx
+        {
+            x = left;
         }
         [x, y, w, h]
     }
@@ -192,10 +191,7 @@ impl Popup {
             // compositors without support for repositioning mapped popups.
             self.window.show(false)?;
             let [x, y, w, h] = bounds;
-            unsafe {
-                check(SDL_SetWindowSize(self.window.raw, w, h))?;
-                check(SDL_SetWindowPosition(self.window.raw, x, y))?;
-            }
+            self.window.set_geometry(x, y, w, h)?;
             self.bounds = bounds;
         }
         Ok(())

@@ -8,11 +8,13 @@ pub mod macos;
 mod unix;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub use unix::Passthrough;
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+pub(crate) use unix::{NativeLibrary, library as native_library};
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 #[derive(Default)]
 pub struct Passthrough {
-    applied: Option<(*mut c_void, bool)>,
+    applied: Option<(std::ptr::NonNull<c_void>, bool)>,
 }
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 impl Passthrough {
@@ -25,6 +27,7 @@ impl Passthrough {
 }
 
 #[cfg(target_os = "windows")]
+#[deny(clippy::undocumented_unsafe_blocks)]
 pub fn set_controller_region(
     window: &Window,
     size: [i32; 2],
@@ -34,15 +37,23 @@ pub fn set_controller_region(
         Foundation::HWND,
         Graphics::Gdi::{CombineRgn, CreateRectRgn, DeleteObject, HGDIOBJ, RGN_DIFF, SetWindowRgn},
     };
+    // Calculate a bounded GDI subtraction before any native calls. The
+    // rectangle's right/bottom edges are now guaranteed not to overflow i32.
+    if size[0] <= 0 || size[1] <= 0 {
+        return Err("Invalid Win32 region dimensions".into());
+    }
+    let hole = hole.and_then(|hole| hole.clipped(size));
+    // SAFETY: The window remains live, and GDI region handles are checked
+    // before use. This function destroys regions on failure and transfers
+    // ownership to Windows only after SetWindowRgn succeeds.
     unsafe {
-        let hwnd = HWND(SDL_GetPointerProperty(
-            SDL_GetWindowProperties(window.raw),
-            SDL_PROP_WINDOW_WIN32_HWND_POINTER,
-            std::ptr::null_mut(),
-        ));
-        if hwnd.is_invalid() {
-            return Err("No Win32 window handle".into());
-        }
+        let hwnd = HWND(
+            window
+                .win32_hwnd()
+                .ok_or("No Win32 window handle")?
+                .as_non_null()
+                .as_ptr(),
+        );
         let region = if let Some(hole) = hole {
             let full = CreateRectRgn(0, 0, size[0], size[1]);
             let cut = CreateRectRgn(hole.x, hole.y, hole.x + hole.w, hole.y + hole.h);
@@ -74,100 +85,75 @@ pub fn set_controller_region(
 }
 
 #[cfg(target_os = "windows")]
+#[deny(clippy::undocumented_unsafe_blocks)]
 impl Passthrough {
     pub fn set(&mut self, window: &Window, pass: bool) -> Result<(), String> {
+        #[cfg(target_pointer_width = "64")]
+        use windows::Win32::UI::WindowsAndMessaging::{GetWindowLongPtrW, SetWindowLongPtrW};
+        #[cfg(target_pointer_width = "32")]
+        use windows::Win32::UI::WindowsAndMessaging::{GetWindowLongW, SetWindowLongW};
+        use windows::Win32::{
+            Foundation::{ERROR_SUCCESS, GetLastError, HWND, SetLastError},
+            UI::WindowsAndMessaging::{
+                GWL_EXSTYLE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+                SWP_NOZORDER, SetWindowPos, WS_EX_LAYERED, WS_EX_TRANSPARENT,
+            },
+        };
+
+        let identity = window
+            .win32_hwnd()
+            .ok_or("No Win32 window handle")?
+            .as_non_null();
+        if self.applied == Some((identity, pass)) {
+            return Ok(());
+        }
+        self.invalidate();
+        let hwnd = HWND(identity.as_ptr());
+        // SAFETY: The HWND is borrowed from the live SDL window; the typed
+        // windows bindings preserve the system ABI. Clearing last-error
+        // distinguishes a valid zero style from an API failure.
         unsafe {
-            #[link(name = "user32")]
-            unsafe extern "system" {
-                fn SetWindowPos(
-                    h: *mut c_void,
-                    a: *mut c_void,
-                    x: i32,
-                    y: i32,
-                    cx: i32,
-                    cy: i32,
-                    f: u32,
-                ) -> i32;
-            }
-            #[cfg(target_pointer_width = "64")]
-            #[link(name = "user32")]
-            unsafe extern "system" {
-                fn GetWindowLongPtrW(h: *mut c_void, i: i32) -> isize;
-                fn SetWindowLongPtrW(h: *mut c_void, i: i32, v: isize) -> isize;
-            }
-            #[cfg(target_pointer_width = "32")]
-            #[link(name = "user32")]
-            unsafe extern "system" {
-                fn GetWindowLongW(h: *mut c_void, i: i32) -> i32;
-                fn SetWindowLongW(h: *mut c_void, i: i32, v: i32) -> i32;
-            }
-            #[link(name = "kernel32")]
-            unsafe extern "system" {
-                fn SetLastError(e: u32);
-                fn GetLastError() -> u32;
-            }
-            let hwnd = SDL_GetPointerProperty(
-                SDL_GetWindowProperties(window.raw),
-                SDL_PROP_WINDOW_WIN32_HWND_POINTER,
-                std::ptr::null_mut(),
-            );
-            if hwnd.is_null() {
-                return Err("No Win32 window handle".into());
-            }
-            if self.applied == Some((hwnd, pass)) {
-                return Ok(());
-            }
-            self.invalidate();
-            const GWL_EXSTYLE: i32 = -20;
-            const WS_EX_TRANSPARENT: isize = 0x20;
-            const WS_EX_LAYERED: isize = 0x80000;
-            SetLastError(0);
+            SetLastError(ERROR_SUCCESS);
             #[cfg(target_pointer_width = "64")]
             let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
             #[cfg(target_pointer_width = "32")]
             let style = GetWindowLongW(hwnd, GWL_EXSTYLE) as isize;
-            if style == 0 && GetLastError() != 0 {
+            if style == 0 && GetLastError() != ERROR_SUCCESS {
                 return Err(std::io::Error::last_os_error().to_string());
             }
             let desired = if pass {
-                style | WS_EX_TRANSPARENT | WS_EX_LAYERED
+                style | WS_EX_TRANSPARENT.0 as isize | WS_EX_LAYERED.0 as isize
             } else {
-                style & !WS_EX_TRANSPARENT
+                style & !(WS_EX_TRANSPARENT.0 as isize)
             };
             if desired != style {
-                SetLastError(0);
+                SetLastError(ERROR_SUCCESS);
                 #[cfg(target_pointer_width = "64")]
                 let prev = SetWindowLongPtrW(hwnd, GWL_EXSTYLE, desired);
                 #[cfg(target_pointer_width = "32")]
                 let prev = SetWindowLongW(hwnd, GWL_EXSTYLE, desired as i32) as isize;
-                if prev == 0 && GetLastError() != 0 {
+                if prev == 0 && GetLastError() != ERROR_SUCCESS {
                     return Err(std::io::Error::last_os_error().to_string());
                 }
             }
             // Refresh the style without raising the canvas over the toolbar.
-            const SWP_NOSIZE: u32 = 0x1;
-            const SWP_NOMOVE: u32 = 0x2;
-            const SWP_NOZORDER: u32 = 0x4;
-            const SWP_NOACTIVATE: u32 = 0x10;
-            const SWP_FRAMECHANGED: u32 = 0x20;
-            if SetWindowPos(
+            SetWindowPos(
                 hwnd,
-                std::ptr::null_mut(),
+                None,
                 0,
                 0,
                 0,
                 0,
                 SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-            ) == 0
-            {
-                return Err(std::io::Error::last_os_error().to_string());
-            }
-            self.applied = Some((hwnd, pass));
-            Ok(())
+            )
+            .map_err(|error| error.to_string())?;
         }
+        self.applied = Some((identity, pass));
+        Ok(())
     }
 }
 #[cfg(target_os = "macos")]
+#[deny(clippy::undocumented_unsafe_blocks)]
 impl Passthrough {
     pub fn set(&mut self, window: &Window, pass: bool) -> Result<(), String> {
         use objc2::{
@@ -175,17 +161,15 @@ impl Passthrough {
             runtime::{AnyObject, Bool},
         };
 
+        // SAFETY: SDL owns the live NSWindow. The Cocoa selectors and Bool
+        // return/argument types match the NSWindow methods being called.
         unsafe {
-            let ns = SDL_GetPointerProperty(
-                SDL_GetWindowProperties(window.raw),
-                SDL_PROP_WINDOW_COCOA_WINDOW_POINTER,
-                std::ptr::null_mut(),
-            );
-            if ns.is_null() {
-                return Err("No Cocoa window handle".into());
-            }
-            let cocoa = ns.cast::<AnyObject>();
-            if self.applied != Some((ns, pass)) {
+            let identity = window
+                .cocoa_window()
+                .ok_or("No Cocoa window handle")?
+                .as_non_null();
+            let cocoa = identity.as_ptr().cast::<AnyObject>();
+            if self.applied != Some((identity, pass)) {
                 // SDL's Cocoa listener can reset ignoresMouseEvents when it
                 // handles motion for a transparent window. Disable that motion
                 // while passing input through, as Cocoa does for tooltips.
@@ -197,7 +181,7 @@ impl Passthrough {
             if ignoring.as_bool() != pass {
                 let _: () = msg_send![cocoa, setIgnoresMouseEvents: Bool::new(pass)];
             }
-            self.applied = Some((ns, pass));
+            self.applied = Some((identity, pass));
             Ok(())
         }
     }
@@ -225,75 +209,56 @@ impl Passthrough {
     }
 }
 
+#[deny(clippy::undocumented_unsafe_blocks)]
 pub fn keep_controller_above(canvas: &Window, controller: &Window, _native: &Passthrough) {
     let _ = canvas;
     #[cfg(target_os = "windows")]
-    unsafe {
-        #[link(name = "user32")]
-        unsafe extern "system" {
-            fn SetWindowPos(
-                h: *mut c_void,
-                after: *mut c_void,
-                x: i32,
-                y: i32,
-                w: i32,
-                hgt: i32,
-                flags: u32,
-            ) -> i32;
-        }
-        let hwnd = SDL_GetPointerProperty(
-            SDL_GetWindowProperties(controller.raw),
-            SDL_PROP_WINDOW_WIN32_HWND_POINTER,
-            std::ptr::null_mut(),
-        );
-        if !hwnd.is_null() {
-            // Keep drawing focus on the canvas; raising the controller must not
-            // interrupt a pen stroke or activate the window beneath it.
-            SetWindowPos(
-                hwnd,
-                (-1isize) as *mut c_void,
-                0,
-                0,
-                0,
-                0,
-                0x1 | 0x2 | 0x10 | 0x200,
-            );
+    {
+        use windows::Win32::{
+            Foundation::HWND,
+            UI::WindowsAndMessaging::{
+                HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
+                SetWindowPos,
+            },
+        };
+        if let Some(handle) = controller.win32_hwnd() {
+            // SAFETY: The HWND is owned by the live SDL controller. The typed
+            // Win32 API receives the documented topmost pseudo-handle and flags.
+            let _ = unsafe {
+                SetWindowPos(
+                    HWND(handle.as_non_null().as_ptr()),
+                    Some(HWND_TOPMOST),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+                )
+            };
         }
     }
     #[cfg(target_os = "macos")]
-    unsafe {
-        #[link(name = "objc")]
-        unsafe extern "C" {
-            fn sel_registerName(name: *const std::ffi::c_char) -> *mut c_void;
-            fn objc_msgSend();
-        }
-        let window = SDL_GetPointerProperty(
-            SDL_GetWindowProperties(controller.raw),
-            SDL_PROP_WINDOW_COCOA_WINDOW_POINTER,
-            std::ptr::null_mut(),
-        );
-        let under = SDL_GetPointerProperty(
-            SDL_GetWindowProperties(canvas.raw),
-            SDL_PROP_WINDOW_COCOA_WINDOW_POINTER,
-            std::ptr::null_mut(),
-        );
-        if !window.is_null() && !under.is_null() {
-            let get: unsafe extern "C" fn(*mut c_void, *mut c_void) -> isize =
-                std::mem::transmute(objc_msgSend as *const ());
-            let set: unsafe extern "C" fn(*mut c_void, *mut c_void, isize) =
-                std::mem::transmute(objc_msgSend as *const ());
-            let order: unsafe extern "C" fn(*mut c_void, *mut c_void, isize, isize) =
-                std::mem::transmute(objc_msgSend as *const ());
-            let level = get(under, sel_registerName(c"level".as_ptr())).saturating_add(1);
-            if get(window, sel_registerName(c"level".as_ptr())) != level {
-                set(window, sel_registerName(c"setLevel:".as_ptr()), level);
+    {
+        use objc2::{msg_send, runtime::AnyObject};
+
+        let window = controller.cocoa_window();
+        let under = canvas.cocoa_window();
+        if let (Some(window), Some(under)) = (window, under) {
+            // SAFETY: Both pointers are SDL-owned live Cocoa NSWindows. The
+            // selectors have these NSInteger/void signatures on macOS.
+            // objc2 performs typed sends, avoiding untyped objc_msgSend casts.
+            unsafe {
+                let window = window.as_non_null().as_ptr().cast::<AnyObject>();
+                let under = under.as_non_null().as_ptr().cast::<AnyObject>();
+                let canvas_level: isize = msg_send![under, level];
+                let level = canvas_level.saturating_add(1);
+                let current_level: isize = msg_send![window, level];
+                if current_level != level {
+                    let _: () = msg_send![window, setLevel: level];
+                }
+                let number: isize = msg_send![under, windowNumber];
+                let _: () = msg_send![window, orderWindow: 1isize, relativeTo: number];
             }
-            order(
-                window,
-                sel_registerName(c"orderWindow:relativeTo:".as_ptr()),
-                1,
-                get(under, sel_registerName(c"windowNumber".as_ptr())),
-            );
         }
     }
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -302,91 +267,71 @@ pub fn keep_controller_above(canvas: &Window, controller: &Window, _native: &Pas
 
 pub fn show_canvas(canvas: &Window, controller: &Window, shown: bool) -> Result<(), String> {
     if crate::sdl::driver() == "wayland" {
-        unsafe {
-            // Transient toplevels stay above the fullscreen drawing surface.
-            // Detach before hiding it so Hide cannot also hide the controls.
-            let parent = if shown {
-                canvas.raw
-            } else {
-                std::ptr::null_mut()
-            };
-            if SDL_GetWindowParent(controller.raw) != parent {
-                check(SDL_SetWindowParent(controller.raw, parent))?;
-            }
-        }
+        // Transient toplevels stay above the fullscreen drawing surface.
+        // Detach before hiding it so Hide cannot also hide the controls.
+        controller.set_parent(shown.then_some(canvas))?;
     }
     canvas.show(shown)
 }
 
+// Validate native RECT dimensions before narrowing to floating-point canvas
+// units. The difference of two valid i32 coordinates need not fit in i32.
+#[cfg(any(target_os = "windows", test))]
+fn checked_native_rect_size(left: i32, top: i32, right: i32, bottom: i32) -> Option<[i64; 2]> {
+    let width = i64::from(right) - i64::from(left);
+    let height = i64::from(bottom) - i64::from(top);
+    (width > 0 && height > 0).then_some([width, height])
+}
+
+#[deny(clippy::undocumented_unsafe_blocks)]
 pub fn controller_bounds(canvas: &Window, controller: &Window) -> Option<[f32; 4]> {
     #[cfg(target_os = "windows")]
-    unsafe {
-        #[repr(C)]
-        struct Rect {
-            left: i32,
-            top: i32,
-            right: i32,
-            bottom: i32,
-        }
-        #[repr(C)]
-        struct Point {
-            x: i32,
-            y: i32,
-        }
-        #[link(name = "user32")]
-        unsafe extern "system" {
-            fn GetWindowRect(w: *mut c_void, rect: *mut Rect) -> i32;
-            fn ScreenToClient(w: *mut c_void, point: *mut Point) -> i32;
-        }
-        let window = SDL_GetPointerProperty(
-            SDL_GetWindowProperties(controller.raw),
-            SDL_PROP_WINDOW_WIN32_HWND_POINTER,
-            std::ptr::null_mut(),
-        );
-        let surface = SDL_GetPointerProperty(
-            SDL_GetWindowProperties(canvas.raw),
-            SDL_PROP_WINDOW_WIN32_HWND_POINTER,
-            std::ptr::null_mut(),
-        );
-        if window.is_null() || surface.is_null() {
-            return None;
-        }
-        let mut rect = Rect {
-            left: 0,
-            top: 0,
-            right: 0,
-            bottom: 0,
+    {
+        use windows::Win32::{
+            Foundation::{HWND, POINT, RECT},
+            Graphics::Gdi::ScreenToClient,
+            UI::WindowsAndMessaging::GetWindowRect,
         };
-        if GetWindowRect(window, &mut rect) == 0 {
-            return None;
-        }
-        let mut point = Point {
-            x: rect.left,
-            y: rect.top,
+        let window = HWND(controller.win32_hwnd()?.as_non_null().as_ptr());
+        let surface = HWND(canvas.win32_hwnd()?.as_non_null().as_ptr());
+        let mut rect = RECT::default();
+        // SAFETY: Both HWNDs belong to live SDL windows. RECT and POINT are
+        // initialized, writable Win32 values. Typed bindings check the ABI.
+        let point = unsafe {
+            if GetWindowRect(window, &mut rect).is_err() {
+                return None;
+            }
+            let mut point = POINT {
+                x: rect.left,
+                y: rect.top,
+            };
+            if !ScreenToClient(surface, &mut point).as_bool() {
+                return None;
+            }
+            point
         };
-        if ScreenToClient(surface, &mut point) == 0 {
-            return None;
-        }
+        // Win32 RECT coordinates can span the full signed 32-bit range.
+        // Reject invalid sizes and widen differences outside the FFI block.
+        let [width, height] =
+            checked_native_rect_size(rect.left, rect.top, rect.right, rect.bottom)?;
         let logical = canvas.size();
         let pixels = canvas.pixel_size();
+        if pixels[0] <= 0 || pixels[1] <= 0 {
+            return None;
+        }
         let scale = [logical[0] / pixels[0] as f32, logical[1] / pixels[1] as f32];
         Some([
             point.x as f32 * scale[0],
             point.y as f32 * scale[1],
-            (rect.right - rect.left) as f32 * scale[0],
-            (rect.bottom - rect.top) as f32 * scale[1],
+            width as f32 * scale[0],
+            height as f32 * scale[1],
         ])
     }
     #[cfg(not(target_os = "windows"))]
-    unsafe {
-        let (mut x, mut y, mut cx, mut cy) = (0, 0, 0, 0);
-        if !SDL_GetWindowPosition(canvas.raw, &mut x, &mut y)
-            || !SDL_GetWindowPosition(controller.raw, &mut cx, &mut cy)
-        {
-            return None;
-        }
-        let (mut top, mut left, mut bottom, mut right) = (0, 0, 0, 0);
-        SDL_GetWindowBordersSize(controller.raw, &mut top, &mut left, &mut bottom, &mut right);
+    {
+        let [x, y] = canvas.position().ok()?;
+        let [cx, cy] = controller.position().ok()?;
+        let [top, left, bottom, right] = controller.border_size();
         let size = controller.size();
         Some([
             (cx - x - left) as f32,
@@ -394,5 +339,21 @@ pub fn controller_bounds(canvas: &Window, controller: &Window) -> Option<[f32; 4
             size[0] + (left + right) as f32,
             size[1] + (top + bottom) as f32,
         ])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::checked_native_rect_size;
+
+    #[test]
+    fn win32_rectangle_dimensions_are_checked_without_overflow() {
+        assert_eq!(checked_native_rect_size(1, 2, 101, 202), Some([100, 200]));
+        assert_eq!(checked_native_rect_size(1, 2, 1, 202), None);
+        assert_eq!(checked_native_rect_size(1, 2, 101, -2), None);
+        assert_eq!(
+            checked_native_rect_size(i32::MIN, i32::MIN, i32::MAX, i32::MAX),
+            Some([i64::from(u32::MAX), i64::from(u32::MAX)])
+        );
     }
 }

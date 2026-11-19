@@ -11,7 +11,6 @@ use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     io::Read,
-    ptr,
     time::{Duration, Instant},
 };
 
@@ -150,38 +149,7 @@ impl Image {
     }
     #[cfg(any(target_os = "linux", target_os = "freebsd", test))]
     pub fn convert_to_srgb(&mut self, profile: &[u8]) {
-        use lcms2_sys as cms;
-        if profile.is_empty() || profile.len() > 16 * 1024 * 1024 {
-            return;
-        }
-        unsafe {
-            let input = cms::cmsOpenProfileFromMem(profile.as_ptr().cast(), profile.len() as u32);
-            if input.is_null() {
-                return;
-            }
-            let srgb = cms::cmsCreate_sRGBProfile();
-            let transform = cms::cmsCreateTransform(
-                input,
-                cms::PixelFormat::RGBA_8,
-                srgb,
-                cms::PixelFormat::RGBA_8,
-                cms::Intent::RelativeColorimetric,
-                cms::FLAGS_COPY_ALPHA | cms::FLAGS_BLACKPOINTCOMPENSATION,
-            );
-            cms::cmsCloseProfile(input);
-            cms::cmsCloseProfile(srgb);
-            if !transform.is_null() {
-                // Both FFI pointers describe the same in-place pixel buffer.
-                let pixels = self.rgba.as_mut_ptr();
-                cms::cmsDoTransform(
-                    transform,
-                    pixels.cast_const().cast(),
-                    pixels.cast(),
-                    self.width * self.height,
-                );
-                cms::cmsDeleteTransform(transform);
-            }
-        }
+        crate::icc::convert_rgba8_to_srgb(&mut self.rgba, profile);
     }
 }
 
@@ -305,78 +273,6 @@ pub fn snapshot_mode(
     }
 }
 
-struct Texture(*mut SDL_Texture);
-impl Texture {
-    fn new(render: &Renderer, image: &Snapshot, color: &ColorManager) -> Result<Self, String> {
-        unsafe {
-            let linear = image.encoding == Encoding::LinearRgba16;
-            let raw = if linear {
-                if !render.extended {
-                    return Err("The renderer cannot display the captured HDR range".into());
-                }
-                let props = SDL_CreateProperties();
-                SDL_SetNumberProperty(
-                    props,
-                    SDL_PROP_TEXTURE_CREATE_FORMAT_NUMBER,
-                    SDL_PIXELFORMAT_RGBA64_FLOAT.0 as i64,
-                );
-                SDL_SetNumberProperty(
-                    props,
-                    SDL_PROP_TEXTURE_CREATE_COLORSPACE_NUMBER,
-                    SDL_COLORSPACE_SRGB_LINEAR.0 as i64,
-                );
-                SDL_SetNumberProperty(
-                    props,
-                    SDL_PROP_TEXTURE_CREATE_WIDTH_NUMBER,
-                    image.width as i64,
-                );
-                SDL_SetNumberProperty(
-                    props,
-                    SDL_PROP_TEXTURE_CREATE_HEIGHT_NUMBER,
-                    image.height as i64,
-                );
-                // A local-display capture is already mapped to this display.
-                // A positive content headroom could ask SDL to tone map it again.
-                SDL_SetFloatProperty(props, SDL_PROP_TEXTURE_CREATE_HDR_HEADROOM_FLOAT, 0.);
-                let texture = SDL_CreateTextureWithProperties(render.raw, props);
-                SDL_DestroyProperties(props);
-                texture
-            } else {
-                SDL_CreateTexture(
-                    render.raw,
-                    SDL_PIXELFORMAT_RGBA32,
-                    SDL_TEXTUREACCESS_STATIC,
-                    image.width as i32,
-                    image.height as i32,
-                )
-            };
-            if raw.is_null() {
-                return Err(crate::sdl::error());
-            }
-            let texture = Self(raw);
-            let mut pixels = image.pixels()?;
-            if !linear && !color.is_identity() {
-                color.map_rgba8(pixels.to_mut());
-            }
-            check(SDL_UpdateTexture(
-                texture.0,
-                ptr::null(),
-                pixels.as_ptr().cast(),
-                (image.width as usize * image.encoding.bytes_per_pixel()) as i32,
-            ))?;
-            check(SDL_SetTextureBlendMode(texture.0, SDL_BLENDMODE_NONE))?;
-            check(SDL_SetTextureScaleMode(texture.0, SDL_SCALEMODE_LINEAR))?;
-            Ok(texture)
-        }
-    }
-}
-impl Drop for Texture {
-    fn drop(&mut self) {
-        unsafe {
-            SDL_DestroyTexture(self.0);
-        }
-    }
-}
 enum Capture {
     Idle,
     Wait(Instant),
@@ -388,7 +284,7 @@ pub struct Background {
     display: Option<u32>,
     bounds: [i32; 4],
     images: BTreeMap<u32, Snapshot>,
-    texture: Option<Texture>,
+    texture: Option<SnapshotTexture>,
     capture: Capture,
     started: Instant,
     mode: SnapshotMode,
@@ -479,6 +375,7 @@ impl Background {
     pub fn invalidate_texture(&mut self) {
         self.texture = None;
     }
+
     pub fn poll(&mut self, window: &Window) -> Option<Result<(), String>> {
         if self.pending() && self.started.elapsed() > Duration::from_secs(120) {
             self.live();
@@ -578,47 +475,44 @@ impl Background {
         let Some(image) = self.display.and_then(|id| self.images.get(&id)) else {
             return Ok(());
         };
+        let linear = image.encoding == Encoding::LinearRgba16;
         if self.texture.is_none() {
-            self.texture = Some(Texture::new(render, image, color)?);
+            let mut pixels = image.pixels()?;
+            if !linear && !color.is_identity() {
+                color.map_rgba8(pixels.to_mut());
+            }
+            self.texture = Some(SnapshotTexture::new(
+                render,
+                [image.width, image.height],
+                linear,
+                pixels.as_ref(),
+            )?);
         }
-        let texture = self.texture.as_ref().unwrap().0;
+        let Some(texture) = self.texture.as_ref() else {
+            return Err("Background snapshot texture was not initialized".into());
+        };
         let [w, h] = window.size();
         let dst = SDL_FRect { x: 0., y: 0., w, h };
-        unsafe {
-            if image.encoding == Encoding::Srgb8 {
-                return check(SDL_RenderTexture(render.raw, texture, ptr::null(), &dst));
-            }
-            let mut previous = 1.;
-            check(SDL_GetRenderColorScale(render.raw, &mut previous))?;
-            let white = SDL_GetFloatProperty(
-                SDL_GetRendererProperties(render.raw),
-                SDL_PROP_RENDERER_SDR_WHITE_POINT_FLOAT,
-                1.,
-            );
-            if !white.is_finite() || white <= 0. {
-                return Err("Invalid SDR reference white level".into());
-            }
-            // SDL multiplies all draw calls by its current SDR white level.
-            // Cancel that multiplier just for the captured linear pixels.
-            check(SDL_SetRenderColorScale(render.raw, 1. / white))?;
-            let draw = check(SDL_RenderTexture(render.raw, texture, ptr::null(), &dst));
-            let restore = check(SDL_SetRenderColorScale(render.raw, previous));
-            draw.and(restore)
-        }
+        texture.draw(render, &dst, linear)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn display_result(result: Result<(), crate::appearance::Text>) -> TestResult {
+        result.map_err(|message| message.get(crate::appearance::Language::English).into())
+    }
     #[test]
-    fn disconnect_forgets_frozen_frames_and_live_mode_releases_images() {
+    fn disconnect_forgets_frozen_frames_and_live_mode_releases_images() -> TestResult {
         let mut bg = Background::default();
-        bg.images.insert(7, Image::buffer(2, 2).unwrap().into());
+        bg.images.insert(7, Image::buffer(2, 2)?.into());
         bg.display = Some(7);
         bg.frozen = true;
-        bg.display(None, &BTreeSet::new(), SnapshotMode::Sdr, true)
-            .unwrap();
+        display_result(bg.display(None, &BTreeSet::new(), SnapshotMode::Sdr, true))?;
         assert!(bg.images.is_empty());
         assert!(!bg.pending());
         bg.freeze();
@@ -627,21 +521,19 @@ mod tests {
         assert!(!bg.pending());
         assert!(!bg.frozen);
         assert!(Image::buffer(u32::MAX, u32::MAX).is_err());
+        Ok(())
     }
     #[test]
-    fn frozen_png_decodes_without_modifying_the_source_file() {
+    fn frozen_png_decodes_without_modifying_the_source_file() -> TestResult {
         let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)?
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
             "overink-png-test-{}-{unique}.png",
             std::process::id()
         ));
-        image::RgbaImage::from_pixel(3, 2, image::Rgba([18, 171, 239, 255]))
-            .save(&path)
-            .unwrap();
-        let image = Image::load(&path).unwrap();
+        image::RgbaImage::from_pixel(3, 2, image::Rgba([18, 171, 239, 255])).save(&path)?;
+        let image = Image::load(&path)?;
         assert_eq!((image.width, image.height), (3, 2));
         assert!(
             image
@@ -652,10 +544,11 @@ mod tests {
                 .all(|v| *v == [18, 171, 239, 255])
         );
         assert!(path.exists());
-        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(path)?;
+        Ok(())
     }
     #[test]
-    fn mouse_mode_defers_capture_without_discarding_frozen_pages() {
+    fn mouse_mode_defers_capture_without_discarding_frozen_pages() -> TestResult {
         let mut bg = Background::default();
         let screen = crate::display::Display {
             id: 7,
@@ -665,21 +558,19 @@ mod tests {
             scale: 1.,
         };
         let connected = BTreeSet::from([7]);
-        bg.display(Some(&screen), &connected, SnapshotMode::Sdr, true)
-            .unwrap();
+        display_result(bg.display(Some(&screen), &connected, SnapshotMode::Sdr, true))?;
         bg.freeze();
-        bg.display(Some(&screen), &connected, SnapshotMode::Sdr, false)
-            .unwrap();
+        display_result(bg.display(Some(&screen), &connected, SnapshotMode::Sdr, false))?;
         assert!(!bg.pending());
         assert!(bg.frozen);
-        bg.images.insert(7, Image::buffer(2, 2).unwrap().into());
-        bg.display(Some(&screen), &connected, SnapshotMode::Sdr, true)
-            .unwrap();
+        bg.images.insert(7, Image::buffer(2, 2)?.into());
+        display_result(bg.display(Some(&screen), &connected, SnapshotMode::Sdr, true))?;
         assert!(!bg.pending());
         assert!(bg.images.contains_key(&7));
+        Ok(())
     }
     #[test]
-    fn enabling_hdr_replaces_the_cached_sdr_capture() {
+    fn enabling_hdr_replaces_the_cached_sdr_capture() -> TestResult {
         let mut bg = Background::default();
         let screen = crate::display::Display {
             id: 7,
@@ -689,12 +580,10 @@ mod tests {
             scale: 1.,
         };
         let connected = BTreeSet::from([7]);
-        bg.display(Some(&screen), &connected, SnapshotMode::Sdr, true)
-            .unwrap();
-        bg.images.insert(7, Image::buffer(2, 2).unwrap().into());
+        display_result(bg.display(Some(&screen), &connected, SnapshotMode::Sdr, true))?;
+        bg.images.insert(7, Image::buffer(2, 2)?.into());
         bg.frozen = true;
-        bg.display(Some(&screen), &connected, SnapshotMode::Linear, true)
-            .unwrap();
+        display_result(bg.display(Some(&screen), &connected, SnapshotMode::Linear, true))?;
         assert!(bg.images.is_empty());
         assert!(bg.pending());
         let reason = crate::appearance::text(
@@ -709,9 +598,10 @@ mod tests {
         );
         assert!(!bg.pending());
         assert!(!bg.frozen);
+        Ok(())
     }
     #[test]
-    fn completed_capture_exits_pending_and_exposes_the_snapshot() {
+    fn completed_capture_exits_pending_and_exposes_the_snapshot() -> TestResult {
         let mut bg = Background {
             display: Some(7),
             mode: SnapshotMode::Linear,
@@ -719,41 +609,41 @@ mod tests {
         };
         bg.freeze();
         assert!(bg.pending());
-        let snapshot = Snapshot::compress(Image::hdr_buffer(128, 128).unwrap()).unwrap();
+        let snapshot = Snapshot::compress(Image::hdr_buffer(128, 128)?)?;
         assert!(bg.finish_capture(Ok(Some(snapshot))).is_ok());
         assert!(bg.frozen && !bg.pending());
         assert_eq!(bg.images[&7].encoding, Encoding::LinearRgba16);
+        Ok(())
     }
     #[test]
-    fn fp16_capture_keeps_highlights_and_negative_color_components() {
-        let mut image = Image::hdr_buffer(1, 2).unwrap();
+    fn fp16_capture_keeps_highlights_and_negative_color_components() -> TestResult {
+        let mut image = Image::hdr_buffer(1, 2)?;
         let mut padded = [0; 24];
         padded[..2].copy_from_slice(&0x4800_u16.to_ne_bytes()); // 8.0
         padded[2..4].copy_from_slice(&0xb800_u16.to_ne_bytes()); // -0.5
         padded[12..14].copy_from_slice(&0x4000_u16.to_ne_bytes()); // 2.0
-        image
-            .copy_hdr_rows(padded.len(), 12, |offset, row| {
-                row.copy_from_slice(&padded[offset..offset + row.len()]);
-            })
-            .unwrap();
+        image.copy_hdr_rows(padded.len(), 12, |offset, row| {
+            row.copy_from_slice(&padded[offset..offset + row.len()]);
+        })?;
         assert_eq!(&image.rgba[..6], &padded[..6]);
         assert_eq!(&image.rgba[8..14], &padded[12..18]);
         assert_eq!(&image.rgba[6..8], &0x3c00_u16.to_ne_bytes());
         assert_eq!(&image.rgba[14..16], &0x3c00_u16.to_ne_bytes());
+        Ok(())
     }
     #[test]
-    fn compressed_hdr_snapshot_can_rebuild_the_texture_losslessly() {
-        let mut image = Image::hdr_buffer(128, 64).unwrap();
+    fn compressed_hdr_snapshot_can_rebuild_the_texture_losslessly() -> TestResult {
+        let mut image = Image::hdr_buffer(128, 64)?;
         let pixel = [0x4800_u16, 0xb800, 0x4000, 0x3c00].map(u16::to_ne_bytes);
         for bytes in image.rgba.as_chunks_mut::<8>().0 {
             bytes.copy_from_slice(pixel.as_flattened());
         }
-        let snapshot = Snapshot::compress(image).unwrap();
+        let snapshot = Snapshot::compress(image)?;
         assert!(snapshot.compressed);
         assert_eq!(snapshot.encoding, Encoding::LinearRgba16);
         assert!(snapshot.bytes.len() < 8192);
         for _ in 0..2 {
-            let rgba = snapshot.pixels().unwrap();
+            let rgba = snapshot.pixels()?;
             assert_eq!(rgba.len(), 128 * 64 * 8);
             assert!(
                 rgba.as_chunks::<8>()
@@ -762,5 +652,6 @@ mod tests {
                     .all(|rgba| rgba == pixel.as_flattened())
             );
         }
+        Ok(())
     }
 }

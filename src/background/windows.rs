@@ -57,8 +57,11 @@ pub fn start<T: Send + 'static>(
     let handle = monitor as usize;
     Job::start(
         move |cancelled| {
-            capture(HMONITOR(handle as *mut _), cancelled)
-                .map_err(|error| format!("Windows floating-point desktop capture: {error}"))
+            capture(
+                HMONITOR(ptr::with_exposed_provenance_mut(handle)),
+                cancelled,
+            )
+            .map_err(|error| format!("Windows floating-point desktop capture: {error}"))
         },
         prepare,
     )

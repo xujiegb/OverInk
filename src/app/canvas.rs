@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use super::{App, Options, ink::Ink};
 use crate::{
     appearance::{Text, text},
@@ -130,21 +132,14 @@ impl Canvas {
                 if let Some(id) = self.output
                     && let Some([x, y, w, h]) = self.bounds
                     && driver() != "wayland"
+                    && (self.window.position().ok() != Some([x, y])
+                        || self.window.size() != [w as f32, h as f32])
                 {
-                    let (mut actual_x, mut actual_y) = (0, 0);
-                    let positioned = unsafe {
-                        SDL_GetWindowPosition(self.window.raw, &mut actual_x, &mut actual_y)
-                    };
-                    if !positioned
-                        || [actual_x, actual_y] != [x, y]
-                        || self.window.size() != [w as f32, h as f32]
-                    {
-                        self.window.place_on_display(id, true).map_err(|error| {
-                            format!("Positioning the drawing canvas failed ({error})")
-                        })?;
-                    }
+                    self.window.place_on_display(id, true).map_err(|error| {
+                        format!("Positioning the drawing canvas failed ({error})")
+                    })?;
                 }
-                unsafe { SDL_SetWindowAlwaysOnTop(self.window.raw, true) };
+                self.window.set_always_on_top(true);
                 self.keep_toolbar_above(toolbar);
             }
         }
@@ -176,9 +171,11 @@ impl Canvas {
     }
 
     pub fn renderer_reset(&mut self) {
+        // Release live SDL texture objects before rebuilding their contents
+        // or destroying the old renderer.
         self.ink.reset_textures();
-        // A new context recreates the glyph atlas for the new SDL renderer.
         self.suspend_text_input();
+        // Dropping the old text GUI releases its SDL texture handles.
         self.text = None;
         self.text_style = None;
         self.background.invalidate_texture();
@@ -269,11 +266,10 @@ impl Canvas {
             // Apply input and upload texture deltas before a toolbar action changes the draft.
             // The next canvas frame will paint the resulting document.
             output.shapes.clear();
-            self.text
-                .as_mut()
-                .unwrap()
-                .paint(&self.render, &self.window, &self.color, output)?;
-            self.dirty = true;
+            if let Some(gui) = self.text.as_mut() {
+                gui.paint(&self.render, &self.window, &self.color, output)?;
+                self.dirty = true;
+            }
         }
         Ok(())
     }
@@ -393,13 +389,10 @@ impl Canvas {
                         extended_ink_budget,
                     )?
                 };
-                if let Some(output) = self.text_frame(page, theme, keep_editor_open) {
-                    self.text.as_mut().unwrap().paint(
-                        &self.render,
-                        &self.window,
-                        &self.color,
-                        output,
-                    )?;
+                if let Some(output) = self.text_frame(page, theme, keep_editor_open)
+                    && let Some(gui) = self.text.as_mut()
+                {
+                    gui.paint(&self.render, &self.window, &self.color, output)?;
                 }
                 if page.hidden {
                     self.render.present()?;
@@ -562,29 +555,7 @@ fn reconcile_windows(
 }
 
 pub(super) fn event_window(event: &SDL_Event, ty: SDL_EventType) -> Option<SDL_WindowID> {
-    unsafe {
-        let window = match ty {
-            SDL_EVENT_MOUSE_BUTTON_DOWN | SDL_EVENT_MOUSE_BUTTON_UP => event.button.windowID,
-            SDL_EVENT_MOUSE_MOTION => event.motion.windowID,
-            SDL_EVENT_MOUSE_WHEEL => event.wheel.windowID,
-            SDL_EVENT_FINGER_DOWN
-            | SDL_EVENT_FINGER_MOTION
-            | SDL_EVENT_FINGER_UP
-            | SDL_EVENT_FINGER_CANCELED => event.tfinger.windowID,
-            SDL_EVENT_PEN_PROXIMITY_IN | SDL_EVENT_PEN_PROXIMITY_OUT => event.pproximity.windowID,
-            SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP => event.ptouch.windowID,
-            SDL_EVENT_PEN_MOTION => event.pmotion.windowID,
-            SDL_EVENT_PEN_AXIS => event.paxis.windowID,
-            SDL_EVENT_KEY_DOWN | SDL_EVENT_KEY_UP => event.key.windowID,
-            SDL_EVENT_WINDOW_FOCUS_GAINED
-            | SDL_EVENT_WINDOW_FOCUS_LOST
-            | SDL_EVENT_WINDOW_MOUSE_LEAVE => event.window.windowID,
-            SDL_EVENT_TEXT_INPUT => event.text.windowID,
-            SDL_EVENT_TEXT_EDITING => event.edit.windowID,
-            _ => return None,
-        };
-        (window.0 != 0).then_some(window)
-    }
+    crate::sdl::event_window(event, ty)
 }
 
 pub(super) fn failure(error: impl ToString) -> crate::appearance::Status {
