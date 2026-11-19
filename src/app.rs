@@ -2624,8 +2624,11 @@ fn run_inner(options: Options) -> Result<(), String> {
             for (index, canvas) in canvases.iter_mut().enumerate() {
                 let screenshot = app.screenshot.targets(canvas.window.id);
                 let mouse = mouse && !screenshot;
+                // The native chooser owns interaction while pending. Even a
+                // screenshot canvas kept as a Wayland transient parent would
+                // remain fullscreen and always-on-top behind the chooser.
                 let visible = if file_dialog.pending() {
-                    screenshot && dialog::USE_WINDOW_PARENT
+                    false
                 } else {
                     screenshot
                         || (options.smoke
@@ -2759,11 +2762,12 @@ fn run_inner(options: Options) -> Result<(), String> {
                     .iter()
                     .position(|canvas| app.screenshot.targets(canvas.window.id))
             {
-                if !dialog::USE_WINDOW_PARENT {
-                    // Keep the always-on-top overlays out of the system dialog's way.
-                    for canvas in &mut canvases {
-                        canvas.show(&toolbar, false)?;
-                    }
+                // Hide the fullscreen selection *before* opening the native
+                // chooser, even on Linux/FreeBSD. Wayland transient parents
+                // cannot be hidden without also affecting a modal child, so
+                // screenshot-save choosers are deliberately unparented.
+                for canvas in &mut canvases {
+                    canvas.show(&toolbar, false)?;
                 }
                 app.screenshot.open_save_as(
                     &mut file_dialog,

@@ -4,7 +4,7 @@
 
 use super::{
     Window,
-    dialog::{DialogKind, USE_WINDOW_PARENT, complete},
+    dialog::{DialogKind, complete, use_window_parent},
     error,
 };
 use sdl3_sys::dialog::*;
@@ -44,15 +44,16 @@ pub(super) fn show(id: usize, kind: DialogKind, window: &Window, location: Optio
     let user = ptr::without_provenance_mut(id);
     let location = location.and_then(location_to_c);
     let initial = location.as_ref().map_or(ptr::null(), |path| path.as_ptr());
-    let parent = if USE_WINDOW_PARENT {
+    let parent = if use_window_parent(kind) {
         window.raw.as_ptr()
     } else {
         ptr::null_mut()
     };
     // SAFETY: SDL borrows the initial C string only during this call.
     // The filter uses static storage valid through callback completion.
-    // The parent is a live SDL Window pointer or null on the platforms where
-    // native dialog callbacks may outlive the original parent.
+    // The parent is a live SDL Window pointer or null. Screenshot-save
+    // dialogs are unparented so the fullscreen canvas can be hidden while
+    // the chooser is open, including GNOME Wayland and XWayland.
     unsafe {
         match kind {
             DialogKind::Font => {

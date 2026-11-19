@@ -106,10 +106,24 @@ enum SdlNativeAction<'a> {
     InkTextureUpload(&'a OwnedTexture, &'a [u8], i32),
     TextureModulation(&'a OwnedTexture, [f32; 3], f32),
     GuiTextureUpload(&'a OwnedTexture, Option<&'a SDL_Rect>, &'a [u8], i32),
+    RendererColorProperty(&'a Renderer, RendererPropertyQuery),
+    RenderOwnedTexture(
+        &'a Renderer,
+        OwnedTextureRef<'a>,
+        Option<&'a SDL_FRect>,
+        Option<&'a SDL_FRect>,
+    ),
+    #[cfg(test)]
+    ReadSurfacePixel(&'a OwnedSurface, i32, i32),
     ClipboardWrite(&'a CStr),
     ClipboardRead,
     ReadString(SdlStringSource),
     WindowIccProfile(&'a Window),
+    WindowPointer(&'a Window, NativeWindowProperty),
+    WindowNumber(&'a Window, WindowNumberQuery),
+    WindowFloat(&'a Window, WindowFloatQuery),
+    #[cfg(target_os = "windows")]
+    WindowsMonitor(u32),
     SystemTheme,
     IndirectTouch(SDL_TouchID),
     CaptureMouse(bool),
@@ -133,6 +147,14 @@ enum SdlNativeResult {
     Success(bool),
     Text(Option<String>),
     Profile(Option<Vec<u8>>),
+    NativePointer(Option<NonNull<c_void>>),
+    Number(i64),
+    Float(f32),
+    #[cfg(target_os = "windows")]
+    WindowsMonitor(Option<usize>),
+    ColorProperty((bool, f32)),
+    #[cfg(test)]
+    Pixel(Option<[u8; 4]>),
     Theme(SDL_SystemTheme),
 }
 
@@ -168,6 +190,56 @@ impl SdlNativeResult {
     fn profile(self) -> Option<Vec<u8>> {
         if let Self::Profile(bytes) = self {
             bytes
+        } else {
+            None
+        }
+    }
+
+    fn native_pointer(self) -> Option<NonNull<c_void>> {
+        if let Self::NativePointer(raw) = self {
+            raw
+        } else {
+            None
+        }
+    }
+
+    fn number(self) -> i64 {
+        if let Self::Number(value) = self {
+            value
+        } else {
+            0
+        }
+    }
+
+    fn float(self) -> f32 {
+        if let Self::Float(value) = self {
+            value
+        } else {
+            1.
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn windows_monitor(self) -> Option<usize> {
+        if let Self::WindowsMonitor(handle) = self {
+            handle
+        } else {
+            None
+        }
+    }
+
+    fn color_property(self) -> (bool, f32) {
+        if let Self::ColorProperty(value) = self {
+            value
+        } else {
+            (false, 1.)
+        }
+    }
+
+    #[cfg(test)]
+    fn pixel(self) -> Option<[u8; 4]> {
+        if let Self::Pixel(value) = self {
+            value
         } else {
             None
         }
@@ -317,6 +389,63 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
                     pitch,
                 ))
             }
+            SdlNativeAction::RendererColorProperty(renderer, query) => {
+                let values = if let Some(raw) = renderer.raw {
+                    let props = SDL_GetRendererProperties(raw.as_ptr());
+                    match query {
+                        RendererPropertyQuery::HdrState => (
+                            SDL_GetBooleanProperty(
+                                props,
+                                SDL_PROP_RENDERER_HDR_ENABLED_BOOLEAN,
+                                false,
+                            ),
+                            SDL_GetFloatProperty(props, SDL_PROP_RENDERER_HDR_HEADROOM_FLOAT, 1.),
+                        ),
+                        RendererPropertyQuery::SdrWhitePoint => (
+                            false,
+                            SDL_GetFloatProperty(
+                                props,
+                                SDL_PROP_RENDERER_SDR_WHITE_POINT_FLOAT,
+                                1.,
+                            ),
+                        ),
+                    }
+                } else {
+                    (false, 1.)
+                };
+                SdlNativeResult::ColorProperty(values)
+            }
+            SdlNativeAction::RenderOwnedTexture(renderer, texture, source, destination) => {
+                let success = if let Some(raw) = renderer.raw {
+                    SDL_RenderTexture(
+                        raw.as_ptr(),
+                        texture.raw().as_ptr(),
+                        source.map_or(ptr::null(), |rect| rect),
+                        destination.map_or(ptr::null(), |rect| rect),
+                    )
+                } else {
+                    false
+                };
+                SdlNativeResult::Success(success)
+            }
+            #[cfg(test)]
+            SdlNativeAction::ReadSurfacePixel(surface, x, y) => {
+                let [mut r, mut g, mut b, mut a] = [0; 4];
+                let pixel = if SDL_ReadSurfacePixel(
+                    surface.as_non_null().as_ptr(),
+                    x,
+                    y,
+                    &mut r,
+                    &mut g,
+                    &mut b,
+                    &mut a,
+                ) {
+                    Some([r, g, b, a])
+                } else {
+                    None
+                };
+                SdlNativeResult::Pixel(pixel)
+            }
             SdlNativeAction::ClipboardWrite(value) => {
                 SdlNativeResult::Success(SDL_SetClipboardText(value.as_ptr()))
             }
@@ -371,6 +500,67 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
                     SDL_ClearError();
                     SdlNativeResult::Profile(None)
                 }
+            }
+            SdlNativeAction::WindowPointer(window, property) => {
+                let raw = if let Some(key) = property.key() {
+                    NonNull::new(SDL_GetPointerProperty(
+                        SDL_GetWindowProperties(window.raw.as_ptr()),
+                        key.as_ptr(),
+                        ptr::null_mut(),
+                    ))
+                } else {
+                    None
+                };
+                SdlNativeResult::NativePointer(raw)
+            }
+            SdlNativeAction::WindowNumber(window, query) => {
+                let value = match query {
+                    WindowNumberQuery::DisplayId => {
+                        SDL_GetDisplayForWindow(window.raw.as_ptr()).0 as i64
+                    }
+                    #[cfg(target_os = "macos")]
+                    WindowNumberQuery::CocoaMetalViewTag => SDL_GetNumberProperty(
+                        SDL_GetWindowProperties(window.raw.as_ptr()),
+                        SDL_PROP_WINDOW_COCOA_METAL_VIEW_TAG_NUMBER,
+                        0,
+                    ),
+                    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                    WindowNumberQuery::X11Window => SDL_GetNumberProperty(
+                        SDL_GetWindowProperties(window.raw.as_ptr()),
+                        SDL_PROP_WINDOW_X11_WINDOW_NUMBER,
+                        0,
+                    ),
+                };
+                SdlNativeResult::Number(value)
+            }
+            SdlNativeAction::WindowFloat(window, query) => {
+                let value = match query {
+                    WindowFloatQuery::SdrWhiteLevel => SDL_GetFloatProperty(
+                        SDL_GetWindowProperties(window.raw.as_ptr()),
+                        SDL_PROP_WINDOW_SDR_WHITE_LEVEL_FLOAT,
+                        1.,
+                    ),
+                    WindowFloatQuery::DisplayScale => {
+                        SDL_GetWindowDisplayScale(window.raw.as_ptr())
+                    }
+                    WindowFloatQuery::PixelDensity => {
+                        SDL_GetWindowPixelDensity(window.raw.as_ptr())
+                    }
+                };
+                SdlNativeResult::Float(value)
+            }
+            #[cfg(target_os = "windows")]
+            SdlNativeAction::WindowsMonitor(display) => {
+                let handle = NonNull::new(SDL_GetPointerProperty(
+                    SDL_GetDisplayProperties(SDL_DisplayID(display)),
+                    SDL_PROP_DISPLAY_WINDOWS_HMONITOR_POINTER,
+                    ptr::null_mut(),
+                ))
+                // The Win32 monitor handle is passed to the capture thread as
+                // an opaque integer. Mark provenance as exposed for the later
+                // with_exposed_provenance_mut reconstruction.
+                .map(|handle| handle.as_ptr().expose_provenance());
+                SdlNativeResult::WindowsMonitor(handle)
             }
             SdlNativeAction::SystemTheme => SdlNativeResult::Theme(SDL_GetSystemTheme()),
             SdlNativeAction::IndirectTouch(device) => SdlNativeResult::Success(matches!(
@@ -440,6 +630,17 @@ pub fn cstring(v: &str) -> CString {
         CString::new(v.replace('\0', "")).unwrap_or_default()
     })
 }
+/// Read only the known Win32 HMONITOR SDL display property. This returns an
+/// opaque handle value, not a dereferenceable pointer, and does not expose
+/// the SDL properties table to asynchronous capture workers.
+#[cfg(target_os = "windows")]
+pub(crate) fn windows_monitor_handle(display: u32) -> Option<usize> {
+    if !is_main_thread() || !SDL_VIDEO_READY.load(std::sync::atomic::Ordering::Acquire) {
+        return None;
+    }
+    sdl_native(SdlNativeAction::WindowsMonitor(display)).windows_monitor()
+}
+
 pub fn is_wayland_session() -> bool {
     std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland")
         || ["WAYLAND_DISPLAY", "WAYLAND_SOCKET"]
@@ -1182,25 +1383,7 @@ impl Window {
     /// Copy only a known numeric SDL window property; never expose a
     /// property handle or unchecked key to higher-level callers.
     fn query_number(&self, query: WindowNumberQuery) -> i64 {
-        // SAFETY: SDL owns the still-live window. This only reads a copied
-        // number from the window's native properties or its display ID.
-        unsafe {
-            match query {
-                WindowNumberQuery::DisplayId => SDL_GetDisplayForWindow(self.raw.as_ptr()).0 as i64,
-                #[cfg(target_os = "macos")]
-                WindowNumberQuery::CocoaMetalViewTag => SDL_GetNumberProperty(
-                    SDL_GetWindowProperties(self.raw.as_ptr()),
-                    SDL_PROP_WINDOW_COCOA_METAL_VIEW_TAG_NUMBER,
-                    0,
-                ),
-                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-                WindowNumberQuery::X11Window => SDL_GetNumberProperty(
-                    SDL_GetWindowProperties(self.raw.as_ptr()),
-                    SDL_PROP_WINDOW_X11_WINDOW_NUMBER,
-                    0,
-                ),
-            }
-        }
+        sdl_native(SdlNativeAction::WindowNumber(self, query)).number()
     }
 
     /// Copy initialized coordinate outputs from the already-audited native
@@ -1294,19 +1477,7 @@ impl Window {
 
     /// Read one SDL-owned window metric without exporting native handles.
     fn query_float(&self, query: WindowFloatQuery) -> f32 {
-        // SAFETY: The SDL window belongs to this live Window instance.
-        // These queries return scalar copies and do not transfer ownership.
-        unsafe {
-            match query {
-                WindowFloatQuery::SdrWhiteLevel => SDL_GetFloatProperty(
-                    SDL_GetWindowProperties(self.raw.as_ptr()),
-                    SDL_PROP_WINDOW_SDR_WHITE_LEVEL_FLOAT,
-                    1.,
-                ),
-                WindowFloatQuery::DisplayScale => SDL_GetWindowDisplayScale(self.raw.as_ptr()),
-                WindowFloatQuery::PixelDensity => SDL_GetWindowPixelDensity(self.raw.as_ptr()),
-            }
-        }
+        sdl_native(SdlNativeAction::WindowFloat(self, query)).float()
     }
 
     /// Dispatch a closed set of window operations on SDL's owning thread.
@@ -1703,21 +1874,12 @@ impl Window {
         &self,
         property: NativeWindowProperty,
     ) -> Option<NativeWindowHandle<'_>> {
-        let key = property.key()?;
-        // SAFETY: The known key belongs to SDL's live Window property
-        // table; SDL returns a borrowed pointer or null without transferring
-        // ownership. NativeWindowHandle ties it to the Window borrow.
-        unsafe {
-            NonNull::new(SDL_GetPointerProperty(
-                SDL_GetWindowProperties(self.raw.as_ptr()),
-                key.as_ptr(),
-                ptr::null_mut(),
-            ))
+        sdl_native(SdlNativeAction::WindowPointer(self, property))
+            .native_pointer()
             .map(|raw| NativeWindowHandle {
                 raw,
                 _window: PhantomData,
             })
-        }
     }
 
     /// Borrow the Win32 HWND backing this live SDL window.
@@ -2333,6 +2495,7 @@ enum RenderCommand<'a> {
     SetColorScale(f32),
     ReadTarget(&'a mut Option<NonNull<SDL_Texture>>),
     SetTarget(RenderTarget<'a>),
+    Geometry(GeometryTexture<'a>, &'a [SDL_Vertex], &'a [u32], i32, i32),
     Flush,
     Present,
 }
@@ -2348,24 +2511,7 @@ impl Renderer {
     /// Read only known SDL renderer color properties at the FFI boundary.
     /// HDR uses both fields from the same property handle.
     fn query_color_property(&self, query: RendererPropertyQuery) -> (bool, f32) {
-        let Some(renderer) = self.raw else {
-            return (false, 1.);
-        };
-        // SAFETY: Renderer owns a live SDL renderer. These SDL getters
-        // return copied numeric values without exporting native pointers.
-        unsafe {
-            let props = SDL_GetRendererProperties(renderer.as_ptr());
-            match query {
-                RendererPropertyQuery::HdrState => (
-                    SDL_GetBooleanProperty(props, SDL_PROP_RENDERER_HDR_ENABLED_BOOLEAN, false),
-                    SDL_GetFloatProperty(props, SDL_PROP_RENDERER_HDR_HEADROOM_FLOAT, 1.),
-                ),
-                RendererPropertyQuery::SdrWhitePoint => (
-                    false,
-                    SDL_GetFloatProperty(props, SDL_PROP_RENDERER_SDR_WHITE_POINT_FLOAT, 1.),
-                ),
-            }
-        }
+        sdl_native(SdlNativeAction::RendererColorProperty(self, query)).color_property()
     }
 
     /// Render an adapter-owned texture. The enum keeps the native pointer
@@ -2376,19 +2522,18 @@ impl Renderer {
         source: Option<&SDL_FRect>,
         destination: Option<&SDL_FRect>,
     ) -> Result<(), String> {
-        let Some(renderer) = self.raw else {
+        if self.raw.is_none() {
             return Err("Renderer has been destroyed".into());
-        };
-        // SAFETY: Both the renderer and selected texture are live while the
-        // synchronous SDL call reads the borrowed source/destination bounds.
-        unsafe {
-            check(SDL_RenderTexture(
-                renderer.as_ptr(),
-                texture.raw().as_ptr(),
-                source.map_or(ptr::null(), |rect| rect),
-                destination.map_or(ptr::null(), |rect| rect),
-            ))
         }
+        check(
+            sdl_native(SdlNativeAction::RenderOwnedTexture(
+                self,
+                texture,
+                source,
+                destination,
+            ))
+            .succeeded(),
+        )
     }
 
     /// The only FFI dispatch for ordinary clear, clip, scale, flush and
@@ -2449,6 +2594,16 @@ impl Renderer {
                         }
                     };
                     check(SDL_SetRenderTarget(renderer.as_ptr(), raw))
+                }
+                RenderCommand::Geometry(texture, vertices, indices, vertex_count, index_count) => {
+                    check(SDL_RenderGeometry(
+                        renderer.as_ptr(),
+                        texture.raw().map_or(ptr::null_mut(), NonNull::as_ptr),
+                        vertices.as_ptr(),
+                        vertex_count,
+                        indices.as_ptr().cast(),
+                        index_count,
+                    ))
                 }
                 RenderCommand::Flush => check(SDL_FlushRenderer(renderer.as_ptr())),
                 RenderCommand::Present => check(SDL_RenderPresent(renderer.as_ptr())),
@@ -2683,9 +2838,9 @@ impl Renderer {
         vertices: &[SDL_Vertex],
         indices: &[u32],
     ) -> Result<(), String> {
-        let Some(renderer) = self.raw else {
+        if self.raw.is_none() {
             return Err("Renderer has been destroyed".into());
-        };
+        }
         if vertices.is_empty() || indices.is_empty() {
             return Ok(());
         }
@@ -2696,19 +2851,15 @@ impl Renderer {
         if indices.iter().any(|&index| index >= vertex_count as u32) {
             return Err("SDL geometry index refers outside the vertex buffer".into());
         }
-        // SAFETY: Both input slices remain valid throughout SDL's synchronous
-        // read, their lengths fit the C int ABI, and all indices reference
-        // vertices within the supplied slice.
-        unsafe {
-            check(SDL_RenderGeometry(
-                renderer.as_ptr(),
-                texture.raw().map_or(ptr::null_mut(), NonNull::as_ptr),
-                vertices.as_ptr(),
-                vertex_count,
-                indices.as_ptr().cast(),
-                index_count,
-            ))
-        }
+        // A closed command variant holds the live texture and both checked
+        // input slices through SDL's synchronous native geometry submission.
+        self.run_command(RenderCommand::Geometry(
+            texture,
+            vertices,
+            indices,
+            vertex_count,
+            index_count,
+        ))
     }
     pub fn present(&self) -> Result<(), String> {
         self.run_command(RenderCommand::Present)
@@ -2800,22 +2951,12 @@ impl TestSurface {
     /// Read a pixel from an owned test surface; share this one native read
     /// boundary with both single-pixel and full-frame test assertions.
     fn read_pixel(&self, x: i32, y: i32) -> Result<[u8; 4], String> {
-        let [mut r, mut g, mut b, mut a] = [0; 4];
-        // SAFETY: TestSurface holds the live SDL_Surface allocation, and the
-        // four initialized output bytes are valid writable memory. SDL checks
-        // whether the requested pixel lies inside the surface.
-        unsafe {
-            check(SDL_ReadSurfacePixel(
-                self.surface.as_non_null().as_ptr(),
-                x,
-                y,
-                &mut r,
-                &mut g,
-                &mut b,
-                &mut a,
-            ))?;
+        if x < 0 || y < 0 || x >= self.dimensions[0] || y >= self.dimensions[1] {
+            return Err("Pixel is outside the test surface".into());
         }
-        Ok([r, g, b, a])
+        sdl_native(SdlNativeAction::ReadSurfacePixel(&self.surface, x, y))
+            .pixel()
+            .ok_or_else(error)
     }
 
     pub fn pixel(renderer: &Renderer, x: i32, y: i32) -> Result<[u8; 4], String> {

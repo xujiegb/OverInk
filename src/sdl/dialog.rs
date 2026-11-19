@@ -20,6 +20,13 @@ type ResultPath = Result<Option<PathBuf>, String>;
 // Windows can look up its native handle from a worker thread.
 pub const USE_WINDOW_PARENT: bool = !cfg!(any(windows, target_os = "macos"));
 
+/// The screenshot selection is a fullscreen, always-on-top canvas. A native
+/// save chooser must not be modal to that canvas: the canvas must be hidden
+/// before the chooser opens so it cannot obscure or intercept the chooser.
+pub(super) const fn use_window_parent(kind: DialogKind) -> bool {
+    USE_WINDOW_PARENT && !matches!(kind, DialogKind::ScreenshotFile)
+}
+
 struct Callbacks {
     last_id: usize,
     results: BTreeMap<usize, Option<ResultPath>>,
@@ -100,6 +107,16 @@ pub fn downloads() -> Option<PathBuf> {
 mod tests {
     use super::*;
     use std::ptr;
+
+    #[test]
+    fn screenshot_save_dialog_does_not_parent_fullscreen_overlay() {
+        assert!(!use_window_parent(DialogKind::ScreenshotFile));
+        assert_eq!(use_window_parent(DialogKind::Font), USE_WINDOW_PARENT);
+        assert_eq!(
+            use_window_parent(DialogKind::ScreenshotFolder),
+            USE_WINDOW_PARENT
+        );
+    }
 
     #[test]
     fn delivers_a_callback_from_another_thread_once() -> Result<(), String> {
