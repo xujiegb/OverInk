@@ -206,6 +206,7 @@ struct App {
     suspended: bool,
     frozen: bool,
     panel: Option<crate::toolbar::Panel>,
+    closing_panel: Option<crate::toolbar::Panel>,
     touch_enabled: bool,
     status: Status,
     path: String,
@@ -274,6 +275,7 @@ impl App {
             suspended,
             frozen: false,
             panel: None,
+            closing_panel: None,
             touch_enabled: true,
             status,
             path: base
@@ -1609,6 +1611,7 @@ fn run_inner(options: Options) -> Result<(), String> {
     let mut tooltips = crate::toolbar::Tooltips::default();
     let mut toolbar_hidden = false;
     let mut toolbar_expanded = false;
+    let mut last_panel_width = 0.0_f32;
     let mut running = true;
     let mut frame = 0;
     let mut last_color = Instant::now();
@@ -2376,15 +2379,34 @@ fn run_inner(options: Options) -> Result<(), String> {
                 }
                 last_color = Instant::now();
             }
-            let expanded = app.panel.is_some() && !app.picking;
-            if expanded != toolbar_expanded || controller_scale_changed {
+            let panel_target = app.panel.filter(|_| !app.picking);
+            if let Some(panel) = panel_target {
+                app.closing_panel = Some(panel);
+            }
+            let phase = gui.ctx.animate_bool_with_time(
+                egui::Id::new("toolbar-panel-expansion"), panel_target.is_some(), 0.20,
+            );
+            if panel_target.is_none() && phase <= 0.001 {
+                app.closing_panel = None;
+            }
+            let panel_width = crate::toolbar::PANEL_WIDTH * phase;
+            let expanded = panel_width > 0.01;
+            if (panel_width - last_panel_width).abs() >= 0.5
+                || expanded != toolbar_expanded
+                || controller_scale_changed
+            {
                 toolbar_dirty = true;
                 controller_bounds_changed = true;
                 toolbar_expanded = expanded;
-                if let Err(error) = toolbar.arrange_toolbar(expanded, None) {
+                last_panel_width = panel_width;
+                if let Err(error) = toolbar.arrange_toolbar_width(panel_width, None) {
                     app.status = text("Toolbar layout failed", "工具栏布局失败", "工具列配置失敗")
                         .detail(error);
                 }
+            }
+            if phase > 0.001 && phase < 0.999 {
+                toolbar_dirty = true;
+                gui.ctx.request_repaint_after(Duration::from_millis(16));
             }
             let theme = appearance.theme(app.preferences.theme);
             if gui.ctx.theme() != theme {
@@ -2434,6 +2456,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                             .unavailable(),
                         mark.id(),
                         file_dialog.pending(),
+                        phase,
                     )
                 });
                 toolbar_text_input = frame.platform_output.ime.is_some();
@@ -3136,6 +3159,7 @@ mod touch_tests {
             suspended: false,
             frozen: false,
             panel: None,
+            closing_panel: None,
             touch_enabled: true,
             status: Status::default(),
             path: String::new(),
