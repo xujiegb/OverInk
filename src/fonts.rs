@@ -357,10 +357,9 @@ impl TextFonts {
                 vec![font.id.as_str().into()],
             );
         }
-        definitions.families.insert(
-            FontFamily::Name(ANNOTATION.into()),
-            self.order.to_vec(),
-        );
+        definitions
+            .families
+            .insert(FontFamily::Name(ANNOTATION.into()), self.order.to_vec());
         definitions
     }
 
