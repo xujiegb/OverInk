@@ -165,11 +165,11 @@ mod tests {
             revision: 0,
         };
         let mut rgba = vec![0u8; 4097 * 4];
-        for (index, pixel) in rgba.chunks_exact_mut(4).enumerate() {
+        for (index, pixel) in rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             pixel.copy_from_slice(&[40, 100, 180, (index % 251) as u8]);
         }
         manager.map_rgba8(&mut rgba);
-        for (index, pixel) in rgba.chunks_exact(4).enumerate() {
+        for (index, pixel) in rgba.as_chunks::<4>().0.iter().enumerate() {
             assert_eq!(pixel[3], (index % 251) as u8);
         }
         Ok(())
