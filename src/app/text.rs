@@ -11,8 +11,8 @@ use crate::{
     toolbar,
 };
 use egui::{
-    Color32, Event, ImeEvent, Key, PointerButton, Pos2, Rect, RichText, Stroke, StrokeKind, TextBuffer, Ui,
-    UiBuilder, Vec2, pos2,
+    Color32, Event, ImeEvent, Key, PointerButton, Pos2, Rect, RichText, Stroke, StrokeKind,
+    TextBuffer, Ui, UiBuilder, Vec2, pos2,
     text::{CCursor, CCursorRange},
     vec2,
 };
@@ -132,7 +132,12 @@ struct MenuPointer {
 }
 
 impl MenuPointer {
-    fn wants_event(&mut self, event: &Event, menu: Option<TextMenus>, context: Option<Rect>) -> bool {
+    fn wants_event(
+        &mut self,
+        event: &Event,
+        menu: Option<TextMenus>,
+        context: Option<Rect>,
+    ) -> bool {
         let contains = |pos| {
             menu.is_some_and(|rect| rect.contains(pos))
                 || context.is_some_and(|rect| rect.contains(pos))
@@ -332,7 +337,11 @@ impl App {
             changed |= self.text_pointer(event, size);
             let menu = self.text_menus(canvas);
             let context = self.text_context_rect(canvas);
-            let forward = self.input.text.menu_pointer.wants_event(event, menu, context);
+            let forward = self
+                .input
+                .text
+                .menu_pointer
+                .wants_event(event, menu, context);
             changed |= forward;
             forward
         });
@@ -382,11 +391,15 @@ impl App {
                 if self
                     .text_menus(canvas)
                     .is_some_and(|menus| menus.contains(pos))
-                    || self.text_context_rect(canvas).is_some_and(|rect| rect.contains(pos))
+                    || self
+                        .text_context_rect(canvas)
+                        .is_some_and(|rect| rect.contains(pos))
                 {
                     return true;
                 }
-                let in_context = self.text_context_rect(canvas).is_some_and(|rect| rect.contains(pos));
+                let in_context = self
+                    .text_context_rect(canvas)
+                    .is_some_and(|rect| rect.contains(pos));
                 let state = &mut self.input.text;
                 state.color_wheel = None;
                 if !in_context {
@@ -578,8 +591,10 @@ impl App {
         let scale = toolbar::menu_scale(canvas, base, units);
         let size = base * scale;
         let min = pos2(
-            pos.x.clamp(canvas.left(), (canvas.right() - size.x).max(canvas.left())),
-            pos.y.clamp(canvas.top(), (canvas.bottom() - size.y).max(canvas.top())),
+            pos.x
+                .clamp(canvas.left(), (canvas.right() - size.x).max(canvas.left())),
+            pos.y
+                .clamp(canvas.top(), (canvas.bottom() - size.y).max(canvas.top())),
         );
         Some(Rect::from_min_size(min, size))
     }
@@ -667,7 +682,10 @@ impl App {
     }
 
     pub(super) fn set_text_box_font(&mut self, key: Option<String>) -> bool {
-        if self.text_fonts.display_name(key.as_deref().unwrap_or("")).is_none()
+        if self
+            .text_fonts
+            .display_name(key.as_deref().unwrap_or(""))
+            .is_none()
             && key.is_some()
         {
             return false;
@@ -743,9 +761,10 @@ impl App {
                         draft.item.text.clone_from(&draft.committed);
                         let cursor = draft.item.text.delete_selected(&selection);
                         let mut cursor = cursor;
-                        draft.item.text.insert_text_at(
-                            &mut cursor, &clipboard, MAX_TEXT_CHARS
-                        );
+                        draft
+                            .item
+                            .text
+                            .insert_text_at(&mut cursor, &clipboard, MAX_TEXT_CHARS);
                         draft.committed.clone_from(&draft.item.text);
                         draft.cursor = Some(CCursorRange::one(cursor));
                         draft.focus = true;
@@ -790,10 +809,13 @@ impl App {
             if !has_text && action != EditAction::Paste {
                 continue;
             }
-            if menu.add_sized(
-                vec2(rect.width() - 12. * scale, EDIT_MENU_ITEM_HEIGHT * scale),
-                egui::Button::new(RichText::new(label).size(14. * scale)).frame(false),
-            ).clicked() {
+            if menu
+                .add_sized(
+                    vec2(rect.width() - 12. * scale, EDIT_MENU_ITEM_HEIGHT * scale),
+                    egui::Button::new(RichText::new(label).size(14. * scale)).frame(false),
+                )
+                .clicked()
+            {
                 self.text_context_action(action);
                 ui.ctx().request_repaint();
                 break;
@@ -1015,15 +1037,20 @@ impl App {
         if interactive {
             let screen = ui.clip_rect();
             if self.input.text.editing()
-                && let Some(pos) = ui.input(|input| input.events.iter().find_map(|event| {
-                    match event {
+                && let Some(pos) = ui.input(|input| {
+                    input.events.iter().find_map(|event| match event {
                         Event::PointerButton {
-                            pos, button: PointerButton::Secondary, pressed: true, ..
+                            pos,
+                            button: PointerButton::Secondary,
+                            pressed: true,
+                            ..
                         } => Some(*pos),
                         _ => None,
-                    }
-                }))
-                && self.text_menu_item().is_some_and(|item| item.rect().contains(pos))
+                    })
+                })
+                && self
+                    .text_menu_item()
+                    .is_some_and(|item| item.rect().contains(pos))
             {
                 self.input.text.context = Some(pos);
             }
@@ -1160,8 +1187,14 @@ impl App {
         child.set_clip_rect(text_rect.intersect(ui.clip_rect()));
         child.spacing_mut().item_spacing = Vec2::ZERO;
         let mut layouter = |ui: &Ui, value: &dyn egui::TextBuffer, wrap: f32| {
-            self.text_fonts
-                .layout_preferred(ui, value.as_str(), font_size, color, wrap, font_family.as_deref())
+            self.text_fonts.layout_preferred(
+                ui,
+                value.as_str(),
+                font_size,
+                color,
+                wrap,
+                font_family.as_deref(),
+            )
         };
         let mut scroll = egui::ScrollArea::vertical()
             .id_salt("annotation-scroll")
@@ -1174,7 +1207,10 @@ impl App {
         let output = scroll.show(&mut child, |ui| {
             egui::TextEdit::multiline(&mut draft.item.text)
                 .id(id)
-                .font(self.text_fonts.font_id_preferred(font_size, font_family.as_deref()))
+                .font(
+                    self.text_fonts
+                        .font_id_preferred(font_size, font_family.as_deref()),
+                )
                 .event_filter(egui::EventFilter {
                     horizontal_arrows: true,
                     vertical_arrows: true,
@@ -1242,7 +1278,12 @@ fn draw_text_box(ui: &Ui, fonts: &TextFonts, item: &TextBox) {
     if ui.is_rect_visible(rect) {
         let color = ink(item);
         let galley = fonts.layout_preferred(
-            ui, &item.text, item.font_size, color, rect.width(), item.font.as_deref()
+            ui,
+            &item.text,
+            item.font_size,
+            color,
+            rect.width(),
+            item.font.as_deref(),
         );
         let offset = item.visible_scroll_offset(galley.size().y);
         ui.painter()
