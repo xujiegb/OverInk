@@ -1324,6 +1324,7 @@ enum WindowFloatQuery {
 enum WindowCommand<'a> {
     InputArea(&'a SDL_Rect),
     SyncInput(bool),
+    RequestScreenKeyboard,
     ClearComposition,
     SyncAndPumpEvents,
     SetSize([i32; 2]),
@@ -1511,6 +1512,26 @@ impl Window {
                         }
                     }
                     Ok(())
+                }
+                WindowCommand::RequestScreenKeyboard => {
+                    // The hint is scoped to this explicit user request and
+                    // restored before processing another window's text input.
+                    // Wayland compositors (GNOME/KWin) receive a new text-input
+                    // enable request, even if a physical keyboard is connected.
+                    let hint = SDL_HINT_ENABLE_SCREEN_KEYBOARD;
+                    let previous = NonNull::new(SDL_GetHint(hint).cast_mut())
+                        .map(|value| CStr::from_ptr(value.as_ptr()).to_owned());
+                    if SDL_TextInputActive(self.raw.as_ptr()) {
+                        check(SDL_StopTextInput(self.raw.as_ptr()))?;
+                    }
+                    let _ = SDL_SetHint(hint, c"1".as_ptr());
+                    let started = check(SDL_StartTextInput(self.raw.as_ptr()));
+                    if let Some(previous) = previous {
+                        let _ = SDL_SetHint(hint, previous.as_ptr());
+                    } else {
+                        let _ = SDL_ResetHint(hint);
+                    }
+                    started
                 }
                 WindowCommand::ClearComposition => {
                     SDL_ClearComposition(self.raw.as_ptr());
@@ -1744,6 +1765,12 @@ impl Window {
 
     pub fn sync_text_input(&self, enabled: bool) {
         let _ = self.run_command(WindowCommand::SyncInput(enabled));
+    }
+
+    /// Retry SDL text-input activation with an explicit virtual-keyboard
+    /// request, without keeping a global hint enabled for toolbar fields.
+    pub fn request_screen_keyboard(&self) -> Result<(), String> {
+        self.run_command(WindowCommand::RequestScreenKeyboard)
     }
 
     pub fn clear_composition(&self) {
