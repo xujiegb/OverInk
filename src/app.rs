@@ -949,6 +949,23 @@ impl App {
         }
         self.touch_motion(key, point);
     }
+    // Release state is global to the physical pen, but proximity remains
+    // local to the canvas. This helper is safe to call on all parked pages:
+    // unlike track_pen, it does not mark an unrelated page as pen-proximate
+    // or cancel the page's ongoing finger gestures.
+    fn release_pen(&mut self, id: u32, definitive: bool) {
+        let had_contact = self
+            .input
+            .contact
+            .is_some_and(|contact| contact.source == Source::Pen(id));
+        self.end(Source::Pen(id));
+        if (definitive || had_contact)
+            && let Some(pen) = self.input.pens.get_mut(&id)
+        {
+            pen.finish();
+        }
+    }
+
     // Device proximity is independent of the current tool or modal picker.
     fn track_pen(&mut self, event: &SDL_Event) {
         let ty = event_type(event);
@@ -985,16 +1002,7 @@ impl App {
             _ => false,
         };
         if lifted {
-            let had_contact = self
-                .input
-                .contact
-                .is_some_and(|contact| contact.source == Source::Pen(id));
-            self.end(Source::Pen(id));
-            if (had_contact || ty == SDL_EVENT_PEN_UP)
-                && let Some(pen) = self.input.pens.get_mut(&id)
-            {
-                pen.finish();
-            }
+            self.release_pen(id, ty == SDL_EVENT_PEN_UP);
         }
         if self.input.pen_proximity.insert(id) {
             self.discard_touches();
@@ -1789,18 +1797,20 @@ fn run_inner(options: Options) -> Result<(), String> {
                     app.for_each_page(|page| page.input.text.refocus());
                 }
 
-                // A pen can lift over the toolbar, another canvas, or outside
-                // the window that owns the active stroke. Apply hover release
-                // to every page before dispatching its coordinate packet.
-                if matches!(ty, SDL_EVENT_PEN_MOTION | SDL_EVENT_PEN_AXIS)
-                    && match ty {
-                        SDL_EVENT_PEN_MOTION => pen_motion_event(&event)
-                            .is_some_and(|pen| pen.pen_state & SDL_PEN_INPUT_DOWN == 0),
-                        _ => pen_axis_event(&event)
-                            .is_some_and(|pen| pen.pen_state & SDL_PEN_INPUT_DOWN == 0),
-                    }
-                {
-                    app.for_each_page(|page| page.track_pen(&event));
+                // The owning canvas can differ from the SDL hover packet's
+                // windowID. End its pen contact on every parked page, but do
+                // not mark the other pages as pen-proximate.
+                let hover_pen = match ty {
+                    SDL_EVENT_PEN_MOTION => pen_motion_event(&event)
+                        .filter(|pen| pen.pen_state & SDL_PEN_INPUT_DOWN == 0)
+                        .map(|pen| pen.which.0),
+                    SDL_EVENT_PEN_AXIS => pen_axis_event(&event)
+                        .filter(|pen| pen.pen_state & SDL_PEN_INPUT_DOWN == 0)
+                        .map(|pen| pen.which.0),
+                    _ => None,
+                };
+                if let Some(id) = hover_pen {
+                    app.for_each_page(|page| page.release_pen(id, false));
                 }
 
                 if screenshot_owns_input {
@@ -2023,10 +2033,13 @@ fn run_inner(options: Options) -> Result<(), String> {
                         break;
                     }
                 }
-                if ty == SDL_EVENT_PEN_UP {
+                if ty == SDL_EVENT_PEN_UP
+                    && let Some(pen) = pen_touch_event(&event)
+                {
                     // The normal target already consumed its release endpoint.
-                    // Commit any orphaned contact on a different page/window.
-                    app.for_each_page(|page| page.track_pen(&event));
+                    // Commit orphaned contacts without changing other pages'
+                    // pen proximity or invalidating their touch gestures.
+                    app.for_each_page(|page| page.release_pen(pen.which.0, true));
                 }
             }
             #[cfg(target_os = "macos")]
