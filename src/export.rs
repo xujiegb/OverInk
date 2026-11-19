@@ -68,8 +68,14 @@ fn svg_text(out: &mut String, doc: &Document, fonts: &TextFonts) -> Result<(), S
         };
         let mut layout = None;
         let frame = ctx.run_ui(input, |ui| {
-            layout =
-                Some(fonts.layout(ui, &item.text, item.font_size, Color32::WHITE, rect.width()));
+            layout = Some(fonts.layout_preferred(
+                ui,
+                &item.text,
+                item.font_size,
+                Color32::WHITE,
+                rect.width(),
+                item.font.as_deref(),
+            ));
         });
         // egui can replace the glyph atlas between passes and reuse its UVs.
         if frame.textures_delta.set.iter().any(|(id, deltas)| {
