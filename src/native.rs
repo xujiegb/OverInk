@@ -42,17 +42,15 @@ pub fn set_controller_region(
         return Err("Invalid Win32 region dimensions".into());
     }
     let hole = hole.and_then(|hole| hole.clipped(size));
+    let hwnd_handle = window
+        .win32_hwnd()
+        .ok_or("No Win32 window handle")?
+        .as_non_null();
     // SAFETY: The window remains live, and GDI region handles are checked
     // before use. This function destroys regions on failure and transfers
     // ownership to Windows only after SetWindowRgn succeeds.
     unsafe {
-        let hwnd = HWND(
-            window
-                .win32_hwnd()
-                .ok_or("No Win32 window handle")?
-                .as_non_null()
-                .as_ptr(),
-        );
+        let hwnd = HWND(hwnd_handle.as_ptr());
         let region = if let Some(hole) = hole {
             let full = CreateRectRgn(0, 0, size[0], size[1]);
             let cut = CreateRectRgn(hole.x, hole.y, hole.x + hole.w, hole.y + hole.h);
@@ -160,13 +158,13 @@ impl Passthrough {
             runtime::{AnyObject, Bool},
         };
 
+        let identity = window
+            .cocoa_window()
+            .ok_or("No Cocoa window handle")?
+            .as_non_null();
         // SAFETY: SDL owns the live NSWindow. The Cocoa selectors and Bool
         // return/argument types match the NSWindow methods being called.
         unsafe {
-            let identity = window
-                .cocoa_window()
-                .ok_or("No Cocoa window handle")?
-                .as_non_null();
             let cocoa = identity.as_ptr().cast::<AnyObject>();
             if self.applied != Some((window.id, pass)) {
                 // SDL's Cocoa listener can reset ignoresMouseEvents when it
@@ -180,9 +178,9 @@ impl Passthrough {
             if ignoring.as_bool() != pass {
                 let _: () = msg_send![cocoa, setIgnoresMouseEvents: Bool::new(pass)];
             }
-            self.applied = Some((window.id, pass));
-            Ok(())
         }
+        self.applied = Some((window.id, pass));
+        Ok(())
     }
 }
 #[cfg(not(any(
