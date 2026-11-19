@@ -288,15 +288,10 @@ impl TextFonts {
     }
 
     fn save_order(&self, path: &Path) -> Result<(), String> {
-        let file = order_file(path);
-        let temporary = file.with_extension(format!("{}.tmp", std::process::id()));
         let data = serde_json::to_vec_pretty(&self.order).map_err(|error| error.to_string())?;
-        fs::write(&temporary, data)
-            .and_then(|()| fs::rename(&temporary, &file))
-            .inspect_err(|_| {
-                let _ = fs::remove_file(&temporary);
-            })
-            .map_err(|error| error.to_string())
+        // Windows cannot atomically rename over an existing destination with
+        // std::fs::rename. The order list is small, so overwrite it directly.
+        fs::write(order_file(path), data).map_err(|error| error.to_string())
     }
 
     pub fn install(&mut self, source: &Path, path: &Path) -> Result<(), String> {
