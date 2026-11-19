@@ -102,6 +102,7 @@ enum SdlNativeAction<'a> {
     DestroyTexture(NonNull<SDL_Texture>),
     DestroyRenderer(NonNull<SDL_Renderer>),
     DestroyWindow(SDL_WindowID, NonNull<SDL_Window>),
+    SaveBmp(&'a OwnedSurface, &'a CStr),
     SystemTheme,
     IndirectTouch(SDL_TouchID),
     CaptureMouse(bool),
@@ -265,6 +266,10 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
                 }
                 SdlNativeResult::Done
             }
+            SdlNativeAction::SaveBmp(surface, name) => SdlNativeResult::Success(SDL_SaveBMP(
+                surface.as_non_null().as_ptr(),
+                name.as_ptr(),
+            )),
             SdlNativeAction::SystemTheme => SdlNativeResult::Theme(SDL_GetSystemTheme()),
             SdlNativeAction::IndirectTouch(device) => SdlNativeResult::Success(matches!(
                 SDL_GetTouchDeviceType(device),
@@ -2537,9 +2542,9 @@ impl Renderer {
     pub fn save_bmp(&self, path: &std::path::Path) -> Result<(), String> {
         let (surface, _) = OwnedSurface::acquire(SurfaceSource::Readback(self))?;
         let name = cstring(&path.to_string_lossy());
-        // SAFETY: The surface and NUL-terminated path remain live during
-        // SDL's synchronous BMP write. The owned surface is then dropped.
-        unsafe { check(SDL_SaveBMP(surface.as_non_null().as_ptr(), name.as_ptr())) }
+        // The owned surface and filename remain borrowed for the duration of
+        // SDL's synchronous save. The native dispatcher keeps the FFI private.
+        check(sdl_native(SdlNativeAction::SaveBmp(&surface, &name)).succeeded())
     }
 
     pub fn hdr(&self) -> (bool, f32) {

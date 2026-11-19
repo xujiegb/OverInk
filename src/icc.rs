@@ -110,13 +110,18 @@ impl ColorManager {
         let Some(transform) = &self.transform else {
             return;
         };
+        // Reuse the staging allocation between batches instead of allocating
+        // and freeing a new RGB vector for each 4096-pixel chunk.
+        let mut rgb = Vec::new();
         for bytes in rgba.chunks_mut(4096 * 4) {
-            let mut rgb: Vec<[f32; 3]> = bytes
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|v| [v[0] as f32 / 255., v[1] as f32 / 255., v[2] as f32 / 255.])
-                .collect();
+            rgb.clear();
+            rgb.extend(
+                bytes
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|v| [v[0] as f32 / 255., v[1] as f32 / 255., v[2] as f32 / 255.]),
+            );
             transform.map_rgb_batch(&mut rgb);
             for (pixel, rgb) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(rgb) {
                 for i in 0..3 {
@@ -141,4 +146,32 @@ pub fn display_sample_to_srgb(window: &Window, rgb: [f32; 3]) -> crate::color::I
     };
     result.rgb = transform.map_rgb(rgb).map(|v| v.clamp(0., 1.));
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn map_rgba8_preserves_alpha_across_chunks() -> Result<(), String> {
+        let profile = moxcms::ColorProfile::new_srgb()
+            .encode()
+            .map_err(|error| error.to_string())?;
+        let transform = Transform::from_srgb_to_display(&profile)
+            .map_err(|error| format!("{error:?}"))?;
+        let manager = ColorManager {
+            transform: Some(transform),
+            status: SYSTEM_SRGB,
+            revision: 0,
+        };
+        let mut rgba = vec![0u8; 4097 * 4];
+        for (index, pixel) in rgba.chunks_exact_mut(4).enumerate() {
+            pixel.copy_from_slice(&[40, 100, 180, (index % 251) as u8]);
+        }
+        manager.map_rgba8(&mut rgba);
+        for (index, pixel) in rgba.chunks_exact(4).enumerate() {
+            assert_eq!(pixel[3], (index % 251) as u8);
+        }
+        Ok(())
+    }
 }

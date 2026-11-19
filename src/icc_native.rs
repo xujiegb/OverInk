@@ -19,8 +19,10 @@ fn open_profile(bytes: &[u8]) -> Option<ColorProfile> {
 
 fn options() -> TransformOptions {
     TransformOptions {
-        // Keep the old Little CMS relative-colorimetric rendering intent.
-        // moxcms does not expose its black-point compensation flag.
+        // Preserve the Little CMS relative-colorimetric rendering intent.
+        // moxcms 0.9.2 automatically applies BPC scaling to some LUT paths
+        // when both black points are detected. It has no public BPC toggle,
+        // and matrix/shaper transforms are not guaranteed to receive BPC.
         rendering_intent: RenderingIntent::RelativeColorimetric,
         ..TransformOptions::default()
     }
