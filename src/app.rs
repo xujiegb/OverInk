@@ -1555,11 +1555,10 @@ fn run_inner(options: Options) -> Result<(), String> {
         canvas::Canvas::new(window, app.displays.get(app.display), &options)
     })?];
     let toolbar = with_autorelease_pool(|| {
-        Window::new(
+        Window::toolbar(
             "OverInk",
             crate::toolbar::WIDTH as i32,
             crate::toolbar::HEIGHT as i32,
-            false,
         )
     })?;
     with_autorelease_pool(|| toolbar.setup_toolbar());
@@ -1601,6 +1600,7 @@ fn run_inner(options: Options) -> Result<(), String> {
     let mut tooltips = crate::toolbar::Tooltips::default();
     let mut toolbar_hidden = false;
     let mut toolbar_expanded = false;
+    let mut toolbar_shape_size = None;
     let mut running = true;
     let mut frame = 0;
     let mut last_color = Instant::now();
@@ -2707,8 +2707,8 @@ fn run_inner(options: Options) -> Result<(), String> {
                 if !toolbar_ime_active {
                     output.platform_output.ime = None;
                 }
-                let rail = crate::toolbar::colors(theme == egui::Theme::Dark).rail;
-                toolbar_render.begin(&toolbar, rail.to_array().map(|c| f32::from(c) / 255.))?;
+                toolbar.update_rounded_shape(&mut toolbar_shape_size)?;
+                toolbar_render.begin(&toolbar, [0.; 4])?;
                 gui.paint(&toolbar_render, &toolbar, &toolbar_color, output)?;
                 toolbar_render.present()?;
                 tooltips.update(&toolbar, &gui, app.language, &toolbar_color);
