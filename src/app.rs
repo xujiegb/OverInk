@@ -976,10 +976,12 @@ impl App {
         // even if a previous PEN_UP packet was lost or routed elsewhere.
         let lifted = match ty {
             SDL_EVENT_PEN_UP => true,
-            SDL_EVENT_PEN_MOTION => pen_motion_event(event)
-                .is_some_and(|pen| pen.pen_state & SDL_PEN_INPUT_DOWN == 0),
-            SDL_EVENT_PEN_AXIS => pen_axis_event(event)
-                .is_some_and(|pen| pen.pen_state & SDL_PEN_INPUT_DOWN == 0),
+            SDL_EVENT_PEN_MOTION => {
+                pen_motion_event(event).is_some_and(|pen| pen.pen_state & SDL_PEN_INPUT_DOWN == 0)
+            }
+            SDL_EVENT_PEN_AXIS => {
+                pen_axis_event(event).is_some_and(|pen| pen.pen_state & SDL_PEN_INPUT_DOWN == 0)
+            }
             _ => false,
         };
         if lifted {
