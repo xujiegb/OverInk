@@ -502,13 +502,15 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
                 }
             }
             SdlNativeAction::WindowPointer(window, property) => {
-                let raw = property.key().and_then(|key| {
+                let raw = if let Some(key) = property.key() {
                     NonNull::new(SDL_GetPointerProperty(
                         SDL_GetWindowProperties(window.raw.as_ptr()),
                         key.as_ptr(),
                         ptr::null_mut(),
                     ))
-                });
+                } else {
+                    None
+                };
                 SdlNativeResult::NativePointer(raw)
             }
             SdlNativeAction::WindowNumber(window, query) => {
