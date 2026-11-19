@@ -272,14 +272,14 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
             SdlNativeAction::SaveBmp(surface, name) => {
                 SdlNativeResult::Success(SDL_SaveBMP(surface.as_non_null().as_ptr(), name.as_ptr()))
             }
-            SdlNativeAction::InkTextureUpload(texture, pixels, pitch) => SdlNativeResult::Success(
-                SDL_UpdateTexture(
+            SdlNativeAction::InkTextureUpload(texture, pixels, pitch) => {
+                SdlNativeResult::Success(SDL_UpdateTexture(
                     texture.as_non_null().as_ptr(),
                     ptr::null(),
                     pixels.as_ptr().cast(),
                     pitch,
-                ),
-            ),
+                ))
+            }
             SdlNativeAction::TextureModulation(texture, rgb, alpha) => {
                 let raw = texture.as_non_null().as_ptr();
                 SdlNativeResult::Success(
@@ -2213,7 +2213,10 @@ impl GuiTexture {
         // SDL receives only the checked borrowed region and the exact RGBA
         // payload through the existing native operation dispatcher.
         check(
-            sdl_native(SdlNativeAction::GuiTextureUpload(&self.raw, rect, rgba, pitch)).succeeded(),
+            sdl_native(SdlNativeAction::GuiTextureUpload(
+                &self.raw, rect, rgba, pitch,
+            ))
+            .succeeded(),
         )
     }
 
