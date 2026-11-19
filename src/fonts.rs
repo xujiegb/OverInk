@@ -26,6 +26,13 @@ pub struct InstalledFont {
     pub name: String,
     path: PathBuf,
     index: u32,
+    regular: bool,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct FontSelection {
+    name: String,
+    index: u32,
 }
 
 /// Enumerate installed typefaces only when the font picker is opened.
@@ -98,7 +105,8 @@ fn scan_installed_fonts() -> Vec<InstalledFont> {
                 dirs.push(path);
                 continue;
             }
-            if !file_type.is_file()
+            if !(file_type.is_file()
+                || (file_type.is_symlink() && fs::metadata(&path).is_ok_and(|m| m.is_file())))
                 || !path.extension().and_then(|v| v.to_str()).is_some_and(|ext| {
                     ["ttf", "otf", "ttc", "otc"].iter().any(|s| ext.eq_ignore_ascii_case(s))
                 })
@@ -125,16 +133,29 @@ fn scan_installed_fonts() -> Vec<InstalledFont> {
                     continue;
                 };
                 if !name.trim().is_empty() {
+                    let regular = face
+                        .localized_strings(StringId::TYPOGRAPHIC_SUBFAMILY_NAME)
+                        .english_or_first()
+                        .or_else(|| {
+                            face.localized_strings(StringId::SUBFAMILY_NAME).english_or_first()
+                        })
+                        .is_some_and(|name| name.chars().collect::<String>().eq_ignore_ascii_case("Regular"));
                     found.push(InstalledFont {
                         name,
                         path: path.clone(),
                         index,
+                        regular,
                     });
                 }
             }
         }
     }
-    found.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    found.sort_by(|a, b| {
+        a.name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            .then_with(|| b.regular.cmp(&a.regular))
+    });
     found.dedup_by(|a, b| a.name.eq_ignore_ascii_case(&b.name));
     found
 }
@@ -298,12 +319,16 @@ impl CustomFont {
 
 impl TextFonts {
     pub fn load(path: &Path) -> Self {
-        let index = fs::read_to_string(path.with_extension("index"))
+        let selection: Option<FontSelection> = fs::read_to_string(path.with_extension("json"))
             .ok()
-            .and_then(|value| value.trim().parse().ok())
-            .unwrap_or(0);
+            .and_then(|value| serde_json::from_str(&value).ok());
+        let index = selection.as_ref().map_or(0, |selection| selection.index);
+        let mut custom = CustomFont::read_index(path, index).ok();
+        if let (Some(custom), Some(selection)) = (&mut custom, selection) {
+            custom.name = selection.name;
+        }
         Self {
-            custom: CustomFont::read_index(path, index).ok(),
+            custom,
             revision: 0,
         }
     }
@@ -327,9 +352,16 @@ impl TextFonts {
                 let _ = fs::remove_file(&temporary);
             })
             .map_err(|error| error.to_string())?;
-        // Eg. PingFang.ttc contains several faces; keep the chosen index.
-        fs::write(path.with_extension("index"), selected.index.to_string())
-            .map_err(|error| error.to_string())?;
+        // Keep the TTC/OTC face index and family name across restarts.
+        let selection = FontSelection {
+            name: selected.name.clone(),
+            index: selected.index,
+        };
+        fs::write(
+            path.with_extension("json"),
+            serde_json::to_vec(&selection).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
         self.custom = Some(font);
         self.revision = self.revision.wrapping_add(1);
         Ok(())
@@ -341,7 +373,7 @@ impl TextFonts {
             Err(error) if error.kind() == io::ErrorKind::NotFound => (),
             Err(error) => return Err(error.to_string()),
         }
-        match fs::remove_file(path.with_extension("index")) {
+        match fs::remove_file(path.with_extension("json")) {
             Ok(()) => (),
             Err(error) if error.kind() == io::ErrorKind::NotFound => (),
             Err(error) => return Err(error.to_string()),
