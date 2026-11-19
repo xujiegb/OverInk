@@ -983,17 +983,39 @@ impl App {
                     action = clipboard_menu(ui, self.language, !item.text.is_empty(), false, false);
                 });
                 if let Some(action) = action {
-                    // A selected box has no live text cursor yet. Open the
-                    // editor first and apply the action at the end of its text.
-                    self.input.text.edit(Some(index), (**item).clone());
-                    if let Some(draft) = &mut self.input.text.draft {
-                        let cursor = draft.cursor;
-                        if let Some(next) = apply_clipboard(
-                            ui, &mut draft.item.text, cursor, action,
-                        ) {
-                            draft.cursor = Some(next);
+                    match action {
+                        ClipboardAction::Copy => {
+                            // A selected box, unlike a text caret, represents
+                            // the entire committed annotation.
+                            ui.ctx().copy_text(item.text.clone());
                         }
-                        draft.committed.clone_from(&draft.item.text);
+                        ClipboardAction::Cut => {
+                            ui.ctx().copy_text(item.text.clone());
+                            self.history.remove_text_box(index);
+                            self.input.text.selected = None;
+                        }
+                        ClipboardAction::Paste => {
+                            if let Some(value) = crate::sdl::clipboard_text()
+                                && self.history.text_boxes().len() < MAX_TEXT_BOXES
+                            {
+                                // Paste text only. Never copy source markup,
+                                // original font size or box styling.
+                                let origin = rect.min
+                                    + vec2(18., 18.) * self.input.canvas_units;
+                                let mut pasted = TextBox::new(
+                                    origin,
+                                    screen,
+                                    self.color,
+                                    self.input.canvas_units,
+                                );
+                                pasted.text = value.chars().take(MAX_TEXT_CHARS).collect();
+                                if pasted.valid() {
+                                    self.input.text.selected =
+                                        self.history.set_text_box(None, pasted);
+                                }
+                            }
+                        }
+                        ClipboardAction::SelectAll => (),
                     }
                     ui.ctx().request_repaint();
                 }
