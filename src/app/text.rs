@@ -16,13 +16,86 @@ use egui::{
     text::{CCursor, CCursorRange},
     vec2,
 };
-use std::time::{Duration, Instant};
+use std::{ops::Range, time::{Duration, Instant}};
 
 mod color_wheel;
 use color_wheel::ColorWheel;
 
 const MENU_BUTTON: Vec2 = vec2(toolbar::RAIL_BUTTON_SIZE.x, 35.);
 const MENU_GAP: f32 = 4.;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TextContextAction {
+    SelectAll,
+    Copy,
+    Paste,
+    Cut,
+}
+
+/// Keep all offsets in Unicode scalar values, matching egui's text cursors.
+fn text_action_range(text: &str, selection: Option<CCursorRange>, whole_when_empty: bool) -> Range<usize> {
+    let length = text.chars().count();
+    let selected = selection
+        .map(|cursor| cursor.as_sorted_char_range())
+        .unwrap_or(length..length);
+    let range = selected.start.min(length)..selected.end.min(length);
+    if whole_when_empty && range.is_empty() {
+        0..length
+    } else {
+        range
+    }
+}
+
+fn apply_text_context(
+    draft: &mut Draft,
+    action: TextContextAction,
+    clipboard: Option<&str>,
+) -> Option<String> {
+    // Only ever transform committed text; an in-progress IME preedit is not
+    // part of the document and must never be copied or deleted.
+    let length = draft.committed.chars().count();
+    match action {
+        TextContextAction::SelectAll => {
+            draft.cursor = Some(CCursorRange::two(CCursor::new(0), CCursor::new(length)));
+            None
+        }
+        TextContextAction::Copy | TextContextAction::Cut => {
+            if length == 0 {
+                return None;
+            }
+            let range = text_action_range(&draft.committed, draft.cursor, true);
+            let copied: String = draft.committed
+                .chars()
+                .skip(range.start)
+                .take(range.end - range.start)
+                .collect();
+            if action == TextContextAction::Cut {
+                draft.item.text.clone_from(&draft.committed);
+                draft.item.text.delete_char_range(range.clone());
+                draft.committed.clone_from(&draft.item.text);
+                draft.cursor = Some(CCursorRange::one(CCursor::new(range.start)));
+            }
+            Some(copied)
+        }
+        TextContextAction::Paste => {
+            let Some(clipboard) = clipboard else {
+                return None;
+            };
+            let range = text_action_range(&draft.committed, draft.cursor, false);
+            let remaining = MAX_TEXT_CHARS.saturating_sub(length - (range.end - range.start));
+            let pasted: String = clipboard.chars().take(remaining).collect();
+            if pasted.is_empty() && range.is_empty() {
+                return None;
+            }
+            draft.item.text.clone_from(&draft.committed);
+            draft.item.text.delete_char_range(range.clone());
+            let count = draft.item.text.insert_text(&pasted, range.start);
+            draft.committed.clone_from(&draft.item.text);
+            draft.cursor = Some(CCursorRange::one(CCursor::new(range.start + count)));
+            None
+        }
+    }
+}
 const MENU_PADDING: f32 = 5.;
 const PALETTE_SIZE: Vec2 = vec2(240., 272.);
 const MENU_SIZE: Vec2 = vec2(
@@ -306,7 +379,12 @@ impl App {
             }
             changed |= self.text_pointer(event, size);
             let menu = self.text_menus(canvas);
-            let forward = self.input.text.menu_pointer.wants_event(event, menu);
+            let forward = (self.input.text.editing()
+                && matches!(
+                    event,
+                    Event::PointerButton { button: PointerButton::Secondary, .. }
+                ))
+                || self.input.text.menu_pointer.wants_event(event, menu);
             changed |= forward;
             forward
         });
@@ -347,6 +425,33 @@ impl App {
                     moved: false,
                 });
                 true
+            }
+            Event::PointerButton {
+                pos,
+                button: PointerButton::Secondary,
+                pressed: true,
+                ..
+            } => {
+                if state.press.is_some()
+                    || !canvas.contains(pos)
+                    || self
+                        .input
+                        .protected
+                        .is_some_and(|hole| hole.contains(pos.x, pos.y))
+                    || self.text_menus(canvas).is_some_and(|menu| menu.contains(pos))
+                {
+                    return false;
+                }
+                if let Some((index, _)) = text_hit(
+                    &self.history,
+                    state.selected,
+                    pos,
+                    self.input.canvas_units,
+                ) && let Some(item) = self.history.text_boxes().get(index) {
+                    state.edit(Some(index), (**item).clone());
+                    return true;
+                }
+                false
             }
             Event::PointerMoved(pos) if state.press.is_some() => {
                 self.move_text_pointer(pos, canvas);
@@ -992,12 +1097,66 @@ impl App {
                 draft.cursor = Some(CCursorRange::one(preedit.sorted_cursors()[0]));
             }
         }
-        if finish
+
+        let mut context_action = None;
+        let has_text = !draft.committed.is_empty();
+        let tr = self.language;
+        // Use TextEdit's own secondary-click popup so selecting text and
+        // right-clicking it does not lose the existing caret/selection.
+        output.response.context_menu(|menu| {
+            if has_text {
+                for (action, label) in [
+                    (TextContextAction::SelectAll, tr.text("Select all", "全选", "全選")),
+                    (TextContextAction::Copy, tr.text("Copy", "拷贝", "複製")),
+                ] {
+                    if menu.add_enabled(!composing, egui::Button::new(label)).clicked() {
+                        context_action = Some(action);
+                        menu.close();
+                    }
+                }
+            }
+            let clipboard_available = crate::sdl::clipboard_text().is_some();
+            if menu
+                .add_enabled(
+                    !composing && clipboard_available,
+                    egui::Button::new(tr.text("Paste", "粘贴", "貼上")),
+                )
+                .clicked()
+            {
+                context_action = Some(TextContextAction::Paste);
+                menu.close();
+            }
+            if has_text
+                && menu
+                    .add_enabled(!composing, egui::Button::new(tr.text("Cut", "剪切", "剪下")))
+                    .clicked()
+            {
+                context_action = Some(TextContextAction::Cut);
+                menu.close();
+            }
+        });
+        let context_open = output.response.context_menu_opened();
+        if let Some(action) = context_action {
+            let clipboard = (action == TextContextAction::Paste)
+                .then(crate::sdl::clipboard_text)
+                .flatten();
+            if let Some(copied) = apply_text_context(draft, action, clipboard.as_deref()) {
+                ui.ctx().copy_text(copied);
+            }
+            let mut state = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
+            state.cursor.set_char_range(draft.cursor);
+            egui::TextEdit::store_state(ui.ctx(), id, state);
+            ui.memory_mut(|memory| memory.request_focus(id));
+            ui.ctx().request_repaint();
+        }
+        if (finish && !context_open && context_action.is_none())
             || (focused
                 && !started
                 && !composing
                 && !wheel_open
                 && !menu_clicked
+                && !context_open
+                && context_action.is_none()
                 && output.response.lost_focus())
         {
             self.input.text.finish(&mut self.history);
