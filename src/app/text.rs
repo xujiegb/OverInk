@@ -722,7 +722,7 @@ impl App {
             let selection = if cursor_range.is_empty() && action != EditAction::Paste {
                 0..length
             } else {
-                cursor_range
+                cursor_range.clone()
             };
             match action {
                 EditAction::SelectAll => {
