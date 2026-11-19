@@ -3955,7 +3955,8 @@ mod touch_tests {
         assert!(trail[1].point.x < 100. && trail[2].point.x > 300.);
     }
     #[test]
-    fn startup_uses_mouse_mode_and_space_restores_the_pen() -> Result<(), Box<dyn std::error::Error>> {
+    fn startup_uses_mouse_mode_and_space_restores_the_pen()
+    -> Result<(), Box<dyn std::error::Error>> {
         let state = tempfile::tempdir()?;
         let mut app = App::new(
             false,
@@ -4111,6 +4112,7 @@ mod touch_tests {
         ));
         let displays = vec![screen(10, 0, 60.0), screen(20, 1920, 120.0)];
         let mut a = App::new(true, 0, displays.clone(), &state, Preferences::default());
+        a.use_tool(Tool::Pen);
         add_ink(&mut a, &[120.]);
         a.select_page(20);
         add_ink(&mut a, &[440.]);
@@ -4134,6 +4136,7 @@ mod touch_tests {
             Preferences::load(&state.join("ui.json")),
         );
         assert!(private.history.strokes().is_empty());
+        private.use_tool(Tool::Pen);
         add_ink(&mut private, &[640.]);
         private.finish_session()?;
         assert!(!private.save_path.exists());
@@ -4158,6 +4161,7 @@ mod touch_tests {
             },
         );
         assert!(!state.exists());
+        app.use_tool(Tool::Pen);
         add_ink(&mut app, &[20., 40.]);
         app.export();
         let svg = std::fs::read_to_string(Path::new(&app.path).with_extension("svg"))?;
