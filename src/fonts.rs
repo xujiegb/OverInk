@@ -238,10 +238,6 @@ impl TextFonts {
         result
     }
 
-    pub fn name(&self) -> Option<&str> {
-        self.custom.first().map(|font| font.name.as_str())
-    }
-
     pub fn entries(&self) -> impl Iterator<Item = (&str, &str, bool)> {
         self.order.iter().filter_map(|id| {
             if FALLBACK.contains(&id.as_str()) {
