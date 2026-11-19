@@ -269,10 +269,7 @@ mod hex_tests {
         ] {
             let color = parse_hex(text, Space::Srgb)?;
             assert_eq!(color.srgb8(), expected);
-            assert_eq!(
-                parse_hex(&color.css(), Space::Srgb)?.srgb8(),
-                expected
-            );
+            assert_eq!(parse_hex(&color.css(), Space::Srgb)?.srgb8(), expected);
             assert_eq!(color.space, Space::Srgb);
         }
         Ok(())
