@@ -211,9 +211,7 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
                 SdlNativeResult::ScreenshotTimestamp(stem)
             }
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-            SdlNativeAction::RegisterUserEvent => {
-                SdlNativeResult::EventType(SDL_RegisterEvents(1))
-            }
+            SdlNativeAction::RegisterUserEvent => SdlNativeResult::EventType(SDL_RegisterEvents(1)),
             SdlNativeAction::Shutdown => {
                 SDL_Quit();
                 SdlNativeResult::Done
