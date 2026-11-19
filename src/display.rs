@@ -12,7 +12,7 @@ use std::{
     path::Path,
     sync::atomic::{AtomicU64, Ordering},
 };
-// Native XRandR FFI is a crate-level sibling, outside this safe module's lint scope.
+// Query XRandR over a safe pure-Rust X11 protocol connection.
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use crate::display_x11 as x11;
 
@@ -26,7 +26,7 @@ pub struct Display {
 }
 pub struct Topology {
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    randr: Option<&'static x11::Randr>,
+    randr: Option<x11::Randr>,
 }
 impl Topology {
     pub fn new(_video: &str) -> Self {
@@ -41,7 +41,7 @@ impl Topology {
         let result = if let Some(areas) = self
             .randr
             .as_ref()
-            .and_then(|api| api.active_areas(_window))
+            .and_then(|api| api.active_areas())
         {
             result
                 .into_iter()
