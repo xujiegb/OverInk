@@ -34,12 +34,6 @@ static WAYLAND_SCALE_TO_DISPLAY_FORCED: std::sync::atomic::AtomicBool =
 unsafe extern "C" {
     #[link_name = "SDL_IsMainThread"]
     safe fn native_is_main_thread() -> bool;
-    // SDL only writes the caller's borrowed, initialized rectangle. It
-    // neither retains the pointer nor transfers allocation ownership.
-    #[link_name = "SDL_GetDisplayBounds"]
-    safe fn native_display_bounds(id: SDL_DisplayID, bounds: &mut SDL_Rect) -> bool;
-    #[link_name = "SDL_GetDisplayUsableBounds"]
-    safe fn native_display_usable_bounds(id: SDL_DisplayID, bounds: &mut SDL_Rect) -> bool;
     // The mouse getters synchronously copy optional float coordinates. Use
     // real exclusive Rust borrows rather than arbitrary nullable pointers.
     #[cfg(not(target_os = "macos"))]
@@ -389,26 +383,65 @@ pub fn wayland_scale_to_display_forced() -> bool {
     WAYLAND_SCALE_TO_DISPLAY_FORCED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Only these two display-bound queries cross into SDL.
+/// Display IDs come from SDL enumeration. Only these known queries can
+/// cross into the native display backend; no foreign buffers escape.
 enum DisplayBoundsKind {
     Full,
     Usable,
 }
+enum NativeDisplayQuery {
+    Bounds(u32, DisplayBoundsKind),
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    DesktopMode(u32),
+}
+enum NativeDisplayResult {
+    Bounds([i32; 4]),
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    DesktopMode([i32; 2], f32),
+}
 
-fn query_display_bounds(id: u32, kind: DisplayBoundsKind) -> Result<[i32; 4], String> {
-    let mut bounds = SDL_Rect::default();
-    // SDL's video queries run on the main thread. Each native function
-    // copies a rectangle into the exclusive, initialized Rust borrow.
+fn native_display_query(query: NativeDisplayQuery) -> Result<NativeDisplayResult, String> {
     if !native_is_main_thread() {
         return Err("SDL display query requires the main thread".into());
     }
-    let display = SDL_DisplayID(id);
-    let ok = match kind {
-        DisplayBoundsKind::Full => native_display_bounds(display, &mut bounds),
-        DisplayBoundsKind::Usable => native_display_usable_bounds(display, &mut bounds),
-    };
-    check(ok)?;
-    Ok([bounds.x, bounds.y, bounds.w, bounds.h])
+    // SAFETY: The SDL video subsystem and display ID are checked by SDL.
+    // These queries only borrow initialized output rectangles or SDL-owned
+    // desktop-mode storage, and copy all scalar fields before returning.
+    unsafe {
+        match query {
+            NativeDisplayQuery::Bounds(id, kind) => {
+                let mut bounds = SDL_Rect::default();
+                let display = SDL_DisplayID(id);
+                check(match kind {
+                    DisplayBoundsKind::Full => SDL_GetDisplayBounds(display, &mut bounds),
+                    DisplayBoundsKind::Usable => {
+                        SDL_GetDisplayUsableBounds(display, &mut bounds)
+                    }
+                })?;
+                Ok(NativeDisplayResult::Bounds([
+                    bounds.x, bounds.y, bounds.w, bounds.h,
+                ]))
+            }
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            NativeDisplayQuery::DesktopMode(id) => {
+                let mode = SDL_GetDesktopDisplayMode(SDL_DisplayID(id))
+                    .as_ref()
+                    .ok_or_else(error)?;
+                Ok(NativeDisplayResult::DesktopMode(
+                    [mode.w, mode.h],
+                    mode.pixel_density,
+                ))
+            }
+        }
+    }
+}
+
+fn query_display_bounds(id: u32, kind: DisplayBoundsKind) -> Result<[i32; 4], String> {
+    match native_display_query(NativeDisplayQuery::Bounds(id, kind))? {
+        NativeDisplayResult::Bounds(bounds) => Ok(bounds),
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        NativeDisplayResult::DesktopMode(..) => Err("Unexpected SDL display query result".into()),
+    }
 }
 
 /// Return usable display bounds only when SDL provides them.
@@ -419,11 +452,9 @@ pub fn usable_display_bounds(id: u32) -> Option<[i32; 4]> {
 /// Read the native mode's logical dimensions and pixel density.
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub fn desktop_display_mode(id: u32) -> Option<([i32; 2], f32)> {
-    // SAFETY: SDL owns the returned desktop mode. Read its scalar fields
-    // immediately while the video subsystem is active.
-    unsafe {
-        let mode = SDL_GetDesktopDisplayMode(SDL_DisplayID(id)).as_ref()?;
-        Some(([mode.w, mode.h], mode.pixel_density))
+    match native_display_query(NativeDisplayQuery::DesktopMode(id)).ok()? {
+        NativeDisplayResult::DesktopMode(size, density) => Some((size, density)),
+        NativeDisplayResult::Bounds(_) => None,
     }
 }
 
