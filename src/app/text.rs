@@ -170,7 +170,13 @@ enum ClipboardAction {
     Cut,
 }
 
-fn clipboard_menu(ui: &mut Ui, tr: Language, has_text: bool) -> Option<ClipboardAction> {
+fn clipboard_menu(
+    ui: &mut Ui,
+    tr: Language,
+    has_text: bool,
+    editing: bool,
+    has_selection: bool,
+) -> Option<ClipboardAction> {
     let mut action = None;
     let entries = [
         (ClipboardAction::SelectAll, tr.text("Select all", "全选", "全選")),
@@ -179,11 +185,18 @@ fn clipboard_menu(ui: &mut Ui, tr: Language, has_text: bool) -> Option<Clipboard
         (ClipboardAction::Cut, tr.text("Cut", "剪切", "剪下")),
     ];
     for (item, label) in entries {
-        if !has_text && item != ClipboardAction::Paste {
+        if (!has_text && item != ClipboardAction::Paste)
+            || (!editing && item == ClipboardAction::SelectAll)
+        {
             continue;
         }
-        let enabled = item != ClipboardAction::Paste
-            || crate::sdl::clipboard_text().is_some_and(|value| !value.is_empty());
+        let enabled = match item {
+            ClipboardAction::Copy | ClipboardAction::Cut => !editing || has_selection,
+            ClipboardAction::Paste => {
+                crate::sdl::clipboard_text().is_some_and(|value| !value.is_empty())
+            }
+            ClipboardAction::SelectAll => true,
+        };
         if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
             action = Some(item);
             ui.close();
@@ -207,20 +220,14 @@ fn apply_clipboard(
             Some(CCursorRange::two(CCursor::new(length), CCursor::new(0)))
         }
         ClipboardAction::Copy | ClipboardAction::Cut => {
-            // With no selection, Copy and Cut act on the entire text buffer.
-            let copied = range.as_ref().map_or_else(
-                || text.to_owned(),
-                |selected| text.char_range(selected.clone()).to_owned(),
-            );
-            ui.ctx().copy_text(copied);
+            // Only an actual selection may be copied or cut while editing.
+            // A selected box uses the separate whole-box actions below.
+            let range = range?;
+            ui.ctx()
+                .copy_text(text.char_range(range.clone()).to_owned());
             if action == ClipboardAction::Cut {
-                let start = range.as_ref().map_or(0, |selected| selected.start.0);
-                if let Some(range) = range {
-                    text.delete_char_range(range);
-                } else {
-                    text.clear();
-                }
-                Some(CCursorRange::one(CCursor::new(start)))
+                text.delete_char_range(range.clone());
+                Some(CCursorRange::one(CCursor::new(range.start)))
             } else {
                 selected
             }
@@ -231,7 +238,9 @@ fn apply_clipboard(
                 let pos = selected.map_or(CCursor::new(length).index, |cursor| cursor.primary.index);
                 pos..pos
             });
-            let capacity = MAX_TEXT_CHARS.saturating_sub(length.saturating_sub(replacement.end.0 - replacement.start.0));
+            let capacity = MAX_TEXT_CHARS.saturating_sub(
+                length.saturating_sub(replacement.end.0 - replacement.start.0),
+            );
             let to_insert: String = value.chars().take(capacity).collect();
             text.delete_char_range(replacement.clone());
             text.insert_text(&to_insert, replacement.start);
@@ -240,6 +249,18 @@ fn apply_clipboard(
             )))
         }
     }
+}
+
+fn plain_text_box(
+    value: &str,
+    origin: Pos2,
+    screen: Rect,
+    color: InkColor,
+    units: f32,
+) -> Option<TextBox> {
+    let mut item = TextBox::new(origin, screen, color, units);
+    item.text = value.chars().take(MAX_TEXT_CHARS).collect();
+    item.valid().then_some(item)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -985,7 +1006,13 @@ impl App {
                 );
                 let mut action = None;
                 area.context_menu(|ui| {
-                    action = clipboard_menu(ui, self.language, !item.text.is_empty());
+                    action = clipboard_menu(
+                        ui,
+                        self.language,
+                        !item.text.is_empty(),
+                        false,
+                        false,
+                    );
                 });
                 if let Some(action) = action {
                     match action {
@@ -997,19 +1024,26 @@ impl App {
                             self.history.remove_text_box(index);
                             self.input.text.selected = None;
                         }
-                        ClipboardAction::SelectAll | ClipboardAction::Paste => {
-                            self.input.text.edit(Some(index), (**item).clone());
-                            if let Some(draft) = &mut self.input.text.draft {
-                                if action == ClipboardAction::SelectAll {
-                                    draft.cursor = Some(CCursorRange::select_all_str(&draft.item.text));
-                                } else if let Some(next) = apply_clipboard(
-                                    ui, &mut draft.item.text, draft.cursor, action,
+                        ClipboardAction::Paste => {
+                            if let Some(value) = crate::sdl::clipboard_text()
+                                && self.history.text_boxes().len() < MAX_TEXT_BOXES
+                            {
+                                // Independent plain text: don't copy source
+                                // font size, formatting or scroll position.
+                                let origin = rect.min + vec2(18., 18.) * self.input.canvas_units;
+                                if let Some(pasted) = plain_text_box(
+                                    &value,
+                                    origin,
+                                    screen,
+                                    self.color,
+                                    self.input.canvas_units,
                                 ) {
-                                    draft.cursor = Some(next);
-                                    draft.committed.clone_from(&draft.item.text);
+                                    self.input.text.selected =
+                                        self.history.set_text_box(None, pasted);
                                 }
                             }
                         }
+                        ClipboardAction::SelectAll => (),
                     }
                     ui.ctx().request_repaint();
                 }
@@ -1155,8 +1189,15 @@ impl App {
             .char_range()
             .or(output.cursor_range)
             .or(draft.cursor);
+        let has_selection = range.is_some_and(|cursor| !cursor.is_empty());
         output.response.context_menu(|ui| {
-            action = clipboard_menu(ui, self.language, !draft.item.text.is_empty());
+            action = clipboard_menu(
+                ui,
+                self.language,
+                !draft.item.text.is_empty(),
+                true,
+                has_selection,
+            );
         });
         if let Some(action) = action {
             if let Some(next) = apply_clipboard(ui, &mut draft.item.text, range, action) {
@@ -1261,6 +1302,50 @@ mod tests {
     use std::ffi::CString;
 
     const SIZE: [f32; 2] = [800., 600.];
+
+    #[test]
+    fn collapsed_editor_cursor_never_copies_or_cuts_all_text() {
+        let ctx = egui::Context::default();
+        let mut text = String::from("甲🙂abc");
+        let frame = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let cursor = Some(CCursorRange::one(CCursor::new(2)));
+            assert!(apply_clipboard(ui, &mut text, cursor, ClipboardAction::Copy).is_none());
+            assert!(apply_clipboard(ui, &mut text, cursor, ClipboardAction::Cut).is_none());
+            assert_eq!(text, "甲🙂abc");
+        });
+        frame.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn selected_unicode_only_is_removed_when_cutting_editor_text() {
+        let ctx = egui::Context::default();
+        let mut text = String::from("A中🙂B");
+        let frame = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let selected = Some(CCursorRange::two(CCursor::new(1), CCursor::new(3)));
+            let cursor = apply_clipboard(ui, &mut text, selected, ClipboardAction::Cut);
+            assert_eq!(cursor, Some(CCursorRange::one(CCursor::new(1))));
+            assert_eq!(text, "AB");
+        });
+        frame.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn plain_text_paste_creates_a_box_with_default_size_and_no_source_format() {
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::from(SIZE));
+        let Some(item) = plain_text_box(
+            "New\n文字🙂",
+            pos2(100., 100.),
+            screen,
+            InkColor::default(),
+            1.,
+        ) else {
+            panic!("Plain text must form a valid box");
+        };
+        assert_eq!(item.text, "New\n文字🙂");
+        assert_eq!(item.font_size, TextBox::DEFAULT_FONT_SIZE);
+        assert_eq!(item.scroll_offset, 0.);
+    }
+
 
     fn click(app: &mut App, point: Pos2) {
         for pressed in [true, false] {
