@@ -938,7 +938,7 @@ impl App {
             SDL_EVENT_PEN_AXIS => pen_axis_event(event).map(|pen| pen.which.0),
             SDL_EVENT_PEN_BUTTON_DOWN | SDL_EVENT_PEN_BUTTON_UP => {
                 pen_button_event(event).map(|pen| pen.which.0)
-            },
+            }
             SDL_EVENT_PEN_MOTION => pen_motion_event(event).map(|pen| pen.which.0),
             SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP => pen_touch_event(event).map(|pen| pen.which.0),
             _ => None,
@@ -965,11 +965,14 @@ impl App {
             return;
         }
         let now = Instant::now();
-        let double = self.input.last_pen_button.is_some_and(|(last_id, last_button, at)| {
-            last_id == id
-                && last_button == button
-                && now.duration_since(at) <= Duration::from_millis(400)
-        });
+        let double = self
+            .input
+            .last_pen_button
+            .is_some_and(|(last_id, last_button, at)| {
+                last_id == id
+                    && last_button == button
+                    && now.duration_since(at) <= Duration::from_millis(400)
+            });
         if double {
             self.input.last_pen_button = None;
             let tool = if self.tool == Tool::Pen {
@@ -1890,7 +1893,8 @@ fn run_inner(options: Options) -> Result<(), String> {
                         had_contacts || app.input.has_contacts()
                     });
                     canvas.dirty |= edited;
-                    toolbar_dirty |= before != app.history_buttons() || ty == SDL_EVENT_PEN_BUTTON_DOWN;
+                    toolbar_dirty |=
+                        before != app.history_buttons() || ty == SDL_EVENT_PEN_BUTTON_DOWN;
                     toolbar_dirty |= selection_before != app.input.text.selected;
                     toolbar_dirty |= panel_before != app.panel;
                     toolbar_dirty |= app.panel.is_some() && (edited || activates);
@@ -2384,7 +2388,9 @@ fn run_inner(options: Options) -> Result<(), String> {
                 app.closing_panel = Some(panel);
             }
             let phase = gui.ctx.animate_bool_with_time(
-                egui::Id::new("toolbar-panel-expansion"), panel_target.is_some(), 0.20,
+                egui::Id::new("toolbar-panel-expansion"),
+                panel_target.is_some(),
+                0.20,
             );
             if panel_target.is_none() && phase <= 0.001 {
                 app.closing_panel = None;
@@ -2518,19 +2524,26 @@ fn run_inner(options: Options) -> Result<(), String> {
                         cmd.redraw_canvas = true;
                     }
                     Err(error) => {
-                        app.status = text(
-                            "Could not remove font", "无法删除字体", "無法刪除字型"
-                        ).detail(error);
+                        app.status = text("Could not remove font", "无法删除字体", "無法刪除字型")
+                            .detail(error);
                     }
                 }
                 toolbar_dirty = true;
             }
             if let Some((from, to)) = cmd.move_font.take() {
-                match app.text_fonts.move_priority(from, to, &annotation_font_path) {
+                match app
+                    .text_fonts
+                    .move_priority(from, to, &annotation_font_path)
+                {
                     Ok(()) => cmd.redraw_canvas = true,
-                    Err(error) => app.status = text(
-                        "Could not save font order", "无法保存字体顺序", "無法儲存字型順序"
-                    ).detail(error),
+                    Err(error) => {
+                        app.status = text(
+                            "Could not save font order",
+                            "无法保存字体顺序",
+                            "無法儲存字型順序",
+                        )
+                        .detail(error)
+                    }
                 }
                 toolbar_dirty = true;
             }
