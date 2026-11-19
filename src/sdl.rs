@@ -122,6 +122,8 @@ enum SdlNativeAction<'a> {
     WindowPointer(&'a Window, NativeWindowProperty),
     WindowNumber(&'a Window, WindowNumberQuery),
     WindowFloat(&'a Window, WindowFloatQuery),
+    #[cfg(target_os = "windows")]
+    WindowsMonitor(u32),
     SystemTheme,
     IndirectTouch(SDL_TouchID),
     CaptureMouse(bool),
@@ -148,6 +150,8 @@ enum SdlNativeResult {
     NativePointer(Option<NonNull<c_void>>),
     Number(i64),
     Float(f32),
+    #[cfg(target_os = "windows")]
+    WindowsMonitor(Option<usize>),
     ColorProperty((bool, f32)),
     #[cfg(test)]
     Pixel(Option<[u8; 4]>),
@@ -212,6 +216,15 @@ impl SdlNativeResult {
             value
         } else {
             1.
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn windows_monitor(self) -> Option<usize> {
+        if let Self::WindowsMonitor(handle) = self {
+            handle
+        } else {
+            None
         }
     }
 
@@ -534,6 +547,19 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
                 };
                 SdlNativeResult::Float(value)
             }
+            #[cfg(target_os = "windows")]
+            SdlNativeAction::WindowsMonitor(display) => {
+                let handle = NonNull::new(SDL_GetPointerProperty(
+                    SDL_GetDisplayProperties(SDL_DisplayID(display)),
+                    SDL_PROP_DISPLAY_WINDOWS_HMONITOR_POINTER,
+                    ptr::null_mut(),
+                ))
+                // The Win32 monitor handle is passed to the capture thread as
+                // an opaque integer. Mark provenance as exposed for the later
+                // with_exposed_provenance_mut reconstruction.
+                .map(|handle| handle.as_ptr().expose_provenance());
+                SdlNativeResult::WindowsMonitor(handle)
+            }
             SdlNativeAction::SystemTheme => SdlNativeResult::Theme(SDL_GetSystemTheme()),
             SdlNativeAction::IndirectTouch(device) => SdlNativeResult::Success(matches!(
                 SDL_GetTouchDeviceType(device),
@@ -602,6 +628,17 @@ pub fn cstring(v: &str) -> CString {
         CString::new(v.replace('\0', "")).unwrap_or_default()
     })
 }
+/// Read only the known Win32 HMONITOR SDL display property. This returns an
+/// opaque handle value, not a dereferenceable pointer, and does not expose
+/// the SDL properties table to asynchronous capture workers.
+#[cfg(target_os = "windows")]
+pub(crate) fn windows_monitor_handle(display: u32) -> Option<usize> {
+    if !is_main_thread() || !SDL_VIDEO_READY.load(std::sync::atomic::Ordering::Acquire) {
+        return None;
+    }
+    sdl_native(SdlNativeAction::WindowsMonitor(display)).windows_monitor()
+}
+
 pub fn is_wayland_session() -> bool {
     std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland")
         || ["WAYLAND_DISPLAY", "WAYLAND_SOCKET"]

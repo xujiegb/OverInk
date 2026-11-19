@@ -44,17 +44,8 @@ pub fn start<T: Send + 'static>(
     display: u32,
     prepare: impl FnOnce(Image) -> Result<T, String> + Send + 'static,
 ) -> Result<Job<T>, String> {
-    let monitor = unsafe {
-        SDL_GetPointerProperty(
-            SDL_GetDisplayProperties(SDL_DisplayID(display)),
-            SDL_PROP_DISPLAY_WINDOWS_HMONITOR_POINTER,
-            ptr::null_mut(),
-        )
-    };
-    if monitor.is_null() {
-        return Err("The Windows display handle is unavailable".into());
-    }
-    let handle = monitor as usize;
+    let handle = windows_monitor_handle(display)
+        .ok_or("The Windows display handle is unavailable")?;
     Job::start(
         move |cancelled| {
             capture(
