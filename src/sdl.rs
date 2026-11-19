@@ -337,9 +337,9 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
                     SdlStringSource::Error => SDL_GetError(),
                     SdlStringSource::VideoDriver => SDL_GetCurrentVideoDriver(),
                 };
-                SdlNativeResult::Text((!text.is_null()).then(|| {
-                    CStr::from_ptr(text).to_string_lossy().into_owned()
-                }))
+                SdlNativeResult::Text(
+                    (!text.is_null()).then(|| CStr::from_ptr(text).to_string_lossy().into_owned()),
+                )
             }
             SdlNativeAction::WindowIccProfile(window) => {
                 // SDL returns an owned profile allocation. The typed Window
@@ -350,15 +350,9 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
                     NonNull::new(SDL_GetWindowICCProfile(window.raw.as_ptr(), &mut size))
                         .map(SdlAllocation)
                 {
-                    SdlNativeResult::Profile(
-                        (size > 0 && size <= 16 * 1024 * 1024).then(|| {
-                            std::slice::from_raw_parts(
-                                profile.0.as_ptr().cast::<u8>(),
-                                size,
-                            )
-                            .to_vec()
-                        }),
-                    )
+                    SdlNativeResult::Profile((size > 0 && size <= 16 * 1024 * 1024).then(|| {
+                        std::slice::from_raw_parts(profile.0.as_ptr().cast::<u8>(), size).to_vec()
+                    }))
                 } else {
                     // A missing ICC profile is normal; clear SDL's stale error.
                     SDL_ClearError();
