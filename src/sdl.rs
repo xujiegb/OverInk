@@ -13,6 +13,12 @@ use std::{
     ptr::{self, NonNull},
 };
 
+// Runtime owns SDL video initialization and shutdown. Native device and
+// cursor queries read this lifecycle flag instead of calling SDL_WasInit
+// through a safe extern that cannot enforce its main-thread precondition.
+static SDL_VIDEO_READY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 // Read SDL's Wayland scaling hint while the SDL-owning thread is already in
 // its audited native initialization boundary. Screenshot workers only need
 // the scalar result, not a callable C API accepting arbitrary pointers.
@@ -58,10 +64,6 @@ unsafe extern "C" {
     safe fn native_mod_state() -> SDL_Keymod;
     #[link_name = "SDL_GetSystemTheme"]
     safe fn native_system_theme() -> SDL_SystemTheme;
-    // SDL_WasInit is not thread safe; the only caller checks the SDL
-    // main thread. All three functions take and return scalar ABI values.
-    #[link_name = "SDL_WasInit"]
-    safe fn native_was_init(flags: SDL_InitFlags) -> SDL_InitFlags;
     #[link_name = "SDL_GetTouchDeviceType"]
     safe fn native_touch_device_type(device: SDL_TouchID) -> SDL_TouchDeviceType;
     #[link_name = "SDL_CaptureMouse"]
@@ -274,6 +276,7 @@ impl Runtime {
                 let name = backend.map_or_else(|| "SDL".into(), CStr::to_string_lossy);
                 format!("Initializing {name} video failed ({error})")
             })?;
+            SDL_VIDEO_READY.store(true, std::sync::atomic::Ordering::Release);
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             {
                 // Query the SDL hint in this existing native initialization
@@ -308,6 +311,7 @@ impl Drop for Runtime {
         // The runtime cannot cross threads in safe Rust. Do not shut SDL
         // down if a foreign callback somehow causes off-main destruction.
         if native_is_main_thread() {
+            SDL_VIDEO_READY.store(false, std::sync::atomic::Ordering::Release);
             native_quit();
         }
     }
@@ -431,10 +435,10 @@ pub fn event_window(event: &SDL_Event, ty: SDL_EventType) -> Option<SDL_WindowID
 
 /// Query indirect touch device capability via SDL's native input API.
 pub fn indirect_touch_device(device: SDL_TouchID) -> bool {
-    // SDL_WasInit is not thread safe. Check SDL's main thread before
-    // querying either video subsystem state or a native touch device.
+    // Query native devices only while the Runtime-owned SDL video subsystem
+    // is live, and always on SDL's owning main thread.
     native_is_main_thread()
-        && native_was_init(SDL_INIT_VIDEO) != 0
+        && SDL_VIDEO_READY.load(std::sync::atomic::Ordering::Acquire)
         && matches!(
             native_touch_device_type(device),
             SDL_TOUCH_DEVICE_INDIRECT_ABSOLUTE | SDL_TOUCH_DEVICE_INDIRECT_RELATIVE
@@ -751,7 +755,9 @@ pub struct SystemCursor(NonNull<SDL_Cursor>);
 
 impl SystemCursor {
     pub fn crosshair() -> Option<Self> {
-        if !native_is_main_thread() || native_was_init(SDL_INIT_VIDEO) == 0 {
+        if !native_is_main_thread()
+            || !SDL_VIDEO_READY.load(std::sync::atomic::Ordering::Acquire)
+        {
             return None;
         }
         let cursor = native_create_system_cursor(SDL_SYSTEM_CURSOR_CROSSHAIR)?;
