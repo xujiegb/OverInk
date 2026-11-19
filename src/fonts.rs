@@ -340,14 +340,24 @@ impl TextFonts {
                 id.strip_prefix("custom-").ok_or("Invalid font entry")?
             ))
         };
-        match fs::remove_file(target) {
+
+        // Persist the new order before deleting the font bytes. If saving
+        // fails, the installed font remains intact and the list rolls back.
+        self.order.remove(index);
+        if let Err(error) = self.save_order(path) {
+            self.order.insert(index, id);
+            return Err(error);
+        }
+        match fs::remove_file(&target) {
             Ok(()) => (),
             Err(error) if error.kind() == io::ErrorKind::NotFound => (),
-            Err(error) => return Err(error.to_string()),
+            Err(error) => {
+                self.order.insert(index, id);
+                let _ = self.save_order(path);
+                return Err(error.to_string());
+            }
         }
-        self.order.remove(index);
         self.customs.retain(|font| font.id != id);
-        self.save_order(path)?;
         self.revision = self.revision.wrapping_add(1);
         Ok(true)
     }
@@ -473,6 +483,38 @@ mod tests {
         });
         frame.drop_without_applying_deltas();
         glyphs
+    }
+
+    #[test]
+    fn font_priority_and_custom_deletion_survive_restart() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        let root = std::env::temp_dir().join(format!(
+            "overink-font-priority-{}-{unique}",
+            std::process::id(),
+        ));
+        let path = root.join("annotation-font");
+        let bundled_font = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets/fonts/SarasaFixedSlabSC-Regular.ttf");
+
+        let mut fonts = TextFonts::default();
+        assert!(matches!(fonts.move_font(2, 0, &path), Ok(true)));
+        assert_eq!(fonts.rows()[0].name, MONO);
+        assert!(matches!(fonts.remove_font(0, &path), Ok(false)));
+
+        assert!(fonts.install(&bundled_font, &path).is_ok());
+        assert!(fonts.install(&bundled_font, &path).is_ok());
+        assert!(fonts.order[0].starts_with("custom-"));
+        assert!(fonts.order[1].starts_with("custom-"));
+        assert_ne!(fonts.order[0], fonts.order[1]);
+
+        let mut restored = TextFonts::load(&path);
+        assert_eq!(restored.order, fonts.order);
+        assert!(matches!(restored.remove_font(0, &path), Ok(true)));
+        assert_eq!(TextFonts::load(&path).order.len(), fonts.order.len() - 1);
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
