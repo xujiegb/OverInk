@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="800" viewBox="0 0 1440 800" role="img" aria-label="OverInk desktop annotation concept illustration">
+<title>OverInk — desktop annotation illustration</title>
+<defs>
+  <linearGradient id="sky" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#091324"/><stop offset=".52" stop-color="#182344"/><stop offset="1" stop-color="#1c122e"/></linearGradient>
+  <linearGradient id="glass" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#25385b" stop-opacity=".84"/><stop offset="1" stop-color="#101a32" stop-opacity=".96"/></linearGradient>
+  <linearGradient id="card" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#c5e3f5" stop-opacity=".21"/><stop offset="1" stop-color="#687bb8" stop-opacity=".04"/></linearGradient>
+  <radialGradient id="glow"><stop stop-color="#36d9d6" stop-opacity=".26"/><stop offset="1" stop-color="#36d9d6" stop-opacity="0"/></radialGradient>
+  <filter id="haze"><feGaussianBlur stdDeviation="35"/></filter>
+</defs>
+<rect width="1440" height="800" rx="42" fill="url(#sky)"/>
+<ellipse cx="1120" cy="135" rx="470" ry="380" fill="#a659b9" opacity=".15" filter="url(#haze)"/>
+<ellipse cx="230" cy="700" rx="420" ry="280" fill="url(#glow)"/>
+<path d="M0 670 C340 500 510 765 830 590 S1250 330 1440 530" fill="none" stroke="#7786c8" stroke-opacity=".1" stroke-width="80"/>
+<rect x="95" y="82" width="1250" height="625" rx="28" fill="url(#glass)" stroke="#d0eafa" stroke-opacity=".19" stroke-width="2"/>
+<rect x="95" y="82" width="1250" height="66" rx="28" fill="#263552" fill-opacity=".65"/>
+<path d="M95 123 V148 H1345 V123" fill="#263552" fill-opacity=".65"/>
+<circle cx="143" cy="115" r="8" fill="#ff858b" opacity=".85"/><circle cx="171" cy="115" r="8" fill="#f7c36c" opacity=".85"/><circle cx="199" cy="115" r="8" fill="#68d9b8" opacity=".85"/>
+<text x="250" y="124" font-size="20" font-weight="600" fill="#e8f2ff" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif">OverInk</text>
+<text x="1265" y="123" text-anchor="end" font-size="15" letter-spacing="2" fill="#a5bad5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif">DESKTOP CANVAS</text>
+<rect x="142" y="186" width="1156" height="455" rx="20" fill="url(#card)" stroke="#c3e2fa" stroke-opacity=".1"/>
+<g stroke="#cee3f5" stroke-opacity=".06" stroke-width="1">
+<path d="M180 188 V640"/>
+<path d="M280 188 V640"/>
+<path d="M380 188 V640"/>
+<path d="M480 188 V640"/>
+<path d="M580 188 V640"/>
+<path d="M680 188 V640"/>
+<path d="M780 188 V640"/>
+<path d="M880 188 V640"/>
+<path d="M980 188 V640"/>
+<path d="M1080 188 V640"/>
+<path d="M1180 188 V640"/>
+<path d="M1280 188 V640"/>
+<path d="M143 234 H1298"/>
+<path d="M143 329 H1298"/>
+<path d="M143 424 H1298"/>
+<path d="M143 519 H1298"/>
+<path d="M143 614 H1298"/>
+</g>
+<rect x="205" y="246" width="360" height="290" rx="19" fill="#0c172a" opacity=".45" stroke="#aec6ec" stroke-opacity=".26"/>
+<text x="247" y="298" font-size="18" letter-spacing="3" fill="#8daac7" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif">MAKE IT VISIBLE</text>
+<text x="244" y="365" font-size="58" font-weight="600" fill="#eaf4ff" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif">Your ideas,</text>
+<text x="244" y="423" font-size="58" font-weight="600" fill="#eaf4ff" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif">in motion.</text>
+<rect x="248" y="458" width="226" height="3" rx="2" fill="#79dff2" opacity=".9"/>
+<text x="248" y="498" font-size="17" fill="#aec7dc" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif">Draw. Explain. Explore.</text>
+<path d="M587 425 C680 205 777 530 866 307 S1098 360 1191 241" fill="none" stroke="#636896" stroke-width="20" stroke-linecap="round" stroke-linejoin="round" opacity=".9"/>
+<path d="M650 516 C774 373 798 563 918 421 S1088 546 1180 386" fill="none" stroke="#79dff2" stroke-width="12" stroke-linecap="round" stroke-linejoin="round" opacity=".88"/>
+<path d="M644 330 C709 290 759 288 817 327 C852 351 891 357 934 323" fill="none" stroke="#3c775e" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M854 509 Q994 557 1063 485 T1216 492" fill="none" stroke="#ad3f55" stroke-width="13" stroke-linecap="round"/>
+<path d="M956 250 C1003 228 1029 235 1062 264" fill="none" stroke="#ecad45" stroke-width="11" stroke-linecap="round"/>
+<text x="745" y="412" font-size="78" font-style="italic" fill="#e6faff" opacity=".95" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif">hello.</text>
+<rect x="600" y="226" width="600" height="345" rx="7" fill="none" stroke="#79dff2" stroke-opacity=".65" stroke-width="2" stroke-dasharray="9 7"/>
+<path d="M600 255 V226 H632 M1168 226 H1200 V258 M600 540 V571 H632 M1168 571 H1200 V540" fill="none" stroke="#79dff2" stroke-width="4" stroke-linecap="round"/>
+<rect x="517" y="656" width="402" height="76" rx="28" fill="#091528" stroke="#d0eafa" stroke-opacity=".25" stroke-width="2"/>
+<path d="m558 700 10-23 14 14-23 10-7 10 6-11" fill="#f3f8ff"/>
+<rect x="604" y="677" width="2" height="33" rx="1" fill="#a7c9dc" opacity=".25"/>
+<circle cx="647" cy="694" r="14" fill="#636896"/><circle cx="701" cy="694" r="14" fill="#3c775e"/><circle cx="755" cy="694" r="14" fill="#ad3f55"/><circle cx="809" cy="694" r="14" fill="#ecad45"/>
+<path d="M864 682 l17 14 -17 14" stroke="#e3f3ff" stroke-width="4" fill="none" stroke-linejoin="round" stroke-linecap="round"/>
+<text x="140" y="765" font-size="14" letter-spacing="2" fill="#a7b9ce" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif">OVERINK / VISUAL CONCEPT</text>
+<text x="1297" y="765" font-size="14" letter-spacing="1.3" text-anchor="end" fill="#a7b9ce" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif">ILLUSTRATION — NOT A SCREENSHOT</text>
+</svg>

@@ -27,6 +27,14 @@
   <sub>Windows &nbsp; · &nbsp; macOS &nbsp; · &nbsp; Linux &nbsp; · &nbsp; FreeBSD</sub>
 </p>
 
+<p align="center">
+  <img src="assets/readme/overview.svg" alt="OverInk 桌面批注功能的视觉示意：彩色笔迹、文字和悬浮工具栏。Illustration of desktop annotation, strokes, text, and tools. Illustration de l’annotation de bureau." width="100%">
+</p>
+
+<p align="center">
+  <sub>功能视觉示意 · Product concept illustration · Illustration du concept</sub>
+</p>
+
 <br>
 
 ---
@@ -93,6 +101,40 @@
     </td>
   </tr>
 </table>
+
+<br>
+
+<h2 align="center">每一种表达，都值得被看见。</h2>
+
+<p align="center">
+  <sub>See ideas take shape.</sub><br>
+  <sub>Donnez forme à vos idées.</sub>
+</p>
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="assets/readme/ink.svg" alt="OverInk 压感手写与多种笔迹的界面示意。Stylus and ink concept illustration. Illustration du stylet et des traits." width="100%">
+      <h3>落笔，自有分寸。</h3>
+      <p><sub>Ink that follows your hand.</sub><br><sub>Des traits qui suivent votre geste.</sub></p>
+      <p>从细腻线条到醒目强调，让内容在眼前自然呈现。</p>
+      <p><sub>From delicate marks to bold emphasis, keep your ideas visible.</sub><br><sub>Des traits subtils aux accents marqués, vos idées prennent vie.</sub></p>
+    </td>
+    <td width="50%" valign="top">
+      <img src="assets/readme/capture.svg" alt="OverInk 区域截图与 PNG 保存功能的界面示意。Screen capture concept illustration. Illustration de la capture d’écran." width="100%">
+      <h3>捕捉，恰到好处。</h3>
+      <p><sub>Keep the moment that matters.</sub><br><sub>Gardez l’essentiel.</sub></p>
+      <p>框选屏幕区域，留下需要分享或回顾的重点。</p>
+      <p><sub>Select an area and save what matters for later.</sub><br><sub>Sélectionnez une zone et conservez l’essentiel.</sub></p>
+    </td>
+  </tr>
+</table>
+
+<p align="center">
+  <sub>以上为界面概念示意，并非实际运行截图；可直接替换为真实截图。</sub><br>
+  <sub>Concept illustrations, not actual application screenshots. Real screenshots can replace them.</sub><br>
+  <sub>Illustrations conceptuelles, et non des captures réelles. Elles pourront être remplacées.</sub>
+</p>
 
 <br>
 

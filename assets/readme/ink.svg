@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="680" height="430" viewBox="0 0 680 430" role="img" aria-label="Pressure-sensitive handwriting concept illustration">
+<title>OverInk ink and tools — concept illustration</title>
+<defs><linearGradient id="inkbg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#10223b"/><stop offset="1" stop-color="#1c1634"/></linearGradient>
+<radialGradient id="inkglow"><stop stop-color="#9f5bdc" stop-opacity=".22"/><stop offset="1" stop-color="#9f5bdc" stop-opacity="0"/></radialGradient></defs>
+<rect width="680" height="430" rx="24" fill="url(#inkbg)"/>
+<ellipse cx="540" cy="70" rx="330" ry="270" fill="url(#inkglow)"/>
+<text x="48" y="66" font-size="17" letter-spacing="3" fill="#9db4d1" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif">THE FEEL OF INK</text>
+<path d="M58 182 C123 114 173 244 245 164 S351 110 402 182 S536 255 616 132" stroke="#7b82c8" stroke-width="20" stroke-linecap="round" stroke-linejoin="round" fill="none" opacity=".65"/>
+<path d="M71 241 C152 180 202 309 280 220 S403 274 478 193 S540 230 613 207" stroke="#79dff2" stroke-width="9" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+<path d="M104 285 C152 332 221 292 276 330 S409 312 445 274" stroke="#ecad45" stroke-width="13" stroke-linecap="round" fill="none"/>
+<path d="M362 142 C426 102 491 119 530 155" stroke="#3c775e" stroke-width="9" stroke-linecap="round" fill="none"/>
+<path d="M450 280 C509 298 545 275 594 310" stroke="#ad3f55" stroke-width="11" stroke-linecap="round" fill="none"/>
+<rect x="196" y="355" width="288" height="53" rx="20" fill="#0b1424" stroke="#bedbed" stroke-opacity=".2"/>
+<circle cx="238" cy="381" r="13" fill="#636896"/><circle cx="287" cy="381" r="13" fill="#3c775e"/><circle cx="336" cy="381" r="13" fill="#ad3f55"/><circle cx="385" cy="381" r="13" fill="#ecad45"/>
+<text x="424" y="387" font-size="18" fill="#e6f5ff" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif">✦</text>
+</svg>
