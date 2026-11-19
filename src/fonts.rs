@@ -219,11 +219,14 @@ impl TextFonts {
             }
         }
         // Keep installations made by older releases available until removed.
-        if path.exists() && let Ok(old) = CustomFont::read(path, "legacy".into()) {
+        if path.exists()
+            && let Ok(old) = CustomFont::read(path, "legacy".into())
+        {
             fonts.custom.push(old);
         }
         fonts.custom.sort_unstable_by(|a, b| a.key.cmp(&b.key));
-        let saved = fs::read(order_file(path)).ok()
+        let saved = fs::read(order_file(path))
+            .ok()
             .and_then(|bytes| serde_json::from_slice::<Vec<String>>(&bytes).ok())
             .unwrap_or_default();
         fonts.order.clear();
@@ -250,21 +253,37 @@ impl TextFonts {
     }
 
     pub fn entries(&self) -> Vec<FontEntry<'_>> {
-        self.order.iter().filter_map(|key| {
-            if FALLBACK.contains(&key.as_str()) {
-                Some(FontEntry { key, name: key, bundled: true })
-            } else {
-                self.custom.iter().find(|font| font.key == *key)
-                    .map(|font| FontEntry { key, name: &font.name, bundled: false })
-            }
-        }).collect()
+        self.order
+            .iter()
+            .filter_map(|key| {
+                if FALLBACK.contains(&key.as_str()) {
+                    Some(FontEntry {
+                        key,
+                        name: key,
+                        bundled: true,
+                    })
+                } else {
+                    self.custom
+                        .iter()
+                        .find(|font| font.key == *key)
+                        .map(|font| FontEntry {
+                            key,
+                            name: &font.name,
+                            bundled: false,
+                        })
+                }
+            })
+            .collect()
     }
 
     pub fn display_name(&self, key: &str) -> Option<&str> {
         if FALLBACK.contains(&key) {
             Some(FALLBACK.iter().copied().find(|name| *name == key)?)
         } else {
-            self.custom.iter().find(|font| font.key == key).map(|font| font.name.as_str())
+            self.custom
+                .iter()
+                .find(|font| font.key == key)
+                .map(|font| font.name.as_str())
         }
     }
 
@@ -274,7 +293,9 @@ impl TextFonts {
         let data = serde_json::to_vec_pretty(&self.order).map_err(|error| error.to_string())?;
         fs::write(&temporary, data)
             .and_then(|()| fs::rename(&temporary, &file))
-            .inspect_err(|_| { let _ = fs::remove_file(&temporary); })
+            .inspect_err(|_| {
+                let _ = fs::remove_file(&temporary);
+            })
             .map_err(|error| error.to_string())
     }
 
@@ -294,7 +315,9 @@ impl TextFonts {
         let temporary = file.with_extension(format!("{}.tmp", std::process::id()));
         fs::write(&temporary, font.face.data.bytes())
             .and_then(|()| fs::rename(&temporary, &file))
-            .inspect_err(|_| { let _ = fs::remove_file(&temporary); })
+            .inspect_err(|_| {
+                let _ = fs::remove_file(&temporary);
+            })
             .map_err(|error| error.to_string())?;
         self.custom.push(font);
         self.order.insert(0, key);
@@ -343,16 +366,20 @@ impl TextFonts {
     pub fn definitions(&self) -> FontDefinitions {
         let mut definitions = bundled().definitions.clone();
         for font in &self.custom {
-            definitions.font_data.insert(font.key.clone(), font.face.data.clone());
+            definitions
+                .font_data
+                .insert(font.key.clone(), font.face.data.clone());
         }
-        definitions.families.insert(
-            FontFamily::Name(ANNOTATION.into()), self.order.clone()
-        );
+        definitions
+            .families
+            .insert(FontFamily::Name(ANNOTATION.into()), self.order.clone());
         for key in &self.order {
             let mut chain = Vec::with_capacity(self.order.len());
             chain.push(key.clone());
             chain.extend(self.order.iter().filter(|other| *other != key).cloned());
-            definitions.families.insert(FontFamily::Name(key.clone().into()), chain);
+            definitions
+                .families
+                .insert(FontFamily::Name(key.clone().into()), chain);
         }
         definitions
     }
@@ -379,7 +406,8 @@ impl TextFonts {
         for key in &self.order {
             let face = if let Some(font) = self.custom.iter().find(|font| font.key == *key) {
                 &font.face
-            } else if let Some(index) = FALLBACK.iter().position(|builtin| *builtin == key.as_str()) {
+            } else if let Some(index) = FALLBACK.iter().position(|builtin| *builtin == key.as_str())
+            {
                 &bundled().faces[index]
             } else {
                 continue;
@@ -418,7 +446,9 @@ impl TextFonts {
         width: f32,
         preferred: Option<&str>,
     ) -> Arc<Galley> {
-        let ordinary = preferred.filter(|key| self.known(key)).unwrap_or(ANNOTATION);
+        let ordinary = preferred
+            .filter(|key| self.known(key))
+            .unwrap_or(ANNOTATION);
         let mut job = LayoutJob::default();
         job.wrap.max_width = width;
         job.keep_trailing_whitespace = true;
@@ -430,7 +460,11 @@ impl TextFonts {
         };
         for (index, cluster) in text.grapheme_indices(true) {
             let special = self.family_for_cluster(cluster);
-            let next = if special == ANNOTATION { ordinary } else { special };
+            let next = if special == ANNOTATION {
+                ordinary
+            } else {
+                special
+            };
             if next != current {
                 if start < index {
                     append(start..index, current);
@@ -448,7 +482,9 @@ impl TextFonts {
     }
 
     pub fn font_id_preferred(&self, size: f32, preferred: Option<&str>) -> FontId {
-        let name = preferred.filter(|name| self.known(name)).unwrap_or(ANNOTATION);
+        let name = preferred
+            .filter(|name| self.known(name))
+            .unwrap_or(ANNOTATION);
         FontId::new(size, FontFamily::Name(Arc::from(name)))
     }
 }
