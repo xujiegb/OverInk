@@ -379,7 +379,7 @@ impl TextFonts {
         for key in &self.order {
             let face = if let Some(font) = self.custom.iter().find(|font| font.key == *key) {
                 &font.face
-            } else if let Some(index) = FALLBACK.iter().position(|builtin| *builtin == key) {
+            } else if let Some(index) = FALLBACK.iter().position(|builtin| *builtin == key.as_str()) {
                 &bundled().faces[index]
             } else {
                 continue;
@@ -391,7 +391,7 @@ impl TextFonts {
                 Some('\u{fe0f}') if !face.has_color_glyph(glyph) => {
                     monochrome_fallback.get_or_insert(key.as_str());
                 }
-                Some('\u{fe0e}') if key == COLOR || face.has_color_glyph(glyph) => (),
+                Some('\u{fe0e}') if key.as_str() == COLOR || face.has_color_glyph(glyph) => (),
                 _ => return key,
             }
         }
@@ -445,6 +445,11 @@ impl TextFonts {
 
     pub fn font_id(size: f32) -> FontId {
         FontId::new(size, FontFamily::Name(ANNOTATION.into()))
+    }
+
+    pub fn font_id_preferred(&self, size: f32, preferred: Option<&str>) -> FontId {
+        let name = preferred.filter(|name| self.known(name)).unwrap_or(ANNOTATION);
+        FontId::new(size, FontFamily::Name(Arc::from(name)))
     }
 }
 
