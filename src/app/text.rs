@@ -978,7 +978,7 @@ impl App {
         for row in 0..2 {
             for col in 0..4 {
                 let key = pos2(
-                    board.left() + (5. + 7. * col as f32) * scale,
+                    board.left() + (4. + 4.5 * col as f32) * scale,
                     board.top() + (5. + 6. * row as f32) * scale,
                 );
                 menu.painter().circle_filled(key, 1.2 * scale, stroke.color);
