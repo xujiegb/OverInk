@@ -88,6 +88,74 @@ const LASER_LIFETIME: Duration = Duration::from_millis(900);
 /// Sidecar occasionally supplies a release coordinate far beyond the last
 /// physical contact. It should never become a long pen/finger ink segment.
 const MACOS_MAX_RELEASE_JUMP: f32 = 128.;
+
+/// Opt-in, local-only diagnostic trace. Set OVERINK_TRACE_INPUT=1 when
+/// reproducing a Sidecar bridging issue to capture the event source and
+/// release state. Kept behind a cached flag to avoid formatting or I/O in
+/// ordinary pen and mouse hot paths.
+fn trace_input_event(event: &SDL_Event) {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ENABLED.get_or_init(|| std::env::var("OVERINK_TRACE_INPUT").is_ok_and(|value| value == "1")) {
+        return;
+    }
+    match event_type(event) {
+        SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP => {
+            if let Some(pen) = pen_touch_event(event) {
+                eprintln!(
+                    "OverInk input PEN_TOUCH ts={} window={} pen={} down={} state={} xy=({:.1},{:.1})",
+                    pen.timestamp, pen.windowID.0, pen.which.0, pen.down, pen.pen_state,
+                    pen.x, pen.y
+                );
+            }
+        }
+        SDL_EVENT_PEN_MOTION => {
+            if let Some(pen) = pen_motion_event(event) {
+                eprintln!(
+                    "OverInk input PEN_MOTION ts={} window={} pen={} state={} xy=({:.1},{:.1})",
+                    pen.timestamp, pen.windowID.0, pen.which.0, pen.pen_state,
+                    pen.x, pen.y
+                );
+            }
+        }
+        SDL_EVENT_PEN_AXIS => {
+            if let Some(pen) = pen_axis_event(event) {
+                eprintln!(
+                    "OverInk input PEN_AXIS ts={} window={} pen={} state={} axis={} value={:.4} xy=({:.1},{:.1})",
+                    pen.timestamp, pen.windowID.0, pen.which.0, pen.pen_state, pen.axis.0,
+                    pen.value, pen.x, pen.y
+                );
+            }
+        }
+        SDL_EVENT_MOUSE_BUTTON_DOWN | SDL_EVENT_MOUSE_BUTTON_UP => {
+            if let Some(mouse) = mouse_button_event(event) {
+                eprintln!(
+                    "OverInk input MOUSE_BUTTON ts={} window={} mouse={} button={} down={} xy=({:.1},{:.1})",
+                    mouse.timestamp, mouse.windowID.0, mouse.which.0, mouse.button,
+                    mouse.down, mouse.x, mouse.y
+                );
+            }
+        }
+        SDL_EVENT_MOUSE_MOTION => {
+            if let Some(mouse) = mouse_motion_event(event) {
+                eprintln!(
+                    "OverInk input MOUSE_MOTION ts={} window={} mouse={} state={} xy=({:.1},{:.1})",
+                    mouse.timestamp, mouse.windowID.0, mouse.which.0, mouse.state.0,
+                    mouse.x, mouse.y
+                );
+            }
+        }
+        SDL_EVENT_FINGER_DOWN | SDL_EVENT_FINGER_MOTION | SDL_EVENT_FINGER_UP | SDL_EVENT_FINGER_CANCELED => {
+            if let Some(finger) = finger_event(event) {
+                eprintln!(
+                    "OverInk input FINGER ts={} type={} window={} touch={} finger={} pressure={:.4} xy=({:.4},{:.4})",
+                    finger.timestamp, event_type(event).0, finger.windowID.0,
+                    finger.touchID.0, finger.fingerID.0, finger.pressure, finger.x, finger.y
+                );
+            }
+        }
+        _ => {}
+    }
+}
 const MAX_LASER_SAMPLES: usize = 4096;
 #[derive(Default)]
 struct Commands {
@@ -1743,6 +1811,7 @@ fn run_inner(options: Options) -> Result<(), String> {
             let mut event = SDL_Event::default();
             while poll_event(&mut event) {
                 let ty = event_type(&event);
+                trace_input_event(&event);
                 if ty == SDL_EVENT_QUIT {
                     running = false;
                     break;
