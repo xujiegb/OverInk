@@ -237,7 +237,7 @@ fn apply_clipboard(
                 let pos = selected.map_or(CCursor::new(length).index, |cursor| cursor.primary.index);
                 pos..pos
             });
-            let capacity = MAX_TEXT_CHARS.saturating_sub(length.saturating_sub(replacement.end - replacement.start));
+            let capacity = MAX_TEXT_CHARS.saturating_sub(length.saturating_sub(replacement.end.0 - replacement.start.0));
             let to_insert: String = value.chars().take(capacity).collect();
             text.delete_char_range(replacement.clone());
             text.insert_text(&to_insert, replacement.start);
@@ -953,8 +953,8 @@ impl App {
             }
             if self.input.text.editing() {
                 self.text_editor(ui, composing, keep_editor_open, menus);
-            } else if let Some(item) =
-                selected.and_then(|index| self.history.text_boxes().get(index))
+            } else if let Some(index) = selected
+                && let Some(item) = self.history.text_boxes().get(index)
             {
                 let rect = preview.unwrap_or(item).rect();
                 let scale = self.input.canvas_units;
