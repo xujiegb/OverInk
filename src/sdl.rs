@@ -1324,6 +1324,7 @@ enum WindowFloatQuery {
 enum WindowCommand<'a> {
     InputArea(&'a SDL_Rect),
     SyncInput(bool),
+    RequestScreenKeyboard,
     ClearComposition,
     SyncAndPumpEvents,
     SetSize([i32; 2]),
@@ -1511,6 +1512,29 @@ impl Window {
                         }
                     }
                     Ok(())
+                }
+                WindowCommand::RequestScreenKeyboard => {
+                    // SDL's default "auto" excludes machines with a physical
+                    // keyboard, including touchscreen MacBooks. This request
+                    // is made only after an explicit touch or keyboard button.
+                    // Temporarily override SDL's own hint, even if an
+                    // environment value disabled automatic OSK presentation.
+                    check(SDL_SetHintWithPriority(
+                        SDL_HINT_ENABLE_SCREEN_KEYBOARD,
+                        c"1".as_ptr(),
+                        SDL_HINT_OVERRIDE,
+                    ))?;
+                    let stopped = if SDL_TextInputActive(self.raw.as_ptr()) {
+                        SDL_StopTextInput(self.raw.as_ptr())
+                    } else {
+                        true
+                    };
+                    let started = stopped && SDL_StartTextInput(self.raw.as_ptr());
+                    // Restore SDL's environment/default hint before returning,
+                    // including on native errors. Avoid a persistent override.
+                    SDL_ResetHint(SDL_HINT_ENABLE_SCREEN_KEYBOARD);
+                    check(stopped)?;
+                    check(started)
                 }
                 WindowCommand::ClearComposition => {
                     SDL_ClearComposition(self.raw.as_ptr());
@@ -1744,6 +1768,10 @@ impl Window {
 
     pub fn sync_text_input(&self, enabled: bool) {
         let _ = self.run_command(WindowCommand::SyncInput(enabled));
+    }
+
+    pub fn request_screen_keyboard(&self) -> Result<(), String> {
+        self.run_command(WindowCommand::RequestScreenKeyboard)
     }
 
     pub fn clear_composition(&self) {
