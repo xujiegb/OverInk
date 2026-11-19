@@ -663,7 +663,9 @@ impl App {
             .map(|range| range.as_sorted_char_range())
             .filter(|range| range.start != range.end)
             .map(|range| (usize::from(range.start))..usize::from(range.end));
-        let range = selected.as_ref().map_or(0..total, |range| range.start..range.end);
+        let range = selected
+            .as_ref()
+            .map_or(0..total, |range| range.start..range.end);
         match action {
             TextContextAction::SelectAll => {
                 draft.cursor = Some(CCursorRange::two(CCursor::new(0), CCursor::new(total)));
@@ -2017,7 +2019,11 @@ mod tests {
         };
         menu_click(&mut app, 1.);
         assert_eq!(
-            app.input.text.draft.as_ref().map(|draft| draft.item.font_size),
+            app.input
+                .text
+                .draft
+                .as_ref()
+                .map(|draft| draft.item.font_size),
             Some(font + 2.)
         );
         menu_click(&mut app, 0.);
