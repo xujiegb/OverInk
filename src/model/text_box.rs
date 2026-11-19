@@ -10,6 +10,8 @@ pub struct TextBox {
     pub origin: [f32; 2],
     pub size: [f32; 2],
     pub font_size: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font: Option<String>,
     pub color: InkColor,
     pub text: String,
     #[serde(default)]
@@ -43,6 +45,7 @@ impl TextBox {
             font_size: (Self::DEFAULT_FONT_SIZE * units)
                 .clamp(*Self::FONT_SIZE.start(), *Self::FONT_SIZE.end()),
             color,
+            font: None,
             text: String::new(),
             scroll_offset: 0.,
         };
@@ -90,6 +93,7 @@ impl TextBox {
                 .zip(Self::MIN_SIZE)
                 .all(|(value, min)| (min..=Self::MAX_SIZE).contains(&value))
             && Self::FONT_SIZE.contains(&self.font_size)
+            && self.font.as_ref().is_none_or(|name| name.len() <= 128)
             && self.scroll_offset.is_finite()
             && self.scroll_offset >= 0.
             && self.color.rgb.iter().all(|v| (0. ..=1.).contains(v))
