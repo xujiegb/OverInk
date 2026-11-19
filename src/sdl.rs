@@ -91,35 +91,6 @@ unsafe extern "C" {
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     #[link_name = "SDL_PushEvent"]
     safe fn native_push_event(event: &mut SDL_Event) -> bool;
-    // Both geometry queries write exactly two initialized integers and never
-    // retain their output references. Window handles originate from SDL and
-    // are validated before entering this private main-thread-only boundary.
-    #[link_name = "SDL_GetWindowSize"]
-    safe fn native_window_size(
-        window: NonNull<SDL_Window>,
-        width: &mut i32,
-        height: &mut i32,
-    ) -> bool;
-    #[link_name = "SDL_GetWindowSizeInPixels"]
-    safe fn native_window_size_in_pixels(
-        window: NonNull<SDL_Window>,
-        width: &mut i32,
-        height: &mut i32,
-    ) -> bool;
-    // These synchronous SDL window queries write initialized integer
-    // outputs without retaining their addresses. The private call site
-    // validates the live SDL window and checks the SDL main thread.
-    #[link_name = "SDL_GetWindowPosition"]
-    safe fn native_window_position(window: NonNull<SDL_Window>, x: &mut i32, y: &mut i32) -> bool;
-    #[cfg(not(target_os = "windows"))]
-    #[link_name = "SDL_GetWindowBordersSize"]
-    safe fn native_window_borders_size(
-        window: NonNull<SDL_Window>,
-        top: &mut i32,
-        left: &mut i32,
-        bottom: &mut i32,
-        right: &mut i32,
-    ) -> bool;
     #[cfg(target_os = "linux")]
     #[link_name = "SDL_FlushEvent"]
     safe fn native_flush_event(event_type: u32);
@@ -868,12 +839,17 @@ pub fn wait_for_event(timeout_ms: i32) {
 }
 
 /// Boolean window queries return owned scalars rather than native flags.
-enum WindowBooleanQuery {
+enum WindowBooleanQuery<'a> {
     TextInputActive,
     InputFocused,
     Hidden,
     Transparent,
     HdrEnabled,
+    // Typed output borrows are valid for the synchronous SDL queries.
+    Size(bool, &'a mut [i32; 2]),
+    Position(&'a mut [i32; 4]),
+    #[cfg(not(target_os = "windows"))]
+    Borders(&'a mut [i32; 4]),
 }
 
 /// Numeric SDL property reads must use one of these known keys.
@@ -993,41 +969,66 @@ impl Window {
         }
     }
 
-    /// Copy SDL's initialized output coordinates before returning to Rust.
+    /// Copy initialized coordinate outputs from the already-audited native
+    /// Window query boundary. Position failures remain errors; unsupported
+    /// decorations still return the zero defaults.
     fn query_coordinates(&self, query: WindowCoordinateQuery) -> Result<[i32; 4], String> {
         if !native_is_main_thread() {
             return Err("SDL window position query requires the main thread".into());
         }
-        let window = self.raw;
+        let mut output = [0; 4];
         match query {
             WindowCoordinateQuery::Position => {
-                let (mut x, mut y) = (0, 0);
-                check(native_window_position(window, &mut x, &mut y))?;
-                Ok([x, y, 0, 0])
+                check(self.query_bool(WindowBooleanQuery::Position(&mut output)))?;
             }
             #[cfg(not(target_os = "windows"))]
             WindowCoordinateQuery::Borders => {
-                let (mut top, mut left, mut bottom, mut right) = (0, 0, 0, 0);
-                // Decoration support is optional: preserve the native
-                // output and zero defaults even on failure.
-                let _ = native_window_borders_size(
-                    window,
-                    &mut top,
-                    &mut left,
-                    &mut bottom,
-                    &mut right,
-                );
-                Ok([top, left, bottom, right])
+                let _ = self.query_bool(WindowBooleanQuery::Borders(&mut output));
             }
         }
+        Ok(output)
     }
 
-    /// Read a known window property or state through one native boundary.
-    fn query_bool(&self, query: WindowBooleanQuery) -> bool {
+    /// Read native Window state or checked, synchronous output coordinates.
+    /// An existing unsafe FFI block handles all SDL_Window pointer queries.
+    fn query_bool(&self, query: WindowBooleanQuery<'_>) -> bool {
         // SAFETY: Window owns the live SDL window on the SDL thread.
         // Each branch reads only scalar flags or boolean SDL properties.
         unsafe {
             match query {
+                WindowBooleanQuery::Size(in_pixels, output) => {
+                    let (mut width, mut height) = (0, 0);
+                    let success = if in_pixels {
+                        SDL_GetWindowSizeInPixels(self.raw.as_ptr(), &mut width, &mut height)
+                    } else {
+                        SDL_GetWindowSize(self.raw.as_ptr(), &mut width, &mut height)
+                    };
+                    if success {
+                        *output = [width, height];
+                    }
+                    success
+                }
+                WindowBooleanQuery::Position(output) => {
+                    let (mut x, mut y) = (0, 0);
+                    let success = SDL_GetWindowPosition(self.raw.as_ptr(), &mut x, &mut y);
+                    if success {
+                        *output = [x, y, 0, 0];
+                    }
+                    success
+                }
+                #[cfg(not(target_os = "windows"))]
+                WindowBooleanQuery::Borders(output) => {
+                    let (mut top, mut left, mut bottom, mut right) = (0, 0, 0, 0);
+                    let success = SDL_GetWindowBordersSize(
+                        self.raw.as_ptr(),
+                        &mut top,
+                        &mut left,
+                        &mut bottom,
+                        &mut right,
+                    );
+                    *output = [top, left, bottom, right];
+                    success
+                }
                 WindowBooleanQuery::TextInputActive => SDL_TextInputActive(self.raw.as_ptr()),
                 WindowBooleanQuery::InputFocused => {
                     SDL_GetWindowFlags(self.raw.as_ptr()) & SDL_WINDOW_INPUT_FOCUS != 0
@@ -1349,14 +1350,9 @@ impl Window {
         if !native_is_main_thread() {
             return None;
         }
-        let window = self.raw;
-        let (mut width, mut height) = (0, 0);
-        let ok = if in_pixels {
-            native_window_size_in_pixels(window, &mut width, &mut height)
-        } else {
-            native_window_size(window, &mut width, &mut height)
-        };
-        ok.then_some([width, height])
+        let mut output = [0; 2];
+        self.query_bool(WindowBooleanQuery::Size(in_pixels, &mut output))
+            .then_some(output)
     }
 
     /// Unclamped dimensions for converting local input into screen pixels.
