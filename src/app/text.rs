@@ -663,7 +663,9 @@ impl App {
             .map(|range| range.as_sorted_char_range())
             .filter(|range| range.start != range.end)
             .map(|range| (usize::from(range.start))..usize::from(range.end));
-        let range = selected.clone().unwrap_or(0..total);
+        let range = selected
+            .as_ref()
+            .map_or(0..total, |range| range.start..range.end);
         match action {
             TextContextAction::SelectAll => {
                 draft.cursor = Some(CCursorRange::two(CCursor::new(0), CCursor::new(total)));
@@ -1677,7 +1679,9 @@ mod tests {
             focus.update(now, false, true, false, false),
             FocusAction::ReturnToCanvas
         );
-        let expires = focus.deadline.unwrap();
+        let Some(expires) = focus.deadline else {
+            panic!("expected pending toolbar focus deadline");
+        };
         assert_eq!(
             focus.update(now, false, false, false, false),
             FocusAction::Keep
@@ -1735,11 +1739,13 @@ mod tests {
         let item = &app.history.text_boxes()[0];
         assert!(item.text.ends_with("末行补充"));
         assert!(item.scroll_offset > 0.);
-        let serialized = serde_json::to_string(item).unwrap();
-        assert_eq!(
-            &serde_json::from_str::<TextBox>(&serialized).unwrap(),
-            item.as_ref()
-        );
+        let Ok(serialized) = serde_json::to_string(item) else {
+            panic!("failed to serialize the scrollable text box");
+        };
+        let Ok(restored) = serde_json::from_str::<TextBox>(&serialized) else {
+            panic!("failed to deserialize the scrollable text box");
+        };
+        assert_eq!(&restored, item.as_ref());
     }
 
     #[test]
@@ -1929,11 +1935,15 @@ mod tests {
         let screen = Rect::from_min_size(Pos2::ZERO, Vec2::from(SIZE));
         let mut item = TextBox::new(pos2(500., 300.), screen, InkColor::default(), 1.);
         item.text = "Selected text".into();
-        let index = app.history.set_text_box(None, item.clone()).unwrap();
+        let Some(index) = app.history.set_text_box(None, item.clone()) else {
+            panic!("expected new text box index");
+        };
         app.tool = Tool::Select;
         assert!(app.text_menus(screen).is_none());
         click(&mut app, item.rect().center());
-        let menu = app.text_menus(screen).unwrap().actions;
+        let Some(menu) = app.text_menus(screen).map(|menus| menus.actions) else {
+            panic!("expected annotation menu actions");
+        };
         assert!(menu.top() > item.rect().bottom());
         render(&mut app, &mut gui);
         let bigger = menu.min
@@ -1963,7 +1973,9 @@ mod tests {
         item.move_to(pos2(500., 580.), screen);
         let moved_rect = item.rect();
         app.history.set_text_box(Some(index), item);
-        let menu = app.text_menus(screen).unwrap().actions;
+        let Some(menu) = app.text_menus(screen).map(|menus| menus.actions) else {
+            panic!("expected annotation menu actions");
+        };
         assert!(moved_rect.intersects(menu));
         assert!(screen.contains_rect(menu));
         click(&mut app, pos2(50., 50.));
@@ -1976,8 +1988,12 @@ mod tests {
         app.use_tool(Tool::Text);
         click(&mut app, pos2(520., 555.));
         let screen = Rect::from_min_size(Pos2::ZERO, Vec2::from(SIZE));
-        let rect = app.text_menus(screen).unwrap().actions;
-        let draft = app.input.text.draft.as_ref().unwrap();
+        let Some(rect) = app.text_menus(screen).map(|menus| menus.actions) else {
+            panic!("expected draft menu actions");
+        };
+        let Some(draft) = app.input.text.draft.as_ref() else {
+            panic!("expected active text draft");
+        };
         assert!(draft.item.rect().intersects(rect));
         let font = draft.item.font_size;
         let mut gui = Gui::new();
@@ -2003,8 +2019,12 @@ mod tests {
         };
         menu_click(&mut app, 1.);
         assert_eq!(
-            app.input.text.draft.as_ref().unwrap().item.font_size,
-            font + 2.
+            app.input
+                .text
+                .draft
+                .as_ref()
+                .map(|draft| draft.item.font_size),
+            Some(font + 2.)
         );
         menu_click(&mut app, 0.);
         assert!(!app.input.text.editing());
@@ -2019,7 +2039,9 @@ mod tests {
         let mut item = TextBox::new(pos2(350., 100.), screen, InkColor::default(), 1.);
         item.text = "Annotation".into();
         app.input.text.selected = app.history.set_text_box(None, item);
-        let menu = app.text_menus(screen).unwrap().actions;
+        let Some(menu) = app.text_menus(screen).map(|menus| menus.actions) else {
+            panic!("expected annotation menu actions");
+        };
         let window = SDL_WindowID(1);
         let motion = |p: Pos2| SDL_Event {
             motion: SDL_MouseMotionEvent {
@@ -2056,14 +2078,23 @@ mod tests {
                 size
             ));
         }
-        let item = &app.input.text.draft.as_ref().unwrap().item;
+        let Some(draft) = app.input.text.draft.as_ref() else {
+            panic!("expected scaled text draft");
+        };
+        let item = &draft.item;
         assert_eq!(item.size, [640., 224.]);
         assert_eq!(item.font_size, 2. * TextBox::DEFAULT_FONT_SIZE);
-        let menus = app.text_menus(screen).unwrap();
+        let Some(menus) = app.text_menus(screen) else {
+            panic!("expected scalable annotation menus");
+        };
         assert_eq!(menus.actions.size(), MENU_SIZE * 2.);
         assert!(screen.contains_rect(menus.actions));
         let narrow = Rect::from_min_size(Pos2::ZERO, vec2(480., 650.));
-        assert!(narrow.contains_rect(app.text_menus(narrow).unwrap().actions));
+        assert_eq!(
+            app.text_menus(narrow)
+                .map(|menus| narrow.contains_rect(menus.actions)),
+            Some(true)
+        );
     }
 
     #[test]
@@ -2092,16 +2123,30 @@ mod tests {
             }
         };
 
-        let row = app.text_menus(screen).unwrap().actions;
+        let Some(row) = app.text_menus(screen).map(|menus| menus.actions) else {
+            panic!("expected annotation palette row");
+        };
         let wheel_button = row.right_center() - vec2(MENU_PADDING + MENU_BUTTON.x * 0.5, 0.);
         tap(&mut app, wheel_button);
-        let (palette, scale) = app.text_menus(screen).unwrap().palette.unwrap();
+        let Some((palette, scale)) = app.text_menus(screen).and_then(|menus| menus.palette) else {
+            panic!("expected text color palette");
+        };
         assert!(screen.contains_rect(palette));
         assert!(app.input.text.editing());
         tap(&mut app, palette.min + vec2(180., 110.) * scale);
-        let color = app.input.text.color_wheel.unwrap().chosen_color().unwrap();
+        let Some(color) = app
+            .input
+            .text
+            .color_wheel
+            .and_then(ColorWheel::chosen_color)
+        else {
+            panic!("expected color-wheel selection");
+        };
         tap(&mut app, palette.min + vec2(60., 230.) * scale);
-        assert_eq!(app.input.text.draft.as_ref().unwrap().item.color, color);
+        assert_eq!(
+            app.input.text.draft.as_ref().map(|draft| draft.item.color),
+            Some(color)
+        );
         assert_eq!(app.color, original_brush);
         assert!(app.input.text.color_wheel.is_none());
 
@@ -2112,7 +2157,9 @@ mod tests {
         assert!(app.input.text.color_wheel.is_none());
         let sampled = InkColor::from_rgb8([4, 171, 131]);
         assert_eq!(app.pick_text_color(sampled), Some(sampled));
-        let draft = app.input.text.draft.as_ref().unwrap();
+        let Some(draft) = app.input.text.draft.as_ref() else {
+            panic!("expected active text draft");
+        };
         assert_eq!(draft.committed, "Draft");
         assert_eq!(draft.item.color, sampled);
         assert_eq!(app.color, original_brush);

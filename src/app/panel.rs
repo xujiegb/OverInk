@@ -26,7 +26,8 @@ impl App {
         // Transparent SDL controller: paint the complete toolbar body in egui
         // rather than clearing the whole native window to an opaque rectangle.
         let rail_color = toolbar::colors(ui.visuals().dark_mode).rail;
-        ui.painter().rect_filled(ui.max_rect(), 15., rail_color);
+        ui.painter()
+            .rect_filled(ui.max_rect(), f32::from(toolbar::OUTER_RADIUS), rail_color);
         let opened = self.panel.filter(|_| !self.picking);
         let shown = opened.or(self.panel_retiring);
         // Animate each panel independently so switching fades in and the
@@ -66,7 +67,7 @@ impl App {
                         |ui| {
                             ui.set_opacity(panel_alpha.clamp(0., 1.));
                             egui::Frame::new()
-                                .corner_radius(egui::CornerRadius::same(15))
+                                .corner_radius(egui::CornerRadius::same(toolbar::OUTER_RADIUS))
                                 .fill(ui.visuals().window_fill())
                                 .inner_margin(egui::Margin::same(13))
                                 .show(ui, |ui| {
