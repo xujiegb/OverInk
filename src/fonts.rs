@@ -359,7 +359,7 @@ impl TextFonts {
         }
         definitions.families.insert(
             FontFamily::Name(ANNOTATION.into()),
-            self.order.iter().cloned().collect(),
+            self.order.to_vec(),
         );
         definitions
     }
