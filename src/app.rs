@@ -1007,9 +1007,7 @@ impl App {
                         finger.pressure_seen
                             && finger
                                 .last
-                                .or_else(|| {
-                                    finger.stroke.as_ref()?.points.last().copied()
-                                })
+                                .or_else(|| finger.stroke.as_ref()?.points.last().copied())
                                 .is_some_and(|last| last.dist(point) > MACOS_MAX_RELEASE_JUMP)
                     });
                 if !stale_release {
