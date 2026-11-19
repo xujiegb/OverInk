@@ -41,6 +41,7 @@ libloading = "0.9"
 async-channel = "2"
 futures-lite = "2"
 zbus = { version = "=6.3.0", default-features = false, features = ["default-rt", "proxy", "service"] }
+x11rb = { version = "=0.13.2", default-features = false, features = ["randr"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "=0.6.5"
