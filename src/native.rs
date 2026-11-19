@@ -1,7 +1,6 @@
 //! Minimal native input-region adapters. These change only input routing, never
 //! the overlay alpha, so existing ink stays visible while clicks pass through.
 use crate::sdl::*;
-use std::ffi::c_void;
 #[cfg(target_os = "macos")]
 pub mod macos;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -14,7 +13,7 @@ pub(crate) use unix::{NativeLibrary, library as native_library};
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 #[derive(Default)]
 pub struct Passthrough {
-    applied: Option<(std::ptr::NonNull<c_void>, bool)>,
+    applied: Option<(SDL_WindowID, bool)>,
 }
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 impl Passthrough {
@@ -104,7 +103,7 @@ impl Passthrough {
             .win32_hwnd()
             .ok_or("No Win32 window handle")?
             .as_non_null();
-        if self.applied == Some((identity, pass)) {
+        if self.applied == Some((window.id, pass)) {
             return Ok(());
         }
         self.invalidate();
@@ -148,7 +147,7 @@ impl Passthrough {
             )
             .map_err(|error| error.to_string())?;
         }
-        self.applied = Some((identity, pass));
+        self.applied = Some((window.id, pass));
         Ok(())
     }
 }
@@ -169,7 +168,7 @@ impl Passthrough {
                 .ok_or("No Cocoa window handle")?
                 .as_non_null();
             let cocoa = identity.as_ptr().cast::<AnyObject>();
-            if self.applied != Some((identity, pass)) {
+            if self.applied != Some((window.id, pass)) {
                 // SDL's Cocoa listener can reset ignoresMouseEvents when it
                 // handles motion for a transparent window. Disable that motion
                 // while passing input through, as Cocoa does for tooltips.
@@ -181,7 +180,7 @@ impl Passthrough {
             if ignoring.as_bool() != pass {
                 let _: () = msg_send![cocoa, setIgnoresMouseEvents: Bool::new(pass)];
             }
-            self.applied = Some((identity, pass));
+            self.applied = Some((window.id, pass));
             Ok(())
         }
     }
