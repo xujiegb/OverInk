@@ -123,7 +123,7 @@ impl ColorManager {
                     .map(|v| [v[0] as f32 / 255., v[1] as f32 / 255., v[2] as f32 / 255.]),
             );
             transform.map_rgb_batch(&mut rgb);
-            for (pixel, rgb) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(rgb) {
+            for (pixel, rgb) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(rgb.iter()) {
                 for i in 0..3 {
                     pixel[i] = (rgb[i].clamp(0., 1.) * 255.).round() as u8;
                 }
