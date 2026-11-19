@@ -13,6 +13,13 @@ use std::{
     ptr::{self, NonNull},
 };
 
+// Read SDL's Wayland scaling hint while the SDL-owning thread is already in
+// its audited native initialization boundary. Screenshot workers only need
+// the scalar result, not a callable C API accepting arbitrary pointers.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+static WAYLAND_SCALE_TO_DISPLAY_FORCED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 // The generated sdl3-sys ABI conservatively marks every foreign function
 // unsafe. This adapter uses safe Rust 2024 imports only for SDL's scalar
 // queries, timer/event functions, and synchronous time conversions with
@@ -267,6 +274,15 @@ impl Runtime {
                 let name = backend.map_or_else(|| "SDL".into(), CStr::to_string_lossy);
                 format!("Initializing {name} video failed ({error})")
             })?;
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            {
+                // Query the SDL hint in this existing native initialization
+                // scope, not through a safe extern with a pointer argument.
+                let name = SDL_HINT_VIDEO_WAYLAND_SCALE_TO_DISPLAY;
+                let enabled = !name.is_null() && SDL_GetHintBoolean(name, false);
+                WAYLAND_SCALE_TO_DISPLAY_FORCED
+                    .store(enabled, std::sync::atomic::Ordering::Relaxed);
+            }
             Ok(Self {
                 _main_thread: PhantomData,
             })
@@ -298,6 +314,13 @@ impl Drop for Runtime {
 }
 pub fn driver() -> String {
     sdl_string(SdlStringSource::VideoDriver).unwrap_or_else(|| "unknown".into())
+}
+
+/// SDL's Wayland scaling hint as observed at video initialization.
+/// OverInk never mutates this hint after initialization.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+pub fn wayland_scale_to_display_forced() -> bool {
+    WAYLAND_SCALE_TO_DISPLAY_FORCED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Only these two display-bound queries cross into SDL.
