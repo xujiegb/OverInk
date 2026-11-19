@@ -39,7 +39,7 @@ struct TextMenus {
 
 // A screen pick must not recolor a different annotation when the toolbar is
 // still interactive while the native picker is running.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub(super) struct TextPickTarget {
     selected: Option<usize>,
     editing: bool,

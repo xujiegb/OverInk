@@ -530,23 +530,31 @@ impl X11 {
         }
         // Convert and validate every coordinate before crossing into Xlib.
         // ShapeInput = 2, ShapeSet = 0, Unsorted = 0.
-        let rectangles = if pass || hole.is_some() {
-            let mut rectangles = Vec::new();
-            if hole.is_some() {
-                for area in crate::controller::outside(size, hole) {
-                    rectangles.push(Rectangle {
-                        x: area.x.try_into().map_err(|_| "Input region is too large")?,
-                        y: area.y.try_into().map_err(|_| "Input region is too large")?,
-                        width: area.w.try_into().map_err(|_| "Input region is too large")?,
-                        height: area.h.try_into().map_err(|_| "Input region is too large")?,
-                    });
-                }
+        // At most four regions surround the toolbar. Keep the native
+        // XShape buffer on the stack instead of allocating a second Vec.
+        let mut rectangles: [Rectangle; 4] = std::array::from_fn(|_| Rectangle {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+        });
+        let mut count = 0;
+        if hole.is_some() {
+            for area in crate::controller::outside(size, hole) {
+                let next = rectangles
+                    .get_mut(count)
+                    .ok_or("Too many X11 input regions")?;
+                *next = Rectangle {
+                    x: area.x.try_into().map_err(|_| "Input region is too large")?,
+                    y: area.y.try_into().map_err(|_| "Input region is too large")?,
+                    width: area.w.try_into().map_err(|_| "Input region is too large")?,
+                    height: area.h.try_into().map_err(|_| "Input region is too large")?,
+                };
+                count += 1;
             }
-            Some(rectangles)
-        } else {
-            None
-        };
-        self.dispatch(w, X11Command::Shape(rectangles.as_deref()))?;
+        }
+        let shape = (pass || hole.is_some()).then_some(&rectangles[..count]);
+        self.dispatch(w, X11Command::Shape(shape))?;
         self.applied = Some(region);
         Ok(())
     }
