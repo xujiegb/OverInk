@@ -1,4 +1,5 @@
 //! SDL is owned by the main thread. Window/renderer pointers never cross threads.
+#![deny(clippy::undocumented_unsafe_blocks)]
 pub mod dialog;
 mod dialog_native;
 pub use sdl3_sys::{
@@ -233,7 +234,8 @@ pub fn check(value: bool) -> Result<(), String> {
     if value { Ok(()) } else { Err(error()) }
 }
 pub fn event_type(event: &SDL_Event) -> SDL_EventType {
-    // Every SDL event record starts with its type tag.
+    // SAFETY: SDL_Event's discriminant occupies the shared first field of
+    // every union variant, and the borrowed event is initialized.
     unsafe { SDL_EventType(event.r#type) }
 }
 pub fn cstring(v: &str) -> CString {
@@ -261,6 +263,8 @@ impl Runtime {
             && cfg!(any(target_os = "linux", target_os = "freebsd"))
             && is_wayland_session();
         let backend = startup_driver(x11, smoke, wayland);
+        // SAFETY: The SDL main-thread check succeeded. SDL copies the fixed
+        // static hint names and NUL-terminated values; Runtime owns shutdown.
         unsafe {
             if let Some(name) = backend {
                 SDL_ClearError();
@@ -366,6 +370,8 @@ pub fn usable_display_bounds(id: u32) -> Option<[i32; 4]> {
 /// Read the native mode's logical dimensions and pixel density.
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub fn desktop_display_mode(id: u32) -> Option<([i32; 2], f32)> {
+    // SAFETY: SDL owns the returned desktop mode. Read its scalar fields
+    // immediately while the video subsystem is active.
     unsafe {
         let mode = SDL_GetDesktopDisplayMode(SDL_DisplayID(id)).as_ref()?;
         Some(([mode.w, mode.h], mode.pixel_density))
@@ -465,6 +471,8 @@ fn bounded_sdl_count(count: i32, maximum: usize) -> Option<usize> {
 
 /// Enumerate SDL preferred locales and release SDL-owned storage before return.
 pub fn preferred_locales() -> Vec<(String, String)> {
+    // SAFETY: SDL owns the returned array, whose bounded count is checked
+    // before slicing. SdlAllocation releases it after copying each locale.
     unsafe {
         let mut count = 0;
         let Some(locales) = NonNull::new(SDL_GetPreferredLocales(&mut count)).map(SdlAllocation)
@@ -543,6 +551,8 @@ pub struct DisplayInfo {
 }
 
 pub fn display_info() -> Result<Vec<DisplayInfo>, String> {
+    // SAFETY: SDL returns a caller-owned display ID list. Validate the count,
+    // copy native metadata synchronously, and release the list through RAII.
     unsafe {
         let mut count = 0;
         let list = NonNull::new(SDL_GetDisplays(&mut count))
@@ -817,6 +827,8 @@ pub fn removed_display_id(event: &SDL_Event) -> Option<u32> {
 /// Read a window event's owning ID only for a tagged window event.
 pub fn window_event_id(event: &SDL_Event) -> Option<SDL_WindowID> {
     if (SDL_EVENT_WINDOW_FIRST..=SDL_EVENT_WINDOW_LAST).contains(&event_type(event)) {
+        // SAFETY: The tag matches an SDL window event, so the window union
+        // variant is the active member and its window ID is initialized.
         Some(unsafe { event.window.windowID })
     } else {
         None
@@ -1525,6 +1537,8 @@ impl Window {
     }
 
     pub fn icc_profile(&self) -> Option<Vec<u8>> {
+        // SAFETY: The live Window owns the SDL handle. SDL allocates the
+        // profile bytes, and the checked slice is copied before RAII release.
         unsafe {
             let mut size = 0;
             let Some(profile) = NonNull::new(SDL_GetWindowICCProfile(self.raw.as_ptr(), &mut size))
@@ -1592,8 +1606,8 @@ impl Window {
 }
 impl Drop for Window {
     fn drop(&mut self) {
-        // Destroying an SDL parent also destroys its popup descendants.
-        // Never dereference a popup whose parent has already been dropped.
+        // SAFETY: SDL owns the window while its ID still resolves to our
+        // handle. Avoid a second destruction when a parent already freed it.
         unsafe {
             if SDL_GetWindowFromID(self.id) == self.raw.as_ptr() {
                 SDL_DestroyWindow(self.raw.as_ptr());
@@ -1803,6 +1817,8 @@ impl InkTexture {
         if pixels.len() != expected {
             return Err("Ink texture pixel buffer size mismatch".into());
         }
+        // SAFETY: The texture is live and the exact byte count and pitch
+        // were validated before SDL synchronously copies the borrowed pixels.
         unsafe {
             check(SDL_UpdateTexture(
                 self.raw.as_non_null().as_ptr(),
@@ -1814,6 +1830,8 @@ impl InkTexture {
     }
 
     pub fn set_modulation(&self, rgb: [f32; 3], alpha: f32) -> Result<(), String> {
+        // SAFETY: The owned SDL texture is live; SDL copies only the scalar
+        // color and alpha values on the renderer's main thread.
         unsafe {
             check(SDL_SetTextureColorModFloat(
                 self.raw.as_non_null().as_ptr(),
@@ -1866,6 +1884,8 @@ impl SnapshotTexture {
             return Err("The renderer cannot display the captured HDR range".into());
         }
         let renderer = renderer.raw.ok_or("Renderer has been destroyed")?;
+        // SAFETY: The renderer is live. The properties guard and owned
+        // texture retain single ownership until native configuration ends.
         unsafe {
             let raw = if linear {
                 let props = OwnedProperties::new()?;
@@ -2270,6 +2290,8 @@ impl Renderer {
         Self::create(window, true, Some(c"software"))
     }
     fn create(window: &Window, force_sdr: bool, driver: Option<&CStr>) -> Result<Self, String> {
+        // SAFETY: SDL owns the live Window and copies borrowed CStr data.
+        // New renderer handles are checked and subsequently owned by Renderer.
         unsafe {
             let props = OwnedProperties::new()?;
             if !SDL_SetPointerProperty(
