@@ -203,13 +203,15 @@ class CaptureBridge {
                 resolve(this._active && !state.cancelled ? decision : null);
             };
             const close = choice => {
-                decision = !state.cancelled ? choice : null;
                 if (closing) {
-                    if (state.cancelled)
+                    if (state.cancelled) {
+                        decision = null;
                         settle();
+                    }
                     return;
                 }
                 closing = true;
+                decision = !state.cancelled ? choice : null;
                 if (state.cancelled)
                     settle();
                 if (dialog.state === ModalDialog.State.OPENED ||

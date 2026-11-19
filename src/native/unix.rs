@@ -399,7 +399,7 @@ type CombineRectangles = unsafe extern "C" fn(
     c_int,
     c_int,
     c_int,
-    Option<&Rectangle>,
+    Option<NonNull<Rectangle>>,
     c_int,
     c_int,
     c_int,
@@ -462,7 +462,8 @@ impl X11 {
                         2,
                         0,
                         0,
-                        rectangles.first(),
+                        NonNull::new(rectangles.as_ptr().cast_mut())
+                            .filter(|_| !rectangles.is_empty()),
                         count,
                         0,
                         0,
