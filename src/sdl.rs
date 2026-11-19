@@ -1856,6 +1856,19 @@ impl Window {
         let mut pixels = icon.into_raw();
         let _ = self.run_command(WindowCommand::ToolbarSetup(size, &mut pixels));
     }
+    /// Rebuild the native shape only after an actual pixel-size/DPI change.
+    /// It masks both the compositor output and pointer hit-testing region.
+    pub fn update_rounded_shape(&self, applied: &mut Option<[i32; 2]>) -> Result<(), String> {
+        let pixels = self.pixel_size();
+        if *applied == Some(pixels) {
+            return Ok(());
+        }
+        let radius = (15. * self.ui_scale() * self.pixel_density()).round() as i32;
+        self.run_command(WindowCommand::RoundedCorners(pixels, radius.max(1)))?;
+        *applied = Some(pixels);
+        Ok(())
+    }
+
     pub fn arrange_toolbar(&self, expanded: bool, on_display: Option<u32>) -> Result<(), String> {
         let units = self.ui_scale();
         let width = crate::toolbar::WIDTH
@@ -1876,12 +1889,6 @@ impl Window {
             h = h.min((available_height - 16).max(1));
         }
         self.run_command(WindowCommand::SetSize([w, h]))?;
-        // SDL must own the mask surface's lifetime and the temporary surface
-        // must be released after SetWindowShape copies it. Reapply after DPI
-        // or size changes, but never on every rendered frame.
-        let pixels = self.pixel_size();
-        let radius = (15. * units * self.pixel_density()).round() as i32;
-        self.run_command(WindowCommand::RoundedCorners(pixels, radius.max(1)))?;
         let video = driver();
         if let Some([left, top, available_width, available_height]) =
             bounds.filter(|_| video != "wayland")
