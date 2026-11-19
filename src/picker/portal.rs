@@ -9,8 +9,8 @@ use std::{
     collections::HashMap,
     path::PathBuf,
     sync::{
-        atomic::{AtomicU64, Ordering},
-        mpsc,
+        atomic::{AtomicU8, AtomicU64, Ordering},
+        mpsc, Arc,
     },
     thread,
 };
@@ -25,6 +25,8 @@ pub(crate) type ScreenshotFallback = Box<dyn FnOnce(Image) -> Result<Image, Stri
 pub struct SystemJob<T = InkColor> {
     receiver: mpsc::Receiver<PortalResult<T>>,
     cancel: async_channel::Sender<()>,
+    #[cfg(target_os = "linux")]
+    portal_visibility: Option<Arc<AtomicU8>>,
 }
 impl SystemJob<InkColor> {
     pub fn start() -> Result<Self, String> {
@@ -79,7 +81,12 @@ impl SystemJob<Image> {
         };
         let [x, y] = position.unwrap_or([0, 0]);
         let positioned = position.is_some();
-        Self::spawn("overink-gnome-shell-capture", move |cancelled| {
+        // State: 0 = Shell capture, 1 = hide requested, 2 = canvas hidden.
+        // The worker must not request a compositor screenshot until the
+        // main SDL thread has removed OverInk windows from the desktop.
+        let portal_visibility = Arc::new(AtomicU8::new(0));
+        let worker_visibility = Arc::clone(&portal_visibility);
+        let mut job = Self::spawn("overink-gnome-shell-capture", move |cancelled| {
             let shell_request = (
                 request_id.as_str(),
                 region.left() as f64,
@@ -136,9 +143,26 @@ impl SystemJob<Image> {
                         && (error.to_string().contains("ServiceUnknown")
                             || error.to_string().contains("NameHasNoOwner")) =>
                 {
-                    // Portal v2 has no explicit full-screen target. With its
-                    // noninteractive default, accept only an image whose
-                    // dimensions match the known single-display desktop.
+                    // The Shell extension is absent. Only the main SDL thread
+                    // can hide the annotation canvas and toolbar; wait for
+                    // that acknowledgement before requesting portal pixels.
+                    worker_visibility.store(1, Ordering::Release);
+                    while !cancelled.is_closed()
+                        && worker_visibility.load(Ordering::Acquire) != 2
+                    {
+                        thread::sleep(std::time::Duration::from_millis(8));
+                    }
+                    if cancelled.is_closed() {
+                        return Ok(None);
+                    }
+                    // SDL_HideWindow is synchronous, but compositor visibility
+                    // is applied at the next frame. Give it time to settle.
+                    thread::sleep(std::time::Duration::from_millis(100));
+                    if cancelled.is_closed() {
+                        return Ok(None);
+                    }
+                    // Portal v2 has no explicit full-screen target. Accept
+                    // only an image matching the known single-display desktop.
                     // Never fall back to the incomplete X11 framebuffer.
                     let values = zbus::block_on(request("Screenshot", false, cancelled)).map_err(
                         |error| {
@@ -211,7 +235,9 @@ impl SystemJob<Image> {
             };
             let _ = std::fs::remove_file(file);
             result
-        })
+        })?;
+        job.portal_visibility = Some(portal_visibility);
+        Ok(job)
     }
 }
 impl<T: Send + 'static> SystemJob<T> {
@@ -227,7 +253,12 @@ impl<T: Send + 'static> SystemJob<T> {
                 let _ = sender.send(request(&cancelled));
             })
             .map_err(|error| error.to_string())?;
-        Ok(Self { receiver, cancel })
+        Ok(Self {
+            receiver,
+            cancel,
+            #[cfg(target_os = "linux")]
+            portal_visibility: None,
+        })
     }
     pub fn poll(&self) -> Option<PortalResult<T>> {
         match self.receiver.try_recv() {
@@ -238,6 +269,20 @@ impl<T: Send + 'static> SystemJob<T> {
     }
 }
 impl<T> SystemJob<T> {
+    #[cfg(target_os = "linux")]
+    pub fn portal_fallback_pending(&self) -> bool {
+        self.portal_visibility
+            .as_ref()
+            .is_some_and(|state| state.load(Ordering::Acquire) != 0)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn acknowledge_portal_fallback_hidden(&self) {
+        if let Some(state) = &self.portal_visibility {
+            let _ = state.compare_exchange(1, 2, Ordering::AcqRel, Ordering::Acquire);
+        }
+    }
+
     pub fn cancel(&self) {
         self.cancel.close();
     }

@@ -2215,7 +2215,9 @@ fn run_inner(options: Options) -> Result<(), String> {
                     }
                 }
             }
-            let hide = picker.hides_windows() || canvases.iter().any(|c| c.background.pending());
+            let hide = picker.hides_windows()
+                || canvases.iter().any(|c| c.background.pending())
+                || app.screenshot.portal_fallback_requested();
             toolbar_dirty |= capture_visibility(
                 &mut canvases,
                 &toolbar,
@@ -2224,6 +2226,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 hide,
                 app.screenshot.active(),
             )?;
+            app.screenshot.acknowledge_portal_fallback_hidden();
             let mut restore_text_focus = false;
             if let Some(result) = picker.poll(&canvases[active].window) {
                 app.picking = false;
@@ -2292,7 +2295,9 @@ fn run_inner(options: Options) -> Result<(), String> {
                     };
                 }
             }
-            let hide = picker.hides_windows() || canvases.iter().any(|c| c.background.pending());
+            let hide = picker.hides_windows()
+                || canvases.iter().any(|c| c.background.pending())
+                || app.screenshot.portal_fallback_requested();
             toolbar_dirty |= capture_visibility(
                 &mut canvases,
                 &toolbar,
@@ -2301,6 +2306,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 hide,
                 app.screenshot.active(),
             )?;
+            app.screenshot.acknowledge_portal_fallback_hidden();
             if hide {
                 wait_for_events(Duration::from_millis(8));
                 return Ok(());
@@ -2529,7 +2535,9 @@ fn run_inner(options: Options) -> Result<(), String> {
             }
 
             let screenshot_active = app.screenshot.active();
-            let hide = picker.hides_windows() || canvases.iter().any(|c| c.background.pending());
+            let hide = picker.hides_windows()
+                || canvases.iter().any(|c| c.background.pending())
+                || app.screenshot.portal_fallback_requested();
             toolbar_dirty |= capture_visibility(
                 &mut canvases,
                 &toolbar,
@@ -2538,6 +2546,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 hide,
                 screenshot_active,
             )?;
+            app.screenshot.acknowledge_portal_fallback_hidden();
             if toolbar_hidden && let Some(mut output) = output.take() {
                 output.shapes.clear();
                 output.platform_output.ime = None;

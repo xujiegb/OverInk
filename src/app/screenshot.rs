@@ -267,6 +267,24 @@ impl Screenshot {
         matches!(self.stage, Stage::Ready(..))
     }
 
+    /// Hide OverInk's annotations only after the Shell bridge is confirmed
+    /// absent; its normal capture path still needs a visible canvas actor.
+    pub fn portal_fallback_requested(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        if let Stage::Capturing(_, Job::Shell(job), _) = &self.stage {
+            return job.portal_fallback_pending();
+        }
+        false
+    }
+
+    /// Called only after SDL has hidden the canvas and toolbar successfully.
+    pub fn acknowledge_portal_fallback_hidden(&self) {
+        #[cfg(target_os = "linux")]
+        if let Stage::Capturing(_, Job::Shell(job), _) = &self.stage {
+            job.acknowledge_portal_fallback_hidden();
+        }
+    }
+
     pub fn waiting(&self) -> bool {
         matches!(self.stage, Stage::Waiting(..) | Stage::Capturing(..)) || self.saving()
     }
