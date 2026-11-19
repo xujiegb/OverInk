@@ -256,8 +256,10 @@ impl HexEntry {
 #[cfg(test)]
 mod hex_tests {
     use super::*;
+    type TestResult = Result<(), &'static str>;
+
     #[test]
-    fn parses_common_hex_formats_and_roundtrips() -> Result<(), &'static str> {
+    fn parses_common_hex_formats_and_roundtrips() -> TestResult {
         for (text, expected) in [
             ("#FFFFFF", [255; 3]),
             ("ffffff", [255; 3]),
@@ -276,7 +278,7 @@ mod hex_tests {
         Ok(())
     }
     #[test]
-    fn p3_hex_and_srgb_presets_keep_the_selected_space() -> Result<(), &'static str> {
+    fn p3_hex_and_srgb_presets_keep_the_selected_space() -> TestResult {
         let color = InkColor::from_channels([255, 0, 0], Space::DisplayP3);
         let mut entry = HexEntry::new(color);
         assert_eq!(entry.text, "#FF0000");
@@ -311,8 +313,7 @@ mod hex_tests {
         }
     }
     #[test]
-    fn invalid_edit_retains_the_last_color_and_external_choices_resynchronize()
-    -> Result<(), &'static str> {
+    fn invalid_edit_retains_the_last_color_and_external_choices_resynchronize() -> TestResult {
         let initial = InkColor::default();
         let mut entry = HexEntry::new(initial);
         entry.text = "#12".into();
