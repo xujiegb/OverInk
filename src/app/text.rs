@@ -214,7 +214,7 @@ fn apply_clipboard(
             );
             ui.ctx().copy_text(copied);
             if action == ClipboardAction::Cut {
-                let start = range.as_ref().map_or(0, |range| range.start);
+                let start = range.as_ref().map_or(0, |range| range.start.0);
                 if let Some(range) = range {
                     text.delete_char_range(range);
                 } else {
@@ -228,10 +228,10 @@ fn apply_clipboard(
         ClipboardAction::Paste => {
             let value = crate::sdl::clipboard_text()?;
             let replacement = range.unwrap_or_else(|| {
-                let pos = selected.map_or(length, |cursor| cursor.primary.ccursor.index);
+                let pos = selected.map_or(CCursor::new(length).index, |cursor| cursor.primary.index);
                 pos..pos
             });
-            let capacity = MAX_TEXT_CHARS.saturating_sub(length - (replacement.end - replacement.start));
+            let capacity = MAX_TEXT_CHARS.saturating_sub(length.saturating_sub(replacement.end.0 - replacement.start.0));
             let to_insert: String = value.chars().take(capacity).collect();
             text.delete_char_range(replacement.clone());
             text.insert_text(&to_insert, replacement.start);
@@ -384,9 +384,13 @@ impl App {
                 queued -= 1;
                 return true;
             }
-            changed |= self.text_pointer(event, size);
+            let pointer_changed = self.text_pointer(event, size);
+            changed |= pointer_changed;
             let menu = self.text_menus(canvas);
-            let forward = self.input.text.menu_pointer.wants_event(event, menu);
+            let forward = self.input.text.menu_pointer.wants_event(event, menu)
+                || (pointer_changed && matches!(event, Event::PointerButton {
+                    button: PointerButton::Secondary, ..
+                }));
             changed |= forward;
             forward
         });
