@@ -200,6 +200,10 @@ impl TextInput {
         self.keyboard_request.take()
     }
 
+    pub fn keyboard_request_pending(&self) -> bool {
+        self.keyboard_request.is_some()
+    }
+
     pub fn take_screen_pick(&mut self) -> bool {
         std::mem::take(&mut self.screen_pick_requested)
     }
