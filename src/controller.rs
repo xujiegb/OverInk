@@ -212,11 +212,8 @@ impl Guard {
         #[cfg(not(target_os = "windows"))]
         {
             // SDL applies this mask to both rendering and native hit testing.
-            let opaque_regions = pixels.map(|hole| {
-                outside(size, Some(hole))
-                    .map(Rect::sdl)
-                    .collect::<Vec<_>>()
-            });
+            let opaque_regions =
+                pixels.map(|hole| outside(size, Some(hole)).map(Rect::sdl).collect::<Vec<_>>());
             canvas.set_opaque_shape_regions(size, opaque_regions.as_deref())?;
         }
         self.last = Some((size, pixels));
