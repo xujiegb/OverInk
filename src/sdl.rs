@@ -16,8 +16,7 @@ use std::{
 // Runtime owns SDL video initialization and shutdown. Native device and
 // cursor queries read this lifecycle flag instead of calling SDL_WasInit
 // through a safe extern that cannot enforce its main-thread precondition.
-static SDL_VIDEO_READY: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static SDL_VIDEO_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 // Read SDL's Wayland scaling hint while the SDL-owning thread is already in
 // its audited native initialization boundary. Screenshot workers only need
@@ -755,9 +754,7 @@ pub struct SystemCursor(NonNull<SDL_Cursor>);
 
 impl SystemCursor {
     pub fn crosshair() -> Option<Self> {
-        if !native_is_main_thread()
-            || !SDL_VIDEO_READY.load(std::sync::atomic::Ordering::Acquire)
-        {
+        if !native_is_main_thread() || !SDL_VIDEO_READY.load(std::sync::atomic::Ordering::Acquire) {
             return None;
         }
         let cursor = native_create_system_cursor(SDL_SYSTEM_CURSOR_CROSSHAIR)?;
