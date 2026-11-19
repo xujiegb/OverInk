@@ -679,8 +679,16 @@ impl App {
     }
     fn for_each_page(&mut self, mut f: impl FnMut(&mut Self)) {
         f(self);
-        for id in self.parked_input.keys().copied().collect::<Vec<_>>() {
+        // Traversing ordered page IDs avoids allocating a temporary Vec on
+        // every Sidecar pen event. on_page restores the key set on return.
+        let mut next = self.parked_input.keys().next().copied();
+        while let Some(id) = next {
             self.on_page(Some(id), &mut f);
+            next = self
+                .parked_input
+                .range((std::ops::Bound::Excluded(id), std::ops::Bound::Unbounded))
+                .next()
+                .map(|(id, _)| *id);
         }
     }
     fn finish_all_contacts(&mut self) {

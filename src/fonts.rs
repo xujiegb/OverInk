@@ -7,7 +7,7 @@ use egui::{
 use skrifa::{FontRef, GlyphId, MetadataProvider, string::StringId};
 use std::{
     fs::{self, File},
-    io::{self, Read},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
@@ -260,8 +260,19 @@ impl TextFonts {
     fn save_priority(&self, legacy_path: &Path) -> Result<(), String> {
         let base = legacy_path.parent().ok_or("No font settings directory")?;
         fs::create_dir_all(base).map_err(|error| error.to_string())?;
-        let data = serde_json::to_vec_pretty(&self.order).map_err(|error| error.to_string())?;
-        fs::write(base.join("annotation-fonts.json"), data).map_err(|error| error.to_string())
+        // Keep the previous configuration intact if serialization or a
+        // storage write fails. The tempfile lives in the same directory, so
+        // persist can replace the destination without a partial JSON write.
+        let mut temporary = tempfile::NamedTempFile::new_in(base)
+            .map_err(|error| error.to_string())?;
+        serde_json::to_writer_pretty(&mut temporary, &self.order)
+            .map_err(|error| error.to_string())?;
+        temporary.flush().map_err(|error| error.to_string())?;
+        temporary.as_file().sync_all().map_err(|error| error.to_string())?;
+        temporary
+            .persist(base.join("annotation-fonts.json"))
+            .map_err(|error| error.error.to_string())?;
+        Ok(())
     }
 
     /// Add a system font to a private copy, without retaining a dependency on
@@ -307,7 +318,13 @@ impl TextFonts {
         }
         let item = self.order.remove(from);
         self.order.insert(to, item);
-        self.save_priority(legacy_path)?;
+        if let Err(error) = self.save_priority(legacy_path) {
+            // A write failure must not leave the displayed order different
+            // from the one that will be loaded on the next launch.
+            let item = self.order.remove(to);
+            self.order.insert(from, item);
+            return Err(error);
+        }
         self.revision = self.revision.wrapping_add(1);
         Ok(())
     }
@@ -321,27 +338,53 @@ impl TextFonts {
             .iter()
             .position(|item| item == id)
             .ok_or("Font is not in the priority list")?;
+        let custom_index = self
+            .custom
+            .iter()
+            .position(|font| font.id == id)
+            .ok_or("Imported font data is missing")?;
+        let removed_order = self.order.remove(index);
+        let removed_font = self.custom.remove(custom_index);
+        if let Err(error) = self.save_priority(legacy_path) {
+            self.order.insert(index, removed_order);
+            self.custom.insert(custom_index, removed_font);
+            return Err(error);
+        }
+        // Only delete the private font copy once the settings have been
+        // saved. An OS-level unlink failure can leave an orphaned file, but
+        // must never restore a font the user has already removed.
         let base = legacy_path.parent().ok_or("No font settings directory")?;
         let file = font_file(base, legacy_path, id);
-        match fs::remove_file(file) {
-            Ok(()) => (),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => (),
-            Err(error) => return Err(error.to_string()),
+        if let Err(error) = fs::remove_file(file)
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            eprintln!("OverInk: could not clean up removed font {id}: {error}");
         }
-        self.order.remove(index);
-        self.custom.retain(|font| font.id != id);
-        self.save_priority(legacy_path)?;
         self.revision = self.revision.wrapping_add(1);
         Ok(())
     }
 
     pub fn reset(&mut self, legacy_path: &Path) -> Result<(), String> {
-        let ids: Vec<String> = self.custom.iter().map(|font| font.id.clone()).collect();
-        for id in &ids {
-            self.remove_font(id, legacy_path)?;
+        // One persisted transaction instead of rewriting the settings file
+        // once for every imported font. Restore both collections on failure.
+        let previous_order = std::mem::replace(
+            &mut self.order,
+            FALLBACK.iter().map(|name| (*name).to_owned()).collect(),
+        );
+        let previous_custom = std::mem::take(&mut self.custom);
+        if let Err(error) = self.save_priority(legacy_path) {
+            self.order = previous_order;
+            self.custom = previous_custom;
+            return Err(error);
         }
-        self.order = FALLBACK.iter().map(|name| (*name).to_owned()).collect();
-        self.save_priority(legacy_path)?;
+        let base = legacy_path.parent().ok_or("No font settings directory")?;
+        for font in &previous_custom {
+            if let Err(error) = fs::remove_file(font_file(base, legacy_path, &font.id))
+                && error.kind() != io::ErrorKind::NotFound
+            {
+                eprintln!("OverInk: could not clean up reset font {}: {error}", font.id);
+            }
+        }
         self.revision = self.revision.wrapping_add(1);
         Ok(())
     }
@@ -571,6 +614,53 @@ mod tests {
         });
         frame.drop_without_applying_deltas();
         glyphs
+    }
+
+    #[test]
+    fn failed_font_move_restores_the_original_priority_order() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let blocker = temp.path().join("not-a-directory");
+        fs::write(&blocker, b"block")?;
+        let mut fonts = TextFonts::default();
+        let before = fonts.order.to_vec();
+
+        assert!(fonts.move_font(0, 2, &blocker.join("annotation-font")).is_err());
+        assert_eq!(fonts.order, before);
+        assert_eq!(fonts.revision, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn failed_removal_and_reset_preserve_font_entries() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let source = temp.path().join("system-font.ttf");
+        fs::write(
+            &source,
+            include_bytes!("../assets/fonts/SarasaFixedSlabSC-Regular.ttf"),
+        )?;
+        let settings = temp.path().join("annotation-font");
+        let mut fonts = TextFonts::default();
+        fonts.install(&source, &settings)?;
+        let id = fonts.custom[0].id.to_owned();
+        let private_file = font_file(temp.path(), &settings, &id);
+        assert!(private_file.exists());
+        let before_revision = fonts.revision;
+
+        let blocker = temp.path().join("blocked");
+        fs::write(&blocker, b"block")?;
+        let invalid_settings = blocker.join("annotation-font");
+        assert!(fonts.remove_font(&id, &invalid_settings).is_err());
+        assert!(fonts.reset(&invalid_settings).is_err());
+        assert_eq!(fonts.custom.len(), 1);
+        assert_eq!(fonts.order.first().map(String::as_str), Some(id.as_str()));
+        assert_eq!(fonts.revision, before_revision);
+        assert!(private_file.exists());
+
+        fonts.reset(&settings)?;
+        assert!(fonts.custom.is_empty());
+        assert_eq!(fonts.order, FALLBACK.map(str::to_owned));
+        assert!(!private_file.exists());
+        Ok(())
     }
 
     #[test]
