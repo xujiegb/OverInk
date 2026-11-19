@@ -619,48 +619,78 @@ impl App {
                 });
         });
         ui.separator();
-        ui.label(RichText::new(tr.text("Annotation font", "标注字体", "標註字型")).strong());
-        ui.label(
-            self.text_fonts
-                .name()
-                .unwrap_or(crate::fonts::INCLUDED_FONT),
-        );
-        ui.add_enabled_ui(!dialog_open, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                if ui
-                    .button(tr.text("Choose font file…", "选择字体文件…", "選擇字型檔案…"))
-                    .clicked()
-                {
-                    commands.choose_font = true;
-                }
-                if self.text_fonts.name().is_some()
-                    && ui
-                        .button(tr.text("Use included font", "使用内置字体", "使用內建字型"))
+        ui.label(RichText::new(tr.text("Annotation fonts", "标注字体", "標註字型")).strong());
+        ui.small(tr.text(
+            "Drag ☰ to change fallback priority. The three included fonts cannot be removed.",
+            "拖动 ☰ 调整字体优先级；三个内置字体不可删除。",
+            "拖曳 ☰ 調整字型優先順序；三個內建字型不可刪除。",
+        ));
+        let font_rows: Vec<_> = self.text_fonts.entries()
+            .map(|(id, name, bundled)| (id.to_owned(), name.to_owned(), bundled))
+            .collect();
+        for (index, (id, name, bundled)) in font_rows.iter().enumerate() {
+            let frame = egui::Frame::default().inner_margin(egui::Margin::symmetric(5, 3));
+            let (_, dropped) = ui.dnd_drop_zone::<usize, ()>(frame, |ui| {
+                ui.horizontal(|ui| {
+                    let drag_id = ui.make_persistent_id(("annotation-font-priority", id));
+                    ui.dnd_drag_source(drag_id, index, |ui| {
+                        ui.label("☰");
+                    });
+                    ui.label(name);
+                    if *bundled {
+                        ui.small("🔒").on_hover_text(tr.text(
+                            "Included font",
+                            "内置字体",
+                            "內建字型",
+                        ));
+                    } else if ui
+                        .small_button("×")
+                        .on_hover_text(tr.text("Remove font", "删除字体", "刪除字型"))
                         .clicked()
-                {
-                    commands.reset_font = true;
-                }
+                    {
+                        commands.font_remove = Some(id.clone());
+                    }
+                });
             });
-        });
-        if let Some(path) = &mut self.font_path_input {
-            let entry = ui.add(
-                egui::TextEdit::singleline(path)
-                    .id(egui::Id::unique(super::FONT_PATH_FIELD))
-                    .hint_text(tr.text("Font file path", "字体文件路径", "字型檔案路徑")),
+            if let Some(from) = dropped {
+                commands.font_reorder = Some((*from, index));
+            }
+        }
+        if ui.add_enabled(!dialog_open, egui::Button::new(tr.text(
+            "+ Add system font",
+            "＋ 添加系统字体",
+            "＋ 新增系統字型",
+        ))).clicked() {
+            self.adding_font = !self.adding_font;
+            if self.adding_font {
+                self.font_catalog.get_or_insert_with(crate::fonts::installed_system_fonts);
+            }
+        }
+        if self.adding_font {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.font_search)
+                    .hint_text(tr.text("Search fonts", "搜索字体", "搜尋字型")),
             );
-            let submitted =
-                entry.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-            let usable = !path.trim().is_empty();
-            if (submitted
-                || ui
-                    .add_enabled(
-                        usable,
-                        egui::Button::new(tr.text("Apply font", "应用字体", "套用字型")),
-                    )
-                    .clicked())
-                && usable
-            {
-                commands.font_path = Some(std::path::PathBuf::from(path.trim()));
+            let filter = self.font_search.to_lowercase();
+            let mut added = false;
+            if let Some(catalog) = &self.font_catalog {
+                egui::ScrollArea::vertical()
+                    .id_salt("installed-fonts")
+                    .max_height(180.)
+                    .show(ui, |ui| {
+                        for font in catalog.iter().filter(|font| {
+                            font.name.to_lowercase().contains(&filter)
+                        }) {
+                            if ui.selectable_label(false, &font.name).clicked() {
+                                commands.font_path = Some(font.path.clone());
+                                added = true;
+                            }
+                        }
+                    });
+            }
+            if added {
+                self.adding_font = false;
+                self.font_search.clear();
             }
         }
         ui.separator();
