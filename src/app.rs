@@ -76,6 +76,9 @@ struct FingerStroke {
     stroke: Option<Stroke>,
     fragments: Vec<Stroke>,
     last: Option<Point>,
+    /// Whether this contact has supplied genuine positive pressure.
+    /// Normal touch drivers can legitimately report only zero pressure.
+    pressure_seen: bool,
 }
 struct LaserSample {
     point: Point,
@@ -993,16 +996,25 @@ impl App {
             return;
         }
         if event.r#type == SDL_EVENT_FINGER_UP {
-            if let Some(point) = touch::point(event, size)
-                && (!cfg!(target_os = "macos")
-                    || self
-                        .input
-                        .touches
-                        .get(&key)
-                        .and_then(|finger| finger.last)
-                        .is_some_and(|last| last.dist(point) <= MACOS_MAX_RELEASE_JUMP))
-            {
-                self.touch_motion(key, point);
+            if let Some(point) = touch::point(event, size) {
+                // A sparse but valid touch can travel a long distance between
+                // DOWN and UP. Distance alone must not discard its endpoint.
+                // A macOS release is suspicious only after *positive* touch
+                // pressure was observed and the UP packet reports zero.
+                let stale_release = cfg!(target_os = "macos")
+                    && event.pressure <= 0.
+                    && self.input.touches.get(&key).is_some_and(|finger| {
+                        finger.pressure_seen
+                            && finger
+                                .last
+                                .or_else(|| {
+                                    finger.stroke.as_ref()?.points.last().copied()
+                                })
+                                .is_some_and(|last| last.dist(point) > MACOS_MAX_RELEASE_JUMP)
+                    });
+                if !stale_release {
+                    self.touch_motion(key, point);
+                }
             }
             if let Some(finger) = self.input.touches.remove(&key) {
                 self.commit_touch(finger);
@@ -1062,8 +1074,14 @@ impl App {
                     stroke,
                     fragments: Vec::new(),
                     last: None,
+                    pressure_seen: event.pressure.is_finite() && event.pressure > 0.,
                 },
             );
+        } else if event.pressure.is_finite()
+            && event.pressure > 0.
+            && let Some(finger) = self.input.touches.get_mut(&key)
+        {
+            finger.pressure_seen = true;
         }
         self.touch_motion(key, point);
     }
@@ -1247,6 +1265,8 @@ impl App {
                     // Keep nearby endpoint samples for natural stroke ends,
                     // but reject implausibly distant Sidecar release positions.
                     let accept_endpoint = !cfg!(target_os = "macos")
+                        || !pen.has_pressure
+                        || pen.pressure <= 0.
                         || self.input.contact.is_none_or(|contact| {
                             contact.source != source
                                 || contact.last.dist(p) <= MACOS_MAX_RELEASE_JUMP

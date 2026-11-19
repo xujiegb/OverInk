@@ -303,7 +303,7 @@ fn finger_contact(app: &mut App, ty: SDL_EventType, x: f32) {
                 windowID: CANVAS,
                 x,
                 y: 0.2,
-                pressure: 1.,
+                pressure: if ty == SDL_EVENT_FINGER_UP { 0. } else { 1. },
                 ..Default::default()
             },
         },
@@ -347,6 +347,9 @@ fn macos_pen_up_at_distant_stale_position_does_not_draw_connector() {
     let mut app = super::touch_tests::app();
     contact(&mut app, CANVAS, true, 40.);
     motion(&mut app, CANVAS, true, 100.);
+    // Positive pen pressure provides additional evidence that a distant
+    // release sample with no intervening motion may be stale.
+    pressure(&mut app, CANVAS, true, 100., 0.4);
     // SDL receives the release near the next touchdown rather than the old tip.
     contact(&mut app, CANVAS, false, 700.);
     assert_eq!(app.history.strokes().len(), 1);
@@ -375,4 +378,91 @@ fn macos_finger_up_at_distant_stale_position_does_not_draw_connector() {
             .iter()
             .all(|point| point.x <= 100.)
     );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn long_valid_finger_release_without_pressure_preserves_endpoint() {
+    let mut app = super::touch_tests::app();
+    app.event(
+        &SDL_Event {
+            tfinger: SDL_TouchFingerEvent {
+                r#type: SDL_EVENT_FINGER_DOWN,
+                touchID: SDL_TouchID(5),
+                fingerID: SDL_FingerID(5),
+                windowID: CANVAS,
+                x: 0.1,
+                y: 0.1,
+                pressure: 0.,
+                ..Default::default()
+            },
+        },
+        CANVAS,
+        SIZE,
+    );
+    app.event(
+        &SDL_Event {
+            tfinger: SDL_TouchFingerEvent {
+                r#type: SDL_EVENT_FINGER_UP,
+                touchID: SDL_TouchID(5),
+                fingerID: SDL_FingerID(5),
+                windowID: CANVAS,
+                x: 0.1,
+                y: 0.9,
+                pressure: 0.,
+                ..Default::default()
+            },
+        },
+        CANVAS,
+        SIZE,
+    );
+    let [stroke] = app.history.strokes() else {
+        panic!("expected a complete touch stroke");
+    };
+    assert_eq!(stroke.points.len(), 2);
+    assert_eq!(stroke.points[1].y, 630.);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn long_valid_release_with_positive_pressure_preserves_shape_endpoint() {
+    let mut app = super::touch_tests::app();
+    app.use_tool(Tool::Line);
+    finger_contact(&mut app, SDL_EVENT_FINGER_DOWN, 0.05);
+    finger_contact(&mut app, SDL_EVENT_FINGER_MOTION, 0.1);
+    // Positive contact pressure at release is not evidence of a stale
+    // coordinate, even if it is far away from the last motion sample.
+    app.event(
+        &SDL_Event {
+            tfinger: SDL_TouchFingerEvent {
+                r#type: SDL_EVENT_FINGER_UP,
+                touchID: SDL_TouchID(9),
+                fingerID: SDL_FingerID(3),
+                windowID: CANVAS,
+                x: 0.8,
+                y: 0.2,
+                pressure: 1.,
+                ..Default::default()
+            },
+        },
+        CANVAS,
+        SIZE,
+    );
+    let [stroke] = app.history.strokes() else {
+        panic!("expected a completed line shape");
+    };
+    assert_eq!(stroke.points.last().map(|point| point.x), Some(800.));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn sparse_pen_without_pressure_retains_valid_distant_up_position() {
+    let mut app = super::touch_tests::app();
+    contact(&mut app, CANVAS, true, 10.);
+    contact(&mut app, CANVAS, false, 300.);
+    let [stroke] = app.history.strokes() else {
+        panic!("expected completed stroke");
+    };
+    assert_eq!(stroke.points.len(), 2);
+    assert_eq!(stroke.points[1].x, 300.);
 }
