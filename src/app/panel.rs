@@ -596,49 +596,75 @@ impl App {
         });
         ui.separator();
         ui.label(RichText::new(tr.text("Annotation font", "标注字体", "標註字型")).strong());
-        ui.label(
-            self.text_fonts
-                .name()
-                .unwrap_or(crate::fonts::INCLUDED_FONT),
-        );
+        ui.small(tr.text(
+            "Choose an installed font family, as in a word processor.",
+            "从已安装字体列表选择字体，无需查找字体文件。",
+            "從已安裝字型清單選取字型，無需尋找字型檔案。",
+        ));
+        let current = self
+            .text_fonts
+            .name()
+            .unwrap_or(crate::fonts::INCLUDED_FONT)
+            .to_owned();
         ui.add_enabled_ui(!dialog_open, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                if ui
-                    .button(tr.text("Choose font file…", "选择字体文件…", "選擇字型檔案…"))
-                    .clicked()
-                {
-                    commands.choose_font = true;
-                }
-                if self.text_fonts.name().is_some()
-                    && ui
-                        .button(tr.text("Use included font", "使用内置字体", "使用內建字型"))
+            egui::ComboBox::from_id_salt("annotation-font-family")
+                .width(ui.available_width().min(320.))
+                .selected_text(&current)
+                .show_ui(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.font_search)
+                            .hint_text(tr.text(
+                                "Search fonts…",
+                                "搜索字体…",
+                                "搜尋字型…",
+                            )),
+                    );
+                    if ui
+                        .selectable_label(
+                            self.text_fonts.name().is_none(),
+                            crate::fonts::INCLUDED_FONT,
+                        )
                         .clicked()
-                {
-                    commands.reset_font = true;
-                }
-            });
+                    {
+                        commands.reset_font = true;
+                        ui.close();
+                    }
+                    ui.separator();
+                    let filter = self.font_search.trim().to_lowercase();
+                    let available = crate::fonts::installed_fonts();
+                    let matching: Vec<_> = available
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, font)| {
+                            filter.is_empty() || font.name.to_lowercase().contains(&filter)
+                        })
+                        .collect();
+                    if matching.is_empty() {
+                        ui.label(tr.text(
+                            "No matching installed fonts",
+                            "没有匹配的已安装字体",
+                            "找不到符合的已安裝字型",
+                        ));
+                    } else {
+                        egui::ScrollArea::vertical()
+                            .max_height(230.)
+                            .show_rows(ui, 24., matching.len(), |ui, range| {
+                                for &(index, font) in &matching[range] {
+                                    if ui
+                                        .selectable_label(
+                                            current == font.name,
+                                            &font.name,
+                                        )
+                                        .clicked()
+                                    {
+                                        commands.font_choice = Some(index);
+                                        ui.close();
+                                    }
+                                }
+                            });
+                    }
+                });
         });
-        if let Some(path) = &mut self.font_path_input {
-            let entry = ui.add(
-                egui::TextEdit::singleline(path)
-                    .id(egui::Id::unique(super::FONT_PATH_FIELD))
-                    .hint_text(tr.text("Font file path", "字体文件路径", "字型檔案路徑")),
-            );
-            let submitted =
-                entry.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-            let usable = !path.trim().is_empty();
-            if (submitted
-                || ui
-                    .add_enabled(
-                        usable,
-                        egui::Button::new(tr.text("Apply font", "应用字体", "套用字型")),
-                    )
-                    .clicked())
-                && usable
-            {
-                commands.font_path = Some(std::path::PathBuf::from(path.trim()));
-            }
-        }
         ui.separator();
         ui.label(RichText::new(tr.text("Screenshots", "截图", "螢幕擷取")).strong());
         let hdr_available = screenshot::hdr_available(&canvas.window);
