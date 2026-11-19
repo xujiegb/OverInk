@@ -83,7 +83,6 @@ const LEFT_BUTTON: u8 = SDL_BUTTON_LEFT as u8;
 const RIGHT_BUTTON: u8 = SDL_BUTTON_RIGHT as u8;
 const LASER_LIFETIME: Duration = Duration::from_millis(900);
 const MAX_LASER_SAMPLES: usize = 4096;
-const FONT_PATH_FIELD: &str = "annotation-font-path";
 #[derive(Default)]
 struct Commands {
     mode: bool,
@@ -97,8 +96,8 @@ struct Commands {
     gnome_action: Option<crate::gnome::Action>,
     redraw_canvas: bool,
     choose_font: bool,
-    font_path: Option<PathBuf>,
-    reset_font: bool,
+    font_move: Option<(usize, usize)>,
+    font_remove: Option<usize>,
     screenshot: bool,
     screenshot_folder: bool,
 }
@@ -193,7 +192,7 @@ struct App {
     frame_rate: FrameRate,
     preferences: Preferences,
     text_fonts: TextFonts,
-    font_path_input: Option<String>,
+    font_drag: Option<usize>,
     screenshot: Screenshot,
     #[cfg(target_os = "linux")]
     gnome_guide: Option<crate::gnome::Guide>,
@@ -261,7 +260,7 @@ impl App {
             language: preferences.language.unwrap_or_else(Language::system),
             preferences,
             text_fonts: TextFonts::load(&base.join("annotation-font")),
-            font_path_input: None,
+            font_drag: None,
             screenshot: Screenshot::default(),
             #[cfg(target_os = "linux")]
             gnome_guide: None,
@@ -1244,7 +1243,6 @@ impl App {
     fn install_annotation_font(&mut self, source: &Path, destination: &Path) -> bool {
         match self.text_fonts.install(source, destination) {
             Ok(()) => {
-                self.font_path_input = None;
                 self.status = text(
                     "Annotation font updated",
                     "已更新标注字体",
@@ -1949,14 +1947,10 @@ fn run_inner(options: Options) -> Result<(), String> {
                         Ok(_) => (),
                         Err(error) => {
                             app.panel = Some(crate::toolbar::Panel::Settings);
-                            app.font_path_input.get_or_insert_with(String::new);
-                            gui.ctx.memory_mut(|mem| {
-                                mem.request_focus(egui::Id::unique(FONT_PATH_FIELD))
-                            });
                             app.status = text(
-                                "Enter a font file path",
-                                "请输入字体文件路径",
-                                "請輸入字型檔案路徑",
+                                "Could not open the font picker",
+                                "无法打开字体选择器",
+                                "無法開啟字型選擇器",
                             )
                             .detail(error);
                         }
@@ -2430,29 +2424,30 @@ fn run_inner(options: Options) -> Result<(), String> {
                 mode_changed = true;
                 cmd.redraw_canvas = true;
             }
-            if let Some(source) = cmd.font_path.take() {
-                app.finish_all_contacts();
-                cmd.redraw_canvas |= app.install_annotation_font(&source, &annotation_font_path);
-                toolbar_dirty = true;
-            }
-            if cmd.reset_font {
-                match app.text_fonts.reset(&annotation_font_path) {
-                    Ok(()) => {
-                        app.status = text(
-                            "Using the included annotation font",
-                            "已切换到内置标注字体",
-                            "已切換至內建標註字型",
-                        )
-                        .into();
-                        cmd.redraw_canvas = true;
-                    }
+            if let Some((from, to)) = cmd.font_move.take() {
+                match app.text_fonts.move_font(from, to, &annotation_font_path) {
+                    Ok(changed) => cmd.redraw_canvas |= changed,
                     Err(error) => {
                         app.status = text(
-                            "Could not reset the annotation font",
-                            "无法还原标注字体",
-                            "無法還原標註字型",
+                            "Could not save font priority",
+                            "无法保存字体优先级",
+                            "無法儲存字型優先順序",
                         )
-                        .detail(error)
+                        .detail(error);
+                    }
+                }
+                toolbar_dirty = true;
+            }
+            if let Some(index) = cmd.font_remove.take() {
+                match app.text_fonts.remove_font(index, &annotation_font_path) {
+                    Ok(changed) => cmd.redraw_canvas |= changed,
+                    Err(error) => {
+                        app.status = text(
+                            "Could not remove font",
+                            "无法删除字体",
+                            "無法刪除字型",
+                        )
+                        .detail(error);
                     }
                 }
                 toolbar_dirty = true;
@@ -3069,7 +3064,7 @@ mod touch_tests {
             frame_rate: FrameRate::Auto,
             preferences: Preferences::default(),
             text_fonts: TextFonts::default(),
-            font_path_input: None,
+            font_drag: None,
             screenshot: Screenshot::default(),
             #[cfg(target_os = "linux")]
             gnome_guide: None,
