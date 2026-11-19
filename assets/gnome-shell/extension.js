@@ -187,10 +187,12 @@ class CaptureBridge {
                         String(info.get_attribute_uint32('unix::device')) !== runningDevice ||
                         String(info.get_attribute_uint64('unix::inode')) !== runningInode)
                         return null;
-                    installedSize = info.get_size();
-                    // Reject unreasonably large executables rather than
-                    // blocking GNOME Shell while hashing unbounded content.
-                    if (installedSize <= 0 || installedSize > MAX_EXECUTABLE_BYTES)
+                    installedSize = Number(info.get_size());
+                    // GJS may expose 64-bit sizes as Number or BigInt. Keep
+                    // the digest's byte counter and initial size comparable.
+                    // Reject oversized values before reading any file bytes.
+                    if (!Number.isSafeInteger(installedSize) ||
+                        installedSize <= 0 || installedSize > MAX_EXECUTABLE_BYTES)
                         return null;
                 } else if ((mode & 0o170000) !== 0o040000) {
                     return null;
@@ -209,7 +211,7 @@ class CaptureBridge {
                 Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS, null);
             if (String(after.get_attribute_uint32('unix::device')) !== runningDevice ||
                 String(after.get_attribute_uint64('unix::inode')) !== runningInode ||
-                after.get_size() !== installedSize)
+                Number(after.get_size()) !== installedSize)
                 return null;
             // Version the key deliberately: old st_dev/inode grants require
             // one fresh opt-in, and do not silently migrate to content trust.
