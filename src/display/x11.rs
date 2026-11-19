@@ -67,6 +67,11 @@ impl Randr {
                     .ok()?
                     .reply()
                     .ok()?;
+                // A stale configuration timestamp must not make the query
+                // authoritative: fall back to SDL rather than hide outputs.
+                if info.status != x11rb::protocol::randr::SetConfig::SUCCESS {
+                    return None;
+                }
                 if let Some(area) =
                     active_crtc_area(info.mode, info.x, info.y, info.width, info.height)
                 {
