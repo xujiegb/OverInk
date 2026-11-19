@@ -492,6 +492,7 @@ impl App {
                             )
                             .into();
                         } else {
+                            let touched = state.touch_press;
                             state.edit(
                                 None,
                                 TextBox::new(
@@ -501,6 +502,9 @@ impl App {
                                     self.input.canvas_units,
                                 ),
                             );
+                            if touched {
+                                state.keyboard_request = Some(KeyboardRequest::Touch);
+                            }
                         }
                     }
                 }
