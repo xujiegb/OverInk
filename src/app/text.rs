@@ -2316,6 +2316,38 @@ mod tests {
     }
 
     #[test]
+    fn touching_a_blank_canvas_creates_an_editor_with_keyboard_request() {
+        let mut app = app();
+        app.use_tool(Tool::Text);
+        let mut gui = Gui::new();
+        let window = SDL_WindowID(1);
+        for ty in [SDL_EVENT_FINGER_DOWN, SDL_EVENT_FINGER_UP] {
+            app.text_event(
+                &mut gui,
+                &SDL_Event {
+                    tfinger: SDL_TouchFingerEvent {
+                        r#type: ty,
+                        touchID: SDL_TouchID(3),
+                        fingerID: SDL_FingerID(4),
+                        windowID: window,
+                        x: 0.2,
+                        y: 0.25,
+                        ..Default::default()
+                    },
+                },
+                window,
+                SIZE,
+            );
+        }
+        assert!(app.input.text.editing());
+        assert_eq!(app.input.text.selected, None);
+        assert_eq!(
+            app.input.text.take_keyboard_request(),
+            Some(KeyboardRequest::Touch)
+        );
+    }
+
+    #[test]
     fn mouse_emulated_touch_edits_after_the_double_click_interval() {
         let mut app = app();
         app.use_tool(Tool::Select);
