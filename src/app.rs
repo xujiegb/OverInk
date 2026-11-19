@@ -83,7 +83,6 @@ const LEFT_BUTTON: u8 = SDL_BUTTON_LEFT as u8;
 const RIGHT_BUTTON: u8 = SDL_BUTTON_RIGHT as u8;
 const LASER_LIFETIME: Duration = Duration::from_millis(900);
 const MAX_LASER_SAMPLES: usize = 4096;
-const FONT_PATH_FIELD: &str = "annotation-font-path";
 #[derive(Default)]
 struct Commands {
     mode: bool,
@@ -96,8 +95,7 @@ struct Commands {
     #[cfg(target_os = "linux")]
     gnome_action: Option<crate::gnome::Action>,
     redraw_canvas: bool,
-    choose_font: bool,
-    font_path: Option<PathBuf>,
+    font_choice: Option<usize>,
     reset_font: bool,
     screenshot: bool,
     screenshot_folder: bool,
@@ -193,7 +191,7 @@ struct App {
     frame_rate: FrameRate,
     preferences: Preferences,
     text_fonts: TextFonts,
-    font_path_input: Option<String>,
+    font_search: String,
     screenshot: Screenshot,
     #[cfg(target_os = "linux")]
     gnome_guide: Option<crate::gnome::Guide>,
@@ -261,7 +259,7 @@ impl App {
             language: preferences.language.unwrap_or_else(Language::system),
             preferences,
             text_fonts: TextFonts::load(&base.join("annotation-font")),
-            font_path_input: None,
+            font_search: String::new(),
             screenshot: Screenshot::default(),
             #[cfg(target_os = "linux")]
             gnome_guide: None,
@@ -1241,10 +1239,9 @@ impl App {
         }
     }
 
-    fn install_annotation_font(&mut self, source: &Path, destination: &Path) -> bool {
-        match self.text_fonts.install(source, destination) {
+    fn select_annotation_font(&mut self, choice: usize, destination: &Path) -> bool {
+        match self.text_fonts.install_installed(choice, destination) {
             Ok(()) => {
-                self.font_path_input = None;
                 self.status = text(
                     "Annotation font updated",
                     "已更新标注字体",
@@ -1255,9 +1252,9 @@ impl App {
             }
             Err(error) => {
                 self.status = text(
-                    "Could not use the annotation font",
-                    "无法使用此标注字体",
-                    "無法使用此標註字型",
+                    "Could not use the selected font",
+                    "无法使用选中的字体",
+                    "無法使用選取的字型",
                 )
                 .detail(error);
                 false
@@ -1938,29 +1935,6 @@ fn run_inner(options: Options) -> Result<(), String> {
                 toolbar_dirty = true;
                 restore_toolbar_focus = !app.screenshot.active();
                 match kind {
-                    DialogKind::Font => match result {
-                        Ok(Some(path))
-                            if app.install_annotation_font(&path, &annotation_font_path) =>
-                        {
-                            for canvas in &mut canvases {
-                                canvas.dirty = true;
-                            }
-                        }
-                        Ok(_) => (),
-                        Err(error) => {
-                            app.panel = Some(crate::toolbar::Panel::Settings);
-                            app.font_path_input.get_or_insert_with(String::new);
-                            gui.ctx.memory_mut(|mem| {
-                                mem.request_focus(egui::Id::unique(FONT_PATH_FIELD))
-                            });
-                            app.status = text(
-                                "Enter a font file path",
-                                "请输入字体文件路径",
-                                "請輸入字型檔案路徑",
-                            )
-                            .detail(error);
-                        }
-                    },
                     DialogKind::ScreenshotFolder => match result {
                         Ok(Some(path)) => {
                             let previous = app.preferences.screenshot_folder.replace(path);
@@ -2392,17 +2366,6 @@ fn run_inner(options: Options) -> Result<(), String> {
                 return Ok(());
             }
             mode_changed |= cmd.mode;
-            if cmd.choose_font && !file_dialog.pending() {
-                app.finish_all_contacts();
-                tooltips.clear();
-                for canvas in &mut canvases {
-                    canvas.show(&toolbar, false)?;
-                }
-                gui.suspend_input(&toolbar);
-                file_dialog.open(DialogKind::Font, &toolbar, None);
-                cmd.redraw_canvas = true;
-                toolbar_dirty = true;
-            }
             if cmd.screenshot_folder && !file_dialog.pending() {
                 app.finish_all_contacts();
                 tooltips.clear();
@@ -2430,9 +2393,9 @@ fn run_inner(options: Options) -> Result<(), String> {
                 mode_changed = true;
                 cmd.redraw_canvas = true;
             }
-            if let Some(source) = cmd.font_path.take() {
+            if let Some(choice) = cmd.font_choice {
                 app.finish_all_contacts();
-                cmd.redraw_canvas |= app.install_annotation_font(&source, &annotation_font_path);
+                cmd.redraw_canvas |= app.select_annotation_font(choice, &annotation_font_path);
                 toolbar_dirty = true;
             }
             if cmd.reset_font {
@@ -3069,7 +3032,7 @@ mod touch_tests {
             frame_rate: FrameRate::Auto,
             preferences: Preferences::default(),
             text_fonts: TextFonts::default(),
-            font_path_input: None,
+            font_search: String::new(),
             screenshot: Screenshot::default(),
             #[cfg(target_os = "linux")]
             gnome_guide: None,
