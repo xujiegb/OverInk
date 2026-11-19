@@ -2,7 +2,7 @@ use super::*;
 use crate::controller::Rect;
 use libloading::Library;
 use std::{
-    ffi::{CStr, c_char, c_int, c_ulong},
+    ffi::{CStr, c_char, c_int, c_ulong, c_void},
     ptr::{self, NonNull},
     sync::OnceLock,
 };
