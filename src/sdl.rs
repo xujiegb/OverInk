@@ -361,6 +361,11 @@ impl Runtime {
         if !is_main_thread() {
             return Err("SDL video must initialize on the main thread".into());
         }
+        // A second Runtime could call SDL_Quit while the first one still
+        // owns windows, renderers and textures. Never allow overlapping owners.
+        if SDL_VIDEO_READY.load(std::sync::atomic::Ordering::Acquire) {
+            return Err("An SDL video runtime is already active".into());
+        }
         let wayland = wayland
             && cfg!(any(target_os = "linux", target_os = "freebsd"))
             && is_wayland_session();
