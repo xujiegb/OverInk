@@ -1900,10 +1900,9 @@ impl Window {
         if *applied == Some(pixels) {
             return Ok(());
         }
-        let radius = (f32::from(crate::toolbar::OUTER_RADIUS)
-            * self.ui_scale()
-            * self.pixel_density())
-        .round() as i32;
+        let radius =
+            (f32::from(crate::toolbar::OUTER_RADIUS) * self.ui_scale() * self.pixel_density())
+                .round() as i32;
         self.run_command(WindowCommand::RoundedCorners(pixels, radius.max(1)))?;
         *applied = Some(pixels);
         Ok(())
