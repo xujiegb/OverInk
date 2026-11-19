@@ -1636,8 +1636,16 @@ impl Window {
                         let inset = (x_edge.ceil() as i32).clamp(0, radius);
                         let row_width = width - inset * 2;
                         if row_width > 0 {
-                            let top = SDL_Rect { x: inset, y, w: row_width, h: 1 };
-                            let bottom = SDL_Rect { y: height - y - 1, ..top };
+                            let top = SDL_Rect {
+                                x: inset,
+                                y,
+                                w: row_width,
+                                h: 1,
+                            };
+                            let bottom = SDL_Rect {
+                                y: height - y - 1,
+                                ..top
+                            };
                             check(SDL_FillSurfaceRect(surface_ptr, &top, opaque))?;
                             check(SDL_FillSurfaceRect(surface_ptr, &bottom, opaque))?;
                         }
@@ -1649,8 +1657,17 @@ impl Window {
                                     SDL_MapSurfaceRGBA(surface_ptr, 255, 255, 255, edge_alpha);
                                 for x in [inset - 1, width - inset] {
                                     for row in [y, height - y - 1] {
-                                        let pixel = SDL_Rect { x, y: row, w: 1, h: 1 };
-                                        check(SDL_FillSurfaceRect(surface_ptr, &pixel, edge_color))?;
+                                        let pixel = SDL_Rect {
+                                            x,
+                                            y: row,
+                                            w: 1,
+                                            h: 1,
+                                        };
+                                        check(SDL_FillSurfaceRect(
+                                            surface_ptr,
+                                            &pixel,
+                                            edge_color,
+                                        ))?;
                                     }
                                 }
                             }
