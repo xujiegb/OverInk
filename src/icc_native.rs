@@ -146,12 +146,13 @@ impl MatrixBlackPointCompensation {
     }
 
     fn map(&self, rgb: [f32; 3]) -> [f32; 3] {
-        if rgb
-            .iter()
-            .any(|v| !v.is_finite() || !(0. ..=1.).contains(v))
-        {
+        if rgb.iter().any(|v| !v.is_finite()) {
             return rgb;
         }
+        // moxcms can produce slightly out-of-gamut finite values before the
+        // caller clamps the result. Clamp before applying BPC so neighboring
+        // dark pixels take the same path instead of skipping compensation.
+        let rgb = rgb.map(|v| v.clamp(0., 1.));
         let linear = std::array::from_fn(|i| f64::from(self.decode[i].evaluate_value(rgb[i])));
         if linear.iter().any(|v| !v.is_finite()) {
             return rgb;
@@ -390,7 +391,13 @@ mod tests {
         let plain = Transform::rgb(&srgb, &srgb).ok_or("Missing sRGB transform")?;
         let adjusted =
             Transform::rgb(&srgb, &measured).ok_or("Missing measured display transform")?;
-        assert!(adjusted.bpc.is_some(), "Expected explicit matrix RGB BPC");
+        let bpc = adjusted
+            .bpc
+            .as_ref()
+            .ok_or("Expected explicit matrix RGB BPC")?;
+        // Small gamut/rounding excursions must not bypass BPC.
+        assert_eq!(bpc.map([-1e-6, 0.02, 0.02]), bpc.map([0., 0.02, 0.02]));
+        assert_eq!(bpc.map([1.000_001, 0.5, 0.5]), bpc.map([1., 0.5, 0.5]));
         let near_black = [0.02, 0.02, 0.02];
         let ordinary = plain.map_rgb(near_black);
         let corrected = adjusted.map_rgb(near_black);
