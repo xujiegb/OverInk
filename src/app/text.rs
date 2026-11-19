@@ -684,7 +684,9 @@ impl App {
                     .map_or(draft.item.text.len(), |(i, _)| i);
                 set_clipboard_text(&draft.item.text[start..end]);
                 if action == TextContextAction::Cut {
-                    draft.item.text.delete_char_range(egui::text::CharIndex(range.start)..egui::text::CharIndex(range.end));
+                    draft.item.text.delete_char_range(
+                        egui::text::CharIndex(range.start)..egui::text::CharIndex(range.end),
+                    );
                     draft.committed.clone_from(&draft.item.text);
                     draft.cursor = Some(CCursorRange::one(CCursor::new(range.start)));
                     draft.focus = true;
@@ -695,14 +697,22 @@ impl App {
                     return false;
                 };
                 let caret = selected.as_ref().map_or(
-                    draft.cursor.map_or(total, |range| range.primary.index.into()),
+                    draft
+                        .cursor
+                        .map_or(total, |range| range.primary.index.into()),
                     |range| range.start,
                 );
                 let to_replace = selected.unwrap_or(caret..caret);
-                let max = MAX_TEXT_CHARS.saturating_sub(total.saturating_sub(to_replace.end - to_replace.start));
+                let max = MAX_TEXT_CHARS
+                    .saturating_sub(total.saturating_sub(to_replace.end - to_replace.start));
                 let insertion: String = clipboard.chars().take(max).collect();
-                draft.item.text.delete_char_range(egui::text::CharIndex(to_replace.start)..egui::text::CharIndex(to_replace.end));
-                let inserted = draft.item.text.insert_text(&insertion, egui::text::CharIndex(caret));
+                draft.item.text.delete_char_range(
+                    egui::text::CharIndex(to_replace.start)..egui::text::CharIndex(to_replace.end),
+                );
+                let inserted = draft
+                    .item
+                    .text
+                    .insert_text(&insertion, egui::text::CharIndex(caret));
                 draft.committed.clone_from(&draft.item.text);
                 draft.cursor = Some(CCursorRange::one(CCursor::new(caret + inserted)));
                 draft.focus = true;
