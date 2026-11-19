@@ -98,6 +98,10 @@ enum SdlNativeAction<'a> {
     CurrentCursor,
     DefaultCursor,
     DestroyCursor(NonNull<SDL_Cursor>),
+    DestroySurface(NonNull<SDL_Surface>),
+    DestroyTexture(NonNull<SDL_Texture>),
+    DestroyRenderer(NonNull<SDL_Renderer>),
+    DestroyWindow(SDL_WindowID, NonNull<SDL_Window>),
     SystemTheme,
     IndirectTouch(SDL_TouchID),
     CaptureMouse(bool),
@@ -241,6 +245,24 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
             }
             SdlNativeAction::DestroyCursor(cursor) => {
                 SDL_DestroyCursor(cursor.as_ptr());
+                SdlNativeResult::Done
+            }
+            SdlNativeAction::DestroySurface(surface) => {
+                SDL_DestroySurface(surface.as_ptr());
+                SdlNativeResult::Done
+            }
+            SdlNativeAction::DestroyTexture(texture) => {
+                SDL_DestroyTexture(texture.as_ptr());
+                SdlNativeResult::Done
+            }
+            SdlNativeAction::DestroyRenderer(renderer) => {
+                SDL_DestroyRenderer(renderer.as_ptr());
+                SdlNativeResult::Done
+            }
+            SdlNativeAction::DestroyWindow(id, window) => {
+                if SDL_GetWindowFromID(id) == window.as_ptr() {
+                    SDL_DestroyWindow(window.as_ptr());
+                }
                 SdlNativeResult::Done
             }
             SdlNativeAction::SystemTheme => SdlNativeResult::Theme(SDL_GetSystemTheme()),
@@ -1744,13 +1766,9 @@ impl Window {
 }
 impl Drop for Window {
     fn drop(&mut self) {
-        // SAFETY: SDL owns the window while its ID still resolves to our
-        // handle. Avoid a second destruction when a parent already freed it.
-        unsafe {
-            if SDL_GetWindowFromID(self.id) == self.raw.as_ptr() {
-                SDL_DestroyWindow(self.raw.as_ptr());
-            }
-        }
+        // Only destroy the SDL-owned window while its ID still resolves to our
+        // handle; its native identity can be invalidated by parent teardown.
+        let _ = sdl_native(SdlNativeAction::DestroyWindow(self.id, self.raw));
     }
 }
 /// SDL properties have unique caller ownership and must be destroyed even
@@ -1778,11 +1796,9 @@ impl Drop for OwnedProperties {
     }
 }
 
-/// Release an SDL-owned surface at one native FFI boundary.
+/// Release a uniquely owned SDL surface via the native resource dispatcher.
 fn destroy_owned_surface(raw: NonNull<SDL_Surface>) {
-    // SAFETY: Each caller owns the SDL_Surface from a create/readback API,
-    // and transfers it exactly once while SDL is active on the main thread.
-    unsafe { SDL_DestroySurface(raw.as_ptr()) };
+    let _ = sdl_native(SdlNativeAction::DestroySurface(raw));
 }
 
 /// A limited source of new caller-owned SDL surfaces. No borrowed surfaces
@@ -1838,13 +1854,9 @@ impl Drop for OwnedSurface {
     }
 }
 
-/// Consume one uniquely owned SDL texture on the SDL-owning thread.
-/// Ink, snapshot and UI textures share this native destruction boundary.
+/// Consume one uniquely owned SDL texture via the native resource dispatcher.
 fn destroy_owned_texture(raw: NonNull<SDL_Texture>) {
-    // SAFETY: Every caller transfers the sole SDL_CreateTexture handle from
-    // an owned texture's Drop. The renderer is still live and SDL is confined
-    // to the main thread; no caller may use the pointer after this call.
-    unsafe { SDL_DestroyTexture(raw.as_ptr()) };
+    let _ = sdl_native(SdlNativeAction::DestroyTexture(raw));
 }
 
 /// Uniquely owned, non-null SDL texture shared by the ink and GUI layers.
@@ -2416,9 +2428,9 @@ impl Renderer {
         let Some(raw) = self.raw.take() else {
             return;
         };
-        // SAFETY: This handle is uniquely owned. Taking it prevents a
-        // second release; SDL calls run on the owning main thread.
-        unsafe { SDL_DestroyRenderer(raw.as_ptr()) };
+        // Taking this handle preserves single ownership and prevents a
+        // second release during renderer or Metal output recreation.
+        let _ = sdl_native(SdlNativeAction::DestroyRenderer(raw));
     }
 
     pub fn new(window: &Window, force_sdr: bool) -> Result<Self, String> {
