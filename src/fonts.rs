@@ -263,12 +263,15 @@ impl TextFonts {
         // Keep the previous configuration intact if serialization or a
         // storage write fails. The tempfile lives in the same directory, so
         // persist can replace the destination without a partial JSON write.
-        let mut temporary = tempfile::NamedTempFile::new_in(base)
-            .map_err(|error| error.to_string())?;
+        let mut temporary =
+            tempfile::NamedTempFile::new_in(base).map_err(|error| error.to_string())?;
         serde_json::to_writer_pretty(&mut temporary, &self.order)
             .map_err(|error| error.to_string())?;
         temporary.flush().map_err(|error| error.to_string())?;
-        temporary.as_file().sync_all().map_err(|error| error.to_string())?;
+        temporary
+            .as_file()
+            .sync_all()
+            .map_err(|error| error.to_string())?;
         temporary
             .persist(base.join("annotation-fonts.json"))
             .map_err(|error| error.error.to_string())?;
@@ -382,7 +385,10 @@ impl TextFonts {
             if let Err(error) = fs::remove_file(font_file(base, legacy_path, &font.id))
                 && error.kind() != io::ErrorKind::NotFound
             {
-                eprintln!("OverInk: could not clean up reset font {}: {error}", font.id);
+                eprintln!(
+                    "OverInk: could not clean up reset font {}: {error}",
+                    font.id
+                );
             }
         }
         self.revision = self.revision.wrapping_add(1);
@@ -617,14 +623,19 @@ mod tests {
     }
 
     #[test]
-    fn failed_font_move_restores_the_original_priority_order() -> Result<(), Box<dyn std::error::Error>> {
+    fn failed_font_move_restores_the_original_priority_order()
+    -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let blocker = temp.path().join("not-a-directory");
         fs::write(&blocker, b"block")?;
         let mut fonts = TextFonts::default();
         let before = fonts.order.to_vec();
 
-        assert!(fonts.move_font(0, 2, &blocker.join("annotation-font")).is_err());
+        assert!(
+            fonts
+                .move_font(0, 2, &blocker.join("annotation-font"))
+                .is_err()
+        );
         assert_eq!(fonts.order, before);
         assert_eq!(fonts.revision, 0);
         Ok(())

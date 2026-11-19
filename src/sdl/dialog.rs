@@ -188,7 +188,10 @@ mod tests {
             .ok_or("Cannot begin folder dialog")?;
         let list = [ptr::null()];
         native::chosen(ptr::without_provenance_mut(id), list.as_ptr(), -1);
-        assert!(matches!(dialog.poll(), Some((DialogKind::ScreenshotFolder, Ok(None)))));
+        assert!(matches!(
+            dialog.poll(),
+            Some((DialogKind::ScreenshotFolder, Ok(None)))
+        ));
         assert!(dialog.poll().is_none());
         Ok(())
     }
