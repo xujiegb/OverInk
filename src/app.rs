@@ -1563,6 +1563,14 @@ fn run_inner(options: Options) -> Result<(), String> {
         )
     })?;
     with_autorelease_pool(|| toolbar.setup_toolbar());
+    #[cfg(target_os = "macos")]
+    let pencil_mode = match crate::native::macos::PencilModeMonitor::install() {
+        Ok(monitor) => Some(monitor),
+        Err(error) => {
+            eprintln!("OverInk: Sidecar Apple Pencil double-tap unavailable: {error}");
+            None
+        }
+    };
     if !options.smoke {
         let _ = with_autorelease_pool(|| toolbar.arrange_toolbar(false, app.pages.active));
         with_autorelease_pool(|| canvas::reconcile(&mut canvases, &mut app, &toolbar, &options))?;
@@ -1963,6 +1971,33 @@ fn run_inner(options: Options) -> Result<(), String> {
                     if command.quit {
                         running = false;
                         break;
+                    }
+                }
+            }
+            #[cfg(target_os = "macos")]
+            if let Some(monitor) = &pencil_mode {
+                let taps = monitor.take();
+                // AppKit callbacks do not mutate App inside the Cocoa pump.
+                // Apply gestures only after SDL's event batch, outside modal
+                // pickers and native dialogs.
+                if taps > 0
+                    && !file_dialog.pending()
+                    && !picker.active()
+                    && !toolbar_hidden
+                    && !app.suspended
+                    && !app.picking
+                    && !app.screenshot.active()
+                {
+                    for _ in 0..taps.min(16) {
+                        if app.switch_pen_eraser() {
+                            mode_changed = true;
+                            toolbar_dirty = true;
+                        }
+                    }
+                    if mode_changed {
+                        for canvas in &mut canvases {
+                            canvas.dirty = true;
+                        }
                     }
                 }
             }
