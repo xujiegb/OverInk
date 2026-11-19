@@ -595,28 +595,69 @@ impl App {
                 });
         });
         ui.separator();
-        ui.label(RichText::new(tr.text("Annotation font", "标注字体", "標註字型")).strong());
-        ui.label(
-            self.text_fonts
-                .name()
-                .unwrap_or(crate::fonts::INCLUDED_FONT),
-        );
-        ui.add_enabled_ui(!dialog_open, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                if ui
-                    .button(tr.text("Choose font file…", "选择字体文件…", "選擇字型檔案…"))
+        ui.label(RichText::new(tr.text("Annotation fonts", "文本框字体", "文字框字型")).strong());
+        ui.small(tr.text(
+            "Drag to reorder font fallback priority. Included fonts cannot be deleted.",
+            "拖动字体调整回退优先级。三个内置字体不可删除。",
+            "拖曳字型以調整備援優先順序。三種內建字型不可刪除。",
+        ));
+        if let Some(item) = self.text_menu_item() {
+            let current = item.font.as_deref();
+            let selected_name = current.and_then(|key| self.text_fonts.display_name(key))
+                .unwrap_or(tr.text("Automatic (font priority)", "自动（按优先级）", "自動（依優先順序）"));
+            ui.horizontal(|ui| {
+                ui.label(tr.text("Selected text box", "选中文本框", "選取文字框"));
+                egui::ComboBox::from_id_salt("selected-annotation-font")
+                    .selected_text(selected_name)
+                    .width(190.)
+                    .show_ui(ui, |ui| {
+                        if ui.selectable_label(current.is_none(),
+                            tr.text("Automatic", "自动", "自動")).clicked() {
+                            commands.box_font = Some(None);
+                        }
+                        for entry in self.text_fonts.entries() {
+                            if ui.selectable_label(current == Some(entry.key), entry.name).clicked() {
+                                commands.box_font = Some(Some(entry.key.to_owned()));
+                            }
+                        }
+                    });
+            });
+        }
+        let mut hovered = None;
+        let pointer = ui.input(|input| input.pointer.latest_pos());
+        for (index, font) in self.text_fonts.entries().iter().enumerate() {
+            ui.horizontal(|ui| {
+                let label = format!("⋮⋮  {}", font.name);
+                let drag = ui.add(
+                    egui::Label::new(label).sense(egui::Sense::click_and_drag())
+                );
+                if drag.drag_started() {
+                    self.font_drag = Some(index);
+                }
+                if pointer.is_some_and(|pos| drag.rect.contains(pos)) {
+                    hovered = Some(index);
+                }
+                if font.bundled {
+                    ui.weak(tr.text("Included", "内置", "內建"));
+                } else if ui.small_button("×")
+                    .on_hover_text(tr.text("Remove font", "删除字体", "刪除字型"))
                     .clicked()
                 {
-                    commands.choose_font = true;
-                }
-                if self.text_fonts.name().is_some()
-                    && ui
-                        .button(tr.text("Use included font", "使用内置字体", "使用內建字型"))
-                        .clicked()
-                {
-                    commands.reset_font = true;
+                    commands.remove_font = Some(font.key.to_owned());
                 }
             });
+        }
+        if ui.input(|input| input.pointer.any_released()) {
+            if let (Some(from), Some(to)) = (self.font_drag.take(), hovered)
+                && from != to
+            {
+                commands.move_font = Some((from, to));
+            }
+        }
+        ui.add_enabled_ui(!dialog_open, |ui| {
+            if ui.button(tr.text("Add font…", "添加字体…", "新增字型…")).clicked() {
+                commands.choose_font = true;
+            }
         });
         if let Some(path) = &mut self.font_path_input {
             let entry = ui.add(
