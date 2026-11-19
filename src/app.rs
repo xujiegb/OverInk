@@ -1501,7 +1501,8 @@ fn run_inner(options: Options) -> Result<(), String> {
     let (_runtime, preferences, gnome_status) =
         crate::gnome::start_video(preferences, &preferences_path, options.x11, options.smoke)?;
     #[cfg(not(target_os = "linux"))]
-    let _runtime = with_autorelease_pool(|| Runtime::new(options.x11, preferences.wayland, options.smoke))?;
+    let _runtime =
+        with_autorelease_pool(|| Runtime::new(options.x11, preferences.wayland, options.smoke))?;
     let video = crate::sdl::driver();
     let wayland = video == "wayland";
     let window =
