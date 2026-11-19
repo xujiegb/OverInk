@@ -595,50 +595,65 @@ impl App {
                 });
         });
         ui.separator();
-        ui.label(RichText::new(tr.text("Annotation font", "标注字体", "標註字型")).strong());
-        ui.label(
-            self.text_fonts
-                .name()
-                .unwrap_or(crate::fonts::INCLUDED_FONT),
-        );
-        ui.add_enabled_ui(!dialog_open, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                if ui
-                    .button(tr.text("Choose font file…", "选择字体文件…", "選擇字型檔案…"))
-                    .clicked()
-                {
-                    commands.choose_font = true;
-                }
-                if self.text_fonts.name().is_some()
-                    && ui
-                        .button(tr.text("Use included font", "使用内置字体", "使用內建字型"))
-                        .clicked()
-                {
-                    commands.reset_font = true;
-                }
-            });
-        });
-        if let Some(path) = &mut self.font_path_input {
-            let entry = ui.add(
-                egui::TextEdit::singleline(path)
-                    .id(egui::Id::unique(super::FONT_PATH_FIELD))
-                    .hint_text(tr.text("Font file path", "字体文件路径", "字型檔案路徑")),
-            );
-            let submitted =
-                entry.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-            let usable = !path.trim().is_empty();
-            if (submitted
-                || ui
-                    .add_enabled(
-                        usable,
-                        egui::Button::new(tr.text("Apply font", "应用字体", "套用字型")),
-                    )
-                    .clicked())
-                && usable
-            {
-                commands.font_path = Some(std::path::PathBuf::from(path.trim()));
+        ui.label(RichText::new(tr.text("Font priority", "字体优先级", "字型優先順序")).strong());
+        ui.small(tr.text(
+            "Drag the handle to reorder fonts. The top font is tried first; the three included fonts cannot be removed.",
+            "拖动左侧把手调整优先级，越靠上优先级越高；三个内置字体不可删除。",
+            "拖曳左側把手調整優先順序；越靠上越優先，三個內建字型不可刪除。",
+        ));
+        let rows = self.text_fonts.rows();
+        let mut drop_target = None;
+        let pointer = ui.input(|input| input.pointer.interact_pos());
+        let released = ui.input(|input| input.pointer.any_released());
+        for (index, row) in rows.iter().enumerate() {
+            let frame = egui::Frame::new()
+                .fill(ui.visuals().faint_bg_color)
+                .corner_radius(10)
+                .inner_margin(egui::Margin::symmetric(8, 5))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let handle = ui.add(
+                            egui::Label::new(egui::RichText::new("⠿").size(19.))
+                                .sense(egui::Sense::drag()),
+                        );
+                        if handle.drag_started() {
+                            self.font_drag = Some(index);
+                        }
+                        ui.label(&row.name);
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if row.removable {
+                                if ui.small_button("×").on_hover_text(tr.text(
+                                    "Remove font", "删除字体", "刪除字型",
+                                )).clicked() {
+                                    commands.font_remove = Some(index);
+                                }
+                            } else {
+                                ui.small("🔒");
+                            }
+                        });
+                    });
+                });
+            if released && pointer.is_some_and(|pos| frame.response.rect.contains(pos)) {
+                drop_target = Some(index);
             }
         }
+        if released {
+            if let (Some(from), Some(to)) = (self.font_drag.take(), drop_target) {
+                commands.font_move = Some((from, to));
+            }
+        }
+        ui.add_enabled_ui(!dialog_open, |ui| {
+            if ui.button(tr.text(
+                "＋ Add font…", "＋ 添加字体…", "＋ 加入字型…",
+            )).clicked() {
+                commands.choose_font = true;
+            }
+        });
+        ui.small(tr.text(
+            "New fonts are placed at the top of the list.",
+            "新添加的字体始终排在最上方。",
+            "新加入的字型一律排在最上方。",
+        ));
         ui.separator();
         ui.label(RichText::new(tr.text("Screenshots", "截图", "螢幕擷取")).strong());
         let hdr_available = screenshot::hdr_available(&canvas.window);
