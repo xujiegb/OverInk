@@ -418,9 +418,11 @@ for ($index = 0; $index -lt $themeCultures.Count; $index++) {
     $strings = for ($item = 0; $item -lt $localizationEntries.Count; $item++) {
         $entry = $localizationEntries[$item]
         $localized = if ($index -lt $baseCultureCount) {
-            [string]@($entry.Value)[$index]
+            $values = @($entry.Value)
+            [string]$values[$index]
         } else {
-            [string]$installerLocaleStrings[[string]$culture.Culture][$item]
+            $values = @($installerLocaleStrings[[string]$culture.Culture])
+            [string]$values[$item]
         }
         $value = ConvertTo-XmlAttribute $localized
         "  <String Id=`"$($entry.Key)`" Value=`"$value`" />"
