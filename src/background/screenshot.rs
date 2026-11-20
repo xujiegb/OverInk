@@ -36,11 +36,11 @@ impl Job {
         Self::start_inner(window, display, displays, region, hdr, portal, false)
     }
 
-    /// Pickers use an already validated active canvas and need an owned
-    /// compositor screenshot even on GNOME systems without the optional
-    /// GNOME Shell extension. Unlike ordinary screenshots, their canvas has
-    /// already been hidden and may not report an SDL display ID anymore.
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    /// All platforms use the same OverInk-owned color-picker UI: capture an
+    /// SDR desktop frame while the canvas and controller are hidden, then let
+    /// the application's own pointer handling select the color. On Wayland
+    /// prefer the standard screenshot portal, not a system color sampler.
+    /// The hidden canvas may temporarily lack a reported SDL display ID.
     pub fn start_picker(
         window: &Window,
         display: &Display,
