@@ -905,6 +905,61 @@ impl Keyboard {
 mod tests {
     use super::*;
     #[test]
+    fn screen_keyboard_clicks_do_not_claim_the_ime_editor_focus() {
+        assert!(KEY_SENSE.senses_click());
+        assert!(!KEY_SENSE.is_focusable());
+
+        let mut keyboard = Keyboard::default();
+        keyboard.open();
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(900., 650.));
+        let Some(rect) = keyboard.rect_near(screen, None) else {
+            panic!("Keyboard bounds are required for pointer regression");
+        };
+        let editor_id = egui::Id::new("ime-editor");
+        let mut editor_text = String::new();
+        let mut frame = |events: Vec<egui::Event>, initially_focus: bool| {
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            };
+            let mut action = None;
+            let output = ctx.run_ui(input, |ui| {
+                ui.add(egui::TextEdit::singleline(&mut editor_text).id(editor_id));
+                if initially_focus {
+                    ui.memory_mut(|memory| memory.request_focus(editor_id));
+                }
+                action = keyboard.ui(ui, rect, 1.);
+            });
+            output.drop_without_applying_deltas();
+            action
+        };
+        assert_eq!(frame(vec![], true), None);
+        assert!(ctx.memory(|memory| memory.has_focus(editor_id)));
+
+        let inside = rect.shrink(8.);
+        let row_height = (inside.height() - 4. * 5.) / 5.;
+        let key = pos2(inside.left() + 12., inside.top() + row_height * 0.5);
+        assert_eq!(
+            frame(
+                vec![
+                    egui::Event::PointerMoved(key),
+                    pointer_button(key, true),
+                ],
+                false,
+            ),
+            None,
+        );
+        assert!(ctx.memory(|memory| memory.has_focus(editor_id)));
+        assert_eq!(
+            frame(vec![pointer_button(key, false)], false),
+            Some(Action::Insert(Cow::Borrowed("1"))),
+        );
+        assert!(ctx.memory(|memory| memory.has_focus(editor_id)));
+    }
+
+    #[test]
     fn four_pages_and_emoji_classes_are_available() {
         let mut k = Keyboard::default();
         assert_eq!(k.page, Page::Letters);
