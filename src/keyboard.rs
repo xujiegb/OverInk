@@ -6,7 +6,11 @@
 use crate::sdl::Window;
 
 pub fn show(window: &Window, _video: &str) -> Result<(), String> {
-    // Keep Unicode composition on the text canvas regardless of keyboard UI.
+    // The canvas editor has already activated SDL text input. Only Wayland
+    // needs SDL's on-screen-keyboard hint: restarting SDL text input on Win32
+    // immediately tears down the same TSF/IME session the touch keyboard uses,
+    // and also interferes with macOS's independently launched Keyboard Viewer.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     window.request_screen_keyboard()?;
 
     #[cfg(target_os = "windows")]
@@ -44,20 +48,7 @@ pub fn show(window: &Window, _video: &str) -> Result<(), String> {
 
     #[cfg(target_os = "macos")]
     {
-        use std::{path::Path, process::Command};
-        // Keyboard Viewer is the supported system-provided keyboard UI.
-        // -g keeps the native annotation editor in the foreground for IME.
-        let app = Path::new("/System/Library/Input Methods/KeyboardViewer.app");
-        if !app.is_dir() {
-            return Err("macOS Keyboard Viewer is unavailable".into());
-        }
-        Command::new("/usr/bin/open")
-            .arg("-g")
-            .arg("-a")
-            .arg(app)
-            .spawn()
-            .map(|_| ())
-            .map_err(|error| format!("Could not open macOS Keyboard Viewer: {error}"))
+        show_macos_keyboard()
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -77,4 +68,42 @@ pub fn show(window: &Window, _video: &str) -> Result<(), String> {
                 format!("Could not start Onboard (install the X11 on-screen keyboard): {error}")
             })
     }
+}
+
+/// Run Apple's Keyboard Viewer in the foreground. Its UI is a separate
+/// process: the SDL text editor must remain alive if the Viewer briefly owns
+/// AppKit focus. Never use `open -g` (background-only), nor treat a successful
+/// `spawn()` as evidence that Launch Services actually launched the viewer.
+#[cfg(target_os = "macos")]
+fn show_macos_keyboard() -> Result<(), String> {
+    use std::{path::Path, process::Command};
+    let app = Path::new("/System/Library/Input Methods/KeyboardViewer.app");
+    if !app.is_dir() {
+        return Err(
+            "macOS Keyboard Viewer is not installed at its expected system path; enable Show Keyboard Viewer in System Settings > Keyboard > Text Input"
+                .into(),
+        );
+    }
+    // A closed Keyboard Viewer can leave a headless instance running; open
+    // -n requests a fresh window rather than sending a no-op open to it.
+    // A system policy may prohibit new instances, so fall back to activate.
+    let mut failures = Vec::new();
+    for fresh_instance in [true, false] {
+        let mut command = Command::new("/usr/bin/open");
+        if fresh_instance {
+            command.arg("-n");
+        }
+        command.arg("-a").arg(app);
+        match command.output() {
+            Ok(output) if output.status.success() => return Ok(()),
+            Ok(output) => failures.push(
+                String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            ),
+            Err(error) => failures.push(error.to_string()),
+        }
+    }
+    Err(format!(
+        "macOS could not activate Keyboard Viewer: {}",
+        failures.into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join("; ")
+    ))
 }
