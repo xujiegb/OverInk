@@ -219,9 +219,37 @@ fn try_ibus() -> Result<(), String> {
     checked_command("ibus", &["engine", next])
 }
 
+/// On GNOME Wayland the Shell input source manager controls XKB and IBus
+/// together. The bundled authenticated Overlay extension exposes this action
+/// for the focused OverInk canvas; gsettings "current" does not switch layouts.
+#[cfg(target_os = "linux")]
+fn try_gnome_source() -> Result<bool, String> {
+    let desktop = env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+    if !desktop.split(':').any(|part| part.eq_ignore_ascii_case("GNOME"))
+        || env::var("XDG_SESSION_TYPE").as_deref() != Ok("wayland")
+    {
+        return Ok(false);
+    }
+    let Some(result) = success_stdout(
+        "gdbus",
+        &[
+            "call", "--session", "--dest", "org.overink.Overlay",
+            "--object-path", "/org/overink/Overlay",
+            "--method", "org.overink.Overlay.NextInputSource",
+        ],
+    )? else {
+        return Ok(false);
+    };
+    Ok(result.contains("true"))
+}
+
 /// The system IME keeps its current composition/candidate UI. Only request a
 /// source change; OverInk never fabricates its own candidate strings.
 pub(super) fn switch_input_method() -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    if try_gnome_source()? {
+        return Ok(());
+    }
     if try_fcitx5()? { Ok(()) } else { try_ibus() }
 }
 
