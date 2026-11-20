@@ -110,12 +110,12 @@ impl Picker {
         self.started = Instant::now();
         if cfg!(any(target_os = "windows", target_os = "macos")) || wayland_session {
             self.stage = Stage::Preparing(Instant::now() + Duration::from_millis(120));
-            return;
-        }
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        {
-            self.stage = Stage::ChoosingDirect;
-            self.cursor = SystemCursor::crosshair();
+        } else {
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            {
+                self.stage = Stage::ChoosingDirect;
+                self.cursor = SystemCursor::crosshair();
+            }
         }
     }
     fn reset_cursor(&mut self) {
@@ -188,15 +188,15 @@ impl Picker {
                     |color| Ok(Some(color)),
                 );
                 self.finish(result);
-                return;
-            }
-            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-            match desktop::position(window, local) {
-                Ok(point) => {
-                    self.stage =
-                        Stage::SampleAfter(point, Instant::now() + Duration::from_millis(100));
+            } else {
+                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                match desktop::position(window, local) {
+                    Ok(point) => {
+                        self.stage =
+                            Stage::SampleAfter(point, Instant::now() + Duration::from_millis(100));
+                    }
+                    Err(error) => self.finish(Err(error)),
                 }
-                Err(error) => self.finish(Err(error)),
             }
         }
     }
