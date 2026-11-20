@@ -22,11 +22,13 @@ mod color_wheel;
 use color_wheel::ColorWheel;
 
 const MENU_BUTTON: Vec2 = vec2(toolbar::RAIL_BUTTON_SIZE.x, 35.);
+const KEYBOARD_BUTTON: Vec2 = vec2(52., 35.);
+const KEYBOARD_COLUMN: f32 = 7.;
 const MENU_GAP: f32 = 4.;
 const MENU_PADDING: f32 = 5.;
 const PALETTE_SIZE: Vec2 = vec2(240., 272.);
 const MENU_SIZE: Vec2 = vec2(
-    9. * MENU_BUTTON.x + 8. * MENU_GAP + 2. * MENU_PADDING,
+    8. * MENU_BUTTON.x + KEYBOARD_BUTTON.x + 8. * MENU_GAP + 2. * MENU_PADDING,
     MENU_BUTTON.y + 2. * MENU_PADDING,
 );
 
@@ -114,6 +116,7 @@ pub(super) struct TextInput {
     color_wheel: Option<ColorWheel>,
     screen_pick_requested: bool,
     keyboard_requested: bool,
+    keyboard_press: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -290,6 +293,71 @@ impl App {
         true
     }
 
+    fn keyboard_button_rect(&self, canvas: Rect) -> Option<Rect> {
+        let menu = self.text_menus(canvas)?;
+        let top_left = menu.actions.min
+            + vec2(
+                MENU_PADDING + KEYBOARD_COLUMN * (MENU_BUTTON.x + MENU_GAP),
+                MENU_PADDING,
+            ) * menu.scale;
+        Some(Rect::from_min_size(top_left, KEYBOARD_BUTTON * menu.scale))
+    }
+
+    /// Handle the keyboard button in the same checked pointer path as text-box
+    /// selection. A native SDL mouse, pen, or finger click must not depend on
+    /// which egui overlay layer currently owns the menu's widget ID.
+    fn keyboard_pointer(&mut self, event: &Event, canvas: Rect) -> bool {
+        match *event {
+            Event::PointerButton {
+                pos,
+                button: PointerButton::Primary,
+                pressed: true,
+                ..
+            } => {
+                self.input.text.keyboard_press = self
+                    .keyboard_button_rect(canvas)
+                    .is_some_and(|rect| rect.contains(pos));
+                self.input.text.keyboard_press
+            }
+            Event::PointerButton {
+                pos,
+                button: PointerButton::Primary,
+                pressed: false,
+                ..
+            } => {
+                let down_on_button = std::mem::take(&mut self.input.text.keyboard_press);
+                if down_on_button
+                    && self
+                        .keyboard_button_rect(canvas)
+                        .is_some_and(|rect| rect.contains(pos))
+                {
+                    return self.request_text_keyboard();
+                }
+                false
+            }
+            Event::PointerGone | Event::WindowFocused(false) => {
+                self.input.text.keyboard_press = false;
+                false
+            }
+            _ => false,
+        }
+    }
+
+    fn request_text_keyboard(&mut self) -> bool {
+        if !self.input.text.editing()
+            && let Some(index) = self.input.text.selected
+            && let Some(item) = self.history.text_boxes().get(index)
+        {
+            self.input.text.edit(Some(index), (**item).clone());
+        }
+        if self.input.text.editing() {
+            self.input.text.keyboard_requested = true;
+            true
+        } else {
+            false
+        }
+    }
+
     pub(super) fn text_event(
         &mut self,
         gui: &mut Gui,
@@ -317,6 +385,13 @@ impl App {
         }
         let primary_touch = gui.primary_touch();
         gui.event(event, window, size);
+        let canvas = Rect::from_min_size(Pos2::ZERO, Vec2::from(size));
+        // Resolve keyboard clicks before filtering raw egui input. On macOS
+        // and Windows the native pointer sequence can cross an overlay
+        // layer or focus boundary without registering an egui Button click.
+        for pointer in gui.raw.events.iter().skip(first) {
+            changed |= self.keyboard_pointer(pointer, canvas);
+        }
         if editing
             && ty == SDL_EVENT_MOUSE_BUTTON_DOWN
             && let Some(button) = mouse_button_event(event)
@@ -375,7 +450,6 @@ impl App {
             return changed || gui.raw.events.len() != first;
         }
         let mut queued = first;
-        let canvas = Rect::from_min_size(Pos2::ZERO, Vec2::from(size));
         gui.raw.events.retain(|event| {
             if queued > 0 {
                 queued -= 1;
@@ -953,28 +1027,45 @@ impl App {
                 self.input.text.color_wheel = None;
             }
         }
-        if menu
-            .add_sized(button, toolbar::menu_button("⌨", scale))
-            .on_hover_text(
-                egui::RichText::new(tr.text(
-                    "Show on-screen keyboard",
-                    "呼出屏幕键盘",
-                    "開啟螢幕鍵盤",
-                ))
-                .size(toolbar::MENU_FONT_SIZE * scale),
-            )
+        let keyboard_label =
+            tr.text("Show on-screen keyboard", "呼出屏幕键盘", "開啟螢幕鍵盤");
+        let (icon_rect, keyboard_response) =
+            menu.allocate_exact_size(KEYBOARD_BUTTON * scale, egui::Sense::click());
+        keyboard_response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, menu.is_enabled(), keyboard_label)
+        });
+        if keyboard_response.hovered() || keyboard_response.has_focus() {
+            menu.painter().rect_filled(
+                icon_rect,
+                6. * scale,
+                menu.visuals().widgets.hovered.bg_fill,
+            );
+        }
+        // A vector keyboard is legible on every OS; the previous Unicode
+        // "⌨" was rendered as a tiny fallback glyph on some installations.
+        let keyboard_rect = Rect::from_center_size(
+            icon_rect.center(),
+            vec2(31., 22.) * scale,
+        );
+        let stroke = Stroke::new(2.0 * scale, menu.visuals().text_color());
+        menu.painter().rect_stroke(keyboard_rect, 3. * scale, stroke, StrokeKind::Inside);
+        for row in 0..2 {
+            for col in 0..5 {
+                let center = keyboard_rect.min
+                    + vec2(5. + 5.25 * col as f32, 6. + 6. * row as f32) * scale;
+                menu.painter().circle_filled(center, 1.25 * scale, stroke.color);
+            }
+        }
+        let spacebar = keyboard_rect.min + vec2(8., 18.) * scale;
+        menu.painter().line_segment(
+            [spacebar, spacebar + vec2(15., 0.) * scale],
+            stroke,
+        );
+        if keyboard_response
+            .on_hover_text(egui::RichText::new(keyboard_label).size(toolbar::MENU_FONT_SIZE * scale))
             .clicked()
         {
-            if !self.input.text.editing()
-                && let Some(index) = self.input.text.selected
-                && let Some(item) = self.history.text_boxes().get(index)
-            {
-                self.input.text.edit(Some(index), (**item).clone());
-            }
-            if self.input.text.editing() {
-                self.input.text.keyboard_requested = true;
-                acted = true;
-            }
+            acted |= self.request_text_keyboard();
         }
         let wheel_open = self.input.text.color_wheel.is_some();
         let label = tr.text("Color wheel", "色轮", "色輪");
