@@ -2906,6 +2906,38 @@ mod tests {
     }
 
     #[test]
+    fn egui_keyboard_click_reaches_text_editor_without_committing_box() {
+        let mut app = app();
+        app.use_tool(Tool::Text);
+        click(&mut app, pos2(150., 120.));
+        app.input.text.open_osk();
+        let mut gui = Gui::new();
+        gui.ctx.set_fonts(app.text_fonts.definitions());
+        render(&mut app, &mut gui);
+        render(&mut app, &mut gui);
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::from(SIZE));
+        let Some(keyboard) = app.input.text.osk.rect(screen, 1.) else {
+            panic!("expected visible keyboard");
+        };
+        // Inside the first row's 'q' key for an 800x600 canvas.
+        let point = keyboard.min + vec2(18., 20.);
+        gui.raw.events.push(Event::PointerMoved(point));
+        render(&mut app, &mut gui);
+        for pressed in [true, false] {
+            gui.raw.events.push(Event::PointerButton {
+                pos: point,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            render(&mut app, &mut gui);
+        }
+        assert!(app.input.text.editing());
+        assert!(app.input.text.osk.visible);
+        assert_eq!(draft_committed(&app), Some("q"));
+    }
+
+    #[test]
     fn osk_inserts_complete_emoji_and_respects_ime_preedit() {
         let mut app = app();
         app.use_tool(Tool::Text);
