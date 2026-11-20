@@ -26,7 +26,7 @@ impl DirectTouchMonitor {
             1 => Ok(Some(Self {
                 window_id: window.id.0,
                 _main_thread: PhantomData,
-            }))
+            })),
             0 => Ok(None), // macOS before 27.
             _ => Err("Could not attach the macOS direct-touch recognizer".into()),
         }
