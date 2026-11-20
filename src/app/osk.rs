@@ -480,20 +480,38 @@ impl Keyboard {
         } else {
             label
         };
+        let description = match key {
+            Key::Text(_) => label,
+            Key::Delete => "Backspace",
+            Key::Return => "Return",
+            Key::Shift => "Shift",
+            Key::LetterPage => "Letters",
+            Key::SymbolsPage => "Numbers and symbols",
+            Key::ExtraPage => "More symbols",
+            Key::EmojiPage => "Emoji",
+            Key::Space => "Space",
+            Key::InputMethod => "Switch input method",
+            Key::Hide => "Hide keyboard",
+            Key::Left => "Move cursor left",
+            Key::Right => "Move cursor right",
+        };
         let fill = if special {
             Color32::from_rgb(70, 70, 73)
         } else {
             Color32::from_rgb(94, 94, 96)
         };
         let font_size = (17. * scale).min(rect.height() * 0.53).max(10.);
-        ui.put(
+        let response = ui.put(
             rect,
             egui::Button::new(RichText::new(label).size(font_size).color(Color32::WHITE))
                 .fill(fill)
                 .corner_radius(CornerRadius::same(9))
                 .stroke(Stroke::NONE),
-        )
-        .clicked()
+        );
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), description)
+        });
+        response.clicked()
     }
 
     fn act(&mut self, key: Key) -> Option<Action> {
