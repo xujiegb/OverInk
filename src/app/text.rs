@@ -1366,7 +1366,7 @@ impl App {
                     self.input
                         .text
                         .osk
-                        .rect_near(screen, anchor, self.input.canvas_units)
+                        .rect_near(screen, anchor)
             {
                 let scale = self.input.canvas_units;
                 let inset = egui::vec2(
@@ -1598,7 +1598,6 @@ impl App {
                     .draft
                     .as_ref()
                     .map(|draft| draft.item.rect()),
-                self.input.canvas_units,
             )
             .map(|rect| self.input.text.osk.current_rect(rect));
         let Some(draft) = self.input.text.draft.as_mut() else {
@@ -3064,7 +3063,6 @@ mod tests {
         let Some(fallback) = app.input.text.osk.rect_near(
             screen,
             app.input.text.draft.as_ref().map(|draft| draft.item.rect()),
-            1.,
         ) else {
             panic!("expected visible keyboard");
         };
