@@ -7,15 +7,15 @@ use crate::sdl::Window;
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod native_keys;
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(all(not(test), any(target_os = "windows", target_os = "macos")))]
 pub use native_keys::PhysicalKey;
 
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(all(not(test), any(target_os = "windows", target_os = "macos")))]
 pub fn send_physical_key(key: PhysicalKey) -> Result<(), String> {
     native_keys::send_key(key)
 }
 
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(all(not(test), any(target_os = "windows", target_os = "macos")))]
 pub fn supports_character(ch: char) -> bool {
     native_keys::supports_character(ch)
 }
