@@ -142,7 +142,7 @@ pub fn switch_input_method() -> Result<(), String> {
                 "Enable Accessibility for input-source switching: {}",
                 String::from_utf8_lossy(&output.stderr).trim()
             )
-        });
+        })
     }
     #[cfg(target_os = "windows")]
     {
