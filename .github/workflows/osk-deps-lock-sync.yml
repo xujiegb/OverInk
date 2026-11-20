@@ -19,12 +19,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Resolve the new platform dependency
         run: cargo metadata --format-version 1 > /dev/null
-      - name: Commit only Cargo.lock if it changed
+      - name: Format the new safe IME backend
+        run: cargo fmt --all
+      - name: Commit lockfile and formatted keyboard changes
         run: |
-          if ! git diff --quiet -- Cargo.lock; then
+          if ! git diff --quiet -- Cargo.lock src/keyboard.rs src/keyboard/native_keys.rs src/app/text.rs; then
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git add Cargo.lock
-            git commit -m 'chore(osk): resolve native input dependency lockfile [lock-sync]'
+            git add Cargo.lock src/keyboard.rs src/keyboard/native_keys.rs src/app/text.rs
+            git commit -m 'chore(osk): format and resolve native keyboard bridge [lock-sync]'
             git push origin HEAD:fix/osk-responsive-emoji-ime-20261120
           fi
