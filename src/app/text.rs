@@ -2907,16 +2907,10 @@ mod tests {
 
         // An active IME composition owns the preedit; the self-drawn
         // keyboard does not overwrite or synthesize native input events.
-        app.apply_osk_action(
-            osk::Action::Insert(std::borrow::Cow::Borrowed("😊")),
-            true,
-        );
+        app.apply_osk_action(osk::Action::Insert(std::borrow::Cow::Borrowed("😊")), true);
         assert_eq!(draft_committed(&app), Some(""));
 
-        app.apply_osk_action(
-            osk::Action::Insert(std::borrow::Cow::Borrowed("👩‍💻")),
-            false,
-        );
+        app.apply_osk_action(osk::Action::Insert(std::borrow::Cow::Borrowed("👩‍💻")), false);
         assert_eq!(draft_committed(&app), Some("👩‍💻"));
         app.apply_osk_action(osk::Action::Backspace, false);
         assert_eq!(draft_committed(&app), Some(""));
@@ -2928,16 +2922,16 @@ mod tests {
         draft.item.text.clone_from(&filler);
         draft.committed = filler;
         draft.cursor = Some(CCursorRange::one(CCursor::new(MAX_TEXT_CHARS - 1)));
-        app.apply_osk_action(
-            osk::Action::Insert(std::borrow::Cow::Borrowed("👩‍💻")),
-            false,
+        app.apply_osk_action(osk::Action::Insert(std::borrow::Cow::Borrowed("👩‍💻")), false);
+        assert_eq!(
+            draft_committed(&app).map(str::chars).map(Iterator::count),
+            Some(MAX_TEXT_CHARS - 1)
         );
-        assert_eq!(draft_committed(&app).map(str::chars).map(Iterator::count), Some(MAX_TEXT_CHARS - 1));
-        app.apply_osk_action(
-            osk::Action::Insert(std::borrow::Cow::Borrowed("🙂")),
-            false,
+        app.apply_osk_action(osk::Action::Insert(std::borrow::Cow::Borrowed("🙂")), false);
+        assert_eq!(
+            draft_committed(&app).map(str::chars).map(Iterator::count),
+            Some(MAX_TEXT_CHARS)
         );
-        assert_eq!(draft_committed(&app).map(str::chars).map(Iterator::count), Some(MAX_TEXT_CHARS));
         app.apply_osk_action(osk::Action::Hide, false);
         assert!(!app.input.text.osk.visible);
     }
