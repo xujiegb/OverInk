@@ -3030,6 +3030,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                     &mut toolbar_hidden,
                     hide,
                     false,
+                    picker.hides_canvas(),
                 )?;
             }
             if restore_toolbar_focus && !toolbar_hidden && !file_dialog.pending() {
