@@ -182,21 +182,23 @@ impl Picker {
             {
                 return;
             }
-            if let Stage::ChoosingImage(image) = &self.stage {
-                let result = sample_image(image, local, window.size()).map_or(
-                    Err("The chosen pixel is outside the display".into()),
-                    |color| Ok(Some(color)),
-                );
-                self.finish(result);
-            } else {
+            match &self.stage {
+                Stage::ChoosingImage(image) => {
+                    let result = sample_image(image, local, window.size()).map_or(
+                        Err("The chosen pixel is outside the display".into()),
+                        |color| Ok(Some(color)),
+                    );
+                    self.finish(result);
+                }
                 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-                match desktop::position(window, local) {
+                Stage::ChoosingDirect => match desktop::position(window, local) {
                     Ok(point) => {
                         self.stage =
                             Stage::SampleAfter(point, Instant::now() + Duration::from_millis(100));
                     }
                     Err(error) => self.finish(Err(error)),
-                }
+                },
+                _ => {}
             }
         }
     }
