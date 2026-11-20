@@ -48,9 +48,7 @@ fn checked_command(program: &str, args: &[&str]) -> Result<(), String> {
 
 /// Profile section names use [Groups/N] and [Groups/N/Items/M].
 fn group_section(header: &str) -> Option<(&str, Option<usize>)> {
-    let path = header
-        .strip_prefix("[Groups/")?
-        .strip_suffix(']')?;
+    let path = header.strip_prefix("[Groups/")?.strip_suffix(']')?;
     if let Some((id, item)) = path.split_once("/Items/") {
         id.parse::<usize>().ok()?;
         Some((id, Some(item.parse::<usize>().ok()?)))
@@ -67,9 +65,11 @@ fn configured_fcitx_methods<'a>(profile: &'a str, group: &str) -> Vec<&'a str> {
     let mut group_section_id = None;
     for line in profile.lines().map(str::trim) {
         if line.starts_with('[') {
-            group_section_id = group_section(line)
-                .and_then(|(id, item)| item.is_none().then_some(id));
-        } else if line.strip_prefix("Name=").is_some_and(|name| name.trim() == group)
+            group_section_id =
+                group_section(line).and_then(|(id, item)| item.is_none().then_some(id));
+        } else if line
+            .strip_prefix("Name=")
+            .is_some_and(|name| name.trim() == group)
             && let Some(id) = group_section_id
         {
             selected_group = Some(id);
@@ -84,9 +84,8 @@ fn configured_fcitx_methods<'a>(profile: &'a str, group: &str) -> Vec<&'a str> {
     let mut items = Vec::new();
     for line in profile.lines().map(str::trim) {
         if line.starts_with('[') {
-            current_item = group_section(line).and_then(|(id, item)| {
-                (id == selected_group).then_some(item).flatten()
-            });
+            current_item = group_section(line)
+                .and_then(|(id, item)| (id == selected_group).then_some(item).flatten());
         } else if let Some(name) = line.strip_prefix("Name=")
             && let Some(index) = current_item
         {
@@ -130,10 +129,13 @@ fn try_fcitx5() -> Result<bool, String> {
         return Ok(false);
     }
     let group = success_stdout("fcitx5-remote", &["-q"])?;
-    let configured = group.as_deref().filter(|name| !name.is_empty()).and_then(|name| {
-        let profile = fcitx_profile_path().and_then(|path| fs::read_to_string(path).ok())?;
-        Some((name.to_owned(), profile))
-    });
+    let configured = group
+        .as_deref()
+        .filter(|name| !name.is_empty())
+        .and_then(|name| {
+            let profile = fcitx_profile_path().and_then(|path| fs::read_to_string(path).ok())?;
+            Some((name.to_owned(), profile))
+        });
 
     if let Some((group, profile)) = configured {
         let methods = configured_fcitx_methods(&profile, &group);
@@ -210,19 +212,14 @@ fn try_ibus() -> Result<(), String> {
     } else {
         &available
     };
-    let next = next_method(&current, methods)
-        .map_err(|error| format!("IBus: {error}"))?;
+    let next = next_method(&current, methods).map_err(|error| format!("IBus: {error}"))?;
     checked_command("ibus", &["engine", next])
 }
 
 /// The system IME keeps its current composition/candidate UI. Only request a
 /// source change; OverInk never fabricates its own candidate strings.
 pub(super) fn switch_input_method() -> Result<(), String> {
-    if try_fcitx5()? {
-        Ok(())
-    } else {
-        try_ibus()
-    }
+    if try_fcitx5()? { Ok(()) } else { try_ibus() }
 }
 
 #[cfg(test)]
