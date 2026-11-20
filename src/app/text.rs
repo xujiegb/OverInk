@@ -2774,11 +2774,25 @@ mod tests {
         render(&mut app, &mut gui);
         render(&mut app, &mut gui);
         let mut menu_click = |app: &mut App, column: f32| {
-            let pos = rect.min
-                + vec2(
-                    MENU_PADDING + MENU_BUTTON.x * 0.5 + column * (MENU_BUTTON.x + MENU_GAP),
-                    MENU_SIZE.y * 0.5,
-                );
+            // Calculate the current scaled control center, not yesterday's
+            // unscaled offsets. The toolbar is 90% of its former size.
+            let Some(menu) = app.text_menus(screen) else {
+                panic!("expected scaled text actions");
+            };
+            let pos = if column == KEYBOARD_COLUMN {
+                let Some(keyboard) = app.keyboard_button_rect(screen) else {
+                    panic!("expected scaled keyboard button");
+                };
+                keyboard.center()
+            } else {
+                menu.actions.min
+                    + vec2(
+                        MENU_PADDING
+                            + MENU_BUTTON.x * 0.5
+                            + column * (MENU_BUTTON.x + MENU_GAP),
+                        MENU_SIZE.y * 0.5,
+                    ) * menu.scale
+            };
             gui.raw.events.push(Event::PointerMoved(pos));
             for pressed in [true, false] {
                 gui.raw.events.push(Event::PointerButton {
@@ -3036,8 +3050,8 @@ mod tests {
         ) else {
             panic!("expected visible keyboard");
         };
-        // egui::Window now has a draggable title bar. The first row of
-        // keys starts inside its content area, below the title bar.
+        // The title bar is separate from the keys. The first row is now
+        // the twelve digits and symbols; verify actual key hit testing.
         let keyboard = app.input.text.osk.current_rect(fallback);
         let point = keyboard.min + vec2(18., 55.);
         gui.raw.events.push(Event::PointerMoved(point));
@@ -3053,7 +3067,7 @@ mod tests {
         }
         assert!(app.input.text.editing());
         assert!(app.input.text.osk.visible);
-        assert_eq!(draft_committed(&app), Some("q"));
+        assert_eq!(draft_committed(&app), Some("1"));
     }
 
     #[test]
