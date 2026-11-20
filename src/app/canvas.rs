@@ -22,6 +22,9 @@ pub(super) struct Canvas {
     pub text_repaint_at: Option<Instant>,
     pub render: Renderer,
     native: Passthrough,
+    // Must drop before the SDL window; AppKit owns this view-attached monitor.
+    #[cfg(target_os = "macos")]
+    _direct_touch: Option<crate::native::macos::DirectTouchMonitor>,
     pub window: Window,
     pub color: ColorManager,
     guard: Guard,
@@ -57,6 +60,18 @@ impl Canvas {
                 )
             })?;
         let native = Passthrough::new(&window);
+        #[cfg(target_os = "macos")]
+        let direct_touch = if options.smoke {
+            None
+        } else {
+            match crate::native::macos::DirectTouchMonitor::install(&window) {
+                Ok(monitor) => monitor,
+                Err(error) => {
+                    eprintln!("OverInk: {error}");
+                    None
+                }
+            }
+        };
         let mut color = ColorManager::default();
         color.refresh(&window, render.extended);
         Ok(Self {
@@ -67,6 +82,8 @@ impl Canvas {
             text_repaint_at: None,
             render,
             native,
+            #[cfg(target_os = "macos")]
+            _direct_touch: direct_touch,
             window,
             color,
             guard: Guard::default(),
@@ -325,7 +342,11 @@ impl Canvas {
         let extended = self.render.extended;
         #[cfg(target_os = "macos")]
         let extended = extended || (!_force_sdr && !self.extended_unavailable);
-        background::snapshot_mode(self.window.hdr_enabled(), extended, video, xwayland)
+        // An explicit --sdr request is also an opt-in to SDR desktop capture
+        // on HDR Windows monitors, where a transparent SDL swap chain cannot
+        // preserve the FP16 scRGB output. Do not silently discard HDR otherwise.
+        let hdr = self.window.hdr_enabled() && !_force_sdr;
+        background::snapshot_mode(hdr, extended, video, xwayland)
     }
 
     pub fn update_background(

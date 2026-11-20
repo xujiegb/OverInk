@@ -132,6 +132,8 @@ enum SdlNativeAction<'a> {
     WaitEvent(i32),
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     PushUserEvent(&'a mut SDL_Event),
+    #[cfg(target_os = "macos")]
+    PushMacosTouch(&'a mut SDL_Event),
     #[cfg(target_os = "linux")]
     FlushQuitEvent,
 }
@@ -584,6 +586,10 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
             }
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             SdlNativeAction::PushUserEvent(event) => SdlNativeResult::Success(SDL_PushEvent(event)),
+            #[cfg(target_os = "macos")]
+            SdlNativeAction::PushMacosTouch(event) => {
+                SdlNativeResult::Success(SDL_PushEvent(event))
+            }
             #[cfg(target_os = "linux")]
             SdlNativeAction::FlushQuitEvent => {
                 SDL_FlushEvent(SDL_EVENT_QUIT.0);
@@ -994,6 +1000,44 @@ pub fn push_user_event(ty: u32) -> bool {
     sdl_native(SdlNativeAction::PushUserEvent(&mut event)).succeeded()
 }
 
+/// Push a macOS 27 AppKit *direct finger* sample into the existing checked
+/// SDL event pipeline. The Cocoa bridge passes only scalar values; this code
+/// never takes ownership of any Cocoa or SDL native pointer.
+#[cfg(target_os = "macos")]
+pub fn push_macos_direct_touch(window_id: u32, finger_id: u64, phase: u32, x: f32, y: f32) -> bool {
+    if !is_main_thread()
+        || !SDL_VIDEO_READY.load(std::sync::atomic::Ordering::Acquire)
+        || window_id == 0
+        || finger_id == 0
+        || !x.is_finite()
+        || !y.is_finite()
+    {
+        return false;
+    }
+    let kind = match phase {
+        0 => SDL_EVENT_FINGER_DOWN,
+        1 => SDL_EVENT_FINGER_MOTION,
+        2 => SDL_EVENT_FINGER_UP,
+        3 => SDL_EVENT_FINGER_CANCELED,
+        _ => return false,
+    };
+    // Each canvas has a separate synthetic touch device. This ID cannot be
+    // mistaken for a trackpad: SDL_GetTouchDeviceType returns INVALID rather
+    // than INDIRECT for an unregistered device ID.
+    let mut event = SDL_Event::default();
+    event.tfinger = SDL_TouchFingerEvent {
+        r#type: kind,
+        windowID: SDL_WindowID(window_id),
+        touchID: SDL_TouchID(0x4f56_4552_0000_0000 | u64::from(window_id)),
+        fingerID: SDL_FingerID(finger_id),
+        x,
+        y,
+        pressure: 1.,
+        ..Default::default()
+    };
+    sdl_native(SdlNativeAction::PushMacosTouch(&mut event)).succeeded()
+}
+
 /// Owned display metadata, copied from SDL before its native allocation is freed.
 pub struct DisplayInfo {
     pub id: u32,
@@ -1324,6 +1368,7 @@ enum WindowFloatQuery {
 enum WindowCommand<'a> {
     InputArea(&'a SDL_Rect),
     SyncInput(bool),
+    RequestScreenKeyboard,
     ClearComposition,
     SyncAndPumpEvents,
     SetSize([i32; 2]),
@@ -1505,12 +1550,28 @@ impl Window {
                 WindowCommand::SyncInput(enabled) => {
                     if enabled != SDL_TextInputActive(self.raw.as_ptr()) {
                         if enabled {
-                            SDL_StartTextInput(self.raw.as_ptr());
+                            // Mouse/pen editor activation must not summon an OSK.
+                            // The explicit touch/button request below opts in.
+                            SDL_SetHint(SDL_HINT_ENABLE_SCREEN_KEYBOARD, c"0".as_ptr());
+                            check(SDL_StartTextInput(self.raw.as_ptr()))
                         } else {
-                            SDL_StopTextInput(self.raw.as_ptr());
+                            check(SDL_StopTextInput(self.raw.as_ptr()))
                         }
+                    } else {
+                        Ok(())
                     }
-                    Ok(())
+                }
+                WindowCommand::RequestScreenKeyboard => {
+                    // SDL's hint must be set before StartTextInput. Restart
+                    // just this editor's input method, then restore the normal
+                    // non-OSK policy for subsequent mouse/pen editor activation.
+                    check(SDL_SetHint(SDL_HINT_ENABLE_SCREEN_KEYBOARD, c"1".as_ptr()))?;
+                    if SDL_TextInputActive(self.raw.as_ptr()) {
+                        let _ = SDL_StopTextInput(self.raw.as_ptr());
+                    }
+                    let result = check(SDL_StartTextInput(self.raw.as_ptr()));
+                    let _ = SDL_SetHint(SDL_HINT_ENABLE_SCREEN_KEYBOARD, c"0".as_ptr());
+                    result
                 }
                 WindowCommand::ClearComposition => {
                     SDL_ClearComposition(self.raw.as_ptr());
@@ -1744,6 +1805,10 @@ impl Window {
 
     pub fn sync_text_input(&self, enabled: bool) {
         let _ = self.run_command(WindowCommand::SyncInput(enabled));
+    }
+
+    pub fn request_screen_keyboard(&self) -> Result<(), String> {
+        self.run_command(WindowCommand::RequestScreenKeyboard)
     }
 
     pub fn clear_composition(&self) {
@@ -2781,11 +2846,14 @@ impl Renderer {
                 );
             }
             let mut raw = None;
-            // SDL's transparent Win32 swap chain uses the DXGI bitblt model.
-            // Submit sRGB ink to that path so DWM composites it as SDR.
+            // Windows uses D3D11's legacy blit swap chain for transparent
+            // windows. Some HDR drivers can still create an FP16 scRGB
+            // renderer on that path; attempt it only on an HDR display, then
+            // fall back to SDR if SDL rejects it. Do not make all translucent
+            // SDR windows pay for an unnecessary 16-bit-per-channel surface.
             let transparent = SDL_GetWindowFlags(window.raw.as_ptr()) & SDL_WINDOW_TRANSPARENT != 0;
-            let extended_output =
-                cfg!(target_os = "macos") || (cfg!(target_os = "windows") && !transparent);
+            let extended_output = cfg!(target_os = "macos")
+                || (cfg!(target_os = "windows") && (!transparent || window.hdr_enabled()));
             if !force_sdr && extended_output {
                 SDL_SetNumberProperty(
                     props.id(),

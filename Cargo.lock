@@ -711,6 +711,7 @@ name = "overink"
 version = "0.1.6"
 dependencies = [
  "async-channel",
+ "cc",
  "base64",
  "block2",
  "egui",

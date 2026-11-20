@@ -1675,6 +1675,21 @@ fn run_inner(options: Options) -> Result<(), String> {
         )
     })?;
     with_autorelease_pool(|| toolbar.setup_toolbar());
+    // With NSIsTouchNative set, AppKit no longer synthesizes mouse clicks for
+    // direct touches. The separate toolbar is an SDL window too, so it needs
+    // the same direct-touch bridge as every canvas.
+    #[cfg(target_os = "macos")]
+    let _toolbar_direct_touch = if options.smoke {
+        None
+    } else {
+        match crate::native::macos::DirectTouchMonitor::install(&toolbar) {
+            Ok(monitor) => monitor,
+            Err(error) => {
+                eprintln!("OverInk: toolbar direct touch unavailable: {error}");
+                None
+            }
+        }
+    };
     #[cfg(target_os = "macos")]
     let pencil_mode = match crate::native::macos::PencilModeMonitor::install() {
         Ok(monitor) => Some(monitor),
@@ -2899,6 +2914,33 @@ fn run_inner(options: Options) -> Result<(), String> {
                 {
                     canvas.keep_toolbar_above(&toolbar);
                 }
+            }
+            // Only a direct-finger re-tap or the annotation keyboard button
+            // requests the OSK. Mouse/pen focus still allows normal hardware
+            // typing and IME composition without opening the keyboard.
+            if app.input.text.take_keyboard_request()
+                && !options.smoke
+                && !app.picking
+                && !app.screenshot.active()
+                && !file_dialog.pending()
+                && app.tool.is_text()
+                && !app.pass
+                && app.input.text.editing()
+            {
+                let canvas = &mut canvases[active];
+                gui.sync_text_input(&toolbar, false);
+                canvas.focus_text_editor();
+                canvas.keep_toolbar_above(&toolbar);
+                text_focus.deadline = Some(Instant::now() + Duration::from_millis(150));
+                if let Err(error) = crate::keyboard::show(&canvas.window, &video) {
+                    app.status = text(
+                        "On-screen keyboard unavailable",
+                        "无法呼出屏幕键盘",
+                        "無法開啟螢幕鍵盤",
+                    )
+                    .detail(error);
+                }
+                toolbar_dirty = true;
             }
             // Consume requests even when the picker cannot start, so an old
             // click does not unexpectedly launch a picker after switching modes.
