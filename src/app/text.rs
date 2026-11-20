@@ -1349,21 +1349,19 @@ impl App {
                         .osk
                         .rect_near(screen, anchor, self.input.canvas_units)
             {
-                let base_scale = osk::Keyboard::layout_scale(screen, self.input.canvas_units);
-                let scale = base_scale * osk::Keyboard::DEFAULT_SIZE_RATIO;
-                let title_scale = base_scale * osk::Keyboard::TITLE_HEIGHT_RATIO;
+                let scale = osk::Keyboard::layout_scale(screen, self.input.canvas_units);
                 let safe = osk::Keyboard::safe_area(screen);
                 let minimum = self.input.text.osk.minimum_size(safe.size(), scale);
                 let mut action = None;
                 let window = egui::Window::new(
-                    egui::RichText::new("OverInk").size(toolbar::MENU_FONT_SIZE * title_scale),
+                    egui::RichText::new("OverInk").size(12. * scale),
                 )
                 // Title-only movement remains available, but the heading
                 // band should not waste a full button row of vertical space.
                 .title_frame(
                     egui::Frame::window(ui.style()).inner_margin(egui::Margin::symmetric(
-                        (6. * scale).round() as i8,
-                        (1. * title_scale).round() as i8,
+                        (4. * scale).round() as i8,
+                        (1. * scale).round() as i8,
                     )),
                 )
                 .id(ui.make_persistent_id((
