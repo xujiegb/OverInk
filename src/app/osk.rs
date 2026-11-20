@@ -1183,7 +1183,10 @@ mod tests {
         let available = vec2(1200., 800.);
         assert_eq!(keyboard.minimum_size(available, 1.), vec2(280., 210.));
         assert_eq!(keyboard.minimum_size(available, 2.), vec2(560., 420.));
-        assert_eq!(keyboard.minimum_size(vec2(300., 200.), 2.), vec2(300., 200.));
+        assert_eq!(
+            keyboard.minimum_size(vec2(300., 200.), 2.),
+            vec2(300., 200.)
+        );
     }
 
     #[test]
