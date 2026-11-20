@@ -195,7 +195,7 @@ impl Job {
                 })
                 .map(Self::Portal);
             }
-            let image = crate::picker::desktop::capture(window)?;
+            let image = crate::picker_desktop::capture(window)?;
             Ok(Self::X11(Some(crop.apply(image)?)))
         }
     }
