@@ -568,7 +568,7 @@ impl Keyboard {
                 vec2(cell, emoji_row_h),
             );
             if self.key(ui, rect, Key::Text(emoji), scale) {
-                result = Some(Action::Insert(Cow::Borrowed(emoji)));
+                result = Some(Action::Insert(Cow::Borrowed(*emoji)));
             }
         }
         let dot_spacing = 15. * scale;
