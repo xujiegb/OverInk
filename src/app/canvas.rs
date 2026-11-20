@@ -169,7 +169,7 @@ impl Canvas {
 
     pub fn set_page_geometry(&self, app: &mut App) {
         app.input.protected = self.protected;
-        app.input.canvas_units = self.window.ui_scale().max(0.5);
+        app.input.canvas_units = gui::window_units(&self.window);
     }
 
     pub fn keep_toolbar_above(&self, toolbar: &Window) {
