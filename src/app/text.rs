@@ -1357,9 +1357,11 @@ impl App {
         let total = draft.item.text.chars().count();
         let selected = draft.cursor.map(|cursor| cursor.as_sorted_char_range());
         let mut start = selected
+            .as_ref()
             .map_or(total, |range| usize::from(range.start))
             .min(total);
         let end = selected
+            .as_ref()
             .map_or(total, |range| usize::from(range.end))
             .min(total);
         let mut insert = String::new();
