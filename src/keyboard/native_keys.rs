@@ -10,6 +10,7 @@
 use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 use std::cell::RefCell;
 
+#[cfg(not(test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PhysicalKey {
     Char(char),
@@ -176,6 +177,7 @@ fn send_with_modifier(keyboard: &mut Enigo, key: Key, modifier: Option<Key>) -> 
     }
 }
 
+#[cfg(not(test))]
 pub fn send_key(action: PhysicalKey) -> Result<(), String> {
     with_injector(|keyboard| {
         let (key, modifier) = match action {
