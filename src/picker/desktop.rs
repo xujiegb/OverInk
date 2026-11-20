@@ -418,10 +418,7 @@ mod x11 {
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub use x11::{capture, is_xwayland, position, sample};
 
-#[cfg(all(
-    test,
-    any(target_os = "linux", target_os = "freebsd")
-))]
+#[cfg(all(test, any(target_os = "linux", target_os = "freebsd")))]
 mod coordinate_tests {
     use super::scaled_pixels;
 
@@ -437,4 +434,3 @@ mod coordinate_tests {
         assert!(scaled_pixels([f32::MAX, 4.], [100., 100.], [200, 200]).is_err());
     }
 }
-
