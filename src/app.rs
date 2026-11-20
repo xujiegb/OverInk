@@ -1471,8 +1471,9 @@ fn capture_visibility(
     toolbar_hidden: &mut bool,
     hide_all: bool,
     screenshot_active: bool,
+    picker_canvas_only: bool,
 ) -> Result<bool, String> {
-    if hide_all {
+    if hide_all || picker_canvas_only {
         for canvas in canvases.iter_mut().filter(|canvas| canvas.visible) {
             canvas.show(toolbar, false)?;
         }
@@ -1917,7 +1918,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 let id = canvas::event_window(&event, ty);
                 let active = canvas::active_index(&canvases, app.pages.active);
                 let was_picking = picker.active();
-                picker.event(&event, &canvases[active].window);
+                picker.event(&event, &canvases[active].window, &toolbar);
                 let target = if ty == SDL_EVENT_FINGER_CANCELED {
                     let key = touch::key_from_event(&event)
                         .ok_or("SDL finger cancellation event has no finger data")?;
@@ -2421,6 +2422,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 &mut toolbar_hidden,
                 hide,
                 app.screenshot.active(),
+                picker.hides_canvas(),
             )?;
             app.screenshot.acknowledge_portal_fallback_hidden();
             let mut restore_text_focus = false;
@@ -2501,6 +2503,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 &mut toolbar_hidden,
                 hide,
                 app.screenshot.active(),
+                picker.hides_canvas(),
             )?;
             app.screenshot.acknowledge_portal_fallback_hidden();
             if hide {
@@ -2754,6 +2757,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 &mut toolbar_hidden,
                 hide,
                 screenshot_active,
+                picker.hides_canvas(),
             )?;
             app.screenshot.acknowledge_portal_fallback_hidden();
             if toolbar_hidden && let Some(mut output) = output.take() {
@@ -2906,7 +2910,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 for canvas in &mut canvases {
                     canvas.show(&toolbar, false)?;
                 }
-            } else if mode_changed || controller_bounds_changed {
+            } else if mode_changed || controller_bounds_changed || picker.choosing() {
                 let toolbar_display = toolbar.display_id();
                 if let Some(canvas) = canvases
                     .iter()
