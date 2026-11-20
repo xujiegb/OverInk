@@ -2530,7 +2530,9 @@ mod tests {
         for screen_size in [vec2(800., 600.), vec2(500., 420.), vec2(1100., 700.)] {
             let screen = Rect::from_min_size(Pos2::ZERO, screen_size);
             let menus = app.text_menus(screen).expect("text annotation menu");
-            let (palette, scale) = menus.palette.expect("color palette");
+            let Some((palette, scale)) = menus.palette else {
+                panic!("expected color palette");
+            };
             assert!((palette.width() - menus.actions.width()).abs() < 0.01);
             assert!(screen.contains_rect(menus.actions));
             assert!(palette.width() > 0.);
@@ -2606,10 +2608,10 @@ mod tests {
         assert!(app.input.text.color_wheel.is_none());
 
         tap(&mut app, wheel_button);
-        let (palette, scale) = app
-            .text_menus(screen)
-            .and_then(|menus| menus.palette)
-            .expect("palette remains available after reopening");
+        let Some((palette, scale)) = app.text_menus(screen).and_then(|menus| menus.palette)
+        else {
+            panic!("expected palette after reopening");
+        };
         let inner = palette.shrink(PALETTE_MARGIN * scale);
         tap(
             &mut app,
