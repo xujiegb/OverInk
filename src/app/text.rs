@@ -2902,6 +2902,37 @@ mod tests {
     }
 
     #[test]
+    fn text_context_menu_uses_main_ui_scale_for_buttons_and_bounds() {
+        let mut app = app();
+        app.use_tool(Tool::Text);
+        click(&mut app, pos2(150., 120.));
+        app.input.text.context_menu = Some(pos2(200., 180.));
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(800., 600.));
+        app.input.canvas_units = 1.;
+        let Some(normal) = app.text_context_layout(screen) else {
+            panic!("expected context layout");
+        };
+        app.input.canvas_units = 2.;
+        let Some(hi_dpi) = app.text_context_layout(screen) else {
+            panic!("expected HiDPI context layout");
+        };
+        assert_eq!(normal.scale, 1.);
+        assert_eq!(hi_dpi.scale, 2.);
+        assert!((hi_dpi.rect.width() - 2. * normal.rect.width()).abs() < 0.01);
+        assert!((hi_dpi.rect.height() - 2. * normal.rect.height()).abs() < 0.01);
+        assert!(screen.contains_rect(hi_dpi.rect));
+
+        // The shared menu scale must fit tiny canvases instead of rendering
+        // a DPI-sized popup outside their bounds.
+        let small = Rect::from_min_size(Pos2::ZERO, vec2(230., 160.));
+        let Some(fitted) = app.text_context_layout(small) else {
+            panic!("expected fitted context layout");
+        };
+        assert!(fitted.scale < hi_dpi.scale);
+        assert!(small.contains_rect(fitted.rect));
+    }
+
+    #[test]
     fn palette_tracks_text_menu_width_and_available_window_height() {
         let mut app = app();
         app.use_tool(Tool::Text);
