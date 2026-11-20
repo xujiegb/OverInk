@@ -28,7 +28,12 @@ impl ColorWheel {
     pub fn show(&mut self, ui: &mut Ui, size: f32, scale: f32) {
         let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click_and_drag());
         let center = rect.center();
-        let radius = size * 0.5 - 6. * scale;
+        let radius = (size * 0.5 - 6. * scale).max(0.);
+        // A short window can leave no room for the disc after the brightness
+        // and action rows. Do not divide by zero or paint an inverted mesh.
+        if radius == 0. {
+            return;
+        }
         if let Some(pos) = response.interact_pointer_pos() {
             self.select(pos - center, radius);
         }
