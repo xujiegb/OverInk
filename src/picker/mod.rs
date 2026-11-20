@@ -104,19 +104,19 @@ impl Picker {
             _ => false,
         }
     }
-    pub fn start(&mut self, wayland_session: bool) {
+    pub fn start(&mut self, _wayland_session: bool) {
         self.cancel();
         self.result = None;
         self.started = Instant::now();
-        if cfg!(any(target_os = "windows", target_os = "macos")) || wayland_session {
-            self.stage = Stage::Preparing(Instant::now() + Duration::from_millis(120));
-        } else {
-            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-            {
-                self.stage = Stage::ChoosingDirect;
-                self.cursor = SystemCursor::crosshair();
-            }
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        if !_wayland_session {
+            // Native X11 can pick a root pixel directly; no portal or
+            // intermediate full-screen image is necessary.
+            self.stage = Stage::ChoosingDirect;
+            self.cursor = SystemCursor::crosshair();
+            return;
         }
+        self.stage = Stage::Preparing(Instant::now() + Duration::from_millis(120));
     }
     fn reset_cursor(&mut self) {
         self.cursor = None;
