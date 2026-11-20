@@ -45,6 +45,12 @@ struct TextMenus {
     palette: Option<(Rect, f32)>,
 }
 
+#[derive(Clone, Copy)]
+struct TextContextLayout {
+    rect: Rect,
+    scale: f32,
+}
+
 // A screen pick must not recolor a different annotation when the toolbar is
 // still interactive while the native picker is running.
 #[derive(Debug, PartialEq)]
@@ -777,14 +783,19 @@ impl App {
         })
     }
 
-    fn text_context_rect(&self, canvas: Rect) -> Option<Rect> {
+    fn text_context_layout(&self, canvas: Rect) -> Option<TextContextLayout> {
         let point = self.input.text.context_menu?;
         let lines = if self.text_menu_item()?.text.is_empty() {
             1.
         } else {
             4.
         };
-        let size = vec2(160., lines * 29. + 10.) * self.input.canvas_units;
+        let base = vec2(160., lines * 29. + 10.);
+        // Use the exact same DPI and window-fit scaling as every other
+        // annotation menu. Font, hit targets, margins and popup bounds must
+        // all derive from this single value, even on small displays.
+        let scale = toolbar::menu_scale(canvas, base, self.input.canvas_units);
+        let size = base * scale;
         let min = pos2(
             point
                 .x
@@ -793,7 +804,14 @@ impl App {
                 .y
                 .clamp(canvas.top(), (canvas.bottom() - size.y).max(canvas.top())),
         );
-        Some(Rect::from_min_size(min, size))
+        Some(TextContextLayout {
+            rect: Rect::from_min_size(min, size),
+            scale,
+        })
+    }
+
+    fn text_context_rect(&self, canvas: Rect) -> Option<Rect> {
+        self.text_context_layout(canvas).map(|layout| layout.rect)
     }
 
     fn text_context_action(&mut self, action: TextContextAction) -> bool {
@@ -883,8 +901,9 @@ impl App {
         true
     }
 
-    fn text_context_popup(&mut self, ui: &mut Ui, rect: Rect) {
+    fn text_context_popup(&mut self, ui: &mut Ui, layout: TextContextLayout) {
         let tr = self.language;
+        let TextContextLayout { rect, scale } = layout;
         let has_text = self
             .text_menu_item()
             .is_some_and(|item| !item.text.is_empty());
@@ -893,10 +912,11 @@ impl App {
             egui::Frame::new()
                 .fill(ui.visuals().window_fill())
                 .stroke(ui.visuals().window_stroke())
-                .corner_radius(egui::CornerRadius::same(9))
-                .inner_margin(egui::Margin::same(5))
+                .corner_radius(egui::CornerRadius::same((9. * scale).round() as u8))
+                .inner_margin(egui::Margin::same((5. * scale).round() as i8))
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing = Vec2::ZERO;
+                    ui.spacing_mut().button_padding = vec2(5., 3.) * scale;
                     let entries = [
                         (
                             TextContextAction::SelectAll,
@@ -913,12 +933,12 @@ impl App {
                         if ui
                             .add_sized(
                                 vec2(
-                                    rect.width() - 10. * self.input.canvas_units,
-                                    29. * self.input.canvas_units,
+                                    rect.width() - 10. * scale,
+                                    29. * scale,
                                 ),
                                 egui::Button::new(
                                     egui::RichText::new(title)
-                                        .size(toolbar::MENU_FONT_SIZE * self.input.canvas_units),
+                                        .size(toolbar::MENU_FONT_SIZE * scale),
                                 ),
                             )
                             .clicked()
@@ -1328,8 +1348,8 @@ impl App {
                     });
                 }
             }
-            if let Some(rect) = self.text_context_rect(screen) {
-                self.text_context_popup(ui, rect);
+            if let Some(layout) = self.text_context_layout(screen) {
+                self.text_context_popup(ui, layout);
             }
             // An egui Window (NOT a native OS window) supports drag/resize
             // without stealing SDL text-input focus. Initial placement follows
