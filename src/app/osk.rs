@@ -317,6 +317,11 @@ fn shifted_key_label(label: &'static str) -> Cow<'static, str> {
 }
 
 impl Keyboard {
+    /// Compact default footprint on every platform; user resizing is unchanged.
+    pub const DEFAULT_SIZE_RATIO: f32 = 2. / 3.;
+    /// Title height is independently reduced to three quarters of its old size.
+    pub const TITLE_HEIGHT_RATIO: f32 = 3. / 4.;
+
     pub fn open(&mut self) {
         self.visible = true;
     }
@@ -351,10 +356,10 @@ impl Keyboard {
         if safe.width() < 240. || safe.height() < 145. {
             return None;
         }
-        let scale = Self::layout_scale(screen, units);
+        let scale = Self::layout_scale(screen, units) * Self::DEFAULT_SIZE_RATIO;
         let design = vec2(900., 370.);
         let size = (design * scale)
-            .max(self.minimum_size(safe.size(), units))
+            .max(self.minimum_size(safe.size(), scale))
             .min(safe.size());
         let width = size.x;
         let height = size.y;
@@ -1254,8 +1259,9 @@ mod tests {
         let Some(scaled) = keyboard.rect_near(screen, None, 2.) else {
             panic!("Expected HiDPI keyboard layout");
         };
-        assert_eq!(normal.size(), vec2(900., 370.));
-        assert_eq!(scaled.size(), vec2(1800., 740.));
+        let expected = vec2(900., 370.) * Keyboard::DEFAULT_SIZE_RATIO;
+        assert!((normal.size() - expected).length() < 0.01);
+        assert!((scaled.size() - 2. * expected).length() < 0.01);
         assert_eq!(Keyboard::layout_scale(screen, 1.), 1.);
         assert_eq!(Keyboard::layout_scale(screen, 2.), 2.);
         assert!(Keyboard::safe_area(screen).contains_rect(scaled));
