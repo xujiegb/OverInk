@@ -287,10 +287,6 @@ impl Keyboard {
         self.visible = false;
         self.window_rect = None;
     }
-    pub fn rect(&self, screen: Rect, scale: f32) -> Option<Rect> {
-        self.rect_near(screen, None, scale)
-    }
-
     /// Coordinates already use egui logical points; multiplying panel width by
     /// the DPI scale made a Retina keyboard twice as wide as intended.
     /// Pixel density is handled by the canvas egui context, not by geometry.
@@ -362,7 +358,7 @@ impl Keyboard {
                 .into_iter()
                 .enumerate()
                 {
-                    if let Some(action) = self.row(ui, row, inside, i, gap, scale) {
+                    if let Some(action) = self.row(ui, row, inside, i, gap) {
                         result = Some(action);
                     }
                 }
@@ -377,7 +373,7 @@ impl Keyboard {
                 .into_iter()
                 .enumerate()
                 {
-                    if let Some(action) = self.row(ui, row, inside, i, gap, scale) {
+                    if let Some(action) = self.row(ui, row, inside, i, gap) {
                         result = Some(action);
                     }
                 }
@@ -392,7 +388,7 @@ impl Keyboard {
                 .into_iter()
                 .enumerate()
                 {
-                    if let Some(action) = self.row(ui, row, inside, i, gap, scale) {
+                    if let Some(action) = self.row(ui, row, inside, i, gap) {
                         result = Some(action);
                     }
                 }
@@ -411,7 +407,6 @@ impl Keyboard {
         inside: Rect,
         row: usize,
         gap: f32,
-        scale: f32,
     ) -> Option<Action> {
         let height = ((inside.height() - 3. * gap) / 4.).max(0.);
         let total: f32 = keys.iter().map(|cell| cell.weight).sum();
@@ -423,14 +418,14 @@ impl Keyboard {
             let width = cell.weight * unit;
             let rect = Rect::from_min_size(pos2(x, y), vec2(width, height));
             x += width + gap;
-            if self.key(ui, rect, cell.key, scale) {
+            if self.key(ui, rect, cell.key) {
                 pressed = self.act(cell.key);
             }
         }
         pressed
     }
 
-    fn key(&self, ui: &mut Ui, rect: Rect, key: Key, scale: f32) -> bool {
+    fn key(&self, ui: &mut Ui, rect: Rect, key: Key) -> bool {
         if rect.width() < 2. || rect.height() < 2. {
             return false;
         }
@@ -687,7 +682,7 @@ impl Keyboard {
                 if !grid.intersects(rect) {
                     continue;
                 }
-                if self.key(&mut clip, rect, Key::Text(emoji), scale)
+                if self.key(&mut clip, rect, Key::Text(emoji))
                     && !drag.dragged()
                     && page == self.emoji_page
                 {
@@ -834,14 +829,14 @@ impl Keyboard {
             pos2(nav_x + 2. * nav_width, bottom.top()),
             vec2(unit, row_h),
         );
-        if self.key(ui, input_rect, Key::InputMethod, scale) {
+        if self.key(ui, input_rect, Key::InputMethod) {
             result = Some(Action::SwitchInputMethod);
         }
         let hide_rect = Rect::from_min_size(
             pos2(input_rect.right(), bottom.top()),
             vec2((bottom.right() - input_rect.right()).max(0.), row_h),
         );
-        if self.key(ui, hide_rect, Key::Hide, scale) {
+        if self.key(ui, hide_rect, Key::Hide) {
             result = Some(Action::Hide);
         }
         result
@@ -959,7 +954,7 @@ mod tests {
         keyboard.act(Key::EmojiPage);
         let ctx = egui::Context::default();
         let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(800., 600.));
-        let Some(rect) = keyboard.rect(screen, 1.) else {
+        let Some(rect) = keyboard.rect_near(screen, None, 1.) else {
             panic!("Expected emoji keyboard bounds");
         };
         let inside = rect.shrink(8.);
@@ -1012,7 +1007,7 @@ mod tests {
         keyboard.act(Key::EmojiPage);
         let ctx = egui::Context::default();
         let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(800., 600.));
-        let Some(rect) = keyboard.rect(screen, 1.) else {
+        let Some(rect) = keyboard.rect_near(screen, None, 1.) else {
             panic!("Expected emoji keyboard bounds");
         };
         let inside = rect.shrink(8.);
@@ -1118,14 +1113,14 @@ mod tests {
         k.open();
         for (w, h) in [(800., 600.), (320., 240.), (1920., 1080.)] {
             let area = Rect::from_min_size(egui::Pos2::ZERO, vec2(w, h));
-            let Some(r) = k.rect(area, 1.) else {
+            let Some(r) = k.rect_near(area, None, 1.) else {
                 panic!("keyboard should fit");
             };
             assert!(area.contains_rect(r));
         }
         k.close();
         assert!(
-            k.rect(Rect::from_min_size(egui::Pos2::ZERO, vec2(800., 600.)), 1.)
+            k.rect_near(Rect::from_min_size(egui::Pos2::ZERO, vec2(800., 600.)), None, 1.)
                 .is_none()
         );
     }
