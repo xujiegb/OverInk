@@ -1943,9 +1943,9 @@ impl Window {
             .then_some(output)
     }
 
-    /// Unclamped dimensions for converting local input into screen pixels.
-    /// Render sizes may be clamped to one; input picking must reject zero.
-    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+    /// Unclamped dimensions for converting X11 input into screen pixels.
+    /// Render sizes may be clamped to one; direct X11 sampling rejects zero.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     pub fn capture_coordinate_sizes(&self) -> Option<([f32; 2], [i32; 2])> {
         let [width, height] = self.query_size(false)?;
         let [px, py] = self.query_size(true)?;
