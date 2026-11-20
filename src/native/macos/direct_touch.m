@@ -178,6 +178,11 @@ typedef struct {
 static char OverInkDirectTouchKey;
 
 int32_t overink_macos_install_touch(uint32_t window_id) {
+    // This entry point is safe for any scalar ID, including off-main-thread
+    // callers. Cocoa and SDL window access must remain on the AppKit thread.
+    if (![NSThread isMainThread]) {
+        return -1;
+    }
     if (@available(macOS 27.0, *)) {
         SDL_Window *window = SDL_GetWindowFromID(window_id);
         if (window == NULL) {
@@ -206,6 +211,9 @@ int32_t overink_macos_install_touch(uint32_t window_id) {
 }
 
 void overink_macos_uninstall_touch(uint32_t window_id) {
+    if (![NSThread isMainThread]) {
+        return;
+    }
     SDL_Window *window = SDL_GetWindowFromID(window_id);
     if (window == NULL) {
         return;
