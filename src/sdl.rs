@@ -587,7 +587,9 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             SdlNativeAction::PushUserEvent(event) => SdlNativeResult::Success(SDL_PushEvent(event)),
             #[cfg(target_os = "macos")]
-            SdlNativeAction::PushMacosTouch(event) => SdlNativeResult::Success(SDL_PushEvent(event)),
+            SdlNativeAction::PushMacosTouch(event) => {
+                SdlNativeResult::Success(SDL_PushEvent(event))
+            }
             #[cfg(target_os = "linux")]
             SdlNativeAction::FlushQuitEvent => {
                 SDL_FlushEvent(SDL_EVENT_QUIT.0);
@@ -1002,13 +1004,7 @@ pub fn push_user_event(ty: u32) -> bool {
 /// SDL event pipeline. The Cocoa bridge passes only scalar values; this code
 /// never takes ownership of any Cocoa or SDL native pointer.
 #[cfg(target_os = "macos")]
-pub fn push_macos_direct_touch(
-    window_id: u32,
-    finger_id: u64,
-    phase: u32,
-    x: f32,
-    y: f32,
-) -> bool {
+pub fn push_macos_direct_touch(window_id: u32, finger_id: u64, phase: u32, x: f32, y: f32) -> bool {
     if !is_main_thread()
         || !SDL_VIDEO_READY.load(std::sync::atomic::Ordering::Acquire)
         || window_id == 0
