@@ -923,9 +923,11 @@ mod tests {
         rect: Rect,
         events: Vec<egui::Event>,
     ) -> Option<Action> {
-        let mut input = egui::RawInput::default();
-        input.screen_rect = Some(screen);
-        input.events = events;
+        let input = egui::RawInput {
+            screen_rect: Some(screen),
+            events,
+            ..Default::default()
+        };
         let mut action = None;
         let output = ctx.run_ui(input, |ui| {
             action = keyboard.ui(ui, rect, 1.);
