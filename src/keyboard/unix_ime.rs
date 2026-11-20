@@ -231,23 +231,49 @@ fn try_gnome_source() -> Result<bool, String> {
     {
         return Ok(false);
     }
-    let Some(result) = success_stdout(
-        "gdbus",
-        &[
-            "call",
-            "--session",
-            "--dest",
+
+    // Use the already-linked, safe zbus client instead of spawning gdbus or
+    // parsing its human-readable output. The timeout bounds the UI action if
+    // Shell or its extension is hung.
+    zbus::block_on(async {
+        let connection = zbus::connection::Builder::session()
+            .method_timeout(std::time::Duration::from_millis(750))
+            .build()
+            .await
+            .map_err(|error| format!("GNOME session bus: {error}"))?;
+        let bus = zbus::Proxy::new(
+            &connection,
+            "org.freedesktop.DBus",
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus",
+        )
+        .await
+        .map_err(|error| format!("GNOME D-Bus proxy: {error}"))?;
+        let has_bridge: bool = bus
+            .call("NameHasOwner", &("org.overink.Overlay",))
+            .await
+            .map_err(|error| format!("GNOME extension lookup: {error}"))?;
+        if !has_bridge {
+            return Ok(false);
+        }
+
+        let extension = zbus::Proxy::new(
+            &connection,
             "org.overink.Overlay",
-            "--object-path",
             "/org/overink/Overlay",
-            "--method",
-            "org.overink.Overlay.NextInputSource",
-        ],
-    )?
-    else {
-        return Ok(false);
-    };
-    Ok(result.contains("true"))
+            "org.overink.Overlay",
+        )
+        .await
+        .map_err(|error| format!("GNOME input-source bridge: {error}"))?;
+        let switched: bool = extension
+            .call("NextInputSource", &())
+            .await
+            .map_err(|error| format!("GNOME could not switch input source: {error}"))?;
+        if !switched {
+            return Err("GNOME did not confirm its input-source change".into());
+        }
+        Ok(true)
+    })
 }
 
 /// The system IME keeps its current composition/candidate UI. Only request a
