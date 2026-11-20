@@ -605,7 +605,9 @@ impl Keyboard {
         // The grid itself senses DRAG only, so existing accessible emoji
         // buttons still receive taps/clicks, but drags started on a button
         // pass through to this region instead of inserting that emoji.
-        let dots_h = (23. * scale).min(row_h * 0.46);
+        // Reserve enough height for a usable touch/pen scrub strip even on
+        // short, compact keyboard windows.
+        let dots_h = (23. * scale).min(row_h * 0.8);
         let emoji_row_h = (row_h - dots_h / 3.).max(1.);
         let grid = Rect::from_min_size(
             bounds.min,
