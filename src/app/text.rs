@@ -1369,6 +1369,7 @@ impl App {
             .as_ref()
             .map_or(total, |range| usize::from(range.end))
             .min(total);
+        let deleting = matches!(&action, osk::Action::Backspace);
         let mut insert = std::borrow::Cow::Borrowed("");
         match action {
             osk::Action::Insert(value) => insert = value,
@@ -1435,7 +1436,9 @@ impl App {
                 true
             })
             .collect();
-        if insertion.is_empty() && start == end {
+        // A rejected multi-codepoint emoji must not erase selected text.
+        // Only Backspace intentionally deletes without replacement text.
+        if insertion.is_empty() && (!deleting || start == end) {
             return;
         }
         draft
@@ -2934,6 +2937,20 @@ mod tests {
             Some(MAX_TEXT_CHARS - 1)
         );
         app.apply_osk_action(osk::Action::Insert(std::borrow::Cow::Borrowed("🙂")), false);
+        assert_eq!(
+            draft_committed(&app).map(str::chars).map(Iterator::count),
+            Some(MAX_TEXT_CHARS)
+        );
+        // With one selected codepoint, a three-codepoint emoji cannot fit;
+        // rejecting it must preserve the existing selected character.
+        let Some(draft) = app.input.text.draft.as_mut() else {
+            panic!("expected open text draft");
+        };
+        draft.cursor = Some(CCursorRange::two(
+            CCursor::new(MAX_TEXT_CHARS - 1),
+            CCursor::new(MAX_TEXT_CHARS),
+        ));
+        app.apply_osk_action(osk::Action::Insert(std::borrow::Cow::Borrowed("👩‍💻")), false);
         assert_eq!(
             draft_committed(&app).map(str::chars).map(Iterator::count),
             Some(MAX_TEXT_CHARS)
