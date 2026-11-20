@@ -484,9 +484,9 @@ impl Canvas {
             // delivered to our SDL canvas. Real pointer clicks outside the
             // text still finish editing via text_ui's hit test.
             input.focused = true;
-            input.events.retain(|event| {
-                !matches!(event, egui::Event::WindowFocused(false))
-            });
+            input
+                .events
+                .retain(|event| !matches!(event, egui::Event::WindowFocused(false)));
         }
         let focused = input.focused;
         let composing = gui.composing();
