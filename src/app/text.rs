@@ -1367,13 +1367,18 @@ impl App {
                     (screen.height() * 0.10).clamp(24., 120.),
                 );
                 let safe = screen.shrink2(inset);
-                let minimum = self.input.text.osk.minimum_size(safe.size());
+                let minimum = self.input.text.osk.minimum_size(safe.size(), scale);
                 let mut action = None;
-                let window = egui::Window::new("OverInk")
+                let window = egui::Window::new(
+                    egui::RichText::new("OverInk").size(toolbar::MENU_FONT_SIZE * scale),
+                )
                     // Title-only movement remains available, but the heading
                     // band should not waste a full button row of vertical space.
                     .title_frame(
-                        egui::Frame::window(ui.style()).inner_margin(egui::Margin::symmetric(6, 1)),
+                        egui::Frame::window(ui.style()).inner_margin(egui::Margin::symmetric(
+                            (6. * scale).round() as i8,
+                            (1. * scale).round() as i8,
+                        )),
                     )
                     .id(ui.make_persistent_id("overink-on-screen-keyboard"))
                     .order(egui::Order::Foreground)
