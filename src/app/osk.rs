@@ -548,7 +548,14 @@ impl Keyboard {
     ) -> Option<Action> {
         let (_, items) = EMOJI_CATEGORIES.get(self.emoji_category).copied()?;
         let cell = (bounds.width() - (EMOJI_COLUMNS - 1) as f32 * gap) / EMOJI_COLUMNS as f32;
+        let max_page = items.len().saturating_sub(1) / EMOJI_PAGE_SIZE;
+        self.emoji_page = self.emoji_page.min(max_page);
         let start = self.emoji_page * EMOJI_PAGE_SIZE;
+        // Like GNOME's Emoji Pager, leave a narrow indicator strip between
+        // the three emoji rows and the category bar. No word candidates or
+        // search engine is attached to this keyboard.
+        let dots_h = (13. * scale).min(row_h * 0.24);
+        let emoji_row_h = (row_h - dots_h / 3.).max(1.);
         let mut result = None;
         for (i, emoji) in items.iter().skip(start).take(EMOJI_PAGE_SIZE).enumerate() {
             let col = (i % EMOJI_COLUMNS) as f32;
@@ -556,13 +563,29 @@ impl Keyboard {
             let rect = Rect::from_min_size(
                 pos2(
                     bounds.left() + col * (cell + gap),
-                    bounds.top() + row * (row_h + gap),
+                    bounds.top() + row * (emoji_row_h + gap),
                 ),
-                vec2(cell, row_h),
+                vec2(cell, emoji_row_h),
             );
             if self.key(ui, rect, Key::Text(emoji), scale) {
                 result = Some(Action::Insert(Cow::Borrowed(emoji)));
             }
+        }
+        let dot_spacing = 15. * scale;
+        let dot_count = max_page + 1;
+        let left = bounds.center().x - (dot_count.saturating_sub(1)) as f32 * dot_spacing * 0.5;
+        let dot_y = bounds.top() + 3. * emoji_row_h + 2. * gap + dots_h * 0.5;
+        for page in 0..dot_count {
+            let center = pos2(left + page as f32 * dot_spacing, dot_y);
+            ui.painter().circle_filled(
+                center,
+                if self.emoji_page == page { 3.5 * scale } else { 2.5 * scale },
+                if self.emoji_page == page {
+                    Color32::WHITE
+                } else {
+                    Color32::from_gray(140)
+                },
+            );
         }
         let bottom = Rect::from_min_size(
             pos2(bounds.left(), bounds.top() + 3. * (row_h + gap)),
@@ -606,7 +629,6 @@ impl Keyboard {
         }
         let nav_width = 28. * scale;
         let nav_x = selector.right();
-        let max_page = items.len().saturating_sub(1) / EMOJI_PAGE_SIZE;
         if ui
             .put(
                 Rect::from_min_size(pos2(nav_x, bottom.top()), vec2(nav_width, row_h)),
@@ -663,6 +685,44 @@ mod tests {
         assert!(EMOJI_CATEGORIES.iter().all(|(_, items)| !items.is_empty()));
         k.act(Key::LetterPage);
         assert_eq!(k.page, Page::Letters);
+    }
+
+    #[test]
+    fn shift_is_one_shot_and_plain_unicode_keys_are_borrowed() {
+        let mut keyboard = Keyboard::default();
+        assert_eq!(
+            keyboard.act(Key::Text("a")),
+            Some(Action::Insert(Cow::Borrowed("a")))
+        );
+        keyboard.act(Key::Shift);
+        assert_eq!(
+            keyboard.act(Key::Text("a")),
+            Some(Action::Insert(Cow::Owned("A".to_owned())))
+        );
+        assert!(!keyboard.shift);
+        assert_eq!(
+            keyboard.act(Key::Text("😊")),
+            Some(Action::Insert(Cow::Borrowed("😊")))
+        );
+        assert_eq!(
+            keyboard.act(Key::Space),
+            Some(Action::Insert(Cow::Borrowed(" ")))
+        );
+    }
+
+    #[test]
+    fn emoji_pages_cover_every_category_without_empty_pages() {
+        for (_, items) in EMOJI_CATEGORIES {
+            let pages = items.len().div_ceil(EMOJI_PAGE_SIZE);
+            assert!(pages > 0);
+            for page in 0..pages {
+                assert!(!items[page * EMOJI_PAGE_SIZE..]
+                    .iter()
+                    .take(EMOJI_PAGE_SIZE)
+                    .collect::<Vec<_>>()
+                    .is_empty());
+            }
+        }
     }
 
     #[test]
