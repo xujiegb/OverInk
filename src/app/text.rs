@@ -1443,11 +1443,6 @@ impl App {
             // modifying egui's text buffer when event injection is denied.
             return;
         }
-        match action {
-            _ => {}
-        }
-            _ => {}
-        }
         let Some(draft) = self.input.text.draft.as_mut() else {
             return;
         };
