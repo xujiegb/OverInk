@@ -1339,6 +1339,7 @@ impl App {
         match action {
             osk::Action::Hide => {
                 self.input.text.osk.close();
+                self.input.text.screen_keyboard_session = false;
                 return;
             }
             osk::Action::SwitchInputMethod => {
