@@ -613,7 +613,7 @@ impl Keyboard {
             bounds.min,
             vec2(bounds.width(), 3. * emoji_row_h + 2. * gap),
         );
-        let drag = ui.interact(grid, ui.id().with("emoji-grid-drag"), egui::Sense::DRAG);
+        let drag = ui.interact(grid, ui.scope_id().with("emoji-grid-drag"), egui::Sense::DRAG);
         if drag.drag_started() {
             self.emoji_drag_start = self.emoji_page;
             self.emoji_wheel_remainder = 0.;
@@ -707,7 +707,7 @@ impl Keyboard {
         );
         let dots = ui.interact(
             dots_area,
-            ui.id().with("emoji-page-dots"),
+            ui.scope_id().with("emoji-page-dots"),
             egui::Sense::CLICK | egui::Sense::DRAG,
         );
         // Dock-like magnification on hover, with neighbouring dots also
