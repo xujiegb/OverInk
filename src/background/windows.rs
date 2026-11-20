@@ -215,16 +215,17 @@ fn copy_frame(
             .filter(|size| !pixels.is_null() && *size <= isize::MAX as usize)
             .ok_or_else(|| "Invalid mapped desktop frame".to_string())
             .and_then(|size| {
-                // D3D11's mapped allocation is valid until Unmap; the row
-                // helpers reject pitches that exceed the mapped allocation.
-                // Alpha is made opaque for both kinds of desktop snapshots.
+                // SAFETY: D3D11 Map returned a live staging allocation.
+                // The checked pitch/height are within the readable mapped
+                // region; Unmap runs only after both row copies finish.
+                // This is the single boundary producing a borrowed slice.
+                let mapped = std::slice::from_raw_parts(pixels, size);
+                let mut copy = |offset: usize, row: &mut [u8]| {
+                    row.copy_from_slice(&mapped[offset..offset + row.len()]);
+                };
                 match image.encoding {
-                    Encoding::LinearRgba16 => image.copy_hdr_rows(size, stride, |offset, row| {
-                        ptr::copy_nonoverlapping(pixels.add(offset), row.as_mut_ptr(), row.len());
-                    }),
-                    Encoding::Srgb8 => image.copy_sdr_bgra_rows(size, stride, |offset, row| {
-                        ptr::copy_nonoverlapping(pixels.add(offset), row.as_mut_ptr(), row.len());
-                    }),
+                    Encoding::LinearRgba16 => image.copy_hdr_rows(size, stride, &mut copy),
+                    Encoding::Srgb8 => image.copy_sdr_bgra_rows(size, stride, &mut copy),
                 }
             });
         context.Unmap(&staging, 0);
