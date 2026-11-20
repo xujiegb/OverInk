@@ -305,6 +305,8 @@ CMAKE
   <key>LSMinimumSystemVersion</key><string>$MACOSX_DEPLOYMENT_TARGET</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSPrincipalClass</key><string>NSApplication</string>
+  <!-- Gesture recognizers handle direct touches; disable extra 3P mouse emulation. -->
+  <key>NSIsTouchNative</key><true/>
 </dict></plist>
 PLIST
   plutil -lint "$contents/Info.plist"
