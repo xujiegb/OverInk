@@ -22,7 +22,7 @@ mod color_wheel;
 use color_wheel::ColorWheel;
 
 const MENU_BUTTON: Vec2 = vec2(toolbar::RAIL_BUTTON_SIZE.x, 35.);
-const KEYBOARD_BUTTON: Vec2 = vec2(52., 35.);
+const KEYBOARD_BUTTON: Vec2 = vec2(44., 35.);
 const KEYBOARD_COLUMN: f32 = 7.;
 const MENU_GAP: f32 = 4.;
 const MENU_PADDING: f32 = 5.;
