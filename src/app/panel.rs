@@ -933,6 +933,7 @@ impl App {
             Language::English => format!("{count} strokes on this screen"),
             Language::Simplified => format!("当前屏幕有 {count} 条笔迹"),
             Language::Traditional => format!("目前螢幕有 {count} 條筆跡"),
+            Language::French => format!("{count} tracés sur cet écran"),
         });
         ui.separator();
         let (hdr, headroom) = render.hdr();
