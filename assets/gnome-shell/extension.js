@@ -2,6 +2,7 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import Shell from 'gi://Shell';
+import {getInputSourceManager} from 'resource:///org/gnome/shell/ui/status/keyboard.js';
 import Meta from 'gi://Meta';
 import Clutter from 'gi://Clutter';
 import * as Dialog from 'resource:///org/gnome/shell/ui/dialog.js';
@@ -35,6 +36,9 @@ const CAPTURE_INTERFACE = `<node>
         </method>
         <method name="CancelCapture">
             <arg type="s" direction="in" name="requestId"/>
+        </method>
+        <method name="NextInputSource">
+            <arg type="b" direction="out" name="switched"/>
         </method>
     </interface>
 </node>`;
@@ -283,6 +287,40 @@ class CaptureBridge {
             if (!dialog.open(global.get_current_time()))
                 close(null);
         });
+    }
+
+    // GNOME Shell owns BOTH XKB layouts and IBus sources. Do not rewrite
+    // GSettings "current" (ignored by modern Shell) or call setxkbmap on Wayland.
+    // Restrict this D-Bus action to the process owning a live OverInk canvas.
+    async NextInputSourceAsync(_parameters, invocation) {
+        try {
+            if (!this._active || !this._extension._windows)
+                throw new Error('OverInk Overlay is not active');
+            const reply = await Gio.DBus.session.call(
+                'org.freedesktop.DBus', '/org/freedesktop/DBus',
+                'org.freedesktop.DBus', 'GetConnectionUnixProcessID',
+                new GLib.Variant('(s)', [invocation.get_sender()]),
+                new GLib.VariantType('(u)'), Gio.DBusCallFlags.NONE, 2000, null);
+            const [pid] = reply.deepUnpack();
+            const exe = GLib.file_read_link(`/proc/${pid}/exe`);
+            if (GLib.path_get_basename(exe) !== 'overink')
+                throw new Error('Only OverInk can change its input source');
+            const ownsCanvas = [...this._extension._windows.keys()].some(window =>
+                window.get_pid() === pid && window.get_title() === CANVAS);
+            if (!ownsCanvas)
+                throw new Error('The request has no matching OverInk canvas');
+            const manager = getInputSourceManager();
+            const sources = Object.values(manager.inputSources).filter(Boolean);
+            if (sources.length < 2)
+                throw new Error('Configure at least two GNOME input sources');
+            const active = sources.indexOf(manager.currentSource);
+            if (active < 0)
+                throw new Error('Active source is not in GNOME input sources');
+            sources[(active + 1) % sources.length].activate(true);
+            invocation.return_value(new GLib.Variant('(b)', [true]));
+        } catch (error) {
+            invocation.return_dbus_error('org.overink.Overlay.InputSourceFailed', String(error));
+        }
     }
 
     CaptureAreaAsync(parameters, invocation) {
