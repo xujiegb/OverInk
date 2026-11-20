@@ -2949,22 +2949,41 @@ fn run_inner(options: Options) -> Result<(), String> {
                 gui.sync_text_input(&toolbar, false);
                 canvas.focus_text_editor();
                 canvas.keep_toolbar_above(&toolbar);
-                text_focus.deadline = Some(Instant::now() + Duration::from_millis(150));
-                match crate::keyboard::show(&canvas.window, &video) {
-                    Ok(()) => {
-                        // Only a confirmed launcher request may suppress
-                        // native window FocusLost / SDL_StopTextInput.
-                        app.input.text.mark_screen_keyboard_open();
-                        text_focus.deadline = None;
+                text_focus.deadline = None;
+                if app.preferences.keyboard_source == KeyboardSource::System
+                    && crate::keyboard::system_supported(&video)
+                {
+                    match crate::keyboard::show(&canvas.window, &video) {
+                        Ok(()) => app.input.text.mark_screen_keyboard_open(),
+                        Err(error) => {
+                            // The user explicitly opted in to a system OSK,
+                            // but every platform must retain a working
+                            // self-drawn keyboard if its launcher fails.
+                            app.input.text.open_osk();
+                            app.status = text(
+                                "Using OverInk keyboard",
+                                "已改用 OverInk 键盘",
+                                "已改用 OverInk 鍵盤",
+                            )
+                            .detail(error);
+                        }
                     }
-                    Err(error) => {
-                        app.status = text(
-                            "On-screen keyboard unavailable",
-                            "无法呼出屏幕键盘",
-                            "無法開啟螢幕鍵盤",
-                        )
-                        .detail(error);
-                    }
+                } else {
+                    // macOS and X11 have no reliable universal OSK request.
+                    // This egui overlay cannot steal the native editor focus.
+                    app.input.text.open_osk();
+                }
+                canvas.dirty = true;
+                toolbar_dirty = true;
+            }
+            if app.input.text.take_input_source_request() {
+                if let Err(error) = crate::keyboard::switch_input_method() {
+                    app.status = text(
+                        "Could not switch input method",
+                        "无法切换系统输入法",
+                        "無法切換系統輸入法",
+                    )
+                    .detail(error);
                 }
                 toolbar_dirty = true;
             }
