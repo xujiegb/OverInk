@@ -58,9 +58,7 @@ impl Job {
         _portal: bool,
         _prefer_portal: bool,
     ) -> Result<Self, String> {
-        if window.display_id() != Some(display.id)
-            && !(_prefer_portal && window.hidden())
-        {
+        if window.display_id() != Some(display.id) && !(_prefer_portal && window.hidden()) {
             return Err("The screenshot display has changed".into());
         }
         let size = window.size();
