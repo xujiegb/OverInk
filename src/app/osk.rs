@@ -25,7 +25,7 @@ pub(super) struct Keyboard {
     emoji_page: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Action {
     Insert(String),
     Backspace,
