@@ -2955,7 +2955,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 {
                     // Respect an explicit Windows system-keyboard preference:
                     // never leave an old OverInk overlay open behind TabTip.
-                    app.input.text.osk.close();
+                    app.input.text.close_osk();
                     match crate::keyboard::show(&canvas.window, &video) {
                         Ok(()) => app.input.text.mark_screen_keyboard_open(),
                         Err(error) => {
