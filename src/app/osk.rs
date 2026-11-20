@@ -5,7 +5,7 @@
 //! informed by the GNOME Shell OSK's public UX (GPL-2.0-or-later). No GNOME
 //! JavaScript, layouts, stylesheets or data files are incorporated here.
 //! The IME and candidate window always belong to the operating system.
-use egui::{Color32, CornerRadius, Pos2, Rect, RichText, Stroke, Ui, Vec2, pos2, vec2};
+use egui::{Color32, CornerRadius, Rect, RichText, Stroke, Ui, Vec2, pos2, vec2};
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Page {
@@ -27,7 +27,7 @@ pub(super) struct Keyboard {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Action {
-    Insert(&'static str),
+    Insert(String),
     Backspace,
     Return,
     MoveLeft,
@@ -150,7 +150,9 @@ impl Keyboard {
                     LETTER_ROW_1.as_slice(), LETTER_ROW_2.as_slice(),
                     LETTER_ROW_3.as_slice(), LETTER_ROW_4.as_slice(),
                 ].into_iter().enumerate() {
-                    result = result.or_else(|| self.row(ui, row, inside, i, row_h, gap, scale));
+                    if let Some(action) = self.row(ui, row, inside, i, row_h, gap, scale) {
+                        result = Some(action);
+                    }
                 }
             }
             Page::Symbols => {
@@ -158,7 +160,9 @@ impl Keyboard {
                     NUM_ROW_1.as_slice(), NUM_ROW_2.as_slice(),
                     NUM_ROW_3.as_slice(), NUM_ROW_4.as_slice(),
                 ].into_iter().enumerate() {
-                    result = result.or_else(|| self.row(ui, row, inside, i, row_h, gap, scale));
+                    if let Some(action) = self.row(ui, row, inside, i, row_h, gap, scale) {
+                        result = Some(action);
+                    }
                 }
             }
             Page::ExtraSymbols => {
@@ -166,7 +170,9 @@ impl Keyboard {
                     EXTRA_ROW_1.as_slice(), EXTRA_ROW_2.as_slice(),
                     EXTRA_ROW_3.as_slice(), EXTRA_ROW_4.as_slice(),
                 ].into_iter().enumerate() {
-                    result = result.or_else(|| self.row(ui, row, inside, i, row_h, gap, scale));
+                    if let Some(action) = self.row(ui, row, inside, i, row_h, gap, scale) {
+                        result = Some(action);
+                    }
                 }
             }
             Page::Emoji => {
@@ -247,13 +253,15 @@ impl Keyboard {
     fn act(&mut self, key: Key) -> Option<Action> {
         match key {
             Key::Text(value) => {
-                // Letter labels are static, but shifted keys must return an
-                // upper-case character. That case conversion is handled in
-                // the caller by the stateful letter adapter.
+                let value = if self.shift && self.page == Page::Letters {
+                    value.to_uppercase()
+                } else {
+                    value.to_owned()
+                };
                 self.shift = false;
                 Some(Action::Insert(value))
             }
-            Key::Space => Some(Action::Insert(" ")),
+            Key::Space => Some(Action::Insert(" ".into())),
             Key::Delete => Some(Action::Backspace),
             Key::Return => Some(Action::Return),
             Key::Left => Some(Action::MoveLeft),
@@ -299,14 +307,14 @@ impl Keyboard {
                 vec2(cell, row_h),
             );
             if self.key(ui, rect, Key::Text(emoji), scale) {
-                result = Some(Action::Insert(emoji));
+                result = Some(Action::Insert((*emoji).to_owned()));
             }
         }
         let bottom = Rect::from_min_size(
             pos2(bounds.left(), bounds.top() + 3. * (row_h + gap)),
             vec2(bounds.width(), row_h),
         );
-        let categories_width = (bottom.width() - 85. * scale).max(0.);
+        let categories_width = (bottom.width() - 120. * scale).max(0.);
         let selector = Rect::from_min_size(bottom.min, vec2(categories_width, bottom.height()));
         let unit = selector.width() / (EMOJI_CATEGORIES.len() + 1) as f32;
         if ui.put(
@@ -350,9 +358,16 @@ impl Keyboard {
         ).clicked() {
             self.emoji_page = (self.emoji_page + 1).min(max_page);
         }
-        let hide_rect = Rect::from_min_size(
+        let input_rect = Rect::from_min_size(
             pos2(nav_x + 2. * nav_width, bottom.top()),
-            vec2((bottom.right() - nav_x - 2. * nav_width).max(0.), row_h),
+            vec2(nav_width, row_h),
+        );
+        if self.key(ui, input_rect, Key::InputMethod, scale) {
+            result = Some(Action::SwitchInputMethod);
+        }
+        let hide_rect = Rect::from_min_size(
+            pos2(nav_x + 3. * nav_width, bottom.top()),
+            vec2((bottom.right() - nav_x - 3. * nav_width).max(0.), row_h),
         );
         if self.key(ui, hide_rect, Key::Hide, scale) {
             result = Some(Action::Hide);
@@ -385,11 +400,11 @@ mod tests {
         let mut k = Keyboard::default();
         k.open();
         for (w, h) in [(800.,600.), (320.,240.), (1920.,1080.)] {
-            let area = Rect::from_min_size(Pos2::ZERO, vec2(w,h));
+            let area = Rect::from_min_size(egui::Pos2::ZERO, vec2(w,h));
             let Some(r) = k.rect(area,1.) else { panic!("keyboard should fit"); };
             assert!(area.contains_rect(r));
         }
         k.close();
-        assert!(k.rect(Rect::from_min_size(Pos2::ZERO, vec2(800.,600.)),1.).is_none());
+        assert!(k.rect(Rect::from_min_size(egui::Pos2::ZERO, vec2(800.,600.)),1.).is_none());
     }
 }
