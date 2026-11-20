@@ -1675,6 +1675,21 @@ fn run_inner(options: Options) -> Result<(), String> {
         )
     })?;
     with_autorelease_pool(|| toolbar.setup_toolbar());
+    // With NSIsTouchNative set, AppKit no longer synthesizes mouse clicks for
+    // direct touches. The separate toolbar is an SDL window too, so it needs
+    // the same direct-touch bridge as every canvas.
+    #[cfg(target_os = "macos")]
+    let _toolbar_direct_touch = if options.smoke {
+        None
+    } else {
+        match crate::native::macos::DirectTouchMonitor::install(&toolbar) {
+            Ok(monitor) => monitor,
+            Err(error) => {
+                eprintln!("OverInk: toolbar direct touch unavailable: {error}");
+                None
+            }
+        }
+    };
     #[cfg(target_os = "macos")]
     let pencil_mode = match crate::native::macos::PencilModeMonitor::install() {
         Ok(monitor) => Some(monitor),
