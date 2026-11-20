@@ -192,12 +192,14 @@ fn try_ibus() -> Result<(), String> {
     let listing = success_stdout("ibus", &["list-engine", "--name-only"])?
         .ok_or("IBus cannot enumerate its engines")?;
     let available = ibus_engine_names(&listing);
-    let preferred = success_stdout(
+    let preference = success_stdout(
         "gsettings",
         &["get", "org.freedesktop.ibus.general", "preload-engines"],
-    )?
-    .map(|value| quoted_gvariant_strings(&value))
-    .unwrap_or_default();
+    )?;
+    let preferred = preference
+        .as_deref()
+        .map(quoted_gvariant_strings)
+        .unwrap_or_default();
 
     let configured: Vec<&str> = preferred
         .into_iter()
