@@ -3,6 +3,7 @@
 //! The Objective-C side owns NSTouch/NSView and its recognizer. No Cocoa
 //! object or raw pointer escapes into the application or SDL event model.
 use crate::sdl::{self, Window};
+use std::{marker::PhantomData, rc::Rc};
 
 unsafe extern "C" {
     safe fn overink_macos_install_touch(window_id: u32) -> i32;
@@ -11,6 +12,9 @@ unsafe extern "C" {
 
 pub struct DirectTouchMonitor {
     window_id: u32,
+    // A view-attached AppKit recognizer must be removed on its owning thread.
+    // PhantomData does not allocate or introduce an FFI/raw-pointer type.
+    _main_thread: PhantomData<Rc<()>>,
 }
 
 impl DirectTouchMonitor {
@@ -21,7 +25,8 @@ impl DirectTouchMonitor {
         match installed {
             1 => Ok(Some(Self {
                 window_id: window.id.0,
-            })),
+                _main_thread: PhantomData,
+            }))
             0 => Ok(None), // macOS before 27.
             _ => Err("Could not attach the macOS direct-touch recognizer".into()),
         }
