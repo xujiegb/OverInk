@@ -1362,11 +1362,7 @@ impl App {
                 && let Some(rect) = self.input.text.osk.rect_near(screen, anchor)
             {
                 let scale = self.input.canvas_units;
-                let inset = egui::vec2(
-                    (screen.width() * 0.025).clamp(8., 28.),
-                    (screen.height() * 0.10).clamp(24., 120.),
-                );
-                let safe = screen.shrink2(inset);
+                let safe = osk::Keyboard::safe_area(screen);
                 let minimum = self.input.text.osk.minimum_size(safe.size(), scale);
                 let mut action = None;
                 let window = egui::Window::new(
