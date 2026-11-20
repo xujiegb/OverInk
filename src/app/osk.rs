@@ -954,7 +954,9 @@ mod tests {
             panic!("Expected emoji keyboard bounds");
         };
         let inside = rect.shrink(8.);
-        let start = pos2(inside.right() - 20., inside.top() + 18.);
+        // Start in the gap between Emoji buttons, never on a key.
+        let cell = (inside.width() - 10. * 5.) / EMOJI_COLUMNS as f32;
+        let start = pos2(inside.left() + 8. * cell + 7.5 * 5., inside.top() + 18.);
         emoji_frame(&mut keyboard, &ctx, screen, rect, vec![]);
         assert_eq!(
             emoji_frame(
