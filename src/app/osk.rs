@@ -7,7 +7,10 @@
 //! The IME and candidate window always belong to the operating system.
 use std::borrow::Cow;
 
-use egui::{Color32, CornerRadius, Rect, RichText, Stroke, Ui, pos2, vec2};
+use egui::{Color32, CornerRadius, Rect, RichText, Stroke, StrokeKind, Ui, pos2, vec2};
+
+mod emoji_data;
+use emoji_data::{ACTIVITIES, FACES, FOOD, HEARTS, NATURE, OBJECTS, PEOPLE, SYMBOLS_EMOJI, TRAVEL};
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Page {
@@ -29,6 +32,11 @@ pub(super) struct Keyboard {
     // must not also move the gesture origin.
     emoji_drag_start: usize,
     emoji_wheel_remainder: f32,
+    // Fractional page position. A new gesture retargets the running animation
+    // without snapping, including when the user immediately reverses direction.
+    emoji_display: f32,
+    // Actual egui Window geometry for pointer-focus protection and resizing.
+    window_rect: Option<Rect>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -225,112 +233,9 @@ const EXTRA_ROW_4: [Cell; 9] = [
     HIDE,
 ];
 
-// Curated Unicode sequences, not imported GNOME emoji data. Color emoji are
-// rendered by OverInk's existing OpenMoji fallback; no candidate strip.
-const FACES: &[&str] = &[
-    "😀", "😁", "😂", "🤣", "😃", "😄", "😅", "😆", "😉", "😊", "😋", "😎", "😍", "😘", "😗", "😙",
-    "😚", "🙂", "🤗", "🤩", "🤔", "🤨", "😐", "😑", "😶", "🙄", "😏", "😣", "😥", "😮", "😯", "😪",
-    "😫", "🥱", "😴", "😌", "😛", "😜", "😝", "🤤", "😒", "😓", "😔", "😕", "🙃", "🫠", "🤑", "😲",
-    "☹️", "🙁", "😖", "😞", "😟", "😤", "😢", "😭", "😦", "😧", "😨", "😩", "🤯", "😬", "😰", "😱",
-    "🥺", "😳", "🤪", "😵", "🥴", "😠", "😡", "🤬", "🤢", "🤮", "🤧", "😷", "🤒", "🤕", "🤠", "👻",
-    "💀", "🤖",
-];
-const PEOPLE: &[&str] = &[
-    "👍", "👎", "👏", "🙌", "👐", "🤲", "🤝", "🙏", "✍️", "💪", "👋", "🤚", "🖐️", "✋", "🖖", "👌",
-    "🤌", "🤏", "✌️", "🤞", "🤟", "🤘", "🤙", "👈", "👉", "👆", "👇", "☝️", "✊", "👊", "🤛", "🤜",
-    "❤️", "🫶", "👀", "👂", "👃", "👄",
-];
-const NATURE: &[&str] = &[
-    "🌷", "🌹", "🌺", "🌸", "🌼", "🌻", "💐", "🍀", "🌿", "🌱", "🌳", "🌲", "🌵", "🍁", "🍂", "🌾",
-    "🌴", "🍄", "🌞", "🌝", "🌚", "⭐", "🌟", "🌈", "🌊", "🔥", "❄️", "☀️", "🌙", "🌎", "🐈", "🐕",
-    "🦋", "🐝", "🐢",
-];
-const FOOD: &[&str] = &[
-    "🍎", "🍐", "🍊", "🍋", "🍌", "🍉", "🍇", "🍓", "🫐", "🍒", "🍑", "🥭", "🍍", "🥝", "🍅", "🥑",
-    "🥦", "🥕", "🌽", "🥐", "🍞", "🧀", "🍳", "🍔", "🍟", "🍕", "🌭", "🥪", "🌮", "🍜", "🍣", "🍩",
-    "🍪", "🍰", "☕", "🍵",
-];
-const TRAVEL: &[&str] = &[
-    "✈️", "🚀", "🚗", "🚕", "🚌", "🚎", "🏎️", "🚓", "🚑", "🚒", "🚚", "🚲", "🛴", "🚄", "🚆", "🚇",
-    "🚢", "⛵", "🛳️", "🛫", "🛬", "🛎️", "🏠", "🏫", "🏢", "🏖️", "🏕️", "⛰️", "🌋", "🗻", "🏝️", "🌆",
-    "🌉",
-];
-const ACTIVITIES: &[&str] = &[
-    "🏃", "🚶", "🚴", "🏊", "⚽", "🏀", "🏈", "⚾", "🎾", "🏐", "🏓", "🏸", "🥊", "🎳", "🎯", "🎲",
-    "🎮", "🎨", "🎭", "🎬", "🎤", "🎧", "🎹", "🎸", "🥁", "📸", "🏆", "🥇", "🥈", "🥉",
-];
-const OBJECTS: &[&str] = &[
-    "🔔", "🔕", "📱", "💻", "⌨️", "🖥️", "🖨️", "📷", "📹", "🎥", "🔋", "💡", "🔦", "🕯️", "📚", "📝",
-    "✏️", "🖊️", "🖌️", "✂️", "🔒", "🔑", "🔧", "⚙️", "🧲", "🔬", "🧪", "📎", "📌", "📍",
-];
-const HEARTS: &[&str] = &[
-    "❤️",
-    "🧡",
-    "💛",
-    "💚",
-    "💙",
-    "💜",
-    "🖤",
-    "🤍",
-    "🤎",
-    "💖",
-    "💗",
-    "💓",
-    "💕",
-    "💞",
-    "💘",
-    "💝",
-    "💟",
-    "❣️",
-    "💔",
-    "❤️‍🔥",
-    "❤️‍🩹",
-    "♥️",
-    "💯",
-    "✨",
-    "💫",
-    "⭐",
-    "🌟",
-    "💥",
-    "🔥",
-    "✅",
-    "❌",
-];
-const SYMBOLS_EMOJI: &[&str] = &[
-    "🏳️",
-    "🏴",
-    "🏁",
-    "🚩",
-    "🏳️‍🌈",
-    "🏳️‍⚧️",
-    "⚠️",
-    "☮️",
-    "☯️",
-    "♻️",
-    "✔️",
-    "☑️",
-    "❎",
-    "🔴",
-    "🟠",
-    "🟡",
-    "🟢",
-    "🔵",
-    "🟣",
-    "⚫",
-    "⚪",
-    "🔶",
-    "🔷",
-    "🔺",
-    "🔻",
-    "↗️",
-    "↘️",
-    "⬆️",
-    "⬇️",
-    "➡️",
-    "⬅️",
-    "🔁",
-    "🔀",
-];
+// Unicode 18 fully-qualified Emoji list lives in emoji_data.rs. Its nine
+// independently generated sections match GNOME's category boundaries,
+// including all Unicode regional and subdivision flag sequences.
 const EMOJI_CATEGORIES: &[(&str, &[&str])] = &[
     ("😀", FACES),
     ("👍", PEOPLE),
@@ -380,23 +285,58 @@ impl Keyboard {
     }
     pub fn close(&mut self) {
         self.visible = false;
+        self.window_rect = None;
     }
-    pub fn rect(&self, screen: Rect, scale: f32) -> Option<Rect> {
-        if !self.visible || screen.width() < 120. || screen.height() < 130. {
+    /// Coordinates already use egui logical points; multiplying panel width by
+    /// the DPI scale made a Retina keyboard twice as wide as intended.
+    /// Pixel density is handled by the canvas egui context, not by geometry.
+    pub fn rect_near(&self, screen: Rect, anchor: Option<Rect>, _scale: f32) -> Option<Rect> {
+        if !self.visible || screen.width() < 280. || screen.height() < 200. {
             return None;
         }
-        let margin = 10. * scale;
-        let width = (screen.width() - 2. * margin).max(0.).min(1020. * scale);
-        let height = (width * 0.29)
-            .clamp(142. * scale, 320. * scale)
-            .min((screen.height() - 2. * margin).max(0.) * 0.56);
-        Some(Rect::from_min_size(
-            pos2(
-                screen.center().x - width * 0.5,
-                screen.bottom() - height - margin,
-            ),
-            vec2(width, height),
-        ))
+        // Keep a bottom work-area inset so an always-visible macOS Dock does
+        // not cover the initial keyboard position on a fullscreen SDL canvas.
+        let inset_x = (screen.width() * 0.025).clamp(8., 28.);
+        let inset_y = (screen.height() * 0.10).clamp(24., 120.);
+        let safe = screen.shrink2(vec2(inset_x, inset_y));
+        if safe.width() < 240. || safe.height() < 145. {
+            return None;
+        }
+        let width = (safe.width() * 0.68).clamp(260., 960.).min(safe.width());
+        let height = (width * 0.37).clamp(170., 350.).min(safe.height());
+        let size = vec2(width, height);
+        let gap = (height * 0.035).max(5.);
+        let desired_x = anchor.map_or(safe.center().x, |r| r.center().x) - width * 0.5;
+        let x = desired_x.clamp(safe.left(), safe.right() - width);
+        let y = if let Some(text) = anchor {
+            let below = text.bottom() + gap;
+            let above = text.top() - gap - height;
+            if below + height <= safe.bottom() {
+                below
+            } else if above >= safe.top() {
+                above
+            } else {
+                // Neither side fits: choose the side with more available space
+                // and clamp rather than covering the OS Dock or moving offscreen.
+                let more_below = safe.bottom() - text.bottom() >= text.top() - safe.top();
+                (if more_below { below } else { above }).clamp(safe.top(), safe.bottom() - height)
+            }
+        } else {
+            safe.bottom() - height
+        };
+        Some(Rect::from_min_size(pos2(x, y), size))
+    }
+
+    pub fn current_rect(&self, fallback: Rect) -> Rect {
+        self.window_rect.unwrap_or(fallback)
+    }
+
+    pub fn set_window_rect(&mut self, rect: Rect) {
+        self.window_rect = Some(rect);
+    }
+
+    pub fn minimum_size(&self, available: egui::Vec2) -> egui::Vec2 {
+        vec2(260., 170.).min(available)
     }
 
     pub fn ui(&mut self, ui: &mut Ui, rect: Rect, scale: f32) -> Option<Action> {
@@ -418,7 +358,7 @@ impl Keyboard {
                 .into_iter()
                 .enumerate()
                 {
-                    if let Some(action) = self.row(ui, row, inside, i, gap, scale) {
+                    if let Some(action) = self.row(ui, row, inside, i, gap) {
                         result = Some(action);
                     }
                 }
@@ -433,7 +373,7 @@ impl Keyboard {
                 .into_iter()
                 .enumerate()
                 {
-                    if let Some(action) = self.row(ui, row, inside, i, gap, scale) {
+                    if let Some(action) = self.row(ui, row, inside, i, gap) {
                         result = Some(action);
                     }
                 }
@@ -448,7 +388,7 @@ impl Keyboard {
                 .into_iter()
                 .enumerate()
                 {
-                    if let Some(action) = self.row(ui, row, inside, i, gap, scale) {
+                    if let Some(action) = self.row(ui, row, inside, i, gap) {
                         result = Some(action);
                     }
                 }
@@ -467,7 +407,6 @@ impl Keyboard {
         inside: Rect,
         row: usize,
         gap: f32,
-        scale: f32,
     ) -> Option<Action> {
         let height = ((inside.height() - 3. * gap) / 4.).max(0.);
         let total: f32 = keys.iter().map(|cell| cell.weight).sum();
@@ -479,14 +418,14 @@ impl Keyboard {
             let width = cell.weight * unit;
             let rect = Rect::from_min_size(pos2(x, y), vec2(width, height));
             x += width + gap;
-            if self.key(ui, rect, cell.key, scale) {
+            if self.key(ui, rect, cell.key) {
                 pressed = self.act(cell.key);
             }
         }
         pressed
     }
 
-    fn key(&self, ui: &mut Ui, rect: Rect, key: Key, scale: f32) -> bool {
+    fn key(&self, ui: &mut Ui, rect: Rect, key: Key) -> bool {
         if rect.width() < 2. || rect.height() < 2. {
             return false;
         }
@@ -532,7 +471,9 @@ impl Keyboard {
         } else {
             Color32::from_rgb(94, 94, 96)
         };
-        let font_size = (17. * scale).min(rect.height() * 0.53).max(10.);
+        // Fit lettering and Emoji glyphs to the actual key height rather than
+        // applying one fixed 17pt value to every screen and DPI density.
+        let font_size = (rect.height() * 0.46).min(rect.width() * 0.65).max(12.);
         let response = ui.put(
             rect,
             egui::Button::new(RichText::new(label).size(font_size).color(Color32::WHITE))
@@ -543,6 +484,34 @@ impl Keyboard {
         response.widget_info(|| {
             egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), description)
         });
+        let hovered = ui.ctx().animate_bool_with_time(
+            response.id.with("osk-hover"),
+            response.hovered(),
+            0.11,
+        );
+        let down = ui.ctx().animate_bool_with_time(
+            response.id.with("osk-pressed"),
+            response.is_pointer_button_down_on(),
+            0.075,
+        );
+        if hovered > 0.01 || down > 0.01 {
+            ui.painter().rect_stroke(
+                rect.shrink(1.),
+                CornerRadius::same(9),
+                Stroke::new(
+                    (1.5 * hovered + 2. * down).max(0.5),
+                    Color32::from_white_alpha((110. * hovered + 110. * down).min(220.) as u8),
+                ),
+                StrokeKind::Inside,
+            );
+            if down > 0.01 {
+                ui.painter().rect_filled(
+                    rect.shrink(2.),
+                    CornerRadius::same(8),
+                    Color32::from_white_alpha((45. * down) as u8),
+                );
+            }
+        }
         response.clicked()
     }
 
@@ -607,7 +576,7 @@ impl Keyboard {
         // pass through to this region instead of inserting that emoji.
         // Reserve enough height for a usable touch/pen scrub strip even on
         // short, compact keyboard windows.
-        let dots_h = (23. * scale).min(row_h * 0.8);
+        let dots_h = row_h * 0.38;
         let emoji_row_h = (row_h - dots_h / 3.).max(1.);
         let grid = Rect::from_min_size(
             bounds.min,
@@ -679,27 +648,53 @@ impl Keyboard {
             self.emoji_wheel_remainder = 0.;
         }
 
-        let start = self.emoji_page * EMOJI_PAGE_SIZE;
+        // Smooth the fractional page position, not just its dots. Reversing
+        // direction midway starts from the visible position rather than
+        // restarting an animation at a previous page boundary.
+        let dt = ui.input(|input| input.stable_dt).clamp(0., 0.06);
+        let target = self.emoji_page as f32;
+        let fraction = 1. - (-dt * 17.).exp();
+        self.emoji_display += (target - self.emoji_display) * fraction;
+        if (self.emoji_display - target).abs() < 0.002 {
+            self.emoji_display = target;
+        } else {
+            ui.ctx().request_repaint();
+        }
+        let slide = self.emoji_display.clamp(0., max_page as f32);
+        let from = slide.floor() as usize;
+        let to = (from + 1).min(max_page);
         let mut result = None;
-        for (i, emoji) in items.iter().skip(start).take(EMOJI_PAGE_SIZE).enumerate() {
-            let col = (i % EMOJI_COLUMNS) as f32;
-            let row = (i / EMOJI_COLUMNS) as f32;
-            let rect = Rect::from_min_size(
-                pos2(
-                    bounds.left() + col * (cell + gap),
-                    bounds.top() + row * (emoji_row_h + gap),
-                ),
-                vec2(cell, emoji_row_h),
-            );
-            if self.key(ui, rect, Key::Text(emoji), scale) {
-                result = Some(Action::Insert(Cow::Borrowed(*emoji)));
+        let mut clip = ui.new_child(egui::UiBuilder::new().max_rect(grid));
+        clip.set_clip_rect(grid.intersect(ui.clip_rect()));
+        for page in from..=to {
+            let offset_x = (page as f32 - slide) * (grid.width() + gap * 2.);
+            let start = page * EMOJI_PAGE_SIZE;
+            for (i, emoji) in items.iter().skip(start).take(EMOJI_PAGE_SIZE).enumerate() {
+                let col = (i % EMOJI_COLUMNS) as f32;
+                let row = (i / EMOJI_COLUMNS) as f32;
+                let rect = Rect::from_min_size(
+                    pos2(
+                        grid.left() + col * (cell + gap) + offset_x,
+                        grid.top() + row * (emoji_row_h + gap),
+                    ),
+                    vec2(cell, emoji_row_h),
+                );
+                if !grid.intersects(rect) {
+                    continue;
+                }
+                if self.key(&mut clip, rect, Key::Text(emoji))
+                    && !drag.dragged()
+                    && page == self.emoji_page
+                {
+                    result = Some(Action::Insert(Cow::Borrowed(*emoji)));
+                }
             }
         }
 
         // Larger touch target than the visible dots. This interaction region
         // does not intersect the emoji grid or the category/input-mode bar.
         let dot_count = max_page + 1;
-        let dot_spacing = 24. * scale;
+        let dot_spacing = (dots_h * 1.06).max(12.);
         let left = bounds.center().x - (dot_count.saturating_sub(1)) as f32 * dot_spacing * 0.5;
         let right = left + (dot_count.saturating_sub(1)) as f32 * dot_spacing;
         let dot_top = grid.bottom();
@@ -740,11 +735,11 @@ impl Keyboard {
             });
             let active = self.emoji_page == page;
             let radius =
-                (if active { 4.2 } else { 3.0 }) * scale + 6.0 * scale * proximity * proximity;
+                (if active { 0.22 } else { 0.16 }) * dots_h + 0.32 * dots_h * proximity * proximity;
             if proximity > 0.1 {
                 ui.painter().circle_filled(
                     center,
-                    radius + 2. * scale,
+                    radius + 0.08 * dots_h,
                     Color32::from_white_alpha((28. * proximity) as u8),
                 );
             }
@@ -762,9 +757,13 @@ impl Keyboard {
             pos2(bounds.left(), bounds.top() + 3. * (row_h + gap)),
             vec2(bounds.width(), row_h),
         );
-        let categories_width = (bottom.width() - 120. * scale).max(0.);
-        let selector = Rect::from_min_size(bottom.min, vec2(categories_width, bottom.height()));
-        let unit = selector.width() / (EMOJI_CATEGORIES.len() + 1) as f32;
+        // GNOME-like equally spaced bottom controls. Every normal key has
+        // one proportional unit; only the two pager arrows are 2/3 width.
+        let unit = bottom.width() / (EMOJI_CATEGORIES.len() as f32 + 3. + 4. / 3.);
+        let selector = Rect::from_min_size(
+            bottom.min,
+            vec2(unit * (EMOJI_CATEGORIES.len() + 1) as f32, bottom.height()),
+        );
         if ui
             .put(
                 Rect::from_min_size(selector.min, vec2(unit, row_h)),
@@ -796,20 +795,22 @@ impl Keyboard {
             {
                 self.emoji_category = i;
                 self.emoji_page = 0;
+                self.emoji_display = 0.;
                 self.emoji_drag_start = 0;
                 self.emoji_wheel_remainder = 0.;
             }
         }
-        let nav_width = 28. * scale;
+        let nav_width = unit * (2. / 3.);
         let nav_x = selector.right();
         if ui
             .put(
                 Rect::from_min_size(pos2(nav_x, bottom.top()), vec2(nav_width, row_h)),
-                egui::Button::new("‹"),
+                egui::Button::new(RichText::new("‹").size(row_h * 0.50)),
             )
             .clicked()
         {
             self.emoji_page = self.emoji_page.saturating_sub(1);
+            ui.ctx().request_repaint();
         }
         if ui
             .put(
@@ -817,24 +818,25 @@ impl Keyboard {
                     pos2(nav_x + nav_width, bottom.top()),
                     vec2(nav_width, row_h),
                 ),
-                egui::Button::new("›"),
+                egui::Button::new(RichText::new("›").size(row_h * 0.50)),
             )
             .clicked()
         {
             self.emoji_page = (self.emoji_page + 1).min(max_page);
+            ui.ctx().request_repaint();
         }
         let input_rect = Rect::from_min_size(
             pos2(nav_x + 2. * nav_width, bottom.top()),
-            vec2(nav_width, row_h),
+            vec2(unit, row_h),
         );
-        if self.key(ui, input_rect, Key::InputMethod, scale) {
+        if self.key(ui, input_rect, Key::InputMethod) {
             result = Some(Action::SwitchInputMethod);
         }
         let hide_rect = Rect::from_min_size(
-            pos2(nav_x + 3. * nav_width, bottom.top()),
-            vec2((bottom.right() - nav_x - 3. * nav_width).max(0.), row_h),
+            pos2(input_rect.right(), bottom.top()),
+            vec2((bottom.right() - input_rect.right()).max(0.), row_h),
         );
-        if self.key(ui, hide_rect, Key::Hide, scale) {
+        if self.key(ui, hide_rect, Key::Hide) {
             result = Some(Action::Hide);
         }
         result
@@ -952,7 +954,7 @@ mod tests {
         keyboard.act(Key::EmojiPage);
         let ctx = egui::Context::default();
         let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(800., 600.));
-        let Some(rect) = keyboard.rect(screen, 1.) else {
+        let Some(rect) = keyboard.rect_near(screen, None, 1.) else {
             panic!("Expected emoji keyboard bounds");
         };
         let inside = rect.shrink(8.);
@@ -1005,20 +1007,20 @@ mod tests {
         keyboard.act(Key::EmojiPage);
         let ctx = egui::Context::default();
         let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(800., 600.));
-        let Some(rect) = keyboard.rect(screen, 1.) else {
+        let Some(rect) = keyboard.rect_near(screen, None, 1.) else {
             panic!("Expected emoji keyboard bounds");
         };
         let inside = rect.shrink(8.);
         let gap = 5.;
         let row_h = (inside.height() - 3. * gap) / 4.;
-        let dots_h = 23f32.min(row_h * 0.8);
+        let dots_h = row_h * 0.38;
         let emoji_row_h = row_h - dots_h / 3.;
         let top = inside.top() + 3. * emoji_row_h + 2. * gap;
         let bottom = inside.top() + 3. * (row_h + gap);
         let y = (top + bottom) * 0.5;
         let last_page = FACES.len().div_ceil(EMOJI_PAGE_SIZE) - 1;
-        let left = inside.center().x - last_page as f32 * 12.;
-        let page = |index: usize| pos2(left + index as f32 * 24., y);
+        let left = inside.center().x - last_page as f32 * (dots_h * 1.06) * 0.5;
+        let page = |index: usize| pos2(left + index as f32 * dots_h * 1.06, y);
         emoji_frame(&mut keyboard, &ctx, screen, rect, vec![]);
         let second = page(1);
         emoji_frame(
@@ -1072,20 +1074,58 @@ mod tests {
     }
 
     #[test]
+    fn unicode_categories_include_flags_and_regional_variants() {
+        assert_eq!(EMOJI_CATEGORIES.len(), 9);
+        assert!(SYMBOLS_EMOJI.len() >= 270);
+        for flag in ["🇨🇳", "🇫🇷", "🇯🇵", "🇺🇸", "🇬🇧", "🇺🇳", "🏳️‍🌈"]
+        {
+            assert!(SYMBOLS_EMOJI.contains(&flag), "Missing flag: {flag}");
+        }
+        assert!(FACES.len() > 100);
+        assert!(PEOPLE.len() > 300);
+    }
+
+    #[test]
+    fn responsive_keyboard_is_dpi_neutral_and_avoids_bottom_dock() {
+        let mut keyboard = Keyboard::default();
+        keyboard.open();
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(1920., 1080.));
+        let top_text = Rect::from_min_size(pos2(900., 80.), vec2(200., 80.));
+        let below = keyboard.rect_near(screen, Some(top_text), 1.);
+        let high_dpi = keyboard.rect_near(screen, Some(top_text), 2.);
+        assert_eq!(below, high_dpi, "DPI should affect raster size, not points");
+        let Some(below) = below else {
+            panic!("Expected keyboard below text");
+        };
+        assert!(below.top() >= top_text.bottom());
+        let bottom_text = Rect::from_min_size(pos2(900., 910.), vec2(200., 60.));
+        let Some(above) = keyboard.rect_near(screen, Some(bottom_text), 1.) else {
+            panic!("Expected keyboard above text");
+        };
+        assert!(above.bottom() <= bottom_text.top());
+        assert!(above.bottom() <= screen.bottom() - 100.);
+        assert!(screen.contains_rect(above));
+    }
+
+    #[test]
     fn responsive_overlay_stays_within_canvas() {
         let mut k = Keyboard::default();
         k.open();
         for (w, h) in [(800., 600.), (320., 240.), (1920., 1080.)] {
             let area = Rect::from_min_size(egui::Pos2::ZERO, vec2(w, h));
-            let Some(r) = k.rect(area, 1.) else {
+            let Some(r) = k.rect_near(area, None, 1.) else {
                 panic!("keyboard should fit");
             };
             assert!(area.contains_rect(r));
         }
         k.close();
         assert!(
-            k.rect(Rect::from_min_size(egui::Pos2::ZERO, vec2(800., 600.)), 1.)
-                .is_none()
+            k.rect_near(
+                Rect::from_min_size(egui::Pos2::ZERO, vec2(800., 600.)),
+                None,
+                1.
+            )
+            .is_none()
         );
     }
 }

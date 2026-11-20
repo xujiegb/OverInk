@@ -5,6 +5,21 @@
 //! helpers. The native OSK is opt-in only on Windows and Linux Wayland/XWayland.
 use crate::sdl::Window;
 
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+mod native_keys;
+#[cfg(all(not(test), any(target_os = "windows", target_os = "macos")))]
+pub use native_keys::PhysicalKey;
+
+#[cfg(all(not(test), any(target_os = "windows", target_os = "macos")))]
+pub fn send_physical_key(key: PhysicalKey) -> Result<(), String> {
+    native_keys::send_key(key)
+}
+
+#[cfg(all(not(test), any(target_os = "windows", target_os = "macos")))]
+pub fn supports_character(ch: char) -> bool {
+    native_keys::supports_character(ch)
+}
+
 pub fn system_supported(_video: &str) -> bool {
     #[cfg(target_os = "windows")]
     {
@@ -111,10 +126,9 @@ pub fn switch_input_method() -> Result<(), String> {
         if engines.len() < 2 {
             return Err("Configure at least two system input methods".into());
         }
-        let index = engines
-            .iter()
-            .position(|engine| *engine == active.trim())
-            .unwrap_or(0);
+        let Some(index) = engines.iter().position(|engine| *engine == active.trim()) else {
+            return Err("The active IBus engine is not in the installed engine list".into());
+        };
         let next = engines[(index + 1) % engines.len()];
         let status = std::process::Command::new("ibus")
             .args(["engine", next])
@@ -125,27 +139,12 @@ pub fn switch_input_method() -> Result<(), String> {
             .then_some(())
             .ok_or("IBus could not switch input source".into())
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
-        // macOS does not expose a public cross-process input-source picker to
-        // ordinary applications. Respect the user's configured Control+Space
-        // shortcut through System Events, which requires Accessibility grant.
-        let output = std::process::Command::new("/usr/bin/osascript")
-            .args([
-                "-e",
-                "tell application \"System Events\" to key code 49 using control down",
-            ])
-            .output()
-            .map_err(|error| error.to_string())?;
-        output.status.success().then_some(()).ok_or_else(|| {
-            format!(
-                "Enable Accessibility for input-source switching: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            )
-        })
-    }
-    #[cfg(target_os = "windows")]
-    {
-        Err("Use Win+Space to change the Windows input language; the OverInk keyboard does not impersonate a hardware input method".into())
+        // Prefer actual OS input-source shortcuts over committing a synthetic
+        // string; only the operating system changes the selected IME.
+        // Requires Accessibility permission on macOS, and at least two
+        // configured sources. macOS shortcuts can be changed in Settings.
+        native_keys::switch_source()
     }
 }
