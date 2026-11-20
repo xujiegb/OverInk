@@ -284,6 +284,8 @@ impl App {
             return false;
         }
         self.input.text.cancel_press();
+        self.input.text.touch_press = false;
+        self.input.text.touch_origin = None;
         gui.cancel_touches();
         true
     }
@@ -338,7 +340,11 @@ impl App {
             self.input.text.touch_origin = finger_event(event)
                 .and_then(|finger| crate::touch::point(finger, size))
                 .map(|point| pos2(point.x, point.y));
-        } else if ty == SDL_EVENT_MOUSE_BUTTON_DOWN {
+        } else if ty == SDL_EVENT_MOUSE_BUTTON_DOWN
+            && mouse_button_event(event).is_some_and(|button| button.which != SDL_TOUCH_MOUSEID)
+        {
+            // On X11/Windows, the same finger may also synthesize SDL mouse
+            // packets. Those must not erase the real touch provenance.
             self.input.text.touch_press = false;
             self.input.text.touch_origin = None;
         }
