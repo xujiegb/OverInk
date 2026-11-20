@@ -234,6 +234,10 @@ impl TextInput {
         }
     }
 
+    pub fn close_osk(&mut self) {
+        self.osk.close();
+    }
+
     pub fn screen_keyboard_session(&self) -> bool {
         self.screen_keyboard_session && self.editing()
     }
