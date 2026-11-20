@@ -500,7 +500,7 @@ impl Background {
                     "HDR desktop capture is unavailable on this backend".into()
                 ));
             }
-            Some(crate::picker::desktop::capture(window).map(|image| Some(image.into())))
+            Some(crate::picker_desktop::capture(window).map(|image| Some(image.into())))
         }
     }
     pub fn draw(
