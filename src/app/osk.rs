@@ -1120,8 +1120,12 @@ mod tests {
         }
         k.close();
         assert!(
-            k.rect_near(Rect::from_min_size(egui::Pos2::ZERO, vec2(800., 600.)), None, 1.)
-                .is_none()
+            k.rect_near(
+                Rect::from_min_size(egui::Pos2::ZERO, vec2(800., 600.)),
+                None,
+                1.
+            )
+            .is_none()
         );
     }
 }
