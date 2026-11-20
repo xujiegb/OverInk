@@ -406,9 +406,40 @@ async fn request(
             return Err("The portal cannot request the entire desktop explicitly".into());
         }
     }
-    let handle: OwnedObjectPath = screenshot.call(method, &("", options)).await?;
+    // The portal's method invocation and the actual UI request are distinct
+    // asynchronous operations. React to Cancel even before the method returns
+    // the request handle. Keep its future alive until cancellation has been
+    // delivered, then close the (pre-subscribed) request again to cover the
+    // race where the backend exports the Request after the first Close.
+    let mut invoking = Box::pin(screenshot.call::<_, _, OwnedObjectPath>(method, &("", options)));
+    let handle = future::or(
+        async { Some(invoking.as_mut().await) },
+        async {
+            let _ = cancelled.recv().await;
+            None
+        },
+    )
+    .await;
+    let Some(handle) = handle else {
+        let _ = request.call_noreply("Close", &()).await;
+        // The standard portal Screenshot/PickColor method replies with an
+        // object path immediately; do not detach a future that might still
+        // create a live chooser after the application has cancelled.
+        let _ = invoking.await;
+        let _ = request.call::<_, _, ()>("Close", &()).await;
+        return Ok(None);
+    };
+    let handle = handle?;
     if handle.as_str() != path {
+        if cancelled.is_closed() {
+            let _ = request.call_noreply("Close", &()).await;
+            return Ok(None);
+        }
         return Err("Portal returned an unexpected request handle".into());
+    }
+    if cancelled.is_closed() {
+        let _ = request.call_noreply("Close", &()).await;
+        return Ok(None);
     }
     let response = future::or(
         async {
