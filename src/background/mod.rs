@@ -273,7 +273,7 @@ impl SnapshotMode {
 pub fn is_xwayland(window: &Window, driver: &str) -> bool {
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     if driver == "x11" {
-        return crate::picker::desktop::is_xwayland(window);
+        return crate::picker_desktop::is_xwayland(window);
     }
     let _ = (window, driver);
     false
