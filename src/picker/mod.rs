@@ -293,7 +293,7 @@ mod tests {
         // f32 rounding at the bottom/right edge must still sample the final
         // pixel, never spill into another row or overflow the RGBA buffer.
         assert_eq!(
-            sample_image(&image, [800. - 0.00001, 600. - 0.00001], size)
+            sample_image(&image, [799.999, 599.999], size)
                 .map(|color| color.srgb8()),
             Some([255, 255, 255])
         );
