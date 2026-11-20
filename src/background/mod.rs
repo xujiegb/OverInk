@@ -1,9 +1,9 @@
 #[cfg(target_os = "macos")]
-pub(crate) mod macos;
+mod macos;
 mod png;
 pub mod screenshot;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
-pub(crate) mod system;
+mod system;
 #[cfg(target_os = "windows")]
 mod windows;
 use crate::{icc::ColorManager, sdl::*};
