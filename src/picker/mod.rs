@@ -233,7 +233,7 @@ impl Picker {
             }
             #[cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd"))]
             Stage::Preparing(due) if Instant::now() >= *due => {
-                let bounds = _display.ok_or("The picker display was disconnected");
+                let bounds = _display.ok_or_else(|| "The picker display was disconnected".to_owned());
                 #[cfg(target_os = "macos")]
                 let capture = bounds.and_then(|display| {
                     crate::background::macos::start(
@@ -250,7 +250,7 @@ impl Picker {
                         window,
                         display,
                         _displays,
-                        Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::from(window.size())),
+                        egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::from(window.size())),
                         false,
                         true,
                     )
