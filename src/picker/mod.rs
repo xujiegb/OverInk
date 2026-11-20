@@ -220,7 +220,6 @@ impl Picker {
     pub fn poll(
         &mut self,
         window: &Window,
-        _toolbar: &Window,
         _display: Option<&Display>,
         _displays: &[Display],
     ) -> Option<PickResult> {
@@ -292,7 +291,9 @@ mod tests {
     use super::*;
     #[test]
     fn captured_picker_samples_rgba8_using_logical_window_coordinates() {
-        let mut image = Image::buffer(2, 2).expect("test image allocation");
+        let Ok(mut image) = Image::buffer(2, 2) else {
+            panic!("test image allocation failed");
+        };
         image.rgba.copy_from_slice(&[
             255, 0, 0, 255,
             0, 255, 0, 255,
@@ -315,7 +316,9 @@ mod tests {
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd"))]
     #[test]
     fn cancellation_discards_cached_pixels_and_can_restart() {
-        let image = Image::buffer(2, 2).expect("test image allocation");
+        let Ok(image) = Image::buffer(2, 2) else {
+            panic!("test image allocation failed");
+        };
         let mut picker = Picker::default();
         picker.stage = Stage::ChoosingImage(image);
         assert!(picker.choosing());
