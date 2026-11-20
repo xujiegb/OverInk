@@ -943,10 +943,7 @@ mod tests {
         let key = pos2(inside.left() + 12., inside.top() + row_height * 0.5);
         assert_eq!(
             frame(
-                vec![
-                    egui::Event::PointerMoved(key),
-                    pointer_button(key, true),
-                ],
+                vec![egui::Event::PointerMoved(key), pointer_button(key, true),],
                 false,
             ),
             None,

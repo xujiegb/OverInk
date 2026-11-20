@@ -2004,10 +2004,7 @@ mod tests {
         for partial in ["z", "zh", "zho", "zhon", "zhong"] {
             ime(&mut gui, SDL_EVENT_TEXT_EDITING, partial);
             render(&mut app, &mut gui);
-            assert_eq!(
-                draft_preview(&app),
-                Some(format!("苹果{partial}").as_str())
-            );
+            assert_eq!(draft_preview(&app), Some(format!("苹果{partial}").as_str()));
             assert_eq!(draft_committed(&app), Some("苹果"));
         }
         // Closing the editor must discard only uncommitted pinyin.
