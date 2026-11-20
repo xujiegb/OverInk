@@ -2282,13 +2282,19 @@ mod tests {
             pressed: true,
             modifiers: egui::Modifiers::NONE,
         };
-        let outside_up = Event::PointerButton { pos: Pos2::ZERO, pressed: false, ..down.clone() };
+        let release = |pos| Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let outside_up = release(Pos2::ZERO);
         assert!(app.keyboard_pointer(&down, canvas));
         assert!(!app.keyboard_pointer(&outside_up, canvas));
         assert!(!app.input.text.editing());
         assert!(!app.input.text.take_keyboard_request());
         assert!(app.keyboard_pointer(&down, canvas));
-        assert!(app.keyboard_pointer(&Event::PointerButton { pressed: false, ..down }, canvas));
+        assert!(app.keyboard_pointer(&release(area.center()), canvas));
         assert_eq!(app.history.text_boxes().len(), 1);
         assert!(app.input.text.editing());
         assert!(app.input.text.take_keyboard_request());
