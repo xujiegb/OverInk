@@ -1,9 +1,6 @@
 #![forbid(unsafe_code)]
 
-use crate::{
-    background::Image,
-    color::{InkColor, Space},
-};
+use crate::background::Image;
 use futures_lite::{StreamExt, future};
 #[cfg(target_os = "linux")]
 use std::sync::{Arc, atomic::AtomicU8};
@@ -16,7 +13,9 @@ use std::{
     },
     thread,
 };
-use zbus::{Connection, OwnedObjectPath, OwnedVariant, Proxy, Structure, Variant};
+use zbus::{Connection, OwnedObjectPath, OwnedVariant, Proxy, Variant};
+#[cfg(test)]
+use zbus::Structure;
 
 type PortalResult<T> = Result<Option<T>, String>;
 
@@ -24,22 +23,11 @@ type PortalResult<T> = Result<Option<T>, String>;
 #[cfg(target_os = "linux")]
 pub(crate) type ScreenshotFallback = Box<dyn FnOnce(Image) -> Result<Image, String> + Send>;
 
-pub struct SystemJob<T = InkColor> {
+pub struct SystemJob<T = Image> {
     receiver: mpsc::Receiver<PortalResult<T>>,
     cancel: async_channel::Sender<()>,
     #[cfg(target_os = "linux")]
     portal_visibility: Option<Arc<AtomicU8>>,
-}
-impl SystemJob<InkColor> {
-    pub fn start() -> Result<Self, String> {
-        Self::spawn("overink-color-portal", |cancelled| {
-            zbus::block_on(pick(cancelled)).map_err(|error| {
-                format!(
-                    "Screen picker: {error}. A Screenshot/PickColor portal backend is required."
-                )
-            })
-        })
-    }
 }
 impl SystemJob<Image> {
     pub fn screenshot(
@@ -325,31 +313,6 @@ fn local_file(uri: &str) -> Result<PathBuf, String> {
     Ok(std::ffi::OsString::from_vec(decoded).into())
 }
 
-async fn pick(
-    cancelled: &async_channel::Receiver<()>,
-) -> Result<Option<InkColor>, Box<dyn std::error::Error + Send + Sync>> {
-    let Some(mut values) = request("PickColor", false, cancelled).await? else {
-        return Ok(None);
-    };
-    let value = values.remove("color").ok_or("Portal returned no color")?;
-    let structure = Structure::try_from(value)?;
-    let fields = structure.fields();
-    if fields.len() != 3 {
-        return Err("Portal returned an invalid RGB tuple".into());
-    }
-    let mut rgb = [0.; 3];
-    for (i, field) in fields.iter().enumerate() {
-        let value = f64::try_from(field)?;
-        if !value.is_finite() || !(0.0..=1.0).contains(&value) {
-            return Err("Portal returned an invalid RGB component".into());
-        }
-        rgb[i] = value as f32;
-    }
-    Ok(Some(InkColor {
-        rgb,
-        space: Space::Srgb,
-    }))
-}
 async fn request(
     method: &str,
     require_screen_target: bool,
@@ -578,13 +541,22 @@ mod tests {
                 .await
         })?;
         let timeout = Duration::from_secs(5);
-        let job = SystemJob::start()?;
-        let color = job
+        // Keep exercising PickColor's early-response D-Bus ordering as a
+        // protocol regression, without retaining a production native color
+        // picker that can bypass our cancellable canvas-based selection.
+        let mock_job = || {
+            SystemJob::<Image>::spawn("overink-mock-portal", |cancelled| {
+                let values = zbus::block_on(request("PickColor", false, cancelled))
+                    .map_err(|error| error.to_string())?;
+                values.map(|_| Image::buffer(1, 1)).transpose()
+            })
+        };
+        let job = mock_job()?;
+        let frame = job
             .receiver
             .recv_timeout(timeout)??
-            .ok_or("Expected a portal color")?;
-        assert_eq!(color.srgb8(), [0x12, 0xab, 0xef]);
-        assert_eq!(color.space, Space::Srgb);
+            .ok_or("Expected a completed mock portal request")?;
+        assert_eq!([frame.width, frame.height], [1, 1]);
 
         let screenshot = SystemJob::screenshot(true, Ok)?;
         let error = screenshot
@@ -594,7 +566,7 @@ mod tests {
             .ok_or("Expected rejection of unavailable screen targeting")?;
         assert!(error.contains("cannot request the entire desktop explicitly"));
 
-        let job = SystemJob::start()?;
+        let job = mock_job()?;
         requested.recv_timeout(timeout)?;
         job.cancel();
         acknowledged.recv_timeout(timeout)?;
