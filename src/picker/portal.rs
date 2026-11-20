@@ -500,9 +500,12 @@ mod tests {
                 return OwnedObjectPath::try_from(path)
                     .map_err(|error| zbus::fdo::Error::Failed(error.to_string()));
             }
-            let color =
-                OwnedVariant::try_from(zbus::Structure::from((18. / 255., 171. / 255., 239. / 255.)))
-                    .map_err(|error| zbus::fdo::Error::Failed(error.to_string()))?;
+            let color = OwnedVariant::try_from(zbus::Structure::from((
+                18. / 255.,
+                171. / 255.,
+                239. / 255.,
+            )))
+            .map_err(|error| zbus::fdo::Error::Failed(error.to_string()))?;
             let values = HashMap::from([("color", color)]);
             // Intentionally respond before the method reply to exercise the subscription race.
             connection
