@@ -2043,6 +2043,47 @@ mod tests {
     }
 
     #[test]
+    fn overink_keyboard_inserts_unicode_and_erases_whole_emoji_graphemes() {
+        let mut app = app();
+        app.use_tool(Tool::Text);
+        click(&mut app, pos2(130., 110.));
+        app.input.text.open_osk();
+        assert!(app.input.text.osk.visible);
+        app.apply_osk_action(osk::Action::Insert("a".into()), false);
+        app.apply_osk_action(osk::Action::Insert("👩‍🚀".into()), false);
+        assert_eq!(draft_preview(&app), Some("a👩‍🚀"));
+        app.apply_osk_action(osk::Action::Backspace, false);
+        assert_eq!(draft_preview(&app), Some("a"));
+        app.apply_osk_action(osk::Action::Backspace, false);
+        assert_eq!(draft_preview(&app), Some(""));
+        app.input.text.finish(&mut app.history);
+        assert!(!app.input.text.osk.visible);
+        assert!(!app.input.text.screen_keyboard_session());
+    }
+
+    #[test]
+    fn overink_keyboard_preserves_ime_preedit_and_selected_text_replacement() {
+        let mut app = app();
+        app.use_tool(Tool::Text);
+        click(&mut app, pos2(110., 160.));
+        app.apply_osk_action(osk::Action::Insert("abc".into()), false);
+        assert_eq!(draft_preview(&app), Some("abc"));
+        app.apply_osk_action(osk::Action::Insert("x".into()), true);
+        assert_eq!(draft_preview(&app), Some("abc"));
+        let Some(draft) = app.input.text.draft.as_mut() else {
+            panic!("text draft should exist");
+        };
+        draft.cursor = Some(CCursorRange::two(CCursor::new(0), CCursor::new(3)));
+        app.apply_osk_action(osk::Action::Insert("🌷".into()), false);
+        assert_eq!(draft_preview(&app), Some("🌷"));
+        app.apply_osk_action(osk::Action::SwitchInputMethod, false);
+        assert!(app.input.text.take_input_source_request());
+        assert!(!app.input.text.take_input_source_request());
+        app.apply_osk_action(osk::Action::Hide, false);
+        assert!(!app.input.text.osk.visible);
+    }
+
+    #[test]
     fn external_keyboard_preserves_draft_during_focus_loss_and_resets_on_finish() {
         let mut app = app();
         assert!(!app.input.text.screen_keyboard_session());
