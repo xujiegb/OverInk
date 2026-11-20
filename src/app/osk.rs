@@ -5,6 +5,8 @@
 //! informed by the GNOME Shell OSK's public UX (GPL-2.0-or-later). No GNOME
 //! JavaScript, layouts, stylesheets or data files are incorporated here.
 //! The IME and candidate window always belong to the operating system.
+use std::borrow::Cow;
+
 use egui::{Color32, CornerRadius, Rect, RichText, Stroke, Ui, pos2, vec2};
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,7 +29,7 @@ pub(super) struct Keyboard {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Action {
-    Insert(String),
+    Insert(Cow<'static, str>),
     Backspace,
     Return,
     MoveLeft,
@@ -498,14 +500,14 @@ impl Keyboard {
         match key {
             Key::Text(value) => {
                 let value = if self.shift && self.page == Page::Letters {
-                    value.to_uppercase()
+                    Cow::Owned(value.to_uppercase())
                 } else {
-                    value.to_owned()
+                    Cow::Borrowed(value)
                 };
                 self.shift = false;
                 Some(Action::Insert(value))
             }
-            Key::Space => Some(Action::Insert(" ".into())),
+            Key::Space => Some(Action::Insert(Cow::Borrowed(" "))),
             Key::Delete => Some(Action::Backspace),
             Key::Return => Some(Action::Return),
             Key::Left => Some(Action::MoveLeft),
@@ -559,7 +561,7 @@ impl Keyboard {
                 vec2(cell, row_h),
             );
             if self.key(ui, rect, Key::Text(emoji), scale) {
-                result = Some(Action::Insert((*emoji).to_owned()));
+                result = Some(Action::Insert(Cow::Borrowed(emoji)));
             }
         }
         let bottom = Rect::from_min_size(
