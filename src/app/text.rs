@@ -1357,7 +1357,7 @@ impl App {
         let total = draft.item.text.chars().count();
         let selected = draft.cursor.map(|cursor| cursor.as_sorted_char_range());
         let mut start = selected.map_or(total, |range| usize::from(range.start)).min(total);
-        let mut end = selected.map_or(total, |range| usize::from(range.end)).min(total);
+        let end = selected.map_or(total, |range| usize::from(range.end)).min(total);
         let mut insert = String::new();
         match action {
             osk::Action::Insert(value) => insert = value,
@@ -1387,8 +1387,7 @@ impl App {
                         .map_or(0, |(i, _)| draft.item.text[..i].chars().count())
                 } else {
                     let next = draft.item.text[byte..].graphemes(true)
-                        .next().map_or(0, str::chars)
-                        .count();
+                        .next().map_or(0, |part| part.chars().count());
                     (caret + next).min(total)
                 };
                 draft.cursor = Some(CCursorRange::one(CCursor::new(at)));
