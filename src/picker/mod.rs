@@ -41,8 +41,13 @@ fn sample_image(image: &Image, point: [f32; 2], size: [f32; 2]) -> Option<InkCol
     {
         return None;
     }
-    let x = ((point[0] / size[0]) * image.width as f32).floor() as usize;
-    let y = ((point[1] / size[1]) * image.height as f32).floor() as usize;
+    // f32 division can round a valid near-edge coordinate to exactly 1.0.
+    // Clamp before computing the row offset so that the last column never
+    // addresses a pixel in the next row (or outside the image).
+    let x = (((point[0] / size[0]) * image.width as f32).floor() as usize)
+        .min(image.width as usize - 1);
+    let y = (((point[1] / size[1]) * image.height as f32).floor() as usize)
+        .min(image.height as usize - 1);
     let offset = (y.checked_mul(image.width as usize)?.checked_add(x)?).checked_mul(4)?;
     let rgb = image.rgba.get(offset..offset.checked_add(3)?)?;
     Some(InkColor::from_rgb8([rgb[0], rgb[1], rgb[2]]))
@@ -285,6 +290,13 @@ mod tests {
         assert!(sample_image(&image, [800., 10.], size).is_none());
         assert!(sample_image(&image, [10., f32::NAN], size).is_none());
         assert!(sample_image(&image, [10., 10.], [0., 600.]).is_none());
+        // f32 rounding at the bottom/right edge must still sample the final
+        // pixel, never spill into another row or overflow the RGBA buffer.
+        assert_eq!(
+            sample_image(&image, [800. - 0.00001, 600. - 0.00001], size)
+                .map(|color| color.srgb8()),
+            Some([255, 255, 255])
+        );
         image.rgba.truncate(2);
         assert!(sample_image(&image, [100., 100.], size).is_none());
     }
