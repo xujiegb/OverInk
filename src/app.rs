@@ -1471,9 +1471,8 @@ fn capture_visibility(
     toolbar_hidden: &mut bool,
     hide_all: bool,
     screenshot_active: bool,
-    picker_canvas_only: bool,
 ) -> Result<bool, String> {
-    if hide_all || picker_canvas_only {
+    if hide_all {
         for canvas in canvases.iter_mut().filter(|canvas| canvas.visible) {
             canvas.show(toolbar, false)?;
         }
@@ -2422,7 +2421,6 @@ fn run_inner(options: Options) -> Result<(), String> {
                 &mut toolbar_hidden,
                 hide,
                 app.screenshot.active(),
-                picker.hides_canvas(),
             )?;
             app.screenshot.acknowledge_portal_fallback_hidden();
             let mut restore_text_focus = false;
@@ -2507,7 +2505,6 @@ fn run_inner(options: Options) -> Result<(), String> {
                 &mut toolbar_hidden,
                 hide,
                 app.screenshot.active(),
-                picker.hides_canvas(),
             )?;
             app.screenshot.acknowledge_portal_fallback_hidden();
             if hide {
@@ -2761,7 +2758,6 @@ fn run_inner(options: Options) -> Result<(), String> {
                 &mut toolbar_hidden,
                 hide,
                 screenshot_active,
-                picker.hides_canvas(),
             )?;
             app.screenshot.acknowledge_portal_fallback_hidden();
             if toolbar_hidden && let Some(mut output) = output.take() {
@@ -2848,7 +2844,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 // The native chooser owns interaction while pending. Even a
                 // screenshot canvas kept as a Wayland transient parent would
                 // remain fullscreen and always-on-top behind the chooser.
-                let visible = if file_dialog.pending() || picker.hides_canvas() {
+                let visible = if file_dialog.pending() || picker.hides_windows() {
                     // Native macOS and Wayland portal samplers must see the
                     // desktop beneath OverInk, not its transparent ink canvas.
                     // Keep only the movable Cancel/Quit controller visible.
@@ -3034,8 +3030,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                     &mut toolbar_hidden,
                     hide,
                     false,
-                    picker.hides_canvas(),
-                )?;
+                    )?;
             }
             if restore_toolbar_focus && !toolbar_hidden && !file_dialog.pending() {
                 toolbar.raise();
