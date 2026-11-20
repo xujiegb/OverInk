@@ -914,6 +914,150 @@ mod tests {
         assert_eq!(emoji_dot_at(123., 100., 24., 1), 0);
     }
 
+    // Exercise the actual egui widgets, not only the page arithmetic:
+    // mouse, direct touch and pen all reach the keyboard as pointer events.
+    fn emoji_frame(
+        keyboard: &mut Keyboard,
+        ctx: &egui::Context,
+        screen: Rect,
+        rect: Rect,
+        events: Vec<egui::Event>,
+    ) -> Option<Action> {
+        let mut input = egui::RawInput::default();
+        input.screen_rect = Some(screen);
+        input.events = events;
+        let mut action = None;
+        let output = ctx.run_ui(input, |ui| {
+            action = keyboard.ui(ui, rect, 1.);
+        });
+        output.drop_without_applying_deltas();
+        action
+    }
+
+    fn pointer_button(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn emoji_grid_drag_scrolls_without_inserting_a_character() {
+        let mut keyboard = Keyboard::default();
+        keyboard.open();
+        keyboard.act(Key::EmojiPage);
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(800., 600.));
+        let Some(rect) = keyboard.rect(screen, 1.) else {
+            panic!("Expected emoji keyboard bounds");
+        };
+        let inside = rect.shrink(8.);
+        let start = pos2(inside.right() - 20., inside.top() + 18.);
+        emoji_frame(&mut keyboard, &ctx, screen, rect, vec![]);
+        assert_eq!(
+            emoji_frame(
+                &mut keyboard,
+                &ctx,
+                screen,
+                rect,
+                vec![egui::Event::PointerMoved(start), pointer_button(start, true)],
+            ),
+            None
+        );
+        let finish = start - vec2(240., 0.);
+        assert_eq!(
+            emoji_frame(
+                &mut keyboard,
+                &ctx,
+                screen,
+                rect,
+                vec![egui::Event::PointerMoved(finish)],
+            ),
+            None,
+            "Dragging the emoji grid must not insert its buttons"
+        );
+        assert!(
+            keyboard.emoji_page > 0,
+            "An emoji grid swipe should advance the page"
+        );
+        emoji_frame(
+            &mut keyboard,
+            &ctx,
+            screen,
+            rect,
+            vec![pointer_button(finish, false)],
+        );
+    }
+
+    #[test]
+    fn emoji_page_dots_support_click_and_continuous_scrubbing() {
+        let mut keyboard = Keyboard::default();
+        keyboard.open();
+        keyboard.act(Key::EmojiPage);
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(800., 600.));
+        let Some(rect) = keyboard.rect(screen, 1.) else {
+            panic!("Expected emoji keyboard bounds");
+        };
+        let inside = rect.shrink(8.);
+        let gap = 5.;
+        let row_h = (inside.height() - 3. * gap) / 4.;
+        let dots_h = 23f32.min(row_h * 0.8);
+        let emoji_row_h = row_h - dots_h / 3.;
+        let top = inside.top() + 3. * emoji_row_h + 2. * gap;
+        let bottom = inside.top() + 3. * (row_h + gap);
+        let y = (top + bottom) * 0.5;
+        let last_page = FACES.len().div_ceil(EMOJI_PAGE_SIZE) - 1;
+        let left = inside.center().x - last_page as f32 * 12.;
+        let page = |index: usize| pos2(left + index as f32 * 24., y);
+        emoji_frame(&mut keyboard, &ctx, screen, rect, vec![]);
+        let second = page(1);
+        emoji_frame(
+            &mut keyboard,
+            &ctx,
+            screen,
+            rect,
+            vec![egui::Event::PointerMoved(second), pointer_button(second, true)],
+        );
+        emoji_frame(
+            &mut keyboard,
+            &ctx,
+            screen,
+            rect,
+            vec![pointer_button(second, false)],
+        );
+        assert_eq!(keyboard.emoji_page, 1, "A dot click should jump to page 2");
+        let first = page(0);
+        emoji_frame(
+            &mut keyboard,
+            &ctx,
+            screen,
+            rect,
+            vec![egui::Event::PointerMoved(first), pointer_button(first, true)],
+        );
+        let last = page(last_page);
+        emoji_frame(
+            &mut keyboard,
+            &ctx,
+            screen,
+            rect,
+            vec![egui::Event::PointerMoved(last)],
+        );
+        assert_eq!(
+            keyboard.emoji_page, last_page,
+            "Press-and-scrub should track the nearest dot before release"
+        );
+        emoji_frame(
+            &mut keyboard,
+            &ctx,
+            screen,
+            rect,
+            vec![pointer_button(last, false)],
+        );
+    }
+
     #[test]
     fn responsive_overlay_stays_within_canvas() {
         let mut k = Keyboard::default();
