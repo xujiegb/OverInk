@@ -25,6 +25,10 @@ pub(super) struct Keyboard {
     shift: bool,
     emoji_category: usize,
     emoji_page: usize,
+    // The page at the start of a grid drag; changing the displayed page
+    // must not also move the gesture origin.
+    emoji_drag_start: usize,
+    emoji_wheel_remainder: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -342,6 +346,34 @@ const EMOJI_COLUMNS: usize = 11;
 const EMOJI_ROWS: usize = 3;
 const EMOJI_PAGE_SIZE: usize = EMOJI_COLUMNS * EMOJI_ROWS;
 
+// Both horizontal and vertical drags turn the fixed-size emoji grid into a
+// pager. Direction follows content movement: drag left/up for later pages.
+fn emoji_page_from_drag(origin: usize, last: usize, delta: egui::Vec2, step: f32) -> usize {
+    let axis = if delta.x.abs() >= delta.y.abs() {
+        delta.x
+    } else {
+        delta.y
+    };
+    if !axis.is_finite() {
+        return origin.min(last);
+    }
+    let steps = (axis.abs() / step.max(1.)).floor() as usize;
+    if axis < 0. {
+        origin.saturating_add(steps).min(last)
+    } else {
+        origin.saturating_sub(steps)
+    }
+}
+
+fn emoji_dot_at(x: f32, left: f32, spacing: f32, count: usize) -> usize {
+    if count <= 1 || !x.is_finite() {
+        return 0;
+    }
+    ((x - left) / spacing.max(1.))
+        .round()
+        .clamp(0., (count - 1) as f32) as usize
+}
+
 impl Keyboard {
     pub fn open(&mut self) {
         self.visible = true;
@@ -568,12 +600,75 @@ impl Keyboard {
         let cell = (bounds.width() - (EMOJI_COLUMNS - 1) as f32 * gap) / EMOJI_COLUMNS as f32;
         let max_page = items.len().saturating_sub(1) / EMOJI_PAGE_SIZE;
         self.emoji_page = self.emoji_page.min(max_page);
-        let start = self.emoji_page * EMOJI_PAGE_SIZE;
-        // Like GNOME's Emoji Pager, leave a narrow indicator strip between
-        // the three emoji rows and the category bar. No word candidates or
-        // search engine is attached to this keyboard.
-        let dots_h = (13. * scale).min(row_h * 0.24);
+
+        // Keep the pager between the three emoji rows and the category bar.
+        // The grid itself senses DRAG only, so existing accessible emoji
+        // buttons still receive taps/clicks, but drags started on a button
+        // pass through to this region instead of inserting that emoji.
+        let dots_h = (23. * scale).min(row_h * 0.46);
         let emoji_row_h = (row_h - dots_h / 3.).max(1.);
+        let grid = Rect::from_min_size(
+            bounds.min,
+            vec2(bounds.width(), 3. * emoji_row_h + 2. * gap),
+        );
+        let drag = ui.interact(grid, ui.id().with("emoji-grid-drag"), egui::Sense::drag());
+        if drag.drag_started() {
+            self.emoji_drag_start = self.emoji_page;
+            self.emoji_wheel_remainder = 0.;
+        }
+        if drag.dragged() {
+            // One step per gesture threshold; holding the pointer down can
+            // browse several pages in either axis without releasing it.
+            let step = (grid.width() * 0.18).clamp(28. * scale, 92. * scale);
+            self.emoji_page =
+                emoji_page_from_drag(self.emoji_drag_start, max_page, drag.drag_delta(), step);
+        }
+
+        // Pointer-based hit test rather than Response::hovered: emoji buttons
+        // sit above the drag surface and are supposed to receive hover.
+        let over_grid = ui.input(|input| {
+            input.pointer.hover_pos().is_some_and(|pos| grid.contains(pos))
+        });
+        if over_grid && !drag.dragged() {
+            let wheel = ui.input(|input| {
+                if input.modifiers.ctrl || input.modifiers.command {
+                    egui::Vec2::ZERO
+                } else {
+                    input.smooth_scroll_delta
+                }
+            });
+            let axis = if wheel.x.abs() > wheel.y.abs() {
+                wheel.x
+            } else {
+                wheel.y
+            };
+            if axis.is_finite() {
+                self.emoji_wheel_remainder += axis;
+                let threshold = 22. * scale;
+                let steps = (self.emoji_wheel_remainder.abs() / threshold).floor() as usize;
+                if steps > 0 {
+                    let prior = self.emoji_page;
+                    self.emoji_page = emoji_page_from_drag(
+                        self.emoji_page,
+                        max_page,
+                        vec2(self.emoji_wheel_remainder.signum() * steps as f32, 0.),
+                        1.,
+                    );
+                    // Once at an edge, discard excess momentum rather than
+                    // saving up movement to jump on the next interaction.
+                    self.emoji_wheel_remainder = if prior == self.emoji_page {
+                        0.
+                    } else {
+                        self.emoji_wheel_remainder
+                            - self.emoji_wheel_remainder.signum() * steps as f32 * threshold
+                    };
+                }
+            }
+        } else if !drag.dragged() {
+            self.emoji_wheel_remainder = 0.;
+        }
+
+        let start = self.emoji_page * EMOJI_PAGE_SIZE;
         let mut result = None;
         for (i, emoji) in items.iter().skip(start).take(EMOJI_PAGE_SIZE).enumerate() {
             let col = (i % EMOJI_COLUMNS) as f32;
@@ -589,23 +684,57 @@ impl Keyboard {
                 result = Some(Action::Insert(Cow::Borrowed(*emoji)));
             }
         }
-        let dot_spacing = 15. * scale;
+
+        // Larger touch target than the visible dots. This interaction region
+        // does not intersect the emoji grid or the category/input-mode bar.
         let dot_count = max_page + 1;
+        let dot_spacing = 24. * scale;
         let left = bounds.center().x - (dot_count.saturating_sub(1)) as f32 * dot_spacing * 0.5;
-        let dot_y = bounds.top() + 3. * emoji_row_h + 2. * gap + dots_h * 0.5;
+        let right = left + (dot_count.saturating_sub(1)) as f32 * dot_spacing;
+        let dot_top = grid.bottom();
+        let dot_bottom = bounds.top() + 3. * (row_h + gap);
+        let dot_y = (dot_top + dot_bottom) * 0.5;
+        let dots_area = Rect::from_min_max(
+            pos2(left - dot_spacing * 0.5, dot_top),
+            pos2(right + dot_spacing * 0.5, dot_bottom),
+        );
+        let dots = ui.interact(
+            dots_area,
+            ui.id().with("emoji-page-dots"),
+            egui::Sense::click_and_drag(),
+        );
+        // Dock-like magnification on hover, with neighbouring dots also
+        // gently growing. A finger or pen can press and scrub across them.
+        let pointer = ui.input(|input| input.pointer.interact_pos().or_else(|| input.pointer.hover_pos()));
+        let nearby = pointer.filter(|pos| dots_area.contains(*pos) || dots.dragged());
+        if (dots.clicked() || dots.dragged())
+            && let Some(pos) = dots.interact_pointer_pos()
+        {
+            self.emoji_page = emoji_dot_at(pos.x, left, dot_spacing, dot_count);
+            self.emoji_wheel_remainder = 0.;
+        }
         for page in 0..dot_count {
             let center = pos2(left + page as f32 * dot_spacing, dot_y);
+            let proximity = nearby.map_or(0., |pos| {
+                (1. - ((pos.x - center.x).abs() / (dot_spacing * 1.8))).max(0.)
+            });
+            let active = self.emoji_page == page;
+            let radius = (if active { 4.2 } else { 3.0 }) * scale
+                + 6.0 * scale * proximity * proximity;
+            if proximity > 0.1 {
+                ui.painter().circle_filled(
+                    center,
+                    radius + 2. * scale,
+                    Color32::from_white_alpha((28. * proximity) as u8),
+                );
+            }
             ui.painter().circle_filled(
                 center,
-                if self.emoji_page == page {
-                    3.5 * scale
-                } else {
-                    2.5 * scale
-                },
-                if self.emoji_page == page {
+                radius,
+                if active {
                     Color32::WHITE
                 } else {
-                    Color32::from_gray(140)
+                    Color32::from_gray(155)
                 },
             );
         }
@@ -647,6 +776,8 @@ impl Keyboard {
             {
                 self.emoji_category = i;
                 self.emoji_page = 0;
+                self.emoji_drag_start = 0;
+                self.emoji_wheel_remainder = 0.;
             }
         }
         let nav_width = 28. * scale;
@@ -741,6 +872,26 @@ mod tests {
                 assert!(items.get(page * EMOJI_PAGE_SIZE).is_some());
             }
         }
+    }
+
+    #[test]
+    fn emoji_grid_drag_navigates_in_both_axes_and_clamps() {
+        let last = 3;
+        assert_eq!(emoji_page_from_drag(1, last, vec2(-80., 5.), 40.), 3);
+        assert_eq!(emoji_page_from_drag(2, last, vec2(0., 42.), 40.), 1);
+        assert_eq!(emoji_page_from_drag(0, last, vec2(1000., 0.), 40.), 0);
+        assert_eq!(emoji_page_from_drag(3, last, vec2(-1000., 0.), 40.), 3);
+        assert_eq!(emoji_page_from_drag(1, last, vec2(14., 12.), 40.), 1);
+    }
+
+    #[test]
+    fn emoji_dot_scrubbing_selects_nearest_page_and_clamps() {
+        assert_eq!(emoji_dot_at(100., 100., 24., 4), 0);
+        assert_eq!(emoji_dot_at(123., 100., 24., 4), 1);
+        assert_eq!(emoji_dot_at(149., 100., 24., 4), 2);
+        assert_eq!(emoji_dot_at(500., 100., 24., 4), 3);
+        assert_eq!(emoji_dot_at(-10., 100., 24., 4), 0);
+        assert_eq!(emoji_dot_at(123., 100., 24., 1), 0);
     }
 
     #[test]
