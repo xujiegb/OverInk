@@ -157,6 +157,17 @@ impl ThemeMode {
     }
 }
 
+/// Which on-screen keyboard opens when touching the text annotation's
+/// keyboard icon. Native OSK is an explicit opt-in: GNOME-style OverInk keys
+/// are the cross-platform default and never require accessibility permissions.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyboardSource {
+    #[default]
+    OverInk,
+    System,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Preferences {
@@ -165,6 +176,7 @@ pub struct Preferences {
     pub restore_session: bool,
     pub per_display_windows: bool,
     pub wayland: bool,
+    pub keyboard_source: KeyboardSource,
     pub screenshot_hdr: bool,
     pub screenshot_folder: Option<PathBuf>,
 }
@@ -177,6 +189,7 @@ impl Default for Preferences {
             restore_session: true,
             per_display_windows: false,
             wayland: false,
+            keyboard_source: KeyboardSource::OverInk,
             screenshot_hdr: false,
             screenshot_folder: None,
         }
@@ -273,17 +286,21 @@ mod tests {
         assert!(default.restore_session);
         assert!(!default.per_display_windows);
         assert!(!default.wayland);
+        assert_eq!(default.keyboard_source, KeyboardSource::OverInk);
         let manual = Preferences {
             language: Some(Language::Traditional),
             theme: ThemeMode::Dark,
             restore_session: false,
             per_display_windows: true,
             wayland: true,
+            keyboard_source: KeyboardSource::System,
             screenshot_hdr: true,
             screenshot_folder: Some(PathBuf::from("OverInk Captures")),
         };
         let encoded = serde_json::to_string(&manual)?;
         assert_eq!(serde_json::from_str::<Preferences>(&encoded)?, manual);
+        let legacy: Preferences = serde_json::from_str(r#"{"theme":"dark"}"#)?;
+        assert_eq!(legacy.keyboard_source, KeyboardSource::OverInk);
         Ok(())
     }
 }
