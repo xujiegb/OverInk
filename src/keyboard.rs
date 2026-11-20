@@ -126,10 +126,7 @@ pub fn switch_input_method() -> Result<(), String> {
         if engines.len() < 2 {
             return Err("Configure at least two system input methods".into());
         }
-        let Some(index) = engines
-            .iter()
-            .position(|engine| *engine == active.trim())
-        else {
+        let Some(index) = engines.iter().position(|engine| *engine == active.trim()) else {
             return Err("The active IBus engine is not in the installed engine list".into());
         };
         let next = engines[(index + 1) % engines.len()];
