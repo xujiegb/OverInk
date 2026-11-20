@@ -5,6 +5,9 @@
 //! Unknown keys retain the English fallback until translated.
 #![forbid(unsafe_code)]
 
+// Keep the locale catalog one entry per line; generated-style lookup data
+// must not be broken into multiline matches by rustfmt's width heuristic.
+#[rustfmt::skip]
 pub(super) fn short(english: &'static str) -> &'static str {
     match english {
         "Follow system" => "Système",
