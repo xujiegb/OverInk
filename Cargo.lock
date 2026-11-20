@@ -732,7 +732,6 @@ dependencies = [
  "tempfile",
  "unicode-segmentation",
  "windows",
- "windows-core",
  "zbus",
 ]
 
