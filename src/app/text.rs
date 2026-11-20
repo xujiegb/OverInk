@@ -1382,7 +1382,7 @@ impl App {
                 let before = &draft.item.text[..end_byte];
                 start = before
                     .grapheme_indices(true)
-                    .last()
+                    .next_back()
                     .map_or(0, |(byte, _)| before[..byte].chars().count());
             }
             osk::Action::MoveLeft | osk::Action::MoveRight => {
@@ -1400,7 +1400,7 @@ impl App {
                 let at = if matches!(action, osk::Action::MoveLeft) {
                     draft.item.text[..byte]
                         .grapheme_indices(true)
-                        .last()
+                        .next_back()
                         .map_or(0, |(i, _)| draft.item.text[..i].chars().count())
                 } else {
                     let next = draft.item.text[byte..]
