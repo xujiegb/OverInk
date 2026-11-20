@@ -168,8 +168,8 @@ impl Text {
             Language::English => self.0[0],
             Language::Simplified => self.0[1],
             Language::Traditional => self.0[2],
-            Language::French => french::short(self.0[0]),
-            Language::Spanish
+            Language::French
+            | Language::Spanish
             | Language::Japanese
             | Language::German
             | Language::Russian
