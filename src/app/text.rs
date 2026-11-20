@@ -1365,10 +1365,10 @@ impl App {
             .as_ref()
             .map_or(total, |range| usize::from(range.end))
             .min(total);
-        let mut insert = String::new();
+        let mut insert = std::borrow::Cow::Borrowed("");
         match action {
             osk::Action::Insert(value) => insert = value,
-            osk::Action::Return => insert.push('\n'),
+            osk::Action::Return => insert = std::borrow::Cow::Borrowed("\n"),
             osk::Action::Backspace if start == end => {
                 if start == 0 {
                     return;
@@ -1416,7 +1416,21 @@ impl App {
             _ => {}
         }
         let available = MAX_TEXT_CHARS.saturating_sub(total.saturating_sub(end - start));
-        let insertion: String = insert.chars().take(available).collect();
+        // A multi-codepoint emoji (ZWJ families, modifiers, flags and
+        // variation selectors) must never be cut in the middle by the text
+        // capacity limit. Only insert complete Unicode grapheme clusters.
+        let mut remaining = available;
+        let insertion: String = insert
+            .graphemes(true)
+            .take_while(|grapheme| {
+                let chars = grapheme.chars().count();
+                if chars > remaining {
+                    return false;
+                }
+                remaining -= chars;
+                true
+            })
+            .collect();
         if insertion.is_empty() && start == end {
             return;
         }
@@ -2881,6 +2895,51 @@ mod tests {
         assert!(!app.matches_text_pick_target(&target));
         assert!(app.text_pick_target().is_none());
         assert!(app.pick_text_color(color).is_none());
+    }
+
+    #[test]
+    fn osk_inserts_complete_emoji_and_respects_ime_preedit() {
+        let mut app = app();
+        app.use_tool(Tool::Text);
+        click(&mut app, pos2(150., 120.));
+        app.input.text.open_osk();
+        assert!(app.input.text.osk.visible);
+
+        // An active IME composition owns the preedit; the self-drawn
+        // keyboard does not overwrite or synthesize native input events.
+        app.apply_osk_action(
+            osk::Action::Insert(std::borrow::Cow::Borrowed("😊")),
+            true,
+        );
+        assert_eq!(draft_committed(&app), Some(""));
+
+        app.apply_osk_action(
+            osk::Action::Insert(std::borrow::Cow::Borrowed("👩‍💻")),
+            false,
+        );
+        assert_eq!(draft_committed(&app), Some("👩‍💻"));
+        app.apply_osk_action(osk::Action::Backspace, false);
+        assert_eq!(draft_committed(&app), Some(""));
+
+        let Some(draft) = app.input.text.draft.as_mut() else {
+            panic!("expected open text draft");
+        };
+        let filler = "x".repeat(MAX_TEXT_CHARS - 1);
+        draft.item.text.clone_from(&filler);
+        draft.committed = filler;
+        draft.cursor = Some(CCursorRange::one(CCursor::new(MAX_TEXT_CHARS - 1)));
+        app.apply_osk_action(
+            osk::Action::Insert(std::borrow::Cow::Borrowed("👩‍💻")),
+            false,
+        );
+        assert_eq!(draft_committed(&app).map(str::chars).map(Iterator::count), Some(MAX_TEXT_CHARS - 1));
+        app.apply_osk_action(
+            osk::Action::Insert(std::borrow::Cow::Borrowed("🙂")),
+            false,
+        );
+        assert_eq!(draft_committed(&app).map(str::chars).map(Iterator::count), Some(MAX_TEXT_CHARS));
+        app.apply_osk_action(osk::Action::Hide, false);
+        assert!(!app.input.text.osk.visible);
     }
 
     #[test]
