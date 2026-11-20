@@ -222,7 +222,17 @@ mod tests {
     use super::*;
     #[test]
     fn all_catalogs_have_compact_nonempty_strings() {
-        for locale in [es::STRINGS,ja::STRINGS,de::STRINGS,ru::STRINGS,nl::STRINGS,tr::STRINGS,ko::STRINGS,pt::STRINGS,it::STRINGS] {
+        for locale in [
+            &es::STRINGS,
+            &ja::STRINGS,
+            &de::STRINGS,
+            &ru::STRINGS,
+            &nl::STRINGS,
+            &tr::STRINGS,
+            &ko::STRINGS,
+            &pt::STRINGS,
+            &it::STRINGS,
+        ] {
             assert_eq!(locale.len(), 184);
             assert!(locale.iter().all(|value| !value.is_empty()));
         }
