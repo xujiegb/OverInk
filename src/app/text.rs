@@ -2052,6 +2052,73 @@ mod tests {
     }
 
     #[test]
+    fn second_finger_tap_requests_keyboard_even_with_emulated_mouse_events() {
+        let mut app = app();
+        app.use_tool(Tool::Select);
+        let canvas = Rect::from_min_size(Pos2::ZERO, Vec2::from(SIZE));
+        let mut item = TextBox::new(pos2(200., 150.), canvas, app.color, 1.);
+        item.text = "中文输入".into();
+        assert!(app.history.set_text_box(None, item).is_some());
+        let window = SDL_WindowID(1);
+        let mut gui = Gui::new();
+        let finger = |kind| SDL_Event {
+            tfinger: SDL_TouchFingerEvent {
+                r#type: kind,
+                windowID: window,
+                touchID: SDL_TouchID(7),
+                fingerID: SDL_FingerID(12),
+                x: 0.3,
+                y: 0.3,
+                ..Default::default()
+            },
+        };
+        let simulated_mouse = |kind, down| SDL_Event {
+            button: SDL_MouseButtonEvent {
+                r#type: kind,
+                windowID: window,
+                which: SDL_TOUCH_MOUSEID,
+                button: SDL_BUTTON_LEFT as u8,
+                down,
+                x: 240.,
+                y: 180.,
+                ..Default::default()
+            },
+        };
+
+        for tap in 0..2 {
+            app.text_event(&mut gui, &finger(SDL_EVENT_FINGER_DOWN), window, SIZE);
+            app.text_event(
+                &mut gui,
+                &simulated_mouse(SDL_EVENT_MOUSE_BUTTON_DOWN, true),
+                window,
+                SIZE,
+            );
+            app.text_event(
+                &mut gui,
+                &simulated_mouse(SDL_EVENT_MOUSE_BUTTON_UP, false),
+                window,
+                SIZE,
+            );
+            app.text_event(&mut gui, &finger(SDL_EVENT_FINGER_UP), window, SIZE);
+            assert_eq!(app.input.text.editing(), tap == 1);
+            assert_eq!(app.input.text.take_keyboard_request(), tap == 1);
+        }
+        // Subsequent finger taps reopen an OSK dismissed while editing.
+        app.text_event(&mut gui, &finger(SDL_EVENT_FINGER_DOWN), window, SIZE);
+        app.text_event(&mut gui, &finger(SDL_EVENT_FINGER_UP), window, SIZE);
+        assert!(app.input.text.take_keyboard_request());
+    }
+
+    #[test]
+    fn mouse_editing_does_not_request_keyboard_automatically() {
+        let mut app = app();
+        app.use_tool(Tool::Text);
+        click(&mut app, pos2(150., 120.));
+        assert!(app.input.text.editing());
+        assert!(!app.input.text.take_keyboard_request());
+    }
+
+    #[test]
     fn a_new_draft_menu_works_over_the_editor_at_the_bottom_edge() {
         let mut app = app();
         app.use_tool(Tool::Text);
@@ -2095,6 +2162,8 @@ mod tests {
                 .map(|draft| draft.item.font_size),
             Some(font + 2.)
         );
+        menu_click(&mut app, 7.);
+        assert!(app.input.text.take_keyboard_request());
         menu_click(&mut app, 0.);
         assert!(!app.input.text.editing());
         assert!(app.history.text_boxes().is_empty());
