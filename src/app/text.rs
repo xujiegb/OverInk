@@ -1343,9 +1343,13 @@ impl App {
                 .as_ref()
                 .map(|draft| draft.item.rect());
             if self.input.text.editing()
-                && let Some(rect) = self.input.text.osk.rect_near(screen, anchor)
+                && let Some(rect) = self.input.text.osk.rect_near(
+                    screen,
+                    anchor,
+                    self.input.canvas_units,
+                )
             {
-                let scale = self.input.canvas_units;
+                let scale = osk::Keyboard::layout_scale(screen, self.input.canvas_units);
                 let safe = osk::Keyboard::safe_area(screen);
                 let minimum = self.input.text.osk.minimum_size(safe.size(), scale);
                 let mut action = None;
@@ -1360,7 +1364,10 @@ impl App {
                         (1. * scale).round() as i8,
                     )),
                 )
-                .id(ui.make_persistent_id("overink-on-screen-keyboard"))
+                .id(ui.make_persistent_id((
+                    "overink-on-screen-keyboard",
+                    self.input.canvas_units.to_bits(),
+                )))
                 .order(egui::Order::Foreground)
                 .default_pos(rect.min)
                 .default_size(rect.size())
@@ -1572,6 +1579,7 @@ impl App {
                     .draft
                     .as_ref()
                     .map(|draft| draft.item.rect()),
+                self.input.canvas_units,
             )
             .map(|rect| self.input.text.osk.current_rect(rect));
         let Some(draft) = self.input.text.draft.as_mut() else {
@@ -1889,6 +1897,7 @@ mod tests {
     fn render_with_toolbar_focus(app: &mut App, gui: &mut Gui, toolbar_focused: bool) {
         gui.raw.screen_rect = Some(Rect::from_min_size(Pos2::ZERO, Vec2::from(SIZE)));
         let composing = gui.composing();
+        gui.preserve_embedded_keyboard_focus(app.input.text.osk_visible());
         let input = gui.raw.take();
         let output = gui.ctx.run_ui(input, |ui| {
             app.text_ui(ui, true, composing, toolbar_focused)
@@ -3103,6 +3112,7 @@ mod tests {
         let Some(fallback) = app.input.text.osk.rect_near(
             screen,
             app.input.text.draft.as_ref().map(|draft| draft.item.rect()),
+            app.input.canvas_units,
         ) else {
             panic!("expected visible keyboard");
         };

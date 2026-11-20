@@ -333,9 +333,15 @@ impl Keyboard {
         screen.shrink2(vec2(inset_x, inset_y))
     }
 
-    /// Geometry uses canvas coordinates; `Gui` alone resolves the
-    /// display DPI. No second screen-scale query belongs in this widget.
-    pub fn rect_near(&self, screen: Rect, anchor: Option<Rect>) -> Option<Rect> {
+    /// Use the main toolbar's exact window-fit scale, with canvas_units as
+    /// the sole HiDPI source on every operating system.
+    pub fn layout_scale(screen: Rect, units: f32) -> f32 {
+        crate::toolbar::menu_scale(Self::safe_area(screen), vec2(900., 370.), units)
+    }
+
+    /// Geometry uses the canvas's single UI scale; never branch by platform
+    /// or query macOS/Windows pixel density again inside the keyboard.
+    pub fn rect_near(&self, screen: Rect, anchor: Option<Rect>, units: f32) -> Option<Rect> {
         if !self.visible || screen.width() < 280. || screen.height() < 200. {
             return None;
         }
@@ -345,16 +351,14 @@ impl Keyboard {
         if safe.width() < 240. || safe.height() < 145. {
             return None;
         }
-        #[cfg(target_os = "macos")]
-        let (fraction, maximum) = (0.52, 740.);
-        #[cfg(not(target_os = "macos"))]
-        let (fraction, maximum) = (0.60, 900.);
-        let width = (safe.width() * fraction)
-            .clamp(280., maximum)
-            .min(safe.width());
-        let height = (width * 0.44).clamp(210., 370.).min(safe.height());
-        let size = vec2(width, height);
-        let gap = (height * 0.035).max(5.);
+        let scale = Self::layout_scale(screen, units);
+        let design = vec2(900., 370.);
+        let size = (design * scale)
+            .max(self.minimum_size(safe.size(), units))
+            .min(safe.size());
+        let width = size.x;
+        let height = size.y;
+        let gap = (height * 0.035).max(5. * scale);
         let desired_x = anchor.map_or(safe.center().x, |r| r.center().x) - width * 0.5;
         let x = desired_x.clamp(safe.left(), safe.right() - width);
         let y = if let Some(text) = anchor {
@@ -913,7 +917,7 @@ mod tests {
         keyboard.open();
         let ctx = egui::Context::default();
         let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(900., 650.));
-        let Some(rect) = keyboard.rect_near(screen, None) else {
+        let Some(rect) = keyboard.rect_near(screen, None, 1.) else {
             panic!("Keyboard bounds are required for pointer regression");
         };
         let editor_id = egui::Id::unique("ime-editor");
@@ -1088,7 +1092,7 @@ mod tests {
         keyboard.act(Key::EmojiPage);
         let ctx = egui::Context::default();
         let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(800., 600.));
-        let Some(rect) = keyboard.rect_near(screen, None) else {
+        let Some(rect) = keyboard.rect_near(screen, None, 1.) else {
             panic!("Expected emoji keyboard bounds");
         };
         let inside = rect.shrink(8.);
@@ -1141,7 +1145,7 @@ mod tests {
         keyboard.act(Key::EmojiPage);
         let ctx = egui::Context::default();
         let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(800., 600.));
-        let Some(rect) = keyboard.rect_near(screen, None) else {
+        let Some(rect) = keyboard.rect_near(screen, None, 1.) else {
             panic!("Expected emoji keyboard bounds");
         };
         let inside = rect.shrink(8.);
@@ -1225,18 +1229,36 @@ mod tests {
         keyboard.open();
         let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(1920., 1080.));
         let top_text = Rect::from_min_size(pos2(900., 80.), vec2(200., 80.));
-        let below = keyboard.rect_near(screen, Some(top_text));
+        let below = keyboard.rect_near(screen, Some(top_text), 1.);
         let Some(below) = below else {
             panic!("Expected keyboard below text");
         };
         assert!(below.top() >= top_text.bottom());
         let bottom_text = Rect::from_min_size(pos2(900., 910.), vec2(200., 60.));
-        let Some(above) = keyboard.rect_near(screen, Some(bottom_text)) else {
+        let Some(above) = keyboard.rect_near(screen, Some(bottom_text), 1.) else {
             panic!("Expected keyboard above text");
         };
         assert!(above.bottom() <= bottom_text.top());
         assert!(above.bottom() <= screen.bottom() - 100.);
         assert!(screen.contains_rect(above));
+    }
+
+    #[test]
+    fn keyboard_uses_one_layout_scale_for_all_operating_systems() {
+        let mut keyboard = Keyboard::default();
+        keyboard.open();
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(1920., 1080.));
+        let Some(normal) = keyboard.rect_near(screen, None, 1.) else {
+            panic!("Expected normal keyboard layout");
+        };
+        let Some(scaled) = keyboard.rect_near(screen, None, 2.) else {
+            panic!("Expected HiDPI keyboard layout");
+        };
+        assert_eq!(normal.size(), vec2(900., 370.));
+        assert_eq!(scaled.size(), vec2(1800., 740.));
+        assert_eq!(Keyboard::layout_scale(screen, 1.), 1.);
+        assert_eq!(Keyboard::layout_scale(screen, 2.), 2.);
+        assert!(Keyboard::safe_area(screen).contains_rect(scaled));
     }
 
     #[test]
@@ -1257,7 +1279,7 @@ mod tests {
         k.open();
         for (w, h) in [(800., 600.), (320., 240.), (1920., 1080.)] {
             let area = Rect::from_min_size(egui::Pos2::ZERO, vec2(w, h));
-            let Some(r) = k.rect_near(area, None) else {
+            let Some(r) = k.rect_near(area, None, 1.) else {
                 panic!("keyboard should fit");
             };
             assert!(area.contains_rect(r));
@@ -1266,7 +1288,8 @@ mod tests {
         assert!(
             k.rect_near(
                 Rect::from_min_size(egui::Pos2::ZERO, vec2(800., 600.)),
-                None
+                None,
+                1.,
             )
             .is_none()
         );

@@ -127,6 +127,19 @@ impl Gui {
         self.raw.take()
     }
 
+    /// The embedded keyboard is part of the active annotation editor, not
+    /// a separate text field. When visible, clicks on its keys must not make
+    /// egui surrender TextEdit focus and abort native IME composition.
+    pub fn preserve_embedded_keyboard_focus(&self, enabled: bool) {
+        self.ctx.options_mut(|options| {
+            options.input_options.surrender_focus_on = if enabled {
+                egui::SurrenderFocusOn::Never
+            } else {
+                egui::SurrenderFocusOn::Clicks
+            };
+        });
+    }
+
     pub fn clear_events(&mut self) {
         self.composition_ended = None;
         self.raw.events.clear();

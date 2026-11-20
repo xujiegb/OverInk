@@ -473,14 +473,7 @@ impl Canvas {
         // when the button itself is not focusable. Keep focus only while the
         // embedded keyboard is shown; text_ui already handles explicit
         // clicks outside the editor, and normal focus resumes when it closes.
-        let focus_on_click = if editing && app.input.text.osk_visible() {
-            egui::SurrenderFocusOn::Never
-        } else {
-            egui::SurrenderFocusOn::Clicks
-        };
-        gui.ctx.options_mut(|options| {
-            options.input_options.surrender_focus_on = focus_on_click;
-        });
+        gui.preserve_embedded_keyboard_focus(editing && app.input.text.osk_visible());
         if editing {
             if self.window.input_focused() {
                 gui.sync_text_input(&self.window, true);
