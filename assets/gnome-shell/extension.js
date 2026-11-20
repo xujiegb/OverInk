@@ -305,8 +305,13 @@ class CaptureBridge {
             const exe = GLib.file_read_link(`/proc/${pid}/exe`);
             if (GLib.path_get_basename(exe) !== 'overink')
                 throw new Error('Only OverInk can change its input source');
-            const ownsCanvas = [...this._extension._windows.keys()].some(window =>
-                window.get_pid() === pid && window.get_title() === CANVAS);
+            const ownsCanvas = global.get_window_actors().some(actor => {
+                const window = actor.meta_window;
+                const name = window?.get_wm_class()?.toLowerCase();
+                return window?.get_pid() === pid &&
+                    window?.get_title() === CANVAS &&
+                    (name === APP_ID.toLowerCase() || name === 'overink');
+            });
             if (!ownsCanvas)
                 throw new Error('The request has no matching OverInk canvas');
             const manager = getInputSourceManager();
