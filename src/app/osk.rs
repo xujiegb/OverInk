@@ -1079,6 +1079,39 @@ mod tests {
     }
 
     #[test]
+    fn unicode_categories_include_flags_and_regional_variants() {
+        assert_eq!(EMOJI_CATEGORIES.len(), 9);
+        assert!(SYMBOLS_EMOJI.len() >= 270);
+        for flag in ["🇨🇳", "🇫🇷", "🇯🇵", "🇺🇸", "🇬🇧", "🇺🇳", "🏳️‍🌈"] {
+            assert!(SYMBOLS_EMOJI.contains(&flag), "Missing flag: {flag}");
+        }
+        assert!(FACES.len() > 100);
+        assert!(PEOPLE.len() > 300);
+    }
+
+    #[test]
+    fn responsive_keyboard_is_dpi_neutral_and_avoids_bottom_dock() {
+        let mut keyboard = Keyboard::default();
+        keyboard.open();
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(1920., 1080.));
+        let top_text = Rect::from_min_size(pos2(900., 80.), vec2(200., 80.));
+        let below = keyboard.rect_near(screen, Some(top_text), 1.);
+        let high_dpi = keyboard.rect_near(screen, Some(top_text), 2.);
+        assert_eq!(below, high_dpi, "DPI should affect raster size, not points");
+        let Some(below) = below else {
+            panic!("Expected keyboard below text");
+        };
+        assert!(below.top() >= top_text.bottom());
+        let bottom_text = Rect::from_min_size(pos2(900., 910.), vec2(200., 60.));
+        let Some(above) = keyboard.rect_near(screen, Some(bottom_text), 1.) else {
+            panic!("Expected keyboard above text");
+        };
+        assert!(above.bottom() <= bottom_text.top());
+        assert!(above.bottom() <= screen.bottom() - 100.);
+        assert!(screen.contains_rect(above));
+    }
+
+    #[test]
     fn responsive_overlay_stays_within_canvas() {
         let mut k = Keyboard::default();
         k.open();
