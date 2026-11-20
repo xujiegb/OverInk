@@ -15,6 +15,11 @@ pub fn send_physical_key(key: PhysicalKey) -> Result<(), String> {
     native_keys::send_key(key)
 }
 
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub fn supports_character(ch: char) -> bool {
+    native_keys::supports_character(ch)
+}
+
 pub fn system_supported(_video: &str) -> bool {
     #[cfg(target_os = "windows")]
     {
@@ -121,10 +126,12 @@ pub fn switch_input_method() -> Result<(), String> {
         if engines.len() < 2 {
             return Err("Configure at least two system input methods".into());
         }
-        let index = engines
+        let Some(index) = engines
             .iter()
             .position(|engine| *engine == active.trim())
-            .unwrap_or(0);
+        else {
+            return Err("The active IBus engine is not in the installed engine list".into());
+        };
         let next = engines[(index + 1) % engines.len()];
         let status = std::process::Command::new("ibus")
             .args(["engine", next])
