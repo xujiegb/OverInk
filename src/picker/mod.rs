@@ -161,7 +161,7 @@ impl Picker {
             }
         }
     }
-    pub fn poll(&mut self, window: &Window) -> Option<PickResult> {
+    pub fn poll(&mut self, window: &Window, _toolbar: &Window) -> Option<PickResult> {
         if self.active() && self.started.elapsed() > Duration::from_secs(120) {
             self.cancel();
             self.result = Some(Err("Screen color selection timed out".into()));
@@ -177,6 +177,23 @@ impl Picker {
             },
             Stage::System(job) => {
                 if let Some(result) = job.poll() {
+                    // NSColorSampler reports any clicked pixel, including
+                    // app-owned controls. Never apply the toolbar's color if
+                    // its Cancel/Quit button or draggable grip was clicked.
+                    #[cfg(target_os = "macos")]
+                    let result = if matches!(&result, Ok(Some(_)))
+                        && crate::sdl::global_mouse_position().is_some_and(|point| {
+                            let Ok([x, y]) = _toolbar.position() else {
+                                return false;
+                            };
+                            let [w, h] = _toolbar.size();
+                            controller_contains([x as f32, y as f32, w, h], point)
+                        })
+                    {
+                        Ok(None)
+                    } else {
+                        result
+                    };
                     self.finish(result)
                 }
             }
