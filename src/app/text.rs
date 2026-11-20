@@ -2963,11 +2963,17 @@ mod tests {
         render(&mut app, &mut gui);
         render(&mut app, &mut gui);
         let screen = Rect::from_min_size(Pos2::ZERO, Vec2::from(SIZE));
-        let Some(keyboard) = app.input.text.osk.rect(screen, 1.) else {
+        let Some(fallback) = app.input.text.osk.rect_near(
+            screen,
+            app.input.text.draft.as_ref().map(|draft| draft.item.rect()),
+            1.,
+        ) else {
             panic!("expected visible keyboard");
         };
-        // Inside the first row's 'q' key for an 800x600 canvas.
-        let point = keyboard.min + vec2(18., 20.);
+        // egui::Window now has a draggable title bar. The first row of
+        // keys starts inside its content area, below the title bar.
+        let keyboard = app.input.text.osk.current_rect(fallback);
+        let point = keyboard.min + vec2(18., 55.);
         gui.raw.events.push(Event::PointerMoved(point));
         render(&mut app, &mut gui);
         for pressed in [true, false] {
