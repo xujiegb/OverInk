@@ -18,7 +18,10 @@ use ::windows::{
                 D3D11_USAGE_STAGING, D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext,
                 ID3D11Texture2D,
             },
-            Dxgi::{Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT}, IDXGIDevice},
+            Dxgi::{
+                Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT},
+                IDXGIDevice,
+            },
             Gdi::HMONITOR,
         },
         System::WinRT::{
@@ -85,7 +88,11 @@ pub fn hdr_supported() -> bool {
     })
 }
 
-fn capture(monitor: HMONITOR, cancelled: &AtomicBool, linear: bool) -> Result<Option<Image>, Box<dyn Error>> {
+fn capture(
+    monitor: HMONITOR,
+    cancelled: &AtomicBool,
+    linear: bool,
+) -> Result<Option<Image>, Box<dyn Error>> {
     unsafe {
         RoInitialize(RO_INIT_MULTITHREADED)?;
         let _apartment = Apartment;
@@ -127,12 +134,8 @@ fn capture(monitor: HMONITOR, cancelled: &AtomicBool, linear: bool) -> Result<Op
         } else {
             DirectXPixelFormat::B8G8R8A8UIntNormalized
         };
-        let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
-            &capture_device,
-            format,
-            2,
-            size,
-        )?;
+        let pool =
+            Direct3D11CaptureFramePool::CreateFreeThreaded(&capture_device, format, 2, size)?;
         let session = pool.CreateCaptureSession(&item)?;
         let _ = session.SetIsCursorCaptureEnabled(false);
         let (ready, frames) = mpsc::sync_channel(1);
