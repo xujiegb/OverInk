@@ -373,8 +373,11 @@ impl Keyboard {
         self.window_rect = Some(rect);
     }
 
-    pub fn minimum_size(&self, available: egui::Vec2) -> egui::Vec2 {
-        vec2(280., 210.).min(available)
+    pub fn minimum_size(&self, available: egui::Vec2, units: f32) -> egui::Vec2 {
+        // The five-row keyboard cannot be shrunk to a fixed 210 points at
+        // 150%/200% UI scale: keys would become smaller than main UI buttons.
+        // Reuse the canvas's single main-UI scale, bounded by safe area.
+        (vec2(280., 210.) * units).min(available)
     }
 
     pub fn ui(&mut self, ui: &mut Ui, rect: Rect, scale: f32) -> Option<Action> {
@@ -1165,6 +1168,15 @@ mod tests {
         assert!(above.bottom() <= bottom_text.top());
         assert!(above.bottom() <= screen.bottom() - 100.);
         assert!(screen.contains_rect(above));
+    }
+
+    #[test]
+    fn keyboard_minimum_tracks_shared_ui_scale_and_safe_area() {
+        let keyboard = Keyboard::default();
+        let available = vec2(1200., 800.);
+        assert_eq!(keyboard.minimum_size(available, 1.), vec2(280., 210.));
+        assert_eq!(keyboard.minimum_size(available, 2.), vec2(560., 420.));
+        assert_eq!(keyboard.minimum_size(vec2(300., 200.), 2.), vec2(300., 200.));
     }
 
     #[test]
