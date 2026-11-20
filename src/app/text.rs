@@ -1343,11 +1343,11 @@ impl App {
                 .as_ref()
                 .map(|draft| draft.item.rect());
             if self.input.text.editing()
-                && let Some(rect) = self.input.text.osk.rect_near(
-                    screen,
-                    anchor,
-                    self.input.canvas_units,
-                )
+                && let Some(rect) =
+                    self.input
+                        .text
+                        .osk
+                        .rect_near(screen, anchor, self.input.canvas_units)
             {
                 let scale = osk::Keyboard::layout_scale(screen, self.input.canvas_units);
                 let safe = osk::Keyboard::safe_area(screen);
