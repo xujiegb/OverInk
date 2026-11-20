@@ -8,9 +8,7 @@ use windows::{
     UI::ViewManagement::InputPane,
     Win32::{
         Foundation::HWND,
-        System::WinRT::{
-            IInputPaneInterop, RO_INIT_SINGLETHREADED, RoInitialize, RoUninitialize,
-        },
+        System::WinRT::{IInputPaneInterop, RO_INIT_SINGLETHREADED, RoInitialize, RoUninitialize},
     },
     core::factory,
 };
