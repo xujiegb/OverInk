@@ -2431,7 +2431,6 @@ fn run_inner(options: Options) -> Result<(), String> {
                 .and_then(|id| app.displays.iter().find(|display| display.id == id));
             if let Some(result) = picker.poll(
                 &canvases[active].window,
-                &toolbar,
                 pick_display,
                 &app.displays,
             ) {
