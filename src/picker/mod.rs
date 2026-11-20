@@ -1,5 +1,8 @@
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-pub(crate) mod desktop;
+#![forbid(unsafe_code)]
+
+// Native X11 pixel acquisition lives in the crate-root picker_desktop module.
+// Application-owned color picking and cancellation remain safe Rust.
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub(crate) mod portal;
 
@@ -18,7 +21,7 @@ enum Stage {
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     ChoosingDirect,
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    SampleAfter(desktop::ScreenPoint, Instant),
+    SampleAfter(crate::picker_desktop::ScreenPoint, Instant),
     /// Windows, macOS and Wayland share the same capture-first selection
     /// lifecycle. Only the underlying screenshot source is platform-specific.
     Preparing(Instant),
@@ -191,7 +194,7 @@ impl Picker {
                     self.finish(result);
                 }
                 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-                Stage::ChoosingDirect => match desktop::position(window, local) {
+                Stage::ChoosingDirect => match crate::picker_desktop::position(window, local) {
                     Ok(point) => {
                         self.stage =
                             Stage::SampleAfter(point, Instant::now() + Duration::from_millis(100));
@@ -215,7 +218,7 @@ impl Picker {
         match &mut self.stage {
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             Stage::SampleAfter(point, due) if Instant::now() >= *due => {
-                let result = desktop::sample(window, *point).map(Some);
+                let result = crate::picker_desktop::sample(window, *point).map(Some);
                 self.finish(result);
             }
             Stage::Preparing(due) if Instant::now() >= *due => {
