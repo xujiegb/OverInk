@@ -83,7 +83,7 @@ impl Picker {
         }
         self.finish(Ok(None));
     }
-    pub fn event(&mut self, event: &SDL_Event, window: &Window) {
+    pub fn event(&mut self, event: &SDL_Event, window: &Window, toolbar: &Window) {
         if !self.active() {
             return;
         }
@@ -123,6 +123,22 @@ impl Picker {
             _ => None,
         };
         if let Some(local) = local {
+            // A transparent fullscreen canvas may still receive the mouse
+            // release when the native controller is above it. Do not turn
+            // clicks intended for Cancel / Quit / the draggable grip into
+            // a desktop sample. The overlap is recomputed on every click,
+            // so moving the controller immediately updates the exclusion.
+            if crate::native::controller_bounds(window, toolbar)
+                .is_some_and(|[x, y, w, h]| {
+                    w > 0. && h > 0.
+                        && local[0] >= x
+                        && local[1] >= y
+                        && local[0] < x + w
+                        && local[1] < y + h
+                })
+            {
+                return;
+            }
             match desktop::position(window, local) {
                 Ok(point) => {
                     self.stage =
