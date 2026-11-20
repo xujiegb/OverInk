@@ -39,7 +39,12 @@ pub fn show(window: &Window, _video: &str) -> Result<(), String> {
         let path = ["CommonProgramW6432", "CommonProgramFiles"]
             .into_iter()
             .filter_map(env::var_os)
-            .map(|root| PathBuf::from(root).join("microsoft shared").join("ink").join("TabTip.exe"))
+            .map(|root| {
+                PathBuf::from(root)
+                    .join("microsoft shared")
+                    .join("ink")
+                    .join("TabTip.exe")
+            })
             .find(|path| path.is_file())
             .ok_or("Windows touch keyboard (TabTip.exe) is unavailable")?;
         Command::new(path)
@@ -106,13 +111,19 @@ pub fn switch_input_method() -> Result<(), String> {
         if engines.len() < 2 {
             return Err("Configure at least two system input methods".into());
         }
-        let index = engines.iter().position(|engine| *engine == active.trim()).unwrap_or(0);
+        let index = engines
+            .iter()
+            .position(|engine| *engine == active.trim())
+            .unwrap_or(0);
         let next = engines[(index + 1) % engines.len()];
         let status = std::process::Command::new("ibus")
             .args(["engine", next])
             .status()
             .map_err(|error| error.to_string())?;
-        return status.success().then_some(()).ok_or("IBus could not switch input source".into());
+        return status
+            .success()
+            .then_some(())
+            .ok_or("IBus could not switch input source".into());
     }
     #[cfg(target_os = "macos")]
     {
@@ -120,7 +131,10 @@ pub fn switch_input_method() -> Result<(), String> {
         // ordinary applications. Respect the user's configured Control+Space
         // shortcut through System Events, which requires Accessibility grant.
         let output = std::process::Command::new("/usr/bin/osascript")
-            .args(["-e", "tell application \"System Events\" to key code 49 using control down"])
+            .args([
+                "-e",
+                "tell application \"System Events\" to key code 49 using control down",
+            ])
             .output()
             .map_err(|error| error.to_string())?;
         return output.status.success().then_some(()).ok_or_else(|| {
