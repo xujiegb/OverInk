@@ -616,12 +616,12 @@ impl Keyboard {
             self.emoji_drag_start = self.emoji_page;
             self.emoji_wheel_remainder = 0.;
         }
-        if drag.dragged() {
-            // One step per gesture threshold; holding the pointer down can
-            // browse several pages in either axis without releasing it.
+        if drag.dragged() && let Some(total_delta) = drag.total_drag_delta() {
+            // Unlike drag_delta(), this is the total gesture distance:
+            // slow touch/stylus motions must still advance the page.
             let step = (grid.width() * 0.18).clamp(28. * scale, 92. * scale);
             self.emoji_page =
-                emoji_page_from_drag(self.emoji_drag_start, max_page, drag.drag_delta(), step);
+                emoji_page_from_drag(self.emoji_drag_start, max_page, total_delta, step);
         }
 
         // Pointer-based hit test rather than Response::hovered: emoji buttons
