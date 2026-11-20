@@ -244,6 +244,10 @@ impl TextInput {
         self.osk.close();
     }
 
+    pub fn osk_visible(&self) -> bool {
+        self.osk.visible && self.editing()
+    }
+
     pub fn screen_keyboard_session(&self) -> bool {
         self.screen_keyboard_session && self.editing()
     }

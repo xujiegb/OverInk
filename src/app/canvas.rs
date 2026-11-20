@@ -468,6 +468,19 @@ impl Canvas {
         if gui.ctx.theme() != theme {
             gui.ctx.set_theme(theme);
         }
+        // egui normally surrenders TextEdit focus when the pointer clicks
+        // outside its bounds. A virtual keyboard key is such a click, even
+        // when the button itself is not focusable. Keep focus only while the
+        // embedded keyboard is shown; text_ui already handles explicit
+        // clicks outside the editor, and normal focus resumes when it closes.
+        let focus_on_click = if editing && app.input.text.osk_visible() {
+            egui::SurrenderFocusOn::Never
+        } else {
+            egui::SurrenderFocusOn::Clicks
+        };
+        gui.ctx.options_mut(|options| {
+            options.input_options.surrender_focus_on = focus_on_click;
+        });
         if editing {
             if self.window.input_focused() {
                 gui.sync_text_input(&self.window, true);

@@ -935,6 +935,9 @@ mod tests {
             output.drop_without_applying_deltas();
             action
         };
+        ctx.options_mut(|options| {
+            options.input_options.surrender_focus_on = egui::SurrenderFocusOn::Never;
+        });
         assert_eq!(frame(vec![], true), None);
         assert!(ctx.memory(|memory| memory.has_focus(editor_id)));
 
