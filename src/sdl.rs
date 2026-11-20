@@ -128,6 +128,8 @@ enum SdlNativeAction<'a> {
     IndirectTouch(SDL_TouchID),
     CaptureMouse(bool),
     MouseButtonsReleased,
+    #[cfg(target_os = "macos")]
+    GlobalMousePosition,
     PollEvent(&'a mut SDL_Event),
     WaitEvent(i32),
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -152,6 +154,8 @@ enum SdlNativeResult {
     NativePointer(Option<NonNull<c_void>>),
     Number(i64),
     Float(f32),
+    #[cfg(target_os = "macos")]
+    MousePosition([f32; 2]),
     #[cfg(target_os = "windows")]
     WindowsMonitor(Option<usize>),
     ColorProperty((bool, f32)),
@@ -572,6 +576,7 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
             SdlNativeAction::CaptureMouse(enabled) => {
                 SdlNativeResult::Success(SDL_CaptureMouse(enabled))
             }
+
             SdlNativeAction::MouseButtonsReleased => {
                 let (mut x, mut y) = (0.0, 0.0);
                 #[cfg(target_os = "macos")]
@@ -579,6 +584,12 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
                 #[cfg(not(target_os = "macos"))]
                 let buttons = SDL_GetMouseState(&mut x, &mut y);
                 SdlNativeResult::Success(buttons.0 == 0)
+            }
+            #[cfg(target_os = "macos")]
+            SdlNativeAction::GlobalMousePosition => {
+                let (mut x, mut y) = (0.0, 0.0);
+                SDL_GetGlobalMouseState(&mut x, &mut y);
+                SdlNativeResult::MousePosition([x, y])
             }
             SdlNativeAction::PollEvent(event) => SdlNativeResult::Success(SDL_PollEvent(event)),
             SdlNativeAction::WaitEvent(timeout) => {
@@ -1317,6 +1328,19 @@ pub fn render_reset_window_id(event: &SDL_Event) -> Option<SDL_WindowID> {
 /// Check physical buttons on macOS, and SDL's per-window state elsewhere.
 pub fn mouse_buttons_released() -> bool {
     is_main_thread() && sdl_native(SdlNativeAction::MouseButtonsReleased).succeeded()
+}
+
+/// Query the physical desktop cursor on the SDL thread, e.g. to refuse a
+/// system sampler result from one of OverInk's own floating controls.
+#[cfg(target_os = "macos")]
+pub fn global_mouse_position() -> Option<[f32; 2]> {
+    if !is_main_thread() {
+        return None;
+    }
+    match sdl_native(SdlNativeAction::GlobalMousePosition) {
+        SdlNativeResult::MousePosition(point) if point.iter().all(|v| v.is_finite()) => Some(point),
+        _ => None,
+    }
 }
 
 /// Wait without dequeuing the SDL event, preserving the polling loop's order.
