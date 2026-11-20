@@ -13,9 +13,6 @@ mod display;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[path = "display/x11.rs"]
 mod display_x11;
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
-#[path = "picker/desktop.rs"]
-mod picker_desktop;
 mod export;
 mod fonts;
 mod frame_rate;
@@ -29,6 +26,9 @@ mod keyboard;
 mod model;
 mod native;
 mod picker;
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[path = "picker/desktop.rs"]
+mod picker_desktop;
 mod sdl;
 mod toolbar;
 mod touch;
