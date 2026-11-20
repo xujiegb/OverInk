@@ -613,7 +613,11 @@ impl Keyboard {
             bounds.min,
             vec2(bounds.width(), 3. * emoji_row_h + 2. * gap),
         );
-        let drag = ui.interact(grid, ui.scope_id().with("emoji-grid-drag"), egui::Sense::DRAG);
+        let drag = ui.interact(
+            grid,
+            ui.scope_id().with("emoji-grid-drag"),
+            egui::Sense::DRAG,
+        );
         if drag.drag_started() {
             self.emoji_drag_start = self.emoji_page;
             self.emoji_wheel_remainder = 0.;
