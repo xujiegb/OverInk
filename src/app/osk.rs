@@ -320,10 +320,9 @@ impl Keyboard {
         self.visible = false;
         self.window_rect = None;
     }
-    /// Coordinates already use egui logical points; multiplying panel width by
-    /// the DPI scale made a Retina keyboard twice as wide as intended.
-    /// Pixel density is handled by the canvas egui context, not by geometry.
-    pub fn rect_near(&self, screen: Rect, anchor: Option<Rect>, _scale: f32) -> Option<Rect> {
+    /// Geometry uses canvas coordinates; `Gui` alone resolves the
+    /// display DPI. No second screen-scale query belongs in this widget.
+    pub fn rect_near(&self, screen: Rect, anchor: Option<Rect>) -> Option<Rect> {
         if !self.visible || screen.width() < 280. || screen.height() < 200. {
             return None;
         }
@@ -1017,7 +1016,7 @@ mod tests {
         keyboard.act(Key::EmojiPage);
         let ctx = egui::Context::default();
         let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(800., 600.));
-        let Some(rect) = keyboard.rect_near(screen, None, 1.) else {
+        let Some(rect) = keyboard.rect_near(screen, None) else {
             panic!("Expected emoji keyboard bounds");
         };
         let inside = rect.shrink(8.);
@@ -1070,7 +1069,7 @@ mod tests {
         keyboard.act(Key::EmojiPage);
         let ctx = egui::Context::default();
         let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(800., 600.));
-        let Some(rect) = keyboard.rect_near(screen, None, 1.) else {
+        let Some(rect) = keyboard.rect_near(screen, None) else {
             panic!("Expected emoji keyboard bounds");
         };
         let inside = rect.shrink(8.);
@@ -1154,15 +1153,13 @@ mod tests {
         keyboard.open();
         let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(1920., 1080.));
         let top_text = Rect::from_min_size(pos2(900., 80.), vec2(200., 80.));
-        let below = keyboard.rect_near(screen, Some(top_text), 1.);
-        let high_dpi = keyboard.rect_near(screen, Some(top_text), 2.);
-        assert_eq!(below, high_dpi, "DPI should affect raster size, not points");
+        let below = keyboard.rect_near(screen, Some(top_text));
         let Some(below) = below else {
             panic!("Expected keyboard below text");
         };
         assert!(below.top() >= top_text.bottom());
         let bottom_text = Rect::from_min_size(pos2(900., 910.), vec2(200., 60.));
-        let Some(above) = keyboard.rect_near(screen, Some(bottom_text), 1.) else {
+        let Some(above) = keyboard.rect_near(screen, Some(bottom_text)) else {
             panic!("Expected keyboard above text");
         };
         assert!(above.bottom() <= bottom_text.top());
@@ -1176,19 +1173,15 @@ mod tests {
         k.open();
         for (w, h) in [(800., 600.), (320., 240.), (1920., 1080.)] {
             let area = Rect::from_min_size(egui::Pos2::ZERO, vec2(w, h));
-            let Some(r) = k.rect_near(area, None, 1.) else {
+            let Some(r) = k.rect_near(area, None) else {
                 panic!("keyboard should fit");
             };
             assert!(area.contains_rect(r));
         }
         k.close();
         assert!(
-            k.rect_near(
-                Rect::from_min_size(egui::Pos2::ZERO, vec2(800., 600.)),
-                None,
-                1.
-            )
-            .is_none()
+            k.rect_near(Rect::from_min_size(egui::Pos2::ZERO, vec2(800., 600.)), None)
+                .is_none()
         );
     }
 }
