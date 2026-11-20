@@ -1,4 +1,3 @@
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #![forbid(unsafe_code)]
 
 // Native X11 pixel acquisition lives in the crate-root picker_desktop module.
