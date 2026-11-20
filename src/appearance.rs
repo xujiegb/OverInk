@@ -366,7 +366,7 @@ mod tests {
         ] {
             assert_eq!(Language::from_locale(tag, region), Some(language), "{tag}");
         }
-        assert_eq!(Language::from_locale("ja_JP", ""), None);
+        assert_eq!(Language::from_locale("sv_SE", ""), None);
     }
 
     #[test]
