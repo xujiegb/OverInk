@@ -384,7 +384,7 @@ impl Keyboard {
                 .into_iter()
                 .enumerate()
                 {
-                    if let Some(action) = self.row(ui, row, inside, i, row_h, gap, scale) {
+                    if let Some(action) = self.row(ui, row, inside, i, gap, scale) {
                         result = Some(action);
                     }
                 }
@@ -399,7 +399,7 @@ impl Keyboard {
                 .into_iter()
                 .enumerate()
                 {
-                    if let Some(action) = self.row(ui, row, inside, i, row_h, gap, scale) {
+                    if let Some(action) = self.row(ui, row, inside, i, gap, scale) {
                         result = Some(action);
                     }
                 }
@@ -414,7 +414,7 @@ impl Keyboard {
                 .into_iter()
                 .enumerate()
                 {
-                    if let Some(action) = self.row(ui, row, inside, i, row_h, gap, scale) {
+                    if let Some(action) = self.row(ui, row, inside, i, gap, scale) {
                         result = Some(action);
                     }
                 }
@@ -432,10 +432,10 @@ impl Keyboard {
         keys: &[Cell],
         inside: Rect,
         row: usize,
-        height: f32,
         gap: f32,
         scale: f32,
     ) -> Option<Action> {
+        let height = ((inside.height() - 3. * gap) / 4.).max(0.);
         let total: f32 = keys.iter().map(|cell| cell.weight).sum();
         let unit = ((inside.width() - gap * (keys.len().saturating_sub(1)) as f32) / total).max(0.);
         let mut x = inside.left();
@@ -544,9 +544,7 @@ impl Keyboard {
         gap: f32,
         scale: f32,
     ) -> Option<Action> {
-        let Some((_, items)) = EMOJI_CATEGORIES.get(self.emoji_category).copied() else {
-            return None;
-        };
+        let (_, items) = EMOJI_CATEGORIES.get(self.emoji_category).copied()?;
         let cell = (bounds.width() - (EMOJI_COLUMNS - 1) as f32 * gap) / EMOJI_COLUMNS as f32;
         let start = self.emoji_page * EMOJI_PAGE_SIZE;
         let mut result = None;
