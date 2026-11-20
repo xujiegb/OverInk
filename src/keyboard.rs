@@ -48,6 +48,7 @@ pub fn show(window: &Window, _video: &str) -> Result<(), String> {
 
     #[cfg(target_os = "macos")]
     {
+        let _ = window;
         show_macos_keyboard()
     }
 
@@ -89,11 +90,7 @@ fn show_macos_keyboard() -> Result<(), String> {
     // A system policy may prohibit new instances, so fall back to activate.
     let mut failures = Vec::new();
     for fresh_instance in [true, false] {
-        let mut command = Command::new("/usr/bin/open");
-        if fresh_instance {
-            command.arg("-n");
-        }
-        command.arg("-a").arg(app);
+        let mut command = mac_keyboard_command(app, fresh_instance);
         match command.output() {
             Ok(output) if output.status.success() => return Ok(()),
             Ok(output) => failures.push(
@@ -106,4 +103,32 @@ fn show_macos_keyboard() -> Result<(), String> {
         "macOS could not activate Keyboard Viewer: {}",
         failures.into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join("; ")
     ))
+}
+
+#[cfg(target_os = "macos")]
+fn mac_keyboard_command(app: &std::path::Path, fresh_instance: bool) -> std::process::Command {
+    let mut command = std::process::Command::new("/usr/bin/open");
+    if fresh_instance {
+        command.arg("-n");
+    }
+    command.arg("-a").arg(app);
+    command
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keyboard_viewer_launches_in_foreground_and_can_recover_from_hidden_instance() {
+        let app = std::path::Path::new("/System/Library/Input Methods/KeyboardViewer.app");
+        let fresh = mac_keyboard_command(app, true);
+        let activate = mac_keyboard_command(app, false);
+        let args = |command: &std::process::Command| {
+            command.get_args().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>()
+        };
+        assert_eq!(args(&fresh), vec!["-n", "-a", app.to_string_lossy().as_ref()]);
+        assert_eq!(args(&activate), vec!["-a", app.to_string_lossy().as_ref()]);
+        assert!(!args(&fresh).iter().any(|arg| arg == "-g"));
+    }
 }
