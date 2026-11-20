@@ -225,8 +225,12 @@ impl TextInput {
 
     pub fn open_osk(&mut self) {
         if self.editing() {
+            // Unlike the optional native OS keyboard, this egui overlay stays
+            // inside the focused SDL canvas. Do not suppress real AppKit,
+            // Win32 or Wayland FocusLost events when switching away from the
+            // application; that could leave the IME session stuck active.
+            self.screen_keyboard_session = false;
             self.osk.open();
-            self.mark_screen_keyboard_open();
         }
     }
 
@@ -2090,6 +2094,7 @@ mod tests {
         click(&mut app, pos2(130., 110.));
         app.input.text.open_osk();
         assert!(app.input.text.osk.visible);
+        assert!(!app.input.text.screen_keyboard_session());
         app.apply_osk_action(osk::Action::Insert("a".into()), false);
         app.apply_osk_action(osk::Action::Insert("👩‍🚀".into()), false);
         assert_eq!(draft_preview(&app), Some("a👩‍🚀"));
@@ -2904,6 +2909,7 @@ mod tests {
         click(&mut app, pos2(150., 120.));
         app.input.text.open_osk();
         assert!(app.input.text.osk.visible);
+        assert!(!app.input.text.screen_keyboard_session());
 
         // An active IME composition owns the preedit; the self-drawn
         // keyboard does not overwrite or synthesize native input events.
