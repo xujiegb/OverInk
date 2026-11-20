@@ -333,8 +333,7 @@ impl App {
                 changed = true;
             }
         }
-        if ty == SDL_EVENT_FINGER_DOWN
-            && gui.primary_touch() == crate::touch::key_from_event(event)
+        if ty == SDL_EVENT_FINGER_DOWN && gui.primary_touch() == crate::touch::key_from_event(event)
         {
             self.input.text.touch_press = true;
             self.input.text.touch_origin = finger_event(event)
@@ -360,15 +359,11 @@ impl App {
                     .and_then(|finger| crate::touch::point(finger, size))
                     .is_some_and(|point| {
                         let pos = pos2(point.x, point.y);
-                        self.input
-                            .text
-                            .touch_origin
-                            .is_some_and(|start| {
-                                start.distance(pos) <= 8. * self.input.canvas_units
-                            })
-                            && self
-                                .text_menu_item()
-                                .is_some_and(|item| item.rect().contains(pos))
+                        self.input.text.touch_origin.is_some_and(|start| {
+                            start.distance(pos) <= 8. * self.input.canvas_units
+                        }) && self
+                            .text_menu_item()
+                            .is_some_and(|item| item.rect().contains(pos))
                     })
             {
                 self.input.text.keyboard_requested = true;
