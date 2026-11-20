@@ -28,12 +28,38 @@ impl Job {
     pub fn start(
         window: &Window,
         display: &Display,
+        displays: &[Display],
+        region: Rect,
+        hdr: bool,
+        portal: bool,
+    ) -> Result<Self, String> {
+        Self::start_inner(window, display, displays, region, hdr, portal, false)
+    }
+
+    /// All platforms use the same OverInk-owned color-picker UI: capture an
+    /// SDR desktop frame while the canvas and controller are hidden, then let
+    /// the application's own pointer handling select the color. On Wayland
+    /// prefer the standard screenshot portal, not a system color sampler.
+    /// The hidden canvas may temporarily lack a reported SDL display ID.
+    pub fn start_picker(
+        window: &Window,
+        display: &Display,
+        displays: &[Display],
+        region: Rect,
+    ) -> Result<Self, String> {
+        Self::start_inner(window, display, displays, region, false, true, true)
+    }
+
+    fn start_inner(
+        window: &Window,
+        display: &Display,
         _displays: &[Display],
         region: Rect,
         _hdr: bool,
         _portal: bool,
+        _prefer_portal: bool,
     ) -> Result<Self, String> {
-        if window.display_id() != Some(display.id) {
+        if window.display_id() != Some(display.id) && !(_prefer_portal && window.hidden()) {
             return Err("The screenshot display has changed".into());
         }
         let size = window.size();
@@ -58,7 +84,7 @@ impl Job {
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         {
             #[cfg(target_os = "linux")]
-            if crate::gnome::in_wayland_session() {
+            if crate::gnome::in_wayland_session() && !_prefer_portal {
                 // Route GNOME Wayland and XWayland captures asynchronously
                 // through the compositor. The X11 framebuffer cannot capture
                 // native Wayland windows, and can silently omit screen content.
@@ -169,7 +195,7 @@ impl Job {
                 })
                 .map(Self::Portal);
             }
-            let image = crate::picker::desktop::capture(window)?;
+            let image = crate::picker_desktop::capture(window)?;
             Ok(Self::X11(Some(crop.apply(image)?)))
         }
     }

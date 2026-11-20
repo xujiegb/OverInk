@@ -1917,7 +1917,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 let id = canvas::event_window(&event, ty);
                 let active = canvas::active_index(&canvases, app.pages.active);
                 let was_picking = picker.active();
-                picker.event(&event, &canvases[active].window);
+                picker.event(&event, &canvases[active].window, &toolbar);
                 let target = if ty == SDL_EVENT_FINGER_CANCELED {
                     let key = touch::key_from_event(&event)
                         .ok_or("SDL finger cancellation event has no finger data")?;
@@ -2424,7 +2424,11 @@ fn run_inner(options: Options) -> Result<(), String> {
             )?;
             app.screenshot.acknowledge_portal_fallback_hidden();
             let mut restore_text_focus = false;
-            if let Some(result) = picker.poll(&canvases[active].window) {
+            let pick_display = canvases[active]
+                .output
+                .and_then(|id| app.displays.iter().find(|display| display.id == id));
+            if let Some(result) = picker.poll(&canvases[active].window, pick_display, &app.displays)
+            {
                 app.picking = false;
                 let origin = text_pick.take();
                 let canvas = &canvases[active];
@@ -2840,7 +2844,10 @@ fn run_inner(options: Options) -> Result<(), String> {
                 // The native chooser owns interaction while pending. Even a
                 // screenshot canvas kept as a Wayland transient parent would
                 // remain fullscreen and always-on-top behind the chooser.
-                let visible = if file_dialog.pending() {
+                let visible = if file_dialog.pending() || picker.hides_windows() {
+                    // Native macOS and Wayland portal samplers must see the
+                    // desktop beneath OverInk, not its transparent ink canvas.
+                    // Keep only the movable Cancel/Quit controller visible.
                     false
                 } else {
                     screenshot
@@ -2906,7 +2913,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 for canvas in &mut canvases {
                     canvas.show(&toolbar, false)?;
                 }
-            } else if mode_changed || controller_bounds_changed {
+            } else if mode_changed || controller_bounds_changed || picker.choosing() {
                 let toolbar_display = toolbar.display_id();
                 if let Some(canvas) = canvases
                     .iter()

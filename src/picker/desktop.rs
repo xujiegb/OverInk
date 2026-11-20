@@ -9,7 +9,7 @@ pub struct ScreenPoint {
     pub root: std::ffi::c_ulong,
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn local_pixels(window: &Window, local: [f32; 2]) -> Result<[i32; 2], String> {
     let (logical, physical) = window
         .capture_coordinate_sizes()
@@ -19,7 +19,7 @@ fn local_pixels(window: &Window, local: [f32; 2]) -> Result<[i32; 2], String> {
 
 /// Reject zero-sized/minimized windows and out-of-range coordinates before
 /// narrowing into the 32-bit pixel coordinates required by Win32 and X11.
-#[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn scaled_pixels(
     local: [f32; 2],
     logical: [f32; 2],
@@ -38,98 +38,6 @@ fn scaled_pixels(
         pixels[i] = coordinate as i32;
     }
     Ok(pixels)
-}
-
-#[cfg(target_os = "windows")]
-pub fn position(window: &Window, local: [f32; 2]) -> Result<ScreenPoint, String> {
-    use windows::Win32::{
-        Foundation::{HWND, POINT},
-        Graphics::Gdi::ClientToScreen,
-    };
-    let [x, y] = local_pixels(window, local)?;
-    let mut point = POINT { x, y };
-    let hwnd = HWND(
-        window
-            .win32_hwnd()
-            .ok_or("No Win32 window handle")?
-            .as_non_null()
-            .as_ptr(),
-    );
-    // SAFETY: SDL owns this live HWND and POINT is a writable Win32 value.
-    // The generated windows binding enforces the correct system ABI.
-    if !unsafe { ClientToScreen(hwnd, &mut point) }.as_bool() {
-        return Err(std::io::Error::last_os_error().to_string());
-    }
-    Ok(ScreenPoint {
-        x: point.x,
-        y: point.y,
-        root: 0,
-    })
-}
-#[cfg(target_os = "windows")]
-mod win32_capture {
-    #![deny(clippy::undocumented_unsafe_blocks)]
-
-    use windows::Win32::Graphics::Gdi::{GetDC, GetPixel, HDC, ReleaseDC};
-    #[link(name = "dwmapi")]
-    // SAFETY: The declaration matches the Win32 system ABI. DwmFlush has
-    // no input pointers or caller-side memory invariants, so Rust 2024
-    // may expose this specific imported function as a safe FFI call.
-    unsafe extern "system" {
-        safe fn DwmFlush() -> i32;
-    }
-
-    /// The screen DC is tied to a null HWND and must be released with the same
-    /// null HWND. The non-null handle is exclusively owned by this guard.
-    struct ScreenDc(HDC);
-
-    impl ScreenDc {
-        fn acquire() -> Result<Self, String> {
-            // SAFETY: None requests the desktop DC; only a non-null HDC is
-            // retained and Drop releases it against the same null HWND.
-            let dc = unsafe { GetDC(None) };
-            (!dc.is_invalid())
-                .then_some(Self(dc))
-                .ok_or_else(|| "Cannot read the desktop".into())
-        }
-
-        fn sample(&self, [x, y]: [i32; 2]) -> Result<[u8; 3], String> {
-            // SAFETY: ScreenDc owns a live desktop DC until Drop.
-            let pixel = unsafe { GetPixel(self.0, x, y) }.0;
-            if pixel == u32::MAX {
-                return Err("The desktop pixel is unavailable".into());
-            }
-            Ok([pixel as u8, (pixel >> 8) as u8, (pixel >> 16) as u8])
-        }
-    }
-
-    impl Drop for ScreenDc {
-        fn drop(&mut self) {
-            // SAFETY: GetDC(None) returned this non-null DC; it is released
-            // exactly once with the same None window argument.
-            unsafe {
-                ReleaseDC(None, self.0);
-            }
-        }
-    }
-
-    pub(super) fn sample(point: [i32; 2]) -> Result<[u8; 3], String> {
-        // Both OverInk windows have been hidden before this readback. GDI
-        // returns the system SDR representation rather than scene HDR data.
-        // DwmFlush is a safe FFI declaration: no pointers or caller-owned
-        // buffers cross the boundary. Failure is non-fatal for readback.
-        let _ = DwmFlush();
-        let dc = ScreenDc::acquire()?;
-        dc.sample(point)
-    }
-}
-
-#[cfg(target_os = "windows")]
-pub fn sample(_window: &Window, point: ScreenPoint) -> Result<InkColor, String> {
-    let _ = point.root;
-    Ok(InkColor::from_rgb8(win32_capture::sample([
-        point.x, point.y,
-    ])?))
 }
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -510,10 +418,7 @@ mod x11 {
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub use x11::{capture, is_xwayland, position, sample};
 
-#[cfg(all(
-    test,
-    any(target_os = "windows", target_os = "linux", target_os = "freebsd")
-))]
+#[cfg(all(test, any(target_os = "linux", target_os = "freebsd")))]
 mod coordinate_tests {
     use super::scaled_pixels;
 
@@ -528,14 +433,4 @@ mod coordinate_tests {
         assert!(scaled_pixels([f32::NAN, 4.], [100., 100.], [200, 200]).is_err());
         assert!(scaled_pixels([f32::MAX, 4.], [100., 100.], [200, 200]).is_err());
     }
-}
-
-#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "freebsd")))]
-pub fn position(_window: &Window, _local: [f32; 2]) -> Result<ScreenPoint, String> {
-    Err("Use the system color sampler on this platform".into())
-}
-#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "freebsd")))]
-pub fn sample(_window: &Window, point: ScreenPoint) -> Result<InkColor, String> {
-    let _ = (point.x, point.y, point.root);
-    Err("Use the system color sampler on this platform".into())
 }

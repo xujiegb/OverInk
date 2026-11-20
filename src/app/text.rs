@@ -22,11 +22,18 @@ mod color_wheel;
 use color_wheel::ColorWheel;
 
 const MENU_BUTTON: Vec2 = vec2(toolbar::RAIL_BUTTON_SIZE.x, 35.);
+const KEYBOARD_BUTTON: Vec2 = vec2(52., 35.);
+const KEYBOARD_COLUMN: f32 = 7.;
 const MENU_GAP: f32 = 4.;
 const MENU_PADDING: f32 = 5.;
-const PALETTE_SIZE: Vec2 = vec2(240., 272.);
+// Palette width is derived from the text action bar, not an independent
+// fixed pixel width. Reserve only the control rows; the wheel fills the
+// available vertical space without stretching beyond its natural circle.
+const PALETTE_MARGIN: f32 = 10.;
+const PALETTE_GAP: f32 = 7.;
+const PALETTE_SLIDER_HEIGHT: f32 = 32.;
 const MENU_SIZE: Vec2 = vec2(
-    9. * MENU_BUTTON.x + 8. * MENU_GAP + 2. * MENU_PADDING,
+    8. * MENU_BUTTON.x + KEYBOARD_BUTTON.x + 8. * MENU_GAP + 2. * MENU_PADDING,
     MENU_BUTTON.y + 2. * MENU_PADDING,
 );
 
@@ -114,6 +121,7 @@ pub(super) struct TextInput {
     color_wheel: Option<ColorWheel>,
     screen_pick_requested: bool,
     keyboard_requested: bool,
+    keyboard_press: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -290,6 +298,71 @@ impl App {
         true
     }
 
+    fn keyboard_button_rect(&self, canvas: Rect) -> Option<Rect> {
+        let menu = self.text_menus(canvas)?;
+        let top_left = menu.actions.min
+            + vec2(
+                MENU_PADDING + KEYBOARD_COLUMN * (MENU_BUTTON.x + MENU_GAP),
+                MENU_PADDING,
+            ) * menu.scale;
+        Some(Rect::from_min_size(top_left, KEYBOARD_BUTTON * menu.scale))
+    }
+
+    /// Handle the keyboard button in the same checked pointer path as text-box
+    /// selection. A native SDL mouse, pen, or finger click must not depend on
+    /// which egui overlay layer currently owns the menu's widget ID.
+    fn keyboard_pointer(&mut self, event: &Event, canvas: Rect) -> bool {
+        match *event {
+            Event::PointerButton {
+                pos,
+                button: PointerButton::Primary,
+                pressed: true,
+                ..
+            } => {
+                self.input.text.keyboard_press = self
+                    .keyboard_button_rect(canvas)
+                    .is_some_and(|rect| rect.contains(pos));
+                self.input.text.keyboard_press
+            }
+            Event::PointerButton {
+                pos,
+                button: PointerButton::Primary,
+                pressed: false,
+                ..
+            } => {
+                let down_on_button = std::mem::take(&mut self.input.text.keyboard_press);
+                if down_on_button
+                    && self
+                        .keyboard_button_rect(canvas)
+                        .is_some_and(|rect| rect.contains(pos))
+                {
+                    return self.request_text_keyboard();
+                }
+                false
+            }
+            Event::PointerGone | Event::WindowFocused(false) => {
+                self.input.text.keyboard_press = false;
+                false
+            }
+            _ => false,
+        }
+    }
+
+    fn request_text_keyboard(&mut self) -> bool {
+        if !self.input.text.editing()
+            && let Some(index) = self.input.text.selected
+            && let Some(item) = self.history.text_boxes().get(index)
+        {
+            self.input.text.edit(Some(index), (**item).clone());
+        }
+        if self.input.text.editing() {
+            self.input.text.keyboard_requested = true;
+            true
+        } else {
+            false
+        }
+    }
+
     pub(super) fn text_event(
         &mut self,
         gui: &mut Gui,
@@ -317,6 +390,13 @@ impl App {
         }
         let primary_touch = gui.primary_touch();
         gui.event(event, window, size);
+        let canvas = Rect::from_min_size(Pos2::ZERO, Vec2::from(size));
+        // Resolve keyboard clicks before filtering raw egui input. On macOS
+        // and Windows the native pointer sequence can cross an overlay
+        // layer or focus boundary without registering an egui Button click.
+        for pointer in gui.raw.events.iter().skip(first) {
+            changed |= self.keyboard_pointer(pointer, canvas);
+        }
         if editing
             && ty == SDL_EVENT_MOUSE_BUTTON_DOWN
             && let Some(button) = mouse_button_event(event)
@@ -375,7 +455,6 @@ impl App {
             return changed || gui.raw.events.len() != first;
         }
         let mut queued = first;
-        let canvas = Rect::from_min_size(Pos2::ZERO, Vec2::from(size));
         gui.raw.events.retain(|event| {
             if queued > 0 {
                 queued -= 1;
@@ -638,14 +717,14 @@ impl App {
         let actions =
             toolbar::context_menu_rect(item.rect(), canvas, MENU_SIZE * scale, protected, scale);
         let palette = self.input.text.color_wheel.map(|_| {
-            let scale = toolbar::menu_scale(canvas, PALETTE_SIZE, units);
+            let (size, scale) = palette_layout(actions, canvas, scale);
             // At most two obstacles: avoid allocating a Vec every palette frame.
             let obstacles = [actions, protected.unwrap_or(actions)];
             let count = if protected.is_some() { 2 } else { 1 };
             let rect = toolbar::context_menu_rect_avoiding(
                 actions,
                 canvas,
-                PALETTE_SIZE * scale,
+                size,
                 &obstacles[..count],
                 scale,
             );
@@ -902,34 +981,36 @@ impl App {
         menu.spacing_mut().item_spacing.x = MENU_GAP * scale;
         menu.spacing_mut().button_padding = vec2(5., 4.) * scale;
         let mut acted = false;
-        if menu
-            .add_sized(button, toolbar::menu_button("×", scale))
-            .on_hover_text(
-                egui::RichText::new(tr.text("Delete text box", "删除文本框", "刪除文字框"))
-                    .size(toolbar::MENU_FONT_SIZE * scale),
-            )
-            .clicked()
+        if annotation_icon_button(
+            &mut menu,
+            button,
+            ActionIcon::Delete,
+            tr.text("Delete text box", "删除文本框", "刪除文字框"),
+        )
+        .on_hover_text(
+            egui::RichText::new(tr.text("Delete text box", "删除文本框", "刪除文字框"))
+                .size(toolbar::MENU_FONT_SIZE * scale),
+        )
+        .clicked()
         {
             acted = self.delete_text_box();
         }
-        for (label, hint, step, enabled) in [
+        for (icon, hint, step, enabled) in [
             (
-                "A+",
+                ActionIcon::Increase,
                 tr.text("Increase font size", "加大字号", "加大字級"),
                 font_step,
                 font_size < *TextBox::FONT_SIZE.end(),
             ),
             (
-                "A−",
+                ActionIcon::Decrease,
                 tr.text("Decrease font size", "缩小字号", "縮小字級"),
                 -font_step,
                 font_size > *TextBox::FONT_SIZE.start(),
             ),
         ] {
             if menu
-                .add_enabled_ui(enabled, |ui| {
-                    ui.add_sized(button, toolbar::menu_button(label, scale))
-                })
+                .add_enabled_ui(enabled, |ui| annotation_icon_button(ui, button, icon, hint))
                 .inner
                 .on_hover_text(egui::RichText::new(hint).size(toolbar::MENU_FONT_SIZE * scale))
                 .clicked()
@@ -953,28 +1034,43 @@ impl App {
                 self.input.text.color_wheel = None;
             }
         }
-        if menu
-            .add_sized(button, toolbar::menu_button("⌨", scale))
+        let keyboard_label = tr.text("Show on-screen keyboard", "呼出屏幕键盘", "開啟螢幕鍵盤");
+        let (icon_rect, keyboard_response) =
+            menu.allocate_exact_size(KEYBOARD_BUTTON * scale, egui::Sense::click());
+        keyboard_response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::Role::Button, menu.is_enabled(), keyboard_label)
+        });
+        if keyboard_response.hovered() || keyboard_response.has_focus() {
+            menu.painter().rect_filled(
+                icon_rect,
+                6. * scale,
+                menu.visuals().widgets.hovered.bg_fill,
+            );
+        }
+        // A vector keyboard is legible on every OS; the previous Unicode
+        // "⌨" was rendered as a tiny fallback glyph on some installations.
+        let keyboard_rect = Rect::from_center_size(icon_rect.center(), vec2(31., 22.) * scale);
+        let stroke = Stroke::new(2.0 * scale, menu.visuals().text_color());
+        menu.painter()
+            .rect_stroke(keyboard_rect, 3. * scale, stroke, StrokeKind::Inside);
+        for row in 0..2 {
+            for col in 0..5 {
+                let center =
+                    keyboard_rect.min + vec2(5. + 5.25 * col as f32, 6. + 6. * row as f32) * scale;
+                menu.painter()
+                    .circle_filled(center, 1.25 * scale, stroke.color);
+            }
+        }
+        let spacebar = keyboard_rect.min + vec2(8., 18.) * scale;
+        menu.painter()
+            .line_segment([spacebar, spacebar + vec2(15., 0.) * scale], stroke);
+        if keyboard_response
             .on_hover_text(
-                egui::RichText::new(tr.text(
-                    "Show on-screen keyboard",
-                    "呼出屏幕键盘",
-                    "開啟螢幕鍵盤",
-                ))
-                .size(toolbar::MENU_FONT_SIZE * scale),
+                egui::RichText::new(keyboard_label).size(toolbar::MENU_FONT_SIZE * scale),
             )
             .clicked()
         {
-            if !self.input.text.editing()
-                && let Some(index) = self.input.text.selected
-                && let Some(item) = self.history.text_boxes().get(index)
-            {
-                self.input.text.edit(Some(index), (**item).clone());
-            }
-            if self.input.text.editing() {
-                self.input.text.keyboard_requested = true;
-                acted = true;
-            }
+            acted |= self.request_text_keyboard();
         }
         let wheel_open = self.input.text.color_wheel.is_some();
         let label = tr.text("Color wheel", "色轮", "色輪");
@@ -1012,34 +1108,45 @@ impl App {
             ui.visuals().window_stroke(),
             StrokeKind::Inside,
         );
-        let mut palette = ui.new_child(
-            UiBuilder::new()
-                .id_salt("wheel-controls")
-                .max_rect(rect.shrink(10. * scale)),
-        );
-        palette.spacing_mut().item_spacing = vec2(6., 7.) * scale;
+        let inner = rect.shrink(PALETTE_MARGIN * scale);
+        let wheel_diameter = (inner.height()
+            - (PALETTE_SLIDER_HEIGHT + MENU_BUTTON.y + 2. * PALETTE_GAP) * scale)
+            .max(0.)
+            .min(inner.width());
+        let mut palette = ui.new_child(UiBuilder::new().id_salt("wheel-controls").max_rect(inner));
+        palette.set_width(inner.width());
+        palette.spacing_mut().item_spacing = vec2(PALETTE_GAP, PALETTE_GAP) * scale;
         palette.spacing_mut().button_padding = vec2(6., 4.) * scale;
-        palette.vertical_centered(|ui| wheel.show(ui, 164. * scale, scale));
+        palette.vertical_centered(|ui| wheel.show(ui, wheel_diameter, scale));
         palette.horizontal(|ui| {
+            ui.set_width(inner.width());
             ui.label(
                 egui::RichText::new(tr.text("Brightness", "亮度", "亮度"))
                     .size(toolbar::MENU_FONT_SIZE * scale),
             );
-            ui.spacing_mut().slider_width = 135. * scale;
-            ui.spacing_mut().interact_size.y = 28. * scale;
-            ui.add(egui::Slider::new(&mut wheel.value.v, 0. ..=1.).show_value(false));
+            let remaining = ui.available_width().max(0.);
+            ui.spacing_mut().slider_width = remaining;
+            ui.spacing_mut().interact_size.y = PALETTE_SLIDER_HEIGHT * scale;
+            ui.add_sized(
+                vec2(remaining, PALETTE_SLIDER_HEIGHT * scale),
+                egui::Slider::new(&mut wheel.value.v, 0. ..=1.).show_value(false),
+            );
         });
         let (apply, pick) = palette
             .horizontal(|ui| {
+                ui.set_width(inner.width());
+                let gap = ui.spacing().item_spacing.x;
+                let button_width = ((ui.available_width() - gap) / 2.).max(0.);
+                let size = vec2(button_width, MENU_BUTTON.y * scale);
                 let apply = ui
                     .add_sized(
-                        vec2(88., MENU_BUTTON.y) * scale,
+                        size,
                         toolbar::menu_button(tr.text("Apply", "应用", "套用"), scale),
                     )
                     .clicked();
                 let pick = ui
                     .add_sized(
-                        vec2(114., MENU_BUTTON.y) * scale,
+                        size,
                         toolbar::menu_button(tr.text("Pick screen", "屏幕取色", "螢幕取色"), scale),
                     )
                     .clicked();
@@ -1301,6 +1408,85 @@ impl App {
             ui.ctx().request_repaint();
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum ActionIcon {
+    Delete,
+    Increase,
+    Decrease,
+}
+
+/// Native vector paths replace font-specific ×, A+ and A− glyphs. Geometry,
+/// stroke and contrast follow the actual allocated button size/DPI.
+fn annotation_icon_button(
+    ui: &mut Ui,
+    size: Vec2,
+    icon: ActionIcon,
+    label: &str,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), label));
+    if response.hovered() || response.has_focus() {
+        ui.painter().rect_filled(
+            rect,
+            6. * (size.y / MENU_BUTTON.y),
+            ui.visuals().widgets.hovered.bg_fill,
+        );
+    }
+    let scale = size.y / MENU_BUTTON.y;
+    let color = if ui.is_enabled() {
+        ui.visuals().text_color()
+    } else {
+        ui.visuals().weak_text_color()
+    };
+    let stroke = Stroke::new(2. * scale, color);
+    let at = |x: f32, y: f32| rect.center() + vec2(x, y) * scale;
+    let draw = |a: (f32, f32), b: (f32, f32)| {
+        ui.painter()
+            .line_segment([at(a.0, a.1), at(b.0, b.1)], stroke);
+    };
+    match icon {
+        ActionIcon::Delete => {
+            // Trash bin: handle, lid, body and dividers.
+            draw((-8., -7.), (8., -7.));
+            draw((-3., -10.), (3., -10.));
+            draw((-3., -10.), (-3., -7.));
+            draw((3., -10.), (3., -7.));
+            draw((-6., -5.), (-5., 9.));
+            draw((-5., 9.), (5., 9.));
+            draw((5., 9.), (6., -5.));
+            draw((-2., -3.), (-2., 6.));
+            draw((2., -3.), (2., 6.));
+        }
+        ActionIcon::Increase | ActionIcon::Decrease => {
+            // A is drawn with line segments, never with an OS font fallback.
+            draw((-11., 9.), (-5., -9.));
+            draw((-5., -9.), (1., 9.));
+            draw((-9., 3.), (-1., 3.));
+            draw((7., 0.), (15., 0.));
+            if matches!(icon, ActionIcon::Increase) {
+                draw((11., -4.), (11., 4.));
+            }
+        }
+    }
+    response
+}
+
+/// Use exactly the text action bar's width. The palette's height (and its
+/// round wheel) is fitted into the larger unobstructed vertical side of the
+/// toolbar, then clipped by the canvas. No independent fixed palette size.
+fn palette_layout(actions: Rect, canvas: Rect, scale: f32) -> (Vec2, f32) {
+    let controls =
+        (2. * PALETTE_MARGIN + 2. * PALETTE_GAP + PALETTE_SLIDER_HEIGHT + MENU_BUTTON.y) * scale;
+    let below = (canvas.bottom() - actions.bottom() - MENU_GAP * scale).max(0.);
+    let above = (actions.top() - canvas.top() - MENU_GAP * scale).max(0.);
+    let max_height = below
+        .max(above)
+        .min(canvas.height() - 2. * MENU_GAP * scale);
+    let wheel =
+        (actions.width() - 2. * PALETTE_MARGIN * scale).min((max_height - controls).max(0.));
+    (vec2(actions.width(), controls + wheel), scale)
 }
 
 fn overlay(ui: &Ui, id: &str, rect: Rect, content: impl FnOnce(&mut Ui)) {
@@ -2105,6 +2291,111 @@ mod tests {
     }
 
     #[test]
+    fn native_mouse_pen_and_finger_clicks_open_the_selected_text_keyboard() {
+        for device in ["mouse", "pen", "finger"] {
+            let mut app = app();
+            app.use_tool(Tool::Select);
+            let canvas = Rect::from_min_size(Pos2::ZERO, Vec2::from(SIZE));
+            let mut item = TextBox::new(pos2(200., 150.), canvas, app.color, 1.);
+            item.text = "Keyboard".into();
+            assert!(app.history.set_text_box(None, item).is_some());
+            app.input.text.selected = Some(0);
+            let point = app
+                .keyboard_button_rect(canvas)
+                .expect("selected item has keyboard button")
+                .center();
+            let window = SDL_WindowID(1);
+            let mut gui = Gui::new();
+            for down in [true, false] {
+                let event = match device {
+                    "mouse" => SDL_Event {
+                        button: SDL_MouseButtonEvent {
+                            r#type: if down {
+                                SDL_EVENT_MOUSE_BUTTON_DOWN
+                            } else {
+                                SDL_EVENT_MOUSE_BUTTON_UP
+                            },
+                            windowID: window,
+                            which: SDL_MouseID(1),
+                            button: SDL_BUTTON_LEFT as u8,
+                            down,
+                            x: point.x,
+                            y: point.y,
+                            ..Default::default()
+                        },
+                    },
+                    "pen" => SDL_Event {
+                        ptouch: SDL_PenTouchEvent {
+                            r#type: if down {
+                                SDL_EVENT_PEN_DOWN
+                            } else {
+                                SDL_EVENT_PEN_UP
+                            },
+                            windowID: window,
+                            down,
+                            x: point.x,
+                            y: point.y,
+                            ..Default::default()
+                        },
+                    },
+                    _ => SDL_Event {
+                        tfinger: SDL_TouchFingerEvent {
+                            r#type: if down {
+                                SDL_EVENT_FINGER_DOWN
+                            } else {
+                                SDL_EVENT_FINGER_UP
+                            },
+                            windowID: window,
+                            touchID: SDL_TouchID(45),
+                            fingerID: SDL_FingerID(9),
+                            x: point.x / SIZE[0],
+                            y: point.y / SIZE[1],
+                            ..Default::default()
+                        },
+                    },
+                };
+                app.text_event(&mut gui, &event, window, SIZE);
+                assert_eq!(app.input.text.take_keyboard_request(), !down, "{device}");
+            }
+            assert!(app.input.text.editing(), "{device}");
+        }
+    }
+
+    #[test]
+    fn keyboard_click_requires_release_inside_and_does_not_create_text_box() {
+        let mut app = app();
+        app.use_tool(Tool::Select);
+        let canvas = Rect::from_min_size(Pos2::ZERO, Vec2::from(SIZE));
+        let mut item = TextBox::new(pos2(150., 120.), canvas, app.color, 1.);
+        item.text = "Test".into();
+        assert!(app.history.set_text_box(None, item).is_some());
+        app.input.text.selected = Some(0);
+        let area = app.keyboard_button_rect(canvas).expect("keyboard menu");
+        let down = Event::PointerButton {
+            pos: area.center(),
+            button: PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let release = |pos| Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let outside_up = release(Pos2::ZERO);
+        assert!(app.keyboard_pointer(&down, canvas));
+        assert!(!app.keyboard_pointer(&outside_up, canvas));
+        assert!(!app.input.text.editing());
+        assert!(!app.input.text.take_keyboard_request());
+        assert!(app.keyboard_pointer(&down, canvas));
+        assert!(app.keyboard_pointer(&release(area.center()), canvas));
+        assert_eq!(app.history.text_boxes().len(), 1);
+        assert!(app.input.text.editing());
+        assert!(app.input.text.take_keyboard_request());
+    }
+
+    #[test]
     fn mouse_editing_does_not_request_keyboard_automatically() {
         let mut app = app();
         app.use_tool(Tool::Text);
@@ -2231,6 +2522,26 @@ mod tests {
     }
 
     #[test]
+    fn palette_tracks_text_menu_width_and_available_window_height() {
+        let mut app = app();
+        app.use_tool(Tool::Text);
+        click(&mut app, pos2(150., 120.));
+        app.input.text.color_wheel = Some(ColorWheel::new(app.color));
+        for screen_size in [vec2(800., 600.), vec2(500., 420.), vec2(1100., 700.)] {
+            let screen = Rect::from_min_size(Pos2::ZERO, screen_size);
+            let menus = app.text_menus(screen).expect("text annotation menu");
+            let Some((palette, scale)) = menus.palette else {
+                panic!("expected color palette");
+            };
+            assert!((palette.width() - menus.actions.width()).abs() < 0.01);
+            assert!(screen.contains_rect(menus.actions));
+            assert!(palette.width() > 0.);
+            assert!(palette.height() >= 0.);
+            assert!(scale > 0.);
+        }
+    }
+
+    #[test]
     fn annotation_palette_requests_a_screen_pick_without_finishing_a_draft() {
         let mut app = app();
         app.use_tool(Tool::Text);
@@ -2266,7 +2577,14 @@ mod tests {
         };
         assert!(screen.contains_rect(palette));
         assert!(app.input.text.editing());
-        tap(&mut app, palette.min + vec2(180., 110.) * scale);
+        assert!((palette.width() - row.width()).abs() < 0.01);
+        let inner = palette.shrink(PALETTE_MARGIN * scale);
+        let wheel_size = (inner.height()
+            - (PALETTE_SLIDER_HEIGHT + MENU_BUTTON.y + 2. * PALETTE_GAP) * scale)
+            .max(0.)
+            .min(inner.width());
+        let wheel_center = pos2(inner.center().x, inner.top() + wheel_size * 0.5);
+        tap(&mut app, wheel_center + vec2(wheel_size * 0.3, 0.));
         let Some(color) = app
             .input
             .text
@@ -2275,7 +2593,13 @@ mod tests {
         else {
             panic!("expected color-wheel selection");
         };
-        tap(&mut app, palette.min + vec2(60., 230.) * scale);
+        tap(
+            &mut app,
+            pos2(
+                inner.left() + inner.width() * 0.25,
+                inner.bottom() - MENU_BUTTON.y * scale * 0.5,
+            ),
+        );
         assert_eq!(
             app.input.text.draft.as_ref().map(|draft| draft.item.color),
             Some(color)
@@ -2284,7 +2608,17 @@ mod tests {
         assert!(app.input.text.color_wheel.is_none());
 
         tap(&mut app, wheel_button);
-        tap(&mut app, palette.min + vec2(175., 230.) * scale);
+        let Some((palette, scale)) = app.text_menus(screen).and_then(|menus| menus.palette) else {
+            panic!("expected palette after reopening");
+        };
+        let inner = palette.shrink(PALETTE_MARGIN * scale);
+        tap(
+            &mut app,
+            pos2(
+                inner.left() + inner.width() * 0.75,
+                inner.bottom() - MENU_BUTTON.y * scale * 0.5,
+            ),
+        );
         assert!(app.input.text.take_screen_pick());
         assert!(!app.input.text.take_screen_pick());
         assert!(app.input.text.color_wheel.is_none());

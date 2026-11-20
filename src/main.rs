@@ -26,6 +26,9 @@ mod keyboard;
 mod model;
 mod native;
 mod picker;
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[path = "picker/desktop.rs"]
+mod picker_desktop;
 mod sdl;
 mod toolbar;
 mod touch;

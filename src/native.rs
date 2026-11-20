@@ -5,6 +5,8 @@ use crate::sdl::*;
 pub mod macos;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod unix;
+#[cfg(target_os = "windows")]
+pub mod windows_keyboard;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub use unix::Passthrough;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]

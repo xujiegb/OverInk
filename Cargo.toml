@@ -52,7 +52,6 @@ objc2-app-kit = { version = "=0.3.2", default-features = false, features = [
     "NSColor",
     "NSEvent",
     "NSColorSpace",
-    "NSColorSampler",
     "block2",
     "objc2-core-foundation",
 ] }
@@ -66,6 +65,7 @@ windows = { version = "=0.62.2", features = [
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
+    "UI_ViewManagement",
     "Win32_System_WinRT_Direct3D11",
     "Win32_System_WinRT_Graphics_Capture",
     "Win32_UI_WindowsAndMessaging",
