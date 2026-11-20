@@ -1,4 +1,4 @@
-use super::{Image, system::Job};
+use super::{Encoding, Image, system::Job};
 use crate::sdl::*;
 use ::windows::{
     Foundation::TypedEventHandler,
@@ -18,7 +18,7 @@ use ::windows::{
                 D3D11_USAGE_STAGING, D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext,
                 ID3D11Texture2D,
             },
-            Dxgi::{Common::DXGI_FORMAT_R16G16B16A16_FLOAT, IDXGIDevice},
+            Dxgi::{Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT}, IDXGIDevice},
             Gdi::HMONITOR,
         },
         System::WinRT::{
@@ -42,6 +42,7 @@ use std::{
 
 pub fn start<T: Send + 'static>(
     display: u32,
+    linear: bool,
     prepare: impl FnOnce(Image) -> Result<T, String> + Send + 'static,
 ) -> Result<Job<T>, String> {
     let handle =
@@ -51,8 +52,9 @@ pub fn start<T: Send + 'static>(
             capture(
                 HMONITOR(ptr::with_exposed_provenance_mut(handle)),
                 cancelled,
+                linear,
             )
-            .map_err(|error| format!("Windows floating-point desktop capture: {error}"))
+            .map_err(|error| format!("Windows desktop capture: {error}"))
         },
         prepare,
     )
@@ -83,7 +85,7 @@ pub fn hdr_supported() -> bool {
     })
 }
 
-fn capture(monitor: HMONITOR, cancelled: &AtomicBool) -> Result<Option<Image>, Box<dyn Error>> {
+fn capture(monitor: HMONITOR, cancelled: &AtomicBool, linear: bool) -> Result<Option<Image>, Box<dyn Error>> {
     unsafe {
         RoInitialize(RO_INIT_MULTITHREADED)?;
         let _apartment = Apartment;
@@ -93,7 +95,13 @@ fn capture(monitor: HMONITOR, cancelled: &AtomicBool) -> Result<Option<Image>, B
         let interop = factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
         let item: GraphicsCaptureItem = interop.CreateForMonitor(monitor)?;
         let size = item.Size()?;
-        let mut image = Image::hdr_buffer(size.Width.try_into()?, size.Height.try_into()?)?;
+        let width = size.Width.try_into()?;
+        let height = size.Height.try_into()?;
+        let mut image = if linear {
+            Image::hdr_buffer(width, height)?
+        } else {
+            Image::buffer(width, height)?
+        };
         let (mut device, mut context) = (None, None);
         D3D11CreateDevice(
             None,
@@ -111,11 +119,17 @@ fn capture(monitor: HMONITOR, cancelled: &AtomicBool) -> Result<Option<Image>, B
         let dxgi: IDXGIDevice = device.cast()?;
         let capture_device: IDirect3DDevice =
             CreateDirect3D11DeviceFromDXGIDevice(&dxgi)?.cast()?;
-        // The WGC FP16 format is linear scRGB. Its reference is 80 nits,
-        // including when the user's SDR white level differs from that value.
+        // Capture FP16 scRGB only for an actual HDR/linear output. Otherwise
+        // request SDR BGRA8: this works with a transparent SDL renderer and
+        // avoids allocating an 8-byte-per-pixel frame on Windows ARM.
+        let format = if linear {
+            DirectXPixelFormat::R16G16B16A16Float
+        } else {
+            DirectXPixelFormat::B8G8R8A8UIntNormalized
+        };
         let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
             &capture_device,
-            DirectXPixelFormat::R16G16B16A16Float,
+            format,
             2,
             size,
         )?;
@@ -177,11 +191,12 @@ fn copy_frame(
         let source: ID3D11Texture2D = access.GetInterface()?;
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         source.GetDesc(&mut desc);
-        if desc.Format != DXGI_FORMAT_R16G16B16A16_FLOAT
-            || desc.Width != image.width
-            || desc.Height != image.height
-        {
-            return Err("The capture did not return the requested FP16 desktop frame".into());
+        let expected = match image.encoding {
+            Encoding::LinearRgba16 => DXGI_FORMAT_R16G16B16A16_FLOAT,
+            Encoding::Srgb8 => DXGI_FORMAT_B8G8R8A8_UNORM,
+        };
+        if desc.Format != expected || desc.Width != image.width || desc.Height != image.height {
+            return Err("The capture did not return the requested desktop frame format".into());
         }
         desc.Usage = D3D11_USAGE_STAGING;
         desc.BindFlags = 0;
@@ -200,10 +215,17 @@ fn copy_frame(
             .filter(|size| !pixels.is_null() && *size <= isize::MAX as usize)
             .ok_or_else(|| "Invalid mapped desktop frame".to_string())
             .and_then(|size| {
-                image.copy_hdr_rows(size, stride, |offset, row| {
-                    // Only the pixel bytes of each mapped row are initialized.
-                    ptr::copy_nonoverlapping(pixels.add(offset), row.as_mut_ptr(), row.len());
-                })
+                // D3D11's mapped allocation is valid until Unmap; the row
+                // helpers reject pitches that exceed the mapped allocation.
+                // Alpha is made opaque for both kinds of desktop snapshots.
+                match image.encoding {
+                    Encoding::LinearRgba16 => image.copy_hdr_rows(size, stride, |offset, row| {
+                        ptr::copy_nonoverlapping(pixels.add(offset), row.as_mut_ptr(), row.len());
+                    }),
+                    Encoding::Srgb8 => image.copy_sdr_bgra_rows(size, stride, |offset, row| {
+                        ptr::copy_nonoverlapping(pixels.add(offset), row.as_mut_ptr(), row.len());
+                    }),
+                }
             });
         context.Unmap(&staging, 0);
         result.map_err(Into::into)
