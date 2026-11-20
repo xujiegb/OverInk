@@ -2846,11 +2846,14 @@ impl Renderer {
                 );
             }
             let mut raw = None;
-            // SDL's transparent Win32 swap chain uses the DXGI bitblt model.
-            // Submit sRGB ink to that path so DWM composites it as SDR.
+            // Windows uses D3D11's legacy blit swap chain for transparent
+            // windows. Some HDR drivers can still create an FP16 scRGB
+            // renderer on that path; attempt it only on an HDR display, then
+            // fall back to SDR if SDL rejects it. Do not make all translucent
+            // SDR windows pay for an unnecessary 16-bit-per-channel surface.
             let transparent = SDL_GetWindowFlags(window.raw.as_ptr()) & SDL_WINDOW_TRANSPARENT != 0;
-            let extended_output =
-                cfg!(target_os = "macos") || (cfg!(target_os = "windows") && !transparent);
+            let extended_output = cfg!(target_os = "macos")
+                || (cfg!(target_os = "windows") && (!transparent || window.hdr_enabled()));
             if !force_sdr && extended_output {
                 SDL_SetNumberProperty(
                     props.id(),
