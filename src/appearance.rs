@@ -9,6 +9,7 @@ use std::{
 };
 
 mod french;
+mod multilingual;
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod portal;
@@ -24,14 +25,41 @@ pub enum Language {
     Traditional,
     #[serde(rename = "fr")]
     French,
+    #[serde(rename = "es")]
+    Spanish,
+    #[serde(rename = "ja")]
+    Japanese,
+    #[serde(rename = "de")]
+    German,
+    #[serde(rename = "ru")]
+    Russian,
+    #[serde(rename = "nl")]
+    Dutch,
+    #[serde(rename = "tr")]
+    Turkish,
+    #[serde(rename = "ko")]
+    Korean,
+    #[serde(rename = "pt")]
+    Portuguese,
+    #[serde(rename = "it")]
+    Italian,
 }
 
 impl Language {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 13] = [
         Self::English,
         Self::Simplified,
         Self::Traditional,
         Self::French,
+        Self::Spanish,
+        Self::Japanese,
+        Self::German,
+        Self::Russian,
+        Self::Dutch,
+        Self::Turkish,
+        Self::Korean,
+        Self::Portuguese,
+        Self::Italian,
     ];
 
     pub fn name(self) -> &'static str {
@@ -40,6 +68,15 @@ impl Language {
             Self::Simplified => "简体中文",
             Self::Traditional => "繁體中文",
             Self::French => "Français",
+            Self::Spanish => "Español",
+            Self::Japanese => "日本語",
+            Self::German => "Deutsch",
+            Self::Russian => "Русский",
+            Self::Dutch => "Nederlands",
+            Self::Turkish => "Türkçe",
+            Self::Korean => "한국어",
+            Self::Portuguese => "Português",
+            Self::Italian => "Italiano",
         }
     }
 
@@ -64,6 +101,21 @@ impl Language {
         }
         if code.eq_ignore_ascii_case("fr") {
             return Some(Self::French);
+        }
+        for (tag, language) in [
+            ("es", Self::Spanish),
+            ("ja", Self::Japanese),
+            ("de", Self::German),
+            ("ru", Self::Russian),
+            ("nl", Self::Dutch),
+            ("tr", Self::Turkish),
+            ("ko", Self::Korean),
+            ("pt", Self::Portuguese),
+            ("it", Self::Italian),
+        ] {
+            if code.eq_ignore_ascii_case(tag) {
+                return Some(language);
+            }
         }
         if !code.eq_ignore_ascii_case("zh") {
             return None;
@@ -117,6 +169,15 @@ impl Text {
             Language::Simplified => self.0[1],
             Language::Traditional => self.0[2],
             Language::French => french::short(self.0[0]),
+            Language::Spanish
+            | Language::Japanese
+            | Language::German
+            | Language::Russian
+            | Language::Dutch
+            | Language::Turkish
+            | Language::Korean
+            | Language::Portuguese
+            | Language::Italian => multilingual::short(self.0[0], language),
         }
     }
 
@@ -292,6 +353,16 @@ mod tests {
             ("fr-FR", "", Language::French),
             ("fr_CA.UTF-8", "", Language::French),
             ("fr", "CH", Language::French),
+            ("es-MX", "", Language::Spanish),
+            ("ja-JP", "", Language::Japanese),
+            ("de-AT", "", Language::German),
+            ("ru_RU.UTF-8", "", Language::Russian),
+            ("nl-BE", "", Language::Dutch),
+            ("tr-TR", "", Language::Turkish),
+            ("ko_KR.UTF-8", "", Language::Korean),
+            ("pt-PT", "", Language::Portuguese),
+            ("pt-BR", "", Language::Portuguese),
+            ("it-CH", "", Language::Italian),
         ] {
             assert_eq!(Language::from_locale(tag, region), Some(language), "{tag}");
         }
@@ -323,6 +394,41 @@ mod tests {
             text("Save failed", "保存失败", "儲存失敗").get(Language::French),
             "Échec d’enregistrement"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn nine_added_languages_roundtrip_and_translate() -> serde_json::Result<()> {
+        for language in [
+            Language::Spanish,
+            Language::Japanese,
+            Language::German,
+            Language::Russian,
+            Language::Dutch,
+            Language::Turkish,
+            Language::Korean,
+            Language::Portuguese,
+            Language::Italian,
+        ] {
+            let encoded = serde_json::to_string(&language)?;
+            assert_eq!(serde_json::from_str::<Language>(&encoded)?, language);
+            assert_ne!(
+                language.text("Settings", "设置", "設定"),
+                "Settings",
+                "{} needs a localized label",
+                language.name()
+            );
+            assert_ne!(
+                language.text("Save", "保存", "儲存"),
+                "Save",
+                "{} needs a localized button",
+                language.name()
+            );
+        }
+        // Old preferences must deserialize unchanged.
+        for legacy in [r#""en""#, r#""zh-Hans""#, r#""zh-Hant""#, r#""fr""#] {
+            assert!(serde_json::from_str::<Language>(legacy).is_ok());
+        }
         Ok(())
     }
 
