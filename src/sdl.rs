@@ -1521,10 +1521,7 @@ impl Window {
                     // SDL's hint must be set before StartTextInput. Restart
                     // just this editor's input method, then restore the normal
                     // non-OSK policy for subsequent mouse/pen editor activation.
-                    check(SDL_SetHint(
-                        SDL_HINT_ENABLE_SCREEN_KEYBOARD,
-                        c"1".as_ptr(),
-                    ))?;
+                    check(SDL_SetHint(SDL_HINT_ENABLE_SCREEN_KEYBOARD, c"1".as_ptr()))?;
                     if SDL_TextInputActive(self.raw.as_ptr()) {
                         let _ = SDL_StopTextInput(self.raw.as_ptr());
                     }
