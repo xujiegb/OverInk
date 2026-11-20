@@ -981,34 +981,36 @@ impl App {
         menu.spacing_mut().item_spacing.x = MENU_GAP * scale;
         menu.spacing_mut().button_padding = vec2(5., 4.) * scale;
         let mut acted = false;
-        if menu
-            .add_sized(button, toolbar::menu_button("×", scale))
-            .on_hover_text(
-                egui::RichText::new(tr.text("Delete text box", "删除文本框", "刪除文字框"))
-                    .size(toolbar::MENU_FONT_SIZE * scale),
-            )
-            .clicked()
+        if annotation_icon_button(
+            &mut menu,
+            button,
+            ActionIcon::Delete,
+            tr.text("Delete text box", "删除文本框", "刪除文字框"),
+        )
+        .on_hover_text(
+            egui::RichText::new(tr.text("Delete text box", "删除文本框", "刪除文字框"))
+                .size(toolbar::MENU_FONT_SIZE * scale),
+        )
+        .clicked()
         {
             acted = self.delete_text_box();
         }
-        for (label, hint, step, enabled) in [
+        for (icon, hint, step, enabled) in [
             (
-                "A+",
+                ActionIcon::Increase,
                 tr.text("Increase font size", "加大字号", "加大字級"),
                 font_step,
                 font_size < *TextBox::FONT_SIZE.end(),
             ),
             (
-                "A−",
+                ActionIcon::Decrease,
                 tr.text("Decrease font size", "缩小字号", "縮小字級"),
                 -font_step,
                 font_size > *TextBox::FONT_SIZE.start(),
             ),
         ] {
             if menu
-                .add_enabled_ui(enabled, |ui| {
-                    ui.add_sized(button, toolbar::menu_button(label, scale))
-                })
+                .add_enabled_ui(enabled, |ui| annotation_icon_button(ui, button, icon, hint))
                 .inner
                 .on_hover_text(egui::RichText::new(hint).size(toolbar::MENU_FONT_SIZE * scale))
                 .clicked()
@@ -1407,6 +1409,67 @@ impl App {
             ui.ctx().request_repaint();
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum ActionIcon {
+    Delete,
+    Increase,
+    Decrease,
+}
+
+/// Native vector paths replace font-specific ×, A+ and A− glyphs. Geometry,
+/// stroke and contrast follow the actual allocated button size/DPI.
+fn annotation_icon_button(
+    ui: &mut Ui,
+    size: Vec2,
+    icon: ActionIcon,
+    label: &str,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), label)
+    });
+    if response.hovered() || response.has_focus() {
+        ui.painter()
+            .rect_filled(rect, 6. * (size.y / MENU_BUTTON.y), ui.visuals().widgets.hovered.bg_fill);
+    }
+    let scale = size.y / MENU_BUTTON.y;
+    let color = if ui.is_enabled() {
+        ui.visuals().text_color()
+    } else {
+        ui.visuals().weak_text_color()
+    };
+    let stroke = Stroke::new(2. * scale, color);
+    let at = |x: f32, y: f32| rect.center() + vec2(x, y) * scale;
+    let draw = |a: (f32, f32), b: (f32, f32)| {
+        ui.painter().line_segment([at(a.0, a.1), at(b.0, b.1)], stroke);
+    };
+    match icon {
+        ActionIcon::Delete => {
+            // Trash bin: handle, lid, body and dividers.
+            draw((-8., -7.), (8., -7.));
+            draw((-3., -10.), (3., -10.));
+            draw((-3., -10.), (-3., -7.));
+            draw((3., -10.), (3., -7.));
+            draw((-6., -5.), (-5., 9.));
+            draw((-5., 9.), (5., 9.));
+            draw((5., 9.), (6., -5.));
+            draw((-2., -3.), (-2., 6.));
+            draw((2., -3.), (2., 6.));
+        }
+        ActionIcon::Increase | ActionIcon::Decrease => {
+            // A is drawn with line segments, never with an OS font fallback.
+            draw((-11., 9.), (-5., -9.));
+            draw((-5., -9.), (1., 9.));
+            draw((-9., 3.), (-1., 3.));
+            draw((7., 0.), (15., 0.));
+            if matches!(icon, ActionIcon::Increase) {
+                draw((11., -4.), (11., 4.));
+            }
+        }
+    }
+    response
 }
 
 /// Use exactly the text action bar's width. The palette's height (and its
