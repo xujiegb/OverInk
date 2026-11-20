@@ -244,6 +244,10 @@ impl TextInput {
         self.osk.close();
     }
 
+    pub fn osk_visible(&self) -> bool {
+        self.osk.visible && self.editing()
+    }
+
     pub fn screen_keyboard_session(&self) -> bool {
         self.screen_keyboard_session && self.editing()
     }
@@ -1339,9 +1343,13 @@ impl App {
                 .as_ref()
                 .map(|draft| draft.item.rect());
             if self.input.text.editing()
-                && let Some(rect) = self.input.text.osk.rect_near(screen, anchor)
+                && let Some(rect) =
+                    self.input
+                        .text
+                        .osk
+                        .rect_near(screen, anchor, self.input.canvas_units)
             {
-                let scale = self.input.canvas_units;
+                let scale = osk::Keyboard::layout_scale(screen, self.input.canvas_units);
                 let safe = osk::Keyboard::safe_area(screen);
                 let minimum = self.input.text.osk.minimum_size(safe.size(), scale);
                 let mut action = None;
@@ -1356,7 +1364,10 @@ impl App {
                         (1. * scale).round() as i8,
                     )),
                 )
-                .id(ui.make_persistent_id("overink-on-screen-keyboard"))
+                .id(ui.make_persistent_id((
+                    "overink-on-screen-keyboard",
+                    self.input.canvas_units.to_bits(),
+                )))
                 .order(egui::Order::Foreground)
                 .default_pos(rect.min)
                 .default_size(rect.size())
@@ -1378,6 +1389,9 @@ impl App {
                     self.input.text.osk.set_window_rect(window.response.rect);
                 }
                 if let Some(action) = action {
+                    // Keys use non-focusable interactions; never request egui
+                    // focus again here. Even requesting focus on an already
+                    // focused TextEdit interrupts an active IME composition.
                     self.apply_osk_action(action, composing);
                     ui.ctx().request_repaint();
                 }
@@ -1429,12 +1443,10 @@ impl App {
             if let Some(key) = physical {
                 match send_physical_key(key) {
                     Ok(()) => {
-                        // Restore egui's text editor focus after clicking a
-                        // drawn key; the physical key now flows through SDL's
-                        // established IME commit and preedit handling.
-                        if let Some(draft) = self.input.text.draft.as_mut() {
-                            draft.focus = true;
-                        }
+                        // The keyboard UI has already restored the editor's
+                        // egui focus. Never set Draft::focus here: doing so
+                        // replaces TextEditState on the next frame, erasing
+                        // the active IME cursor/preedit state after every key.
                         return;
                     }
                     Err(error) => {
@@ -1567,6 +1579,7 @@ impl App {
                     .draft
                     .as_ref()
                     .map(|draft| draft.item.rect()),
+                self.input.canvas_units,
             )
             .map(|rect| self.input.text.osk.current_rect(rect));
         let Some(draft) = self.input.text.draft.as_mut() else {
@@ -1884,6 +1897,7 @@ mod tests {
     fn render_with_toolbar_focus(app: &mut App, gui: &mut Gui, toolbar_focused: bool) {
         gui.raw.screen_rect = Some(Rect::from_min_size(Pos2::ZERO, Vec2::from(SIZE)));
         let composing = gui.composing();
+        gui.preserve_embedded_keyboard_focus(app.input.text.osk_visible());
         let input = gui.raw.take();
         let output = gui.ctx.run_ui(input, |ui| {
             app.text_ui(ui, true, composing, toolbar_focused)
@@ -1974,6 +1988,41 @@ mod tests {
         app.change_history(HistoryAction::Undo);
         assert!(app.history.text_boxes().is_empty());
         assert!(!app.history.can_undo());
+    }
+
+    #[test]
+    fn overink_keyboard_keeps_incremental_chinese_preedit_in_one_range() {
+        let mut app = app();
+        app.use_tool(Tool::Text);
+        click(&mut app, pos2(150., 120.));
+        let mut gui = Gui::new();
+        gui.ctx.set_fonts(app.text_fonts.definitions());
+        render(&mut app, &mut gui);
+        app.input.text.open_osk();
+        render(&mut app, &mut gui);
+
+        // A candidate is shown for each growing pinyin sequence. The text
+        // editor must replace the previous preedit, never append a duplicate.
+        for partial in ["a", "ap", "app", "appl", "apple"] {
+            ime(&mut gui, SDL_EVENT_TEXT_EDITING, partial);
+            render(&mut app, &mut gui);
+            assert_eq!(draft_preview(&app), Some(partial));
+            assert_eq!(draft_committed(&app), Some(""));
+        }
+        ime(&mut gui, SDL_EVENT_TEXT_INPUT, "苹果");
+        render(&mut app, &mut gui);
+        assert_eq!(draft_preview(&app), Some("苹果"));
+        assert_eq!(draft_committed(&app), Some("苹果"));
+
+        for partial in ["z", "zh", "zho", "zhon", "zhong"] {
+            ime(&mut gui, SDL_EVENT_TEXT_EDITING, partial);
+            render(&mut app, &mut gui);
+            assert_eq!(draft_preview(&app), Some(format!("苹果{partial}").as_str()));
+            assert_eq!(draft_committed(&app), Some("苹果"));
+        }
+        // Closing the editor must discard only uncommitted pinyin.
+        app.stop();
+        assert_eq!(app.history.text_boxes()[0].text, "苹果");
     }
 
     #[test]
@@ -3063,6 +3112,7 @@ mod tests {
         let Some(fallback) = app.input.text.osk.rect_near(
             screen,
             app.input.text.draft.as_ref().map(|draft| draft.item.rect()),
+            app.input.canvas_units,
         ) else {
             panic!("expected visible keyboard");
         };
