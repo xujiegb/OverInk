@@ -1353,6 +1353,10 @@ impl App {
                     .max_size(safe.size())
                     .constrain_to(safe)
                     .resizable(true)
+                    // egui's default OnTouch drags a window from anywhere,
+                    // stealing finger/pen Emoji page swipes. The title bar is
+                    // the only move handle; keys keep their own gestures.
+                    .drag_area(egui::WindowDrag::TitleBar)
                     .collapsible(false)
                     .show(ui.ctx(), |keyboard_ui| {
                         let keys = keyboard_ui.available_rect_before_wrap();
