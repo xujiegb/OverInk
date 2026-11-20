@@ -204,10 +204,10 @@ mod tests {
             ("Save As…", "Enregistrer sous…"),
             ("Cancel", "Annuler"),
         ] {
-            assert_eq!(Language::French.text(english, "", ""), french);
+            assert_eq!(Language::French.text(english), french);
         }
         assert_eq!(
-            Language::French.text("unknown plugin text", "", ""),
+            Language::French.text("unknown plugin text"),
             "unknown plugin text"
         );
     }
