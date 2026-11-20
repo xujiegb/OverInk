@@ -184,6 +184,15 @@ pub(super) fn short(english: &'static str) -> &'static str {
         "Freezing this desktop requires an extended-linear-sRGB renderer" => "Fond figé : rendu sRGB linéaire étendu requis",
         "HDR desktop capture is unavailable on this backend" => "Capture du bureau HDR indisponible",
         "No HDR screenshot backend" => "Aucun moteur de capture HDR",
+        "Using one canvas because a display window could not be opened" => "Un seul calque : fenêtre d’écran indisponible",
+        "Drawing layer update failed" => "Mise à jour du calque échouée",
+        "Frozen desktop unavailable" => "Fond figé indisponible",
+        "sRGB surface / system compositor" => "Surface sRGB / compositeur",
+        "Extended linear sRGB / system display mapping" => "sRGB linéaire étendu / affichage",
+        "X11 uses sRGB when an ICC profile is unavailable" => "Sans profil ICC, X11 utilise sRGB",
+        "X11 display ICC / moxcms" => "Profil ICC X11 / moxcms",
+        "Invalid ICC profile. X11 is using sRGB." => "Profil ICC invalide : X11 utilise sRGB.",
+        "ICC conversion failed. X11 is using sRGB." => "Conversion ICC échouée : X11 utilise sRGB.",
         _ => english,
     }
 }
