@@ -249,7 +249,7 @@ impl Picker {
                 });
                 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                 let capture = bounds.and_then(|display| {
-                    crate::background::screenshot::Job::start(
+                    crate::background::screenshot::Job::start_picker(
                         window,
                         display,
                         _displays,
@@ -257,8 +257,6 @@ impl Picker {
                             egui::Pos2::ZERO,
                             egui::Vec2::from(window.size()),
                         ),
-                        false,
-                        true,
                     )
                     .map(CaptureJob::Portal)
                 });
