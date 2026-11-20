@@ -47,3 +47,23 @@ pub extern "C" fn overink_macos_touch_event(
 ) {
     let _ = sdl::push_macos_direct_touch(window_id, finger_id, phase, x, y);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{overink_macos_install_touch, overink_macos_uninstall_touch};
+
+    #[test]
+    fn off_main_thread_rejects_direct_touch_install() -> Result<(), String> {
+        // Foreign callers may supply any window ID from any thread. The
+        // bridge must reject this before touching SDL windows or AppKit views.
+        let result = std::thread::spawn(|| {
+            let result = overink_macos_install_touch(u32::MAX);
+            overink_macos_uninstall_touch(u32::MAX);
+            result
+        })
+        .join()
+        .map_err(|_| "Off-main-thread touch bridge panicked")?;
+        assert_eq!(result, -1);
+        Ok(())
+    }
+}
