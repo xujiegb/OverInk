@@ -2953,19 +2953,30 @@ fn run_inner(options: Options) -> Result<(), String> {
                 if app.preferences.keyboard_source == KeyboardSource::System
                     && crate::keyboard::system_supported(&video)
                 {
+                    // Respect an explicit Windows system-keyboard preference:
+                    // never leave an old OverInk overlay open behind TabTip.
+                    app.input.text.osk.close();
                     match crate::keyboard::show(&canvas.window, &video) {
                         Ok(()) => app.input.text.mark_screen_keyboard_open(),
                         Err(error) => {
-                            // The user explicitly opted in to a system OSK,
-                            // but every platform must retain a working
-                            // self-drawn keyboard if its launcher fails.
+                            #[cfg(not(target_os = "windows"))]
                             app.input.text.open_osk();
-                            app.status = text(
+                            // Windows already tried InputPane, TabTip and
+                            // osk.exe. Report failure rather than silently
+                            // substituting the keyboard the user opted out of.
+                            #[cfg(target_os = "windows")]
+                            let message = text(
+                                "Windows system keyboard unavailable",
+                                "Windows 系统键盘不可用",
+                                "Windows 系統鍵盤不可用",
+                            );
+                            #[cfg(not(target_os = "windows"))]
+                            let message = text(
                                 "Using OverInk keyboard",
                                 "已改用 OverInk 键盘",
                                 "已改用 OverInk 鍵盤",
-                            )
-                            .detail(error);
+                            );
+                            app.status = message.detail(error);
                         }
                     }
                 } else {
