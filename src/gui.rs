@@ -11,6 +11,14 @@ use std::{
     collections::{BTreeMap, HashMap},
     time::{Duration, Instant},
 };
+/// The single source of application UI scaling, read from the owning SDL
+/// window. Full-size panels use it as the egui coordinate conversion;
+/// transparent annotation canvases keep SDL coordinates and pass this same
+/// value to their overlay layout. Do not independently query DPI in widgets.
+pub(crate) fn window_units(window: &Window) -> f32 {
+    window.ui_scale().max(0.5)
+}
+
 pub struct Gui {
     pub ctx: Context,
     pub raw: RawInput,
@@ -59,7 +67,7 @@ impl Gui {
         }
     }
     pub fn input(&mut self, w: &Window) -> RawInput {
-        self.input_with_units(w, w.ui_scale().max(0.5))
+        self.input_with_units(w, window_units(w))
     }
 
     pub fn canvas_input(&mut self, w: &Window) -> RawInput {

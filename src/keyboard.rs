@@ -5,6 +5,9 @@
 //! helpers. The native OSK is opt-in only on Windows and Linux Wayland/XWayland.
 use crate::sdl::Window;
 
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+mod unix_ime;
+
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod native_keys;
 #[cfg(all(not(test), any(target_os = "windows", target_os = "macos")))]
@@ -51,7 +54,7 @@ pub fn show(window: &Window, _video: &str) -> Result<(), String> {
             Ok(false) => (),
             Err(error) => eprintln!("OverInk: system InputPane unavailable: {error}"),
         }
-        let path = ["CommonProgramW6432", "CommonProgramFiles"]
+        let tabtip = ["CommonProgramW6432", "CommonProgramFiles"]
             .into_iter()
             .filter_map(env::var_os)
             .map(|root| {
@@ -60,12 +63,19 @@ pub fn show(window: &Window, _video: &str) -> Result<(), String> {
                     .join("ink")
                     .join("TabTip.exe")
             })
-            .find(|path| path.is_file())
-            .ok_or("Windows touch keyboard (TabTip.exe) is unavailable")?;
-        Command::new(path)
+            .find(|path| path.is_file());
+        if let Some(path) = tabtip
+            && Command::new(path).spawn().is_ok()
+        {
+            return Ok(());
+        }
+        // Tablet-mode InputPane can refuse to appear with a hardware
+        // keyboard attached. The built-in Windows Accessibility OSK is still
+        // a native system keyboard and does not require unsafe API calls.
+        Command::new("osk.exe")
             .spawn()
             .map(|_| ())
-            .map_err(|error| format!("Could not launch Windows touch keyboard: {error}"))
+            .map_err(|error| format!("Windows InputPane, TabTip and osk.exe unavailable: {error}"))
     }
     #[cfg(target_os = "linux")]
     {
@@ -94,50 +104,9 @@ pub fn show(window: &Window, _video: &str) -> Result<(), String> {
 pub fn switch_input_method() -> Result<(), String> {
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     {
-        // Fcitx5's toggle changes the active system input method without
-        // synthesizing application keyboard events or touching IME preedit.
-        if std::process::Command::new("fcitx5-remote")
-            .arg("-t")
-            .output()
-            .is_ok_and(|result| result.status.success())
-        {
-            return Ok(());
-        }
-        // IBus lists installed engine IDs; cycle using its own daemon. It
-        // owns the candidate UI, and OverInk only requests an engine change.
-        let current = std::process::Command::new("ibus")
-            .arg("engine")
-            .output()
-            .map_err(|error| format!("No Fcitx5 or IBus input source: {error}"))?;
-        let list = std::process::Command::new("ibus")
-            .arg("list-engine")
-            .output()
-            .map_err(|error| format!("Could not enumerate IBus engines: {error}"))?;
-        if !current.status.success() || !list.status.success() {
-            return Err("Could not query running IBus input sources".into());
-        }
-        let active = String::from_utf8_lossy(&current.stdout);
-        let engines: Vec<&str> = std::str::from_utf8(&list.stdout)
-            .map_err(|e| e.to_string())?
-            .lines()
-            .filter_map(|line| line.trim().split_once(" - ").map(|(name, _)| name.trim()))
-            .filter(|name| !name.is_empty())
-            .collect();
-        if engines.len() < 2 {
-            return Err("Configure at least two system input methods".into());
-        }
-        let Some(index) = engines.iter().position(|engine| *engine == active.trim()) else {
-            return Err("The active IBus engine is not in the installed engine list".into());
-        };
-        let next = engines[(index + 1) % engines.len()];
-        let status = std::process::Command::new("ibus")
-            .args(["engine", next])
-            .status()
-            .map_err(|error| error.to_string())?;
-        status
-            .success()
-            .then_some(())
-            .ok_or("IBus could not switch input source".into())
+        // Fcitx5 and IBus own candidates and native input-source state.
+        // No X11 key injection or Wayland-specific permission is needed.
+        unix_ime::switch_input_method()
     }
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {

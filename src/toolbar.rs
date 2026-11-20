@@ -53,11 +53,11 @@ pub enum Panel {
 impl Panel {
     pub fn title(self, language: Language) -> &'static str {
         match self {
-            Self::Shapes => language.text("Shapes", "形状", "圖形"),
-            Self::Brush => language.text("Brush", "笔刷", "筆刷"),
-            Self::Colors => language.text("Color", "颜色", "色彩"),
-            Self::Background => language.text("Background", "背景", "背景"),
-            Self::Settings => language.text("Settings", "设置", "設定"),
+            Self::Shapes => language.text("Shapes"),
+            Self::Brush => language.text("Brush"),
+            Self::Colors => language.text("Color"),
+            Self::Background => language.text("Background"),
+            Self::Settings => language.text("Settings"),
         }
     }
 }

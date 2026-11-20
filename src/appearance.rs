@@ -3,138 +3,12 @@
 use crate::sdl::*;
 use egui::Theme;
 use serde::{Deserialize, Serialize};
-use std::{
-    borrow::Cow,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
+
+pub use crate::language::{Language, Status, Text, text};
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod portal;
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Language {
-    #[default]
-    #[serde(rename = "en")]
-    English,
-    #[serde(rename = "zh-Hans")]
-    Simplified,
-    #[serde(rename = "zh-Hant")]
-    Traditional,
-}
-
-impl Language {
-    pub const ALL: [Self; 3] = [Self::English, Self::Simplified, Self::Traditional];
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::English => "English",
-            Self::Simplified => "简体中文",
-            Self::Traditional => "繁體中文",
-        }
-    }
-
-    pub fn text(
-        self,
-        english: &'static str,
-        hans: &'static str,
-        hant: &'static str,
-    ) -> &'static str {
-        text(english, hans, hant).get(self)
-    }
-
-    fn from_locale(language: &str, country: &str) -> Option<Self> {
-        let language = language.split(['.', '@']).next().unwrap_or_default();
-        let mut parts = language.split(['-', '_']);
-        let code = parts.next()?;
-        if ["en", "c", "posix"]
-            .iter()
-            .any(|tag| code.eq_ignore_ascii_case(tag))
-        {
-            return Some(Self::English);
-        }
-        if !code.eq_ignore_ascii_case("zh") {
-            return None;
-        }
-        let mut traditional_region = false;
-        for part in parts.chain(country.split(['-', '_'])) {
-            if part.eq_ignore_ascii_case("Hant") {
-                return Some(Self::Traditional);
-            }
-            if part.eq_ignore_ascii_case("Hans") {
-                return Some(Self::Simplified);
-            }
-            traditional_region |= ["TW", "HK", "MO"]
-                .iter()
-                .any(|tag| part.eq_ignore_ascii_case(tag));
-        }
-        Some(if traditional_region {
-            Self::Traditional
-        } else {
-            Self::Simplified
-        })
-    }
-
-    pub fn system() -> Self {
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        if let Some(language) = ["LC_ALL", "LC_MESSAGES"]
-            .into_iter()
-            .find_map(|key| std::env::var(key).ok().filter(|value| !value.is_empty()))
-            .and_then(|locale| Self::from_locale(&locale, ""))
-        {
-            return language;
-        }
-        preferred_locales()
-            .into_iter()
-            .find_map(|(language, country)| Self::from_locale(&language, &country))
-            .unwrap_or_default()
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Text([&'static str; 3]);
-
-pub const fn text(english: &'static str, hans: &'static str, hant: &'static str) -> Text {
-    Text([english, hans, hant])
-}
-
-impl Text {
-    pub fn get(self, language: Language) -> &'static str {
-        self.0[language as usize]
-    }
-
-    pub fn detail(self, detail: impl ToString) -> Status {
-        Status {
-            label: self,
-            detail: detail.to_string(),
-        }
-    }
-}
-
-#[derive(Default)]
-pub struct Status {
-    label: Text,
-    detail: String,
-}
-
-impl From<Text> for Status {
-    fn from(label: Text) -> Self {
-        Self {
-            label,
-            detail: String::new(),
-        }
-    }
-}
-
-impl Status {
-    pub fn get(&self, language: Language) -> Cow<'_, str> {
-        let label = self.label.get(language);
-        if self.detail.is_empty() {
-            Cow::Borrowed(label)
-        } else {
-            Cow::Owned(format!("{label} · {}", self.detail))
-        }
-    }
-}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -150,9 +24,9 @@ impl ThemeMode {
 
     pub fn label(self, language: Language) -> &'static str {
         match self {
-            Self::System => language.text("Follow system", "跟随系统", "跟隨系統"),
-            Self::Light => language.text("Light", "浅色", "淺色"),
-            Self::Dark => language.text("Dark", "深色", "深色"),
+            Self::System => language.text("Follow system"),
+            Self::Light => language.text("Light"),
+            Self::Dark => language.text("Dark"),
         }
     }
 }
@@ -271,10 +145,80 @@ mod tests {
             ("zh-Hans", "TW", Language::Simplified),
             ("zh", "SG", Language::Simplified),
             ("en-GB", "", Language::English),
+            ("fr-FR", "", Language::French),
+            ("fr_CA.UTF-8", "", Language::French),
+            ("fr", "CH", Language::French),
+            ("es-MX", "", Language::Spanish),
+            ("ja-JP", "", Language::Japanese),
+            ("de-AT", "", Language::German),
+            ("ru_RU.UTF-8", "", Language::Russian),
+            ("nl-BE", "", Language::Dutch),
+            ("tr-TR", "", Language::Turkish),
+            ("ko_KR.UTF-8", "", Language::Korean),
+            ("pt-PT", "", Language::Portuguese),
+            ("pt-BR", "", Language::Portuguese),
+            ("it-CH", "", Language::Italian),
         ] {
             assert_eq!(Language::from_locale(tag, region), Some(language), "{tag}");
         }
-        assert_eq!(Language::from_locale("ja_JP", ""), None);
+        assert_eq!(Language::from_locale("sv_SE", ""), None);
+    }
+
+    #[test]
+    fn french_selection_is_backward_compatible_and_localized() -> serde_json::Result<()> {
+        assert_eq!(serde_json::to_string(&Language::French)?, r#""fr""#);
+        assert_eq!(
+            serde_json::from_str::<Language>(r#""fr""#)?,
+            Language::French
+        );
+        assert_eq!(
+            serde_json::from_str::<Language>(r#""zh-Hant""#)?,
+            Language::Traditional
+        );
+        assert_eq!(Language::French.name(), "Français");
+        assert_eq!(Language::French.text("Settings"), "Réglages");
+        assert_eq!(Language::French.text("Pick screen"), "Pipette");
+        assert_eq!(ThemeMode::System.label(Language::French), "Système");
+        assert_eq!(
+            text("Save failed").get(Language::French),
+            "Échec d’enregistrement"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn nine_added_languages_roundtrip_and_translate() -> serde_json::Result<()> {
+        for language in [
+            Language::Spanish,
+            Language::Japanese,
+            Language::German,
+            Language::Russian,
+            Language::Dutch,
+            Language::Turkish,
+            Language::Korean,
+            Language::Portuguese,
+            Language::Italian,
+        ] {
+            let encoded = serde_json::to_string(&language)?;
+            assert_eq!(serde_json::from_str::<Language>(&encoded)?, language);
+            assert_ne!(
+                language.text("Settings"),
+                "Settings",
+                "{} needs a localized label",
+                language.name()
+            );
+            assert_ne!(
+                language.text("Save"),
+                "Save",
+                "{} needs a localized button",
+                language.name()
+            );
+        }
+        // Old preferences must deserialize unchanged.
+        for legacy in [r#""en""#, r#""zh-Hans""#, r#""zh-Hant""#, r#""fr""#] {
+            assert!(serde_json::from_str::<Language>(legacy).is_ok());
+        }
+        Ok(())
     }
 
     #[test]

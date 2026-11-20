@@ -82,7 +82,7 @@ impl App {
                                                 if toolbar::button(
                                                     ui,
                                                     Icon::Close,
-                                                    tr.text("Close panel", "关闭面板", "關閉面板"),
+                                                    tr.text("Close panel"),
                                                     false,
                                                 )
                                                 .clicked()
@@ -129,22 +129,14 @@ impl App {
         ui.add_space(3.);
         toolbar::hint(
             ui.add(egui::Image::new((mark, vec2(29., 29.)))),
-            tr.text(
-                "OverInk · drag to move to another display",
-                "OverInk · 拖动切换显示器",
-                "OverInk · 拖曳切換顯示器",
-            ),
+            tr.text("OverInk · drag to move to another display"),
         );
         ui.add_space(3.);
         if self.picking {
             if toolbar::rail_button(
                 ui,
                 Icon::Close,
-                tr.text(
-                    "Cancel screen color picker (Esc)",
-                    "取消屏幕取色 (Esc)",
-                    "取消螢幕取色 (Esc)",
-                ),
+                tr.text("Cancel screen color picker (Esc)"),
                 true,
             )
             .clicked()
@@ -155,14 +147,7 @@ impl App {
             self.rail_tools(ui, commands);
         }
         ui.add_space(1.);
-        if toolbar::rail_button(
-            ui,
-            Icon::Quit,
-            tr.text("Quit OverInk", "退出 OverInk", "結束 OverInk"),
-            false,
-        )
-        .clicked()
-        {
+        if toolbar::rail_button(ui, Icon::Quit, tr.text("Quit OverInk"), false).clicked() {
             commands.quit = true;
         }
     }
@@ -177,17 +162,9 @@ impl App {
                 ui.vertical_centered(|ui| {
                     let eye = if self.hidden { Icon::EyeOff } else { Icon::Eye };
                     let label = if self.hidden {
-                        tr.text(
-                            "Show drawing layer (H)",
-                            "显示书写图层 (H)",
-                            "顯示書寫圖層 (H)",
-                        )
+                        tr.text("Show drawing layer (H)")
                     } else {
-                        tr.text(
-                            "Hide drawing layer (H)",
-                            "隐藏书写图层 (H)",
-                            "隱藏書寫圖層 (H)",
-                        )
+                        tr.text("Hide drawing layer (H)")
                     };
                     if toolbar::rail_button(ui, eye, label, self.hidden).clicked() {
                         self.finish_all_contacts();
@@ -197,11 +174,7 @@ impl App {
                     if toolbar::rail_button(
                         ui,
                         Icon::Pointer,
-                        tr.text(
-                            "Mouse · click desktop (Space)",
-                            "鼠标 · 点击桌面（空格键）",
-                            "滑鼠 · 點按桌面（空白鍵）",
-                        ),
+                        tr.text("Mouse · click desktop (Space)"),
                         self.pass,
                     )
                     .clicked()
@@ -215,7 +188,7 @@ impl App {
                             toolbar::rail_button(
                                 ui,
                                 Icon::Screenshot,
-                                tr.text("Region screenshot", "区域截图", "區域螢幕擷取"),
+                                tr.text("Region screenshot"),
                                 false,
                             )
                         })
@@ -237,11 +210,7 @@ impl App {
                     if toolbar::rail_button(
                         ui,
                         shapes,
-                        tr.text(
-                            "Lines, shapes and laser",
-                            "线条、形状与激光笔",
-                            "線條、圖形與雷射筆",
-                        ),
+                        tr.text("Lines, shapes and laser"),
                         shape_selected || self.panel == Some(Panel::Shapes),
                     )
                     .clicked()
@@ -253,34 +222,22 @@ impl App {
                         ui,
                         Icon::Brush,
                         Panel::Brush,
-                        tr.text(
-                            "Brush width and opacity",
-                            "笔刷粗细与不透明度",
-                            "筆刷粗細與不透明度",
-                        ),
+                        tr.text("Brush width and opacity"),
                     );
                     let actions = [
                         (
                             Icon::Undo,
-                            tr.text(
-                                "Undo (Ctrl/Cmd+Z)",
-                                "撤销 (Ctrl/Cmd+Z)",
-                                "復原 (Ctrl/Cmd+Z)",
-                            ),
+                            tr.text("Undo (Ctrl/Cmd+Z)"),
                             super::HistoryAction::Undo,
                         ),
                         (
                             Icon::Redo,
-                            tr.text(
-                                "Redo (Ctrl/Cmd+Shift+Z)",
-                                "重做 (Ctrl/Cmd+Shift+Z)",
-                                "重做 (Ctrl/Cmd+Shift+Z)",
-                            ),
+                            tr.text("Redo (Ctrl/Cmd+Shift+Z)"),
                             super::HistoryAction::Redo,
                         ),
                         (
                             Icon::Clear,
-                            tr.text("Clear this page", "清除当前页面", "清除目前頁面"),
+                            tr.text("Clear this page"),
                             super::HistoryAction::Clear,
                         ),
                     ];
@@ -301,13 +258,13 @@ impl App {
                         ui,
                         Icon::Display,
                         Panel::Background,
-                        tr.text("Desktop background", "桌面背景", "桌面背景"),
+                        tr.text("Desktop background"),
                     );
                     self.panel_button(
                         ui,
                         Icon::Settings,
                         Panel::Settings,
-                        tr.text("Settings and files", "设置与文件", "設定與檔案"),
+                        tr.text("Settings and files"),
                     );
                     ui.add(egui::Separator::default().spacing(3.));
                     for row in PRESETS.as_chunks::<2>().0 {
@@ -332,11 +289,7 @@ impl App {
                     let label = format!(
                         "{} · {}",
                         self.color.hex(),
-                        tr.text(
-                            "Palette and screen picker",
-                            "色盘与屏幕取色",
-                            "調色盤與螢幕取色",
-                        )
+                        tr.text("Palette and screen picker")
                     );
                     if toolbar::swatch(
                         ui,
@@ -400,32 +353,15 @@ impl App {
                 }
             }
         });
-        ui.small(tr.text(
-            "Line, arrow, box, ellipse and laser",
-            "直线、箭头、矩形、椭圆与激光笔",
-            "直線、箭頭、矩形、橢圓與雷射筆",
-        ));
+        ui.small(tr.text("Line, arrow, box, ellipse and laser"));
     }
 
     fn brush(&mut self, ui: &mut Ui) {
         let tr = self.language;
-        ui.add(
-            egui::Slider::new(&mut self.width, 1.0..=48.0).text(tr.text("Width", "粗细", "粗細")),
-        );
-        ui.add(egui::Slider::new(&mut self.opacity, 0.1..=1.).text(tr.text(
-            "Opacity",
-            "不透明度",
-            "不透明度",
-        )));
-        ui.checkbox(
-            &mut self.pressure,
-            tr.text("Pen pressure", "笔尖压感", "筆尖感壓"),
-        );
-        ui.add(egui::Slider::new(&mut self.curve, 0.2..=3.).text(tr.text(
-            "Pressure curve",
-            "压感曲线",
-            "感壓曲線",
-        )));
+        ui.add(egui::Slider::new(&mut self.width, 1.0..=48.0).text(tr.text("Width")));
+        ui.add(egui::Slider::new(&mut self.opacity, 0.1..=1.).text(tr.text("Opacity")));
+        ui.checkbox(&mut self.pressure, tr.text("Pen pressure"));
+        ui.add(egui::Slider::new(&mut self.curve, 0.2..=3.).text(tr.text("Pressure curve")));
         ui.separator();
         let pen = self
             .input
@@ -438,7 +374,7 @@ impl App {
         ui.add(egui::ProgressBar::new(pen.pressure).text(format!("{:.1}%", pen.pressure * 100.)));
         ui.small(format!(
             "{} {:.0}° / {:.0}°",
-            tr.text("Tilt", "倾角", "傾角"),
+            tr.text("Tilt"),
             pen.tilt[0],
             pen.tilt[1]
         ));
@@ -447,19 +383,15 @@ impl App {
     fn palette(&mut self, ui: &mut Ui, commands: &mut Commands) {
         let tr = self.language;
         ui.horizontal_wrapped(|ui| {
-            ui.label(tr.text("Palette", "色盘", "調色盤"));
+            ui.label(tr.text("Palette"));
             let mut rgb = self.color.channels8();
             if ui.color_edit_button_srgb(&mut rgb).changed() {
                 commands.redraw_canvas |=
                     self.select_color(InkColor::from_channels(rgb, self.color.space));
             }
             if toolbar::hint(
-                ui.button(tr.text("Pick screen", "屏幕取色", "螢幕取色")),
-                tr.text(
-                    "Choose a desktop pixel. Esc cancels.",
-                    "点击桌面任一点取色，按 Esc 取消。",
-                    "點按桌面任一點取色，按 Esc 取消。",
-                ),
+                ui.button(tr.text("Pick screen")),
+                tr.text("Choose a desktop pixel. Esc cancels."),
             )
             .clicked()
             {
@@ -475,7 +407,7 @@ impl App {
                     .char_limit(16)
                     .hint_text("#FFFFFF"),
             );
-            let accept = ui.button(tr.text("Apply", "应用", "套用")).clicked()
+            let accept = ui.button(tr.text("Apply")).clicked()
                 || (response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)));
             if (response.has_focus() || response.lost_focus())
                 && ui.input(|input| input.key_pressed(egui::Key::Escape))
@@ -493,18 +425,11 @@ impl App {
             }
         });
         if self.hex_entry.invalid {
-            ui.colored_label(
-                ui.visuals().error_fg_color,
-                tr.text(
-                    "Use #RRGGBB or #RGB",
-                    "请输入 #RRGGBB 或 #RGB",
-                    "請輸入 #RRGGBB 或 #RGB",
-                ),
-            );
+            ui.colored_label(ui.visuals().error_fg_color, tr.text("Use #RRGGBB or #RGB"));
         }
         let label = |space| match space {
-            Space::Srgb => tr.text("sRGB color", "sRGB 颜色", "sRGB 色彩"),
-            Space::DisplayP3 => tr.text("Display P3 color", "Display P3 颜色", "Display P3 色彩"),
+            Space::Srgb => tr.text("sRGB color"),
+            Space::DisplayP3 => tr.text("Display P3 color"),
         };
         let mut space = self.color.space;
         egui::ComboBox::from_id_salt("source-gamut")
@@ -532,7 +457,7 @@ impl App {
         if ui
             .selectable_label(
                 self.board.is_none() && !self.frozen,
-                tr.text("Live desktop", "实时桌面", "即時桌面"),
+                tr.text("Live desktop"),
             )
             .clicked()
         {
@@ -542,10 +467,7 @@ impl App {
         }
         let freeze = ui
             .add_enabled_ui(freeze_unavailable.is_none(), |ui| {
-                let response = ui.selectable_label(
-                    self.frozen,
-                    tr.text("Frozen desktop", "冻结桌面", "凍結桌面"),
-                );
+                let response = ui.selectable_label(self.frozen, tr.text("Frozen desktop"));
                 if let Some(reason) = freeze_unavailable {
                     toolbar::hint(response, reason)
                 } else {
@@ -561,16 +483,12 @@ impl App {
         if let Some(reason) = freeze_unavailable {
             ui.small(reason);
         }
-        if self.frozen
-            && ui
-                .button(tr.text("Refresh snapshot", "刷新快照", "更新快照"))
-                .clicked()
-        {
+        if self.frozen && ui.button(tr.text("Refresh snapshot")).clicked() {
             commands.background = true;
         }
         for (board, label) in [
-            (Board::White, tr.text("Whiteboard", "白板", "白板")),
-            (Board::Black, tr.text("Blackboard", "黑板", "黑板")),
+            (Board::White, tr.text("Whiteboard")),
+            (Board::Black, tr.text("Blackboard")),
         ] {
             if ui
                 .selectable_label(self.board == Some(board), label)
@@ -596,8 +514,8 @@ impl App {
         let color = &canvas.color;
         let tr = self.language;
         ui.horizontal(|ui| {
-            ui.label(tr.text("Language", "语言", "語言"));
-            let system = tr.text("Follow system", "跟随系统", "跟隨系統");
+            ui.label(tr.text("Language"));
+            let system = tr.text("Follow system");
             let choice = &mut self.preferences.language;
             egui::ComboBox::from_id_salt("ui-language")
                 .selected_text(choice.map_or(system, Language::name))
@@ -611,7 +529,7 @@ impl App {
                 });
         });
         ui.horizontal(|ui| {
-            ui.label(tr.text("Theme", "主题", "主題"));
+            ui.label(tr.text("Theme"));
             let choice = &mut self.preferences.theme;
             egui::ComboBox::from_id_salt("ui-theme")
                 .selected_text(choice.label(tr))
@@ -624,15 +542,15 @@ impl App {
                 });
         });
         ui.separator();
-        ui.label(RichText::new(tr.text("On-screen keyboard", "屏幕键盘", "螢幕鍵盤")).strong());
+        ui.label(RichText::new(tr.text("On-screen keyboard")).strong());
         ui.horizontal(|ui| {
-            ui.label(tr.text("Keyboard source", "键盘来源", "鍵盤來源"));
+            ui.label(tr.text("Keyboard source"));
             let source = &mut self.preferences.keyboard_source;
             let system_supported = crate::keyboard::system_supported(video);
             let display_source = if *source == KeyboardSource::System && system_supported {
-                tr.text("System keyboard", "系统键盘", "系統鍵盤")
+                tr.text("System keyboard")
             } else {
-                tr.text("OverInk keyboard", "OverInk 键盘", "OverInk 鍵盤")
+                tr.text("OverInk keyboard")
             };
             egui::ComboBox::from_id_salt("osk-source")
                 .selected_text(display_source)
@@ -641,11 +559,7 @@ impl App {
                         .selectable_value(
                             source,
                             KeyboardSource::OverInk,
-                            tr.text(
-                                "OverInk keyboard (default)",
-                                "OverInk 键盘（默认）",
-                                "OverInk 鍵盤（預設）",
-                            ),
+                            tr.text("OverInk keyboard (default)"),
                         )
                         .changed();
                     commands.preferences |= ui
@@ -653,24 +567,18 @@ impl App {
                             ui.selectable_value(
                                 source,
                                 KeyboardSource::System,
-                                tr.text("System keyboard", "系统键盘", "系統鍵盤"),
+                                tr.text("System keyboard"),
                             )
                         })
                         .inner
                         .changed();
                 });
         });
-        ui.small(tr.text(
-            "The globe key changes your input method; the OverInk keyboard provides no candidate suggestions.",
-            "地球键切换系统输入法；OverInk 键盘不提供候选词。",
-            "地球鍵切換系統輸入法；OverInk 鍵盤不提供候選字。",
-        ));
+        ui.small(tr.text("The globe key changes your input method; the OverInk keyboard provides no candidate suggestions."));
         ui.separator();
-        ui.label(RichText::new(tr.text("Annotation fonts", "标注字体", "標註字型")).strong());
+        ui.label(RichText::new(tr.text("Annotation fonts")).strong());
         ui.small(tr.text(
             "Drag ☰ to change fallback priority. The three included fonts cannot be removed.",
-            "拖动 ☰ 调整字体优先级；三个内置字体不可删除。",
-            "拖曳 ☰ 調整字型優先順序；三個內建字型不可刪除。",
         ));
         for (index, (id, name, bundled)) in self.text_fonts.entries().enumerate() {
             let frame = egui::Frame::default().inner_margin(egui::Margin::symmetric(5, 3));
@@ -682,14 +590,10 @@ impl App {
                     });
                     ui.label(name);
                     if bundled {
-                        ui.small("🔒").on_hover_text(tr.text(
-                            "Included font",
-                            "内置字体",
-                            "內建字型",
-                        ));
+                        ui.small("🔒").on_hover_text(tr.text("Included font"));
                     } else if ui
                         .small_button("×")
-                        .on_hover_text(tr.text("Remove font", "删除字体", "刪除字型"))
+                        .on_hover_text(tr.text("Remove font"))
                         .clicked()
                     {
                         commands.font_remove = Some(id.to_owned());
@@ -703,11 +607,7 @@ impl App {
         if ui
             .add_enabled(
                 !dialog_open,
-                egui::Button::new(tr.text(
-                    "+ Add system font",
-                    "＋ 添加系统字体",
-                    "＋ 新增系統字型",
-                )),
+                egui::Button::new(tr.text("+ Add system font")),
             )
             .clicked()
         {
@@ -719,11 +619,8 @@ impl App {
         }
         if self.adding_font {
             ui.add(
-                egui::TextEdit::singleline(&mut self.font_search).hint_text(tr.text(
-                    "Search fonts",
-                    "搜索字体",
-                    "搜尋字型",
-                )),
+                egui::TextEdit::singleline(&mut self.font_search)
+                    .hint_text(tr.text("Search fonts")),
             );
             let filter = self.font_search.to_lowercase();
             let mut added = false;
@@ -749,13 +646,10 @@ impl App {
             }
         }
         ui.separator();
-        ui.label(RichText::new(tr.text("Screenshots", "截图", "螢幕擷取")).strong());
+        ui.label(RichText::new(tr.text("Screenshots")).strong());
         let hdr_available = screenshot::hdr_available(&canvas.window);
         let mut hdr = hdr_available && self.preferences.screenshot_hdr;
-        let checkbox = egui::Checkbox::new(
-            &mut hdr,
-            tr.text("Save HDR PNG", "保存 HDR PNG", "儲存 HDR PNG"),
-        );
+        let checkbox = egui::Checkbox::new(&mut hdr, tr.text("Save HDR PNG"));
         if ui.add_enabled(hdr_available, checkbox).changed() {
             self.preferences.screenshot_hdr = hdr;
             commands.preferences = true;
@@ -763,23 +657,18 @@ impl App {
         if !hdr_available {
             ui.small(screenshot::unsupported_hdr(tr));
         }
-        ui.label(tr.text("Default save folder", "默认保存文件夹", "預設儲存資料夾"));
+        ui.label(tr.text("Default save folder"));
         ui.label(self.preferences.screenshot_folder.as_ref().map_or_else(
-            || tr.text("Downloads", "下载", "下載").into(),
+            || tr.text("Downloads").into(),
             |path| path.to_string_lossy(),
         ));
         ui.add_enabled_ui(!dialog_open, |ui| {
             ui.horizontal_wrapped(|ui| {
-                if ui
-                    .button(tr.text("Choose folder…", "选择文件夹…", "選擇資料夾…"))
-                    .clicked()
-                {
+                if ui.button(tr.text("Choose folder…")).clicked() {
                     commands.screenshot_folder = true;
                 }
                 if self.preferences.screenshot_folder.is_some()
-                    && ui
-                        .button(tr.text("Use Downloads", "使用下载文件夹", "使用下載資料夾"))
-                        .clicked()
+                    && ui.button(tr.text("Use Downloads")).clicked()
                 {
                     self.preferences.screenshot_folder = None;
                     commands.preferences = true;
@@ -787,7 +676,7 @@ impl App {
             });
         });
         ui.separator();
-        ui.label(RichText::new(tr.text("Display", "显示器", "顯示器")).strong());
+        ui.label(RichText::new(tr.text("Display")).strong());
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         {
             #[cfg(target_os = "linux")]
@@ -799,11 +688,7 @@ impl App {
                     can_toggle,
                     egui::Checkbox::new(
                         &mut self.preferences.wayland,
-                        tr.text(
-                            "Native Wayland (restart to apply)",
-                            "原生 Wayland（重启后生效）",
-                            "原生 Wayland（重新啟動後生效）",
-                        ),
+                        tr.text("Native Wayland (restart to apply)"),
                     ),
                 )
                 .changed();
@@ -816,28 +701,20 @@ impl App {
             .add_enabled_ui(video != "wayland", |ui| {
                 ui.checkbox(
                     &mut self.preferences.per_display_windows,
-                    tr.text(
-                        "One canvas per display",
-                        "每块屏幕独立画布",
-                        "每個螢幕獨立畫布",
-                    ),
+                    tr.text("One canvas per display"),
                 )
             })
             .inner;
         commands.preferences |= per_display.changed();
         if video == "wayland" {
-            ui.small(tr.text(
-                "Native Wayland uses a single canvas.",
-                "原生 Wayland 使用单窗口。",
-                "原生 Wayland 使用單視窗。",
-            ));
+            ui.small(tr.text("Native Wayland uses a single canvas."));
         }
         egui::ComboBox::from_id_salt("display")
             .selected_text(
                 self.displays
                     .get(self.display)
                     .map(|d| d.name.as_str())
-                    .unwrap_or(tr.text("No display", "无显示器", "無顯示器")),
+                    .unwrap_or(tr.text("No display")),
             )
             .show_ui(ui, |ui| {
                 for display in &self.displays {
@@ -851,21 +728,13 @@ impl App {
                 }
             });
         if self.multi {
-            ui.small(tr.text(
-                "Draw directly on each screen. Undo follows the selected canvas.",
-                "在各屏幕直接书写。撤销作用于当前画布。",
-                "在各螢幕直接書寫。復原作用於目前畫布。",
-            ));
+            ui.small(tr.text("Draw directly on each screen. Undo follows the selected canvas."));
         } else if video != "wayland" {
-            ui.small(tr.text(
-                "Drag the OverInk icon to move the canvas between screens.",
-                "拖动 OverInk 图标可把画布移到另一块屏幕。",
-                "拖曳 OverInk 圖示可將畫布移到另一個螢幕。",
-            ));
+            ui.small(tr.text("Drag the OverInk icon to move the canvas between screens."));
         }
         ui.horizontal(|ui| {
-            ui.label(tr.text("Frame rate", "帧率", "影格率"));
-            let auto = tr.text("Auto", "自动", "自動");
+            ui.label(tr.text("Frame rate"));
+            let auto = tr.text("Auto");
             egui::ComboBox::from_id_salt("frame-rate")
                 .selected_text(if self.frame_rate == FrameRate::Auto {
                     format!("{auto} ({:.2} FPS)", self.frame_rate.hz(self.refresh_hz()))
@@ -889,41 +758,31 @@ impl App {
                 });
         });
         if ui
-            .checkbox(
-                &mut self.touch_enabled,
-                tr.text("Touch draw", "触屏书写", "觸控書寫"),
-            )
+            .checkbox(&mut self.touch_enabled, tr.text("Touch draw"))
             .changed()
         {
             self.for_each_page(|app| app.discard_touches());
             commands.redraw_canvas = true;
         }
         ui.separator();
-        ui.label(RichText::new(tr.text("Session", "会话", "工作階段")).strong());
+        ui.label(RichText::new(tr.text("Session")).strong());
         commands.preferences |= ui
             .checkbox(
                 &mut self.preferences.restore_session,
-                tr.text(
-                    "Keep ink for the next launch",
-                    "退出后保留笔迹",
-                    "結束後保留筆跡",
-                ),
+                tr.text("Keep ink for the next launch"),
             )
             .changed();
         ui.add(egui::TextEdit::singleline(&mut self.path).desired_width(f32::INFINITY));
         ui.horizontal(|ui| {
-            if ui.button(tr.text("Save", "保存", "儲存")).clicked() {
+            if ui.button(tr.text("Save")).clicked() {
                 self.save();
                 commands.redraw_canvas = true;
             }
-            if ui.button(tr.text("Open", "打开", "開啟")).clicked() {
+            if ui.button(tr.text("Open")).clicked() {
                 self.load();
                 commands.redraw_canvas = true;
             }
-            if ui
-                .button(tr.text("Export SVG", "导出 SVG", "匯出 SVG"))
-                .clicked()
-            {
+            if ui.button(tr.text("Export SVG")).clicked() {
                 self.export();
                 commands.redraw_canvas = true;
             }
@@ -933,17 +792,23 @@ impl App {
             Language::English => format!("{count} strokes on this screen"),
             Language::Simplified => format!("当前屏幕有 {count} 条笔迹"),
             Language::Traditional => format!("目前螢幕有 {count} 條筆跡"),
+            Language::French => format!("{count} tracés sur cet écran"),
+            Language::Spanish => format!("{count} trazos en esta pantalla"),
+            Language::Japanese => format!("この画面の描画：{count} 本"),
+            Language::German => format!("{count} Striche auf diesem Bildschirm"),
+            Language::Russian => format!("Штрихов на экране: {count}"),
+            Language::Dutch => format!("{count} streken op dit scherm"),
+            Language::Turkish => format!("Bu ekrandaki çizgi: {count}"),
+            Language::Korean => format!("이 화면의 획: {count}개"),
+            Language::Portuguese => format!("{count} traços neste ecrã"),
+            Language::Italian => format!("{count} tratti su questo schermo"),
         });
         ui.separator();
         let (hdr, headroom) = render.hdr();
         let encoding = if hdr {
-            tr.text(
-                "HDR output · SDR ink",
-                "HDR 输出 · SDR 笔迹",
-                "HDR 輸出 · SDR 筆跡",
-            )
+            tr.text("HDR output · SDR ink")
         } else if render.extended {
-            tr.text("Linear sRGB", "线性 sRGB", "線性 sRGB")
+            tr.text("Linear sRGB")
         } else {
             "SDR sRGB"
         };
@@ -953,17 +818,10 @@ impl App {
         ));
         ui.small(color.status.get(tr));
         if video == "wayland" {
-            ui.small(tr.text(
-                "The Wayland compositor controls window order and placement.",
-                "Wayland 窗口层级和位置由合成器控制。",
-                "Wayland 視窗層級與位置由合成器控制。",
-            ));
+            ui.small(tr.text("The Wayland compositor controls window order and placement."));
         }
         ui.add_space(6.);
-        if ui
-            .button(tr.text("Quit OverInk", "退出 OverInk", "結束 OverInk"))
-            .clicked()
-        {
+        if ui.button(tr.text("Quit OverInk")).clicked() {
             commands.quit = true;
         }
     }
@@ -971,20 +829,16 @@ impl App {
 
 fn tool_label(tool: Tool, tr: Language) -> &'static str {
     match tool {
-        Tool::Pen => tr.text("Pen", "笔", "筆"),
-        Tool::Pencil => tr.text("Pencil", "铅笔", "鉛筆"),
-        Tool::Marker => tr.text("Highlighter", "荧光笔", "螢光筆"),
-        Tool::Line => tr.text("Line", "直线", "直線"),
-        Tool::Arrow => tr.text("Arrow", "箭头", "箭頭"),
-        Tool::Rectangle => tr.text("Box", "矩形", "矩形"),
-        Tool::Ellipse => tr.text("Ellipse", "椭圆", "橢圓"),
-        Tool::Eraser => tr.text("Eraser", "橡皮擦", "橡皮擦"),
-        Tool::Laser => tr.text("Laser", "激光笔", "雷射筆"),
-        Tool::Text => tr.text("Text (T)", "文字（T）", "文字（T）"),
-        Tool::Select => tr.text(
-            "Select and move text (V)",
-            "选择和移动文字（V）",
-            "選取和移動文字（V）",
-        ),
+        Tool::Pen => tr.text("Pen"),
+        Tool::Pencil => tr.text("Pencil"),
+        Tool::Marker => tr.text("Highlighter"),
+        Tool::Line => tr.text("Line"),
+        Tool::Arrow => tr.text("Arrow"),
+        Tool::Rectangle => tr.text("Box"),
+        Tool::Ellipse => tr.text("Ellipse"),
+        Tool::Eraser => tr.text("Eraser"),
+        Tool::Laser => tr.text("Laser"),
+        Tool::Text => tr.text("Text (T)"),
+        Tool::Select => tr.text("Select and move text (V)"),
     }
 }

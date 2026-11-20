@@ -307,13 +307,22 @@ $themeTemplate = @'
 '@
 # Bootstrapper theme is embedded in this script; no external theme file is required.
 [void][System.Xml.Linq.XDocument]::Parse($themeTemplate)
-$script:BuildStage = 'Validating four-language translations'
+$script:BuildStage = 'Validating thirteen-language translations'
 
 $themeCultures = @(
     @{ Culture = 'en-US'; Lcid = 1033 },
     @{ Culture = 'zh-CN'; Lcid = 2052 },
     @{ Culture = 'zh-TW'; Lcid = 1028 },
-    @{ Culture = 'fr-FR'; Lcid = 1036 }
+    @{ Culture = 'fr-FR'; Lcid = 1036 },
+    @{ Culture = 'es-ES'; Lcid = 3082 },
+    @{ Culture = 'ja-JP'; Lcid = 1041 },
+    @{ Culture = 'de-DE'; Lcid = 1031 },
+    @{ Culture = 'ru-RU'; Lcid = 1049 },
+    @{ Culture = 'nl-NL'; Lcid = 1043 },
+    @{ Culture = 'tr-TR'; Lcid = 1055 },
+    @{ Culture = 'ko-KR'; Lcid = 1042 },
+    @{ Culture = 'pt-PT'; Lcid = 2070 },
+    @{ Culture = 'it-IT'; Lcid = 1040 }
 )
 $themeTranslations = [ordered]@{
     Caption = @('OverInk Setup', 'OverInk 安装程序', 'OverInk 安裝程式', 'Installation d''OverInk')
@@ -370,21 +379,56 @@ $themeTokens = [regex]::Matches($themeTemplate, '#\(loc\.([A-Za-z][A-Za-z0-9_]*)
 foreach ($token in $themeTokens) {
     if (-not $themeTranslations.Contains($token)) { throw "Missing localized string: $token" }
 }
+# Existing four locales remain in the original script. The other nine are
+# stored by culture and by the same checked English token order.
+. (Join-Path $root 'package-windows-locales.ps1')
+$baseCultureCount = 4
 $themeLocalization = @{}
 $localizationEntries = @($themeTranslations.GetEnumerator())
-foreach ($entry in $localizationEntries) {
-    $values = @($entry.Value)
-    if ($values.Count -ne $themeCultures.Count) {
-        throw ("Translation '{0}' has {1} values; expected {2}" -f $entry.Key, $values.Count, $themeCultures.Count)
+if ($installerLocaleTokens.Count -ne $localizationEntries.Count) {
+    throw "Installer localization key count mismatch"
+}
+for ($i = 0; $i -lt $localizationEntries.Count; $i++) {
+    $entry = $localizationEntries[$i]
+    if ([string]$entry.Key -cne [string]$installerLocaleTokens[$i]) {
+        throw "Installer localization key mismatch at $($i): $($entry.Key)"
+    }
+    if (@($entry.Value).Count -ne $baseCultureCount) {
+        throw "Invalid base translations for $($entry.Key)"
+    }
+}
+if ($installerLocaleStrings.Count -ne ($themeCultures.Count - $baseCultureCount)) {
+    throw "Missing or extra installer languages"
+}
+foreach ($culture in $themeCultures | Select-Object -Skip $baseCultureCount) {
+    $cultureName = [string]$culture.Culture
+    if (-not $installerLocaleStrings.ContainsKey($cultureName)) {
+        throw "Missing installer translations for $cultureName"
+    }
+    $items = @($installerLocaleStrings[$cultureName])
+    if ($items.Count -ne $localizationEntries.Count -or
+        @($items | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -gt 0) {
+        throw "Incomplete installer translations for $cultureName"
     }
 }
 for ($index = 0; $index -lt $themeCultures.Count; $index++) {
     $culture = $themeCultures[$index]
+    $localizedItems = if ($index -lt $baseCultureCount) {
+        @()
+    } else {
+        @($installerLocaleStrings[[string]$culture.Culture])
+    }
     $script:BuildStage = "Generating localization for $($culture.Culture) (index $index)"
     $path = Join-Path $work ("$($culture.Culture).thm.wxl")
-    $strings = foreach ($entry in $localizationEntries) {
-        $values = @($entry.Value)
-        $value = ConvertTo-XmlAttribute ([string]$values[$index])
+    $strings = for ($item = 0; $item -lt $localizationEntries.Count; $item++) {
+        $entry = $localizationEntries[$item]
+        $localized = if ($index -lt $baseCultureCount) {
+            $values = @($entry.Value)
+            [string]$values[$index]
+        } else {
+            [string]$localizedItems[$item]
+        }
+        $value = ConvertTo-XmlAttribute $localized
         "  <String Id=`"$($entry.Key)`" Value=`"$value`" />"
     }
     $xml = "<?xml version=`"1.0`" encoding=`"utf-8`"?>`n<WixLocalization xmlns=`"http://wixtoolset.org/schemas/v4/wxl`" Culture=`"$($culture.Culture)`" Language=`"$($culture.Lcid)`" Codepage=`"65001`">`n$($strings -join "`n")`n</WixLocalization>"
@@ -406,6 +450,33 @@ $localeMappings = [ordered]@{
     '3084' = 'fr-FR'
     '4108' = 'fr-FR'
     '5132' = 'fr-FR'
+    # Spanish (Spain and Latin America)
+    '3082' = 'es-ES'
+    '2058' = 'es-ES'
+    '11274' = 'es-ES'
+    '13322' = 'es-ES'
+    '9226' = 'es-ES'
+    # Japanese
+    '1041' = 'ja-JP'
+    # German (Germany, Austria, Switzerland)
+    '1031' = 'de-DE'
+    '3079' = 'de-DE'
+    '2055' = 'de-DE'
+    # Russian
+    '1049' = 'ru-RU'
+    # Dutch (Netherlands, Belgium)
+    '1043' = 'nl-NL'
+    '2067' = 'nl-NL'
+    # Turkish
+    '1055' = 'tr-TR'
+    # Korean
+    '1042' = 'ko-KR'
+    # Portuguese (Portugal and Brazil share the pt-PT catalog)
+    '2070' = 'pt-PT'
+    '1046' = 'pt-PT'
+    # Italian (Italy, Switzerland)
+    '1040' = 'it-IT'
+    '2064' = 'it-IT'
 }
 foreach ($mapping in $localeMappings.GetEnumerator()) {
     $lcid = [string]$mapping.Key

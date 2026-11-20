@@ -169,7 +169,7 @@ impl Canvas {
 
     pub fn set_page_geometry(&self, app: &mut App) {
         app.input.protected = self.protected;
-        app.input.canvas_units = self.window.ui_scale().max(0.5);
+        app.input.canvas_units = gui::window_units(&self.window);
     }
 
     pub fn keep_toolbar_above(&self, toolbar: &Window) {
@@ -545,12 +545,8 @@ pub(super) fn reconcile(
         app.finish_all_contacts();
         app.parked_input.clear();
         app.multi = false;
-        app.status = text(
-            "Using one canvas because a display window could not be opened",
-            "有屏幕的画布无法打开，已切回单窗口",
-            "有螢幕的畫布無法開啟，已切回單視窗",
-        )
-        .detail(error);
+        app.status =
+            text("Using one canvas because a display window could not be opened").detail(error);
         reconcile_windows(canvases, app, toolbar, options)?;
     }
     Ok(())
@@ -596,10 +592,5 @@ pub(super) fn event_window(event: &SDL_Event, ty: SDL_EventType) -> Option<SDL_W
 }
 
 pub(super) fn failure(error: impl ToString) -> crate::appearance::Status {
-    text(
-        "Drawing layer update failed",
-        "更新书写图层失败",
-        "更新書寫圖層失敗",
-    )
-    .detail(error)
+    text("Drawing layer update failed").detail(error)
 }

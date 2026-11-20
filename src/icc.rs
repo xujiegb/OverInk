@@ -23,11 +23,7 @@ pub struct ColorManager {
     pub revision: u64,
 }
 
-const SYSTEM_SRGB: Text = text(
-    "sRGB surface / system compositor",
-    "sRGB 表面 / 系统合成",
-    "sRGB 表面 / 系統合成",
-);
+const SYSTEM_SRGB: Text = text("sRGB surface / system compositor");
 
 impl Default for ColorManager {
     fn default() -> Self {
@@ -46,11 +42,7 @@ impl ColorManager {
         // when the current output no longer needs an application ICC transform.
         self.transform = None;
         self.status = if extended {
-            text(
-                "Extended linear sRGB / system display mapping",
-                "扩展线性 sRGB / 系统显示映射",
-                "延伸線性 sRGB / 系統顯示映射",
-            )
+            text("Extended linear sRGB / system display mapping")
         } else {
             SYSTEM_SRGB
         };
@@ -58,11 +50,7 @@ impl ColorManager {
             return;
         }
         let Some(profile) = window.icc_profile() else {
-            self.status = text(
-                "X11 uses sRGB when an ICC profile is unavailable",
-                "X11 未找到 ICC 配置文件，按 sRGB 显示",
-                "X11 找不到 ICC 色彩描述檔，以 sRGB 顯示",
-            );
+            self.status = text("X11 uses sRGB when an ICC profile is unavailable");
             return;
         };
         let mut hash = std::collections::hash_map::DefaultHasher::new();
@@ -72,25 +60,13 @@ impl ColorManager {
         match Transform::from_srgb_to_display(&profile) {
             Ok(transform) => {
                 self.transform = Some(transform);
-                self.status = text(
-                    "X11 display ICC / moxcms",
-                    "X11 显示器 ICC / moxcms",
-                    "X11 顯示器 ICC / moxcms",
-                );
+                self.status = text("X11 display ICC / moxcms");
             }
             Err(DisplayError::InvalidProfile) => {
-                self.status = text(
-                    "Invalid ICC profile. X11 is using sRGB.",
-                    "ICC 配置文件无效，X11 按 sRGB 显示",
-                    "ICC 色彩描述檔無效，X11 以 sRGB 顯示",
-                );
+                self.status = text("Invalid ICC profile. X11 is using sRGB.");
             }
             Err(DisplayError::ConversionFailed) => {
-                self.status = text(
-                    "ICC conversion failed. X11 is using sRGB.",
-                    "ICC 转换失败，X11 按 sRGB 显示",
-                    "ICC 轉換失敗，X11 以 sRGB 顯示",
-                );
+                self.status = text("ICC conversion failed. X11 is using sRGB.");
             }
         }
     }

@@ -3,25 +3,29 @@
 //! The Objective-C side owns NSTouch/NSView and its recognizer. No Cocoa
 //! object or raw pointer escapes into the application or SDL event model.
 use crate::sdl::{self, Window};
+use std::{marker::PhantomData, rc::Rc};
 
 unsafe extern "C" {
-    fn overink_macos_install_touch(window_id: u32) -> i32;
-    fn overink_macos_uninstall_touch(window_id: u32);
+    safe fn overink_macos_install_touch(window_id: u32) -> i32;
+    safe fn overink_macos_uninstall_touch(window_id: u32);
 }
 
 pub struct DirectTouchMonitor {
     window_id: u32,
+    // A view-attached AppKit recognizer must be removed on its owning thread.
+    // PhantomData does not allocate or introduce an FFI/raw-pointer type.
+    _main_thread: PhantomData<Rc<()>>,
 }
 
 impl DirectTouchMonitor {
     pub fn install(window: &Window) -> Result<Option<Self>, String> {
-        // SAFETY: Window owns a live Cocoa SDL window on the AppKit main
-        // thread. The bridge retrieves the borrowed NSWindow synchronously,
-        // installs a retained gesture recognizer and retains no SDL handles.
-        let installed = unsafe { overink_macos_install_touch(window.id.0) };
+        // The scalar-only bridge validates the AppKit thread and SDL window ID
+        // before it retrieves Cocoa objects; no native pointers enter Rust.
+        let installed = overink_macos_install_touch(window.id.0);
         match installed {
             1 => Ok(Some(Self {
                 window_id: window.id.0,
+                _main_thread: PhantomData,
             })),
             0 => Ok(None), // macOS before 27.
             _ => Err("Could not attach the macOS direct-touch recognizer".into()),
@@ -31,9 +35,8 @@ impl DirectTouchMonitor {
 
 impl Drop for DirectTouchMonitor {
     fn drop(&mut self) {
-        // SAFETY: Canvas drops this monitor before the SDL Window, on the
-        // Cocoa main thread. The bridge removes its gesture recognizer.
-        unsafe { overink_macos_uninstall_touch(self.window_id) };
+        // The bridge ignores invalid IDs and calls outside the AppKit thread.
+        overink_macos_uninstall_touch(self.window_id);
     }
 }
 
@@ -48,4 +51,24 @@ pub extern "C" fn overink_macos_touch_event(
     y: f32,
 ) {
     let _ = sdl::push_macos_direct_touch(window_id, finger_id, phase, x, y);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{overink_macos_install_touch, overink_macos_uninstall_touch};
+
+    #[test]
+    fn off_main_thread_rejects_direct_touch_install() -> Result<(), String> {
+        // Foreign callers may supply any window ID from any thread. The
+        // bridge must reject this before touching SDL windows or AppKit views.
+        let result = std::thread::spawn(|| {
+            let result = overink_macos_install_touch(u32::MAX);
+            overink_macos_uninstall_touch(u32::MAX);
+            result
+        })
+        .join()
+        .map_err(|_| "Off-main-thread touch bridge panicked")?;
+        assert_eq!(result, -1);
+        Ok(())
+    }
 }

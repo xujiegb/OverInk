@@ -97,6 +97,20 @@ const SPACE: Cell = Cell::wide(Key::Space, 4.5);
 const LEFT: Cell = Cell::wide(Key::Left, 1.);
 const RIGHT: Cell = Cell::wide(Key::Right, 1.);
 
+const LETTER_ROW_0: [Cell; 12] = [
+    Cell::text("1"),
+    Cell::text("2"),
+    Cell::text("3"),
+    Cell::text("4"),
+    Cell::text("5"),
+    Cell::text("6"),
+    Cell::text("7"),
+    Cell::text("8"),
+    Cell::text("9"),
+    Cell::text("0"),
+    Cell::text("-"),
+    Cell::text("="),
+];
 const LETTER_ROW_1: [Cell; 11] = [
     Cell::text("q"),
     Cell::text("w"),
@@ -279,6 +293,25 @@ fn emoji_dot_at(x: f32, left: f32, spacing: f32, count: usize) -> usize {
         .clamp(0., (count - 1) as f32) as usize
 }
 
+/// The extra top row uses standard US Shift number/symbol pairs.
+fn shifted_key_label(label: &'static str) -> Cow<'static, str> {
+    match label {
+        "1" => Cow::Borrowed("!"),
+        "2" => Cow::Borrowed("@"),
+        "3" => Cow::Borrowed("#"),
+        "4" => Cow::Borrowed("$"),
+        "5" => Cow::Borrowed("%"),
+        "6" => Cow::Borrowed("^"),
+        "7" => Cow::Borrowed("&"),
+        "8" => Cow::Borrowed("*"),
+        "9" => Cow::Borrowed("("),
+        "0" => Cow::Borrowed(")"),
+        "-" => Cow::Borrowed("_"),
+        "=" => Cow::Borrowed("+"),
+        _ => Cow::Owned(label.to_uppercase()),
+    }
+}
+
 impl Keyboard {
     pub fn open(&mut self) {
         self.visible = true;
@@ -287,23 +320,35 @@ impl Keyboard {
         self.visible = false;
         self.window_rect = None;
     }
-    /// Coordinates already use egui logical points; multiplying panel width by
-    /// the DPI scale made a Retina keyboard twice as wide as intended.
-    /// Pixel density is handled by the canvas egui context, not by geometry.
-    pub fn rect_near(&self, screen: Rect, anchor: Option<Rect>, _scale: f32) -> Option<Rect> {
+    /// Usable keyboard area, shared by initial placement and egui's
+    /// draggable-window constraint. Do not maintain separate Dock insets
+    /// that can diverge after window resizes or display transitions.
+    pub fn safe_area(screen: Rect) -> Rect {
+        let inset_x = (screen.width() * 0.025).clamp(8., 28.);
+        let inset_y = (screen.height() * 0.10).clamp(24., 120.);
+        screen.shrink2(vec2(inset_x, inset_y))
+    }
+
+    /// Geometry uses canvas coordinates; `Gui` alone resolves the
+    /// display DPI. No second screen-scale query belongs in this widget.
+    pub fn rect_near(&self, screen: Rect, anchor: Option<Rect>) -> Option<Rect> {
         if !self.visible || screen.width() < 280. || screen.height() < 200. {
             return None;
         }
         // Keep a bottom work-area inset so an always-visible macOS Dock does
         // not cover the initial keyboard position on a fullscreen SDL canvas.
-        let inset_x = (screen.width() * 0.025).clamp(8., 28.);
-        let inset_y = (screen.height() * 0.10).clamp(24., 120.);
-        let safe = screen.shrink2(vec2(inset_x, inset_y));
+        let safe = Self::safe_area(screen);
         if safe.width() < 240. || safe.height() < 145. {
             return None;
         }
-        let width = (safe.width() * 0.68).clamp(260., 960.).min(safe.width());
-        let height = (width * 0.37).clamp(170., 350.).min(safe.height());
+        #[cfg(target_os = "macos")]
+        let (fraction, maximum) = (0.52, 740.);
+        #[cfg(not(target_os = "macos"))]
+        let (fraction, maximum) = (0.60, 900.);
+        let width = (safe.width() * fraction)
+            .clamp(280., maximum)
+            .min(safe.width());
+        let height = (width * 0.44).clamp(210., 370.).min(safe.height());
         let size = vec2(width, height);
         let gap = (height * 0.035).max(5.);
         let desired_x = anchor.map_or(safe.center().x, |r| r.center().x) - width * 0.5;
@@ -335,8 +380,11 @@ impl Keyboard {
         self.window_rect = Some(rect);
     }
 
-    pub fn minimum_size(&self, available: egui::Vec2) -> egui::Vec2 {
-        vec2(260., 170.).min(available)
+    pub fn minimum_size(&self, available: egui::Vec2, units: f32) -> egui::Vec2 {
+        // The five-row keyboard cannot be shrunk to a fixed 210 points at
+        // 150%/200% UI scale: keys would become smaller than main UI buttons.
+        // Reuse the canvas's single main-UI scale, bounded by safe area.
+        (vec2(280., 210.) * units).min(available)
     }
 
     pub fn ui(&mut self, ui: &mut Ui, rect: Rect, scale: f32) -> Option<Action> {
@@ -345,11 +393,13 @@ impl Keyboard {
         let margin = (8. * scale).max(3.);
         let gap = (5. * scale).max(2.);
         let inside = rect.shrink(margin);
-        let row_h = ((inside.height() - 3. * gap) / 4.).max(0.);
+        let rows = if self.page == Page::Letters { 5 } else { 4 };
+        let row_h = ((inside.height() - (rows - 1) as f32 * gap) / rows as f32).max(0.);
         let mut result = None;
         match self.page {
             Page::Letters => {
                 for (i, row) in [
+                    LETTER_ROW_0.as_slice(),
                     LETTER_ROW_1.as_slice(),
                     LETTER_ROW_2.as_slice(),
                     LETTER_ROW_3.as_slice(),
@@ -358,7 +408,7 @@ impl Keyboard {
                 .into_iter()
                 .enumerate()
                 {
-                    if let Some(action) = self.row(ui, row, inside, i, gap) {
+                    if let Some(action) = self.row(ui, row, inside, i, gap, rows) {
                         result = Some(action);
                     }
                 }
@@ -373,7 +423,7 @@ impl Keyboard {
                 .into_iter()
                 .enumerate()
                 {
-                    if let Some(action) = self.row(ui, row, inside, i, gap) {
+                    if let Some(action) = self.row(ui, row, inside, i, gap, rows) {
                         result = Some(action);
                     }
                 }
@@ -388,7 +438,7 @@ impl Keyboard {
                 .into_iter()
                 .enumerate()
                 {
-                    if let Some(action) = self.row(ui, row, inside, i, gap) {
+                    if let Some(action) = self.row(ui, row, inside, i, gap, rows) {
                         result = Some(action);
                     }
                 }
@@ -407,8 +457,9 @@ impl Keyboard {
         inside: Rect,
         row: usize,
         gap: f32,
+        rows: usize,
     ) -> Option<Action> {
-        let height = ((inside.height() - 3. * gap) / 4.).max(0.);
+        let height = ((inside.height() - (rows - 1) as f32 * gap) / rows as f32).max(0.);
         let total: f32 = keys.iter().map(|cell| cell.weight).sum();
         let unit = ((inside.width() - gap * (keys.len().saturating_sub(1)) as f32) / total).max(0.);
         let mut x = inside.left();
@@ -446,8 +497,8 @@ impl Keyboard {
         };
         let upper;
         let label = if self.shift && self.page == Page::Letters && !special {
-            upper = label.to_uppercase();
-            upper.as_str()
+            upper = shifted_key_label(label);
+            upper.as_ref()
         } else {
             label
         };
@@ -519,7 +570,7 @@ impl Keyboard {
         match key {
             Key::Text(value) => {
                 let value = if self.shift && self.page == Page::Letters {
-                    Cow::Owned(value.to_uppercase())
+                    shifted_key_label(value)
                 } else {
                     Cow::Borrowed(value)
                 };
@@ -863,6 +914,27 @@ mod tests {
     }
 
     #[test]
+    fn five_row_keyboard_has_twelve_number_keys_and_shift_symbols() {
+        assert_eq!(LETTER_ROW_0.len(), 12);
+        assert_eq!(
+            LETTER_ROW_0.iter().map(|cell| cell.weight).sum::<f32>(),
+            12.
+        );
+        let mut k = Keyboard::default();
+        k.act(Key::Shift);
+        assert_eq!(
+            k.act(Key::Text("1")),
+            Some(Action::Insert(Cow::Borrowed("!")))
+        );
+        assert!(!k.shift);
+        k.act(Key::Shift);
+        assert_eq!(
+            k.act(Key::Text("=")),
+            Some(Action::Insert(Cow::Borrowed("+")))
+        );
+    }
+
+    #[test]
     fn shift_is_one_shot_and_plain_unicode_keys_are_borrowed() {
         let mut keyboard = Keyboard::default();
         assert_eq!(
@@ -954,7 +1026,7 @@ mod tests {
         keyboard.act(Key::EmojiPage);
         let ctx = egui::Context::default();
         let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(800., 600.));
-        let Some(rect) = keyboard.rect_near(screen, None, 1.) else {
+        let Some(rect) = keyboard.rect_near(screen, None) else {
             panic!("Expected emoji keyboard bounds");
         };
         let inside = rect.shrink(8.);
@@ -1007,7 +1079,7 @@ mod tests {
         keyboard.act(Key::EmojiPage);
         let ctx = egui::Context::default();
         let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(800., 600.));
-        let Some(rect) = keyboard.rect_near(screen, None, 1.) else {
+        let Some(rect) = keyboard.rect_near(screen, None) else {
             panic!("Expected emoji keyboard bounds");
         };
         let inside = rect.shrink(8.);
@@ -1091,15 +1163,13 @@ mod tests {
         keyboard.open();
         let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(1920., 1080.));
         let top_text = Rect::from_min_size(pos2(900., 80.), vec2(200., 80.));
-        let below = keyboard.rect_near(screen, Some(top_text), 1.);
-        let high_dpi = keyboard.rect_near(screen, Some(top_text), 2.);
-        assert_eq!(below, high_dpi, "DPI should affect raster size, not points");
+        let below = keyboard.rect_near(screen, Some(top_text));
         let Some(below) = below else {
             panic!("Expected keyboard below text");
         };
         assert!(below.top() >= top_text.bottom());
         let bottom_text = Rect::from_min_size(pos2(900., 910.), vec2(200., 60.));
-        let Some(above) = keyboard.rect_near(screen, Some(bottom_text), 1.) else {
+        let Some(above) = keyboard.rect_near(screen, Some(bottom_text)) else {
             panic!("Expected keyboard above text");
         };
         assert!(above.bottom() <= bottom_text.top());
@@ -1108,12 +1178,24 @@ mod tests {
     }
 
     #[test]
+    fn keyboard_minimum_tracks_shared_ui_scale_and_safe_area() {
+        let keyboard = Keyboard::default();
+        let available = vec2(1200., 800.);
+        assert_eq!(keyboard.minimum_size(available, 1.), vec2(280., 210.));
+        assert_eq!(keyboard.minimum_size(available, 2.), vec2(560., 420.));
+        assert_eq!(
+            keyboard.minimum_size(vec2(300., 200.), 2.),
+            vec2(300., 200.)
+        );
+    }
+
+    #[test]
     fn responsive_overlay_stays_within_canvas() {
         let mut k = Keyboard::default();
         k.open();
         for (w, h) in [(800., 600.), (320., 240.), (1920., 1080.)] {
             let area = Rect::from_min_size(egui::Pos2::ZERO, vec2(w, h));
-            let Some(r) = k.rect_near(area, None, 1.) else {
+            let Some(r) = k.rect_near(area, None) else {
                 panic!("keyboard should fit");
             };
             assert!(area.contains_rect(r));
@@ -1122,8 +1204,7 @@ mod tests {
         assert!(
             k.rect_near(
                 Rect::from_min_size(egui::Pos2::ZERO, vec2(800., 600.)),
-                None,
-                1.
+                None
             )
             .is_none()
         );

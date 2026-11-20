@@ -21,7 +21,7 @@ pub(super) fn run(
     })?;
     let window = Window::new("OverInk — GNOME Wayland", WIDTH, HEIGHT, false)?;
     // SDL's X11 window coordinates are pixels, while egui uses points.
-    let units = window.ui_scale();
+    let units = crate::gui::window_units(&window);
     if units > 1. && driver() == "x11" {
         window.set_size(
             (WIDTH as f32 * units).round() as i32,

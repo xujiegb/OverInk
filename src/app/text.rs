@@ -45,6 +45,12 @@ struct TextMenus {
     palette: Option<(Rect, f32)>,
 }
 
+#[derive(Clone, Copy)]
+struct TextContextLayout {
+    rect: Rect,
+    scale: f32,
+}
+
 // A screen pick must not recolor a different annotation when the toolbar is
 // still interactive while the native picker is running.
 #[derive(Debug, PartialEq)]
@@ -232,6 +238,10 @@ impl TextInput {
             self.screen_keyboard_session = false;
             self.osk.open();
         }
+    }
+
+    pub fn close_osk(&mut self) {
+        self.osk.close();
     }
 
     pub fn screen_keyboard_session(&self) -> bool {
@@ -617,12 +627,7 @@ impl App {
                     state.click = None;
                     if self.tool == Tool::Text {
                         if self.history.text_boxes().len() >= MAX_TEXT_BOXES {
-                            self.status = text(
-                                "Text box limit reached",
-                                "已达到文字框数量上限",
-                                "已達到文字框數量上限",
-                            )
-                            .into();
+                            self.status = text("Text box limit reached").into();
                         } else {
                             state.edit(
                                 None,
@@ -747,7 +752,9 @@ impl App {
             )
         });
         let units = self.input.canvas_units;
-        let scale = toolbar::menu_scale(canvas, MENU_SIZE, units);
+        // Keep annotation actions about 10% smaller than the default text
+        // box, while preserving the same HiDPI canvas scaling as the editor.
+        let scale = toolbar::menu_scale(canvas, MENU_SIZE, units) * 0.90;
         let actions =
             toolbar::context_menu_rect(item.rect(), canvas, MENU_SIZE * scale, protected, scale);
         let palette = self.input.text.color_wheel.map(|_| {
@@ -771,14 +778,19 @@ impl App {
         })
     }
 
-    fn text_context_rect(&self, canvas: Rect) -> Option<Rect> {
+    fn text_context_layout(&self, canvas: Rect) -> Option<TextContextLayout> {
         let point = self.input.text.context_menu?;
         let lines = if self.text_menu_item()?.text.is_empty() {
             1.
         } else {
             4.
         };
-        let size = vec2(170., lines * 32. + 12.) * self.input.canvas_units;
+        let base = vec2(160., lines * 29. + 10.);
+        // Use the exact same DPI and window-fit scaling as every other
+        // annotation menu. Font, hit targets, margins and popup bounds must
+        // all derive from this single value, even on small displays.
+        let scale = toolbar::menu_scale(canvas, base, self.input.canvas_units);
+        let size = base * scale;
         let min = pos2(
             point
                 .x
@@ -787,7 +799,14 @@ impl App {
                 .y
                 .clamp(canvas.top(), (canvas.bottom() - size.y).max(canvas.top())),
         );
-        Some(Rect::from_min_size(min, size))
+        Some(TextContextLayout {
+            rect: Rect::from_min_size(min, size),
+            scale,
+        })
+    }
+
+    fn text_context_rect(&self, canvas: Rect) -> Option<Rect> {
+        self.text_context_layout(canvas).map(|layout| layout.rect)
     }
 
     fn text_context_action(&mut self, action: TextContextAction) -> bool {
@@ -877,8 +896,9 @@ impl App {
         true
     }
 
-    fn text_context_popup(&mut self, ui: &mut Ui, rect: Rect) {
+    fn text_context_popup(&mut self, ui: &mut Ui, layout: TextContextLayout) {
         let tr = self.language;
+        let TextContextLayout { rect, scale } = layout;
         let has_text = self
             .text_menu_item()
             .is_some_and(|item| !item.text.is_empty());
@@ -887,18 +907,16 @@ impl App {
             egui::Frame::new()
                 .fill(ui.visuals().window_fill())
                 .stroke(ui.visuals().window_stroke())
-                .corner_radius(egui::CornerRadius::same(12))
-                .inner_margin(egui::Margin::same(6))
+                .corner_radius(egui::CornerRadius::same((9. * scale).round() as u8))
+                .inner_margin(egui::Margin::same((5. * scale).round() as i8))
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing = Vec2::ZERO;
+                    ui.spacing_mut().button_padding = vec2(5., 3.) * scale;
                     let entries = [
-                        (
-                            TextContextAction::SelectAll,
-                            tr.text("Select all", "全选", "全選"),
-                        ),
-                        (TextContextAction::Copy, tr.text("Copy", "拷贝", "複製")),
-                        (TextContextAction::Paste, tr.text("Paste", "粘贴", "貼上")),
-                        (TextContextAction::Cut, tr.text("Cut", "剪切", "剪下")),
+                        (TextContextAction::SelectAll, tr.text("Select all")),
+                        (TextContextAction::Copy, tr.text("Copy")),
+                        (TextContextAction::Paste, tr.text("Paste")),
+                        (TextContextAction::Cut, tr.text("Cut")),
                     ];
                     for (choice, title) in entries {
                         if !has_text && choice != TextContextAction::Paste {
@@ -906,8 +924,11 @@ impl App {
                         }
                         if ui
                             .add_sized(
-                                vec2(rect.width() - 12., 32. * self.input.canvas_units),
-                                egui::Button::new(title),
+                                vec2(rect.width() - 10. * scale, 29. * scale),
+                                egui::Button::new(
+                                    egui::RichText::new(title)
+                                        .size(toolbar::MENU_FONT_SIZE * scale),
+                                ),
                             )
                             .clicked()
                         {
@@ -1019,11 +1040,10 @@ impl App {
             &mut menu,
             button,
             ActionIcon::Delete,
-            tr.text("Delete text box", "删除文本框", "刪除文字框"),
+            tr.text("Delete text box"),
         )
         .on_hover_text(
-            egui::RichText::new(tr.text("Delete text box", "删除文本框", "刪除文字框"))
-                .size(toolbar::MENU_FONT_SIZE * scale),
+            egui::RichText::new(tr.text("Delete text box")).size(toolbar::MENU_FONT_SIZE * scale),
         )
         .clicked()
         {
@@ -1032,13 +1052,13 @@ impl App {
         for (icon, hint, step, enabled) in [
             (
                 ActionIcon::Increase,
-                tr.text("Increase font size", "加大字号", "加大字級"),
+                tr.text("Increase font size"),
                 font_step,
                 font_size < *TextBox::FONT_SIZE.end(),
             ),
             (
                 ActionIcon::Decrease,
-                tr.text("Decrease font size", "缩小字号", "縮小字級"),
+                tr.text("Decrease font size"),
                 -font_step,
                 font_size > *TextBox::FONT_SIZE.start(),
             ),
@@ -1055,11 +1075,7 @@ impl App {
         }
         for rgb in PRESETS {
             let preset = InkColor::from_rgb8(rgb);
-            let label = format!(
-                "{} {}",
-                tr.text("Text color", "文字颜色", "文字顏色"),
-                preset.hex()
-            );
+            let label = format!("{} {}", tr.text("Text color"), preset.hex());
             if toolbar::swatch_button(&mut menu, button, rgb, &label, color.srgb8() == rgb)
                 .on_hover_text(egui::RichText::new(label).size(toolbar::MENU_FONT_SIZE * scale))
                 .clicked()
@@ -1068,7 +1084,7 @@ impl App {
                 self.input.text.color_wheel = None;
             }
         }
-        let keyboard_label = tr.text("Show on-screen keyboard", "呼出屏幕键盘", "開啟螢幕鍵盤");
+        let keyboard_label = tr.text("Show on-screen keyboard");
         let (icon_rect, keyboard_response) =
             menu.allocate_exact_size(KEYBOARD_BUTTON * scale, egui::Sense::click());
         keyboard_response.widget_info(|| {
@@ -1107,7 +1123,7 @@ impl App {
             acted |= self.request_text_keyboard();
         }
         let wheel_open = self.input.text.color_wheel.is_some();
-        let label = tr.text("Color wheel", "色轮", "色輪");
+        let label = tr.text("Color wheel");
         let (icon, response) = menu.allocate_exact_size(button, egui::Sense::click());
         response.widget_info(|| {
             egui::WidgetInfo::selected(egui::Role::Button, menu.is_enabled(), wheel_open, label)
@@ -1155,8 +1171,7 @@ impl App {
         palette.horizontal(|ui| {
             ui.set_width(inner.width());
             ui.label(
-                egui::RichText::new(tr.text("Brightness", "亮度", "亮度"))
-                    .size(toolbar::MENU_FONT_SIZE * scale),
+                egui::RichText::new(tr.text("Brightness")).size(toolbar::MENU_FONT_SIZE * scale),
             );
             let remaining = ui.available_width().max(0.);
             ui.spacing_mut().slider_width = remaining;
@@ -1173,16 +1188,10 @@ impl App {
                 let button_width = ((ui.available_width() - gap) / 2.).max(0.);
                 let size = vec2(button_width, MENU_BUTTON.y * scale);
                 let apply = ui
-                    .add_sized(
-                        size,
-                        toolbar::menu_button(tr.text("Apply", "应用", "套用"), scale),
-                    )
+                    .add_sized(size, toolbar::menu_button(tr.text("Apply"), scale))
                     .clicked();
                 let pick = ui
-                    .add_sized(
-                        size,
-                        toolbar::menu_button(tr.text("Pick screen", "屏幕取色", "螢幕取色"), scale),
-                    )
+                    .add_sized(size, toolbar::menu_button(tr.text("Pick screen"), scale))
                     .clicked();
                 (apply, pick)
             })
@@ -1316,8 +1325,8 @@ impl App {
                     });
                 }
             }
-            if let Some(rect) = self.text_context_rect(screen) {
-                self.text_context_popup(ui, rect);
+            if let Some(layout) = self.text_context_layout(screen) {
+                self.text_context_popup(ui, layout);
             }
             // An egui Window (NOT a native OS window) supports drag/resize
             // without stealing SDL text-input focus. Initial placement follows
@@ -1330,39 +1339,41 @@ impl App {
                 .as_ref()
                 .map(|draft| draft.item.rect());
             if self.input.text.editing()
-                && let Some(rect) =
-                    self.input
-                        .text
-                        .osk
-                        .rect_near(screen, anchor, self.input.canvas_units)
+                && let Some(rect) = self.input.text.osk.rect_near(screen, anchor)
             {
                 let scale = self.input.canvas_units;
-                let inset = egui::vec2(
-                    (screen.width() * 0.025).clamp(8., 28.),
-                    (screen.height() * 0.10).clamp(24., 120.),
-                );
-                let safe = screen.shrink2(inset);
-                let minimum = self.input.text.osk.minimum_size(safe.size());
+                let safe = osk::Keyboard::safe_area(screen);
+                let minimum = self.input.text.osk.minimum_size(safe.size(), scale);
                 let mut action = None;
-                let window = egui::Window::new("OverInk Keyboard")
-                    .id(ui.make_persistent_id("overink-on-screen-keyboard"))
-                    .order(egui::Order::Foreground)
-                    .default_pos(rect.min)
-                    .default_size(rect.size())
-                    .min_size(minimum)
-                    .max_size(safe.size())
-                    .constrain_to(safe)
-                    .resizable(true)
-                    // egui's default OnTouch drags a window from anywhere,
-                    // stealing finger/pen Emoji page swipes. The title bar is
-                    // the only move handle; keys keep their own gestures.
-                    .drag_area(egui::WindowDrag::TitleBar)
-                    .collapsible(false)
-                    .show(ui.ctx(), |keyboard_ui| {
-                        let keys = keyboard_ui.available_rect_before_wrap();
-                        keyboard_ui.set_min_size(keys.size());
-                        action = self.input.text.osk.ui(keyboard_ui, keys, scale);
-                    });
+                let window = egui::Window::new(
+                    egui::RichText::new("OverInk").size(toolbar::MENU_FONT_SIZE * scale),
+                )
+                // Title-only movement remains available, but the heading
+                // band should not waste a full button row of vertical space.
+                .title_frame(
+                    egui::Frame::window(ui.style()).inner_margin(egui::Margin::symmetric(
+                        (6. * scale).round() as i8,
+                        (1. * scale).round() as i8,
+                    )),
+                )
+                .id(ui.make_persistent_id("overink-on-screen-keyboard"))
+                .order(egui::Order::Foreground)
+                .default_pos(rect.min)
+                .default_size(rect.size())
+                .min_size(minimum)
+                .max_size(safe.size())
+                .constrain_to(safe)
+                .resizable(true)
+                // egui's default OnTouch drags a window from anywhere,
+                // stealing finger/pen Emoji page swipes. The title bar is
+                // the only move handle; keys keep their own gestures.
+                .drag_area(egui::WindowDrag::TitleBar)
+                .collapsible(false)
+                .show(ui.ctx(), |keyboard_ui| {
+                    let keys = keyboard_ui.available_rect_before_wrap();
+                    keyboard_ui.set_min_size(keys.size());
+                    action = self.input.text.osk.ui(keyboard_ui, keys, scale);
+                });
                 if let Some(window) = window {
                     self.input.text.osk.set_window_rect(window.response.rect);
                 }
@@ -1427,12 +1438,7 @@ impl App {
                         return;
                     }
                     Err(error) => {
-                        self.status = text(
-                            "System key input unavailable",
-                            "系统键盘输入不可用",
-                            "系統鍵盤輸入不可用",
-                        )
-                        .detail(error);
+                        self.status = text("System key input unavailable").detail(error);
                     }
                 }
             }
@@ -1561,7 +1567,6 @@ impl App {
                     .draft
                     .as_ref()
                     .map(|draft| draft.item.rect()),
-                self.input.canvas_units,
             )
             .map(|rect| self.input.text.osk.current_rect(rect));
         let Some(draft) = self.input.text.draft.as_mut() else {
@@ -2757,11 +2762,23 @@ mod tests {
         render(&mut app, &mut gui);
         render(&mut app, &mut gui);
         let mut menu_click = |app: &mut App, column: f32| {
-            let pos = rect.min
-                + vec2(
-                    MENU_PADDING + MENU_BUTTON.x * 0.5 + column * (MENU_BUTTON.x + MENU_GAP),
-                    MENU_SIZE.y * 0.5,
-                );
+            // Calculate the current scaled control center, not yesterday's
+            // unscaled offsets. The toolbar is 90% of its former size.
+            let Some(menu) = app.text_menus(screen) else {
+                panic!("expected scaled text actions");
+            };
+            let pos = if column == KEYBOARD_COLUMN {
+                let Some(keyboard) = app.keyboard_button_rect(screen) else {
+                    panic!("expected scaled keyboard button");
+                };
+                keyboard.center()
+            } else {
+                menu.actions.min
+                    + vec2(
+                        MENU_PADDING + MENU_BUTTON.x * 0.5 + column * (MENU_BUTTON.x + MENU_GAP),
+                        MENU_SIZE.y * 0.5,
+                    ) * menu.scale
+            };
             gui.raw.events.push(Event::PointerMoved(pos));
             for pressed in [true, false] {
                 gui.raw.events.push(Event::PointerButton {
@@ -2845,7 +2862,7 @@ mod tests {
         let Some(menus) = app.text_menus(screen) else {
             panic!("expected scalable annotation menus");
         };
-        assert_eq!(menus.actions.size(), MENU_SIZE * 2.);
+        assert_eq!(menus.actions.size(), MENU_SIZE * 1.8);
         assert!(screen.contains_rect(menus.actions));
         let narrow = Rect::from_min_size(Pos2::ZERO, vec2(480., 650.));
         assert_eq!(
@@ -2853,6 +2870,37 @@ mod tests {
                 .map(|menus| narrow.contains_rect(menus.actions)),
             Some(true)
         );
+    }
+
+    #[test]
+    fn text_context_menu_uses_main_ui_scale_for_buttons_and_bounds() {
+        let mut app = app();
+        app.use_tool(Tool::Text);
+        click(&mut app, pos2(150., 120.));
+        app.input.text.context_menu = Some(pos2(200., 180.));
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(800., 600.));
+        app.input.canvas_units = 1.;
+        let Some(normal) = app.text_context_layout(screen) else {
+            panic!("expected context layout");
+        };
+        app.input.canvas_units = 2.;
+        let Some(hi_dpi) = app.text_context_layout(screen) else {
+            panic!("expected HiDPI context layout");
+        };
+        assert_eq!(normal.scale, 1.);
+        assert_eq!(hi_dpi.scale, 2.);
+        assert!((hi_dpi.rect.width() - 2. * normal.rect.width()).abs() < 0.01);
+        assert!((hi_dpi.rect.height() - 2. * normal.rect.height()).abs() < 0.01);
+        assert!(screen.contains_rect(hi_dpi.rect));
+
+        // The shared menu scale must fit tiny canvases instead of rendering
+        // a DPI-sized popup outside their bounds.
+        let small = Rect::from_min_size(Pos2::ZERO, vec2(230., 160.));
+        let Some(fitted) = app.text_context_layout(small) else {
+            panic!("expected fitted context layout");
+        };
+        assert!(fitted.scale < hi_dpi.scale);
+        assert!(small.contains_rect(fitted.rect));
     }
 
     #[test]
@@ -3015,12 +3063,11 @@ mod tests {
         let Some(fallback) = app.input.text.osk.rect_near(
             screen,
             app.input.text.draft.as_ref().map(|draft| draft.item.rect()),
-            1.,
         ) else {
             panic!("expected visible keyboard");
         };
-        // egui::Window now has a draggable title bar. The first row of
-        // keys starts inside its content area, below the title bar.
+        // The title bar is separate from the keys. The first row is now
+        // the twelve digits and symbols; verify actual key hit testing.
         let keyboard = app.input.text.osk.current_rect(fallback);
         let point = keyboard.min + vec2(18., 55.);
         gui.raw.events.push(Event::PointerMoved(point));
@@ -3036,7 +3083,7 @@ mod tests {
         }
         assert!(app.input.text.editing());
         assert!(app.input.text.osk.visible);
-        assert_eq!(draft_committed(&app), Some("q"));
+        assert_eq!(draft_committed(&app), Some("1"));
     }
 
     #[test]

@@ -1973,9 +1973,11 @@ impl Window {
         if *applied == Some(pixels) {
             return Ok(());
         }
-        let radius =
-            (f32::from(crate::toolbar::OUTER_RADIUS) * self.ui_scale() * self.pixel_density())
-                .round() as i32;
+        // SDL's native hit-test uses physical pixels. UI layout uses
+        // gui::window_units instead; these are deliberately different spaces.
+        // The display scale already includes pixel density, so do not multiply
+        // both a UI scale and pixel density here.
+        let radius = (f32::from(crate::toolbar::OUTER_RADIUS) * self.scale()).round() as i32;
         self.run_command(WindowCommand::RoundedCorners(pixels, radius.max(1)))?;
         *applied = Some(pixels);
         Ok(())
