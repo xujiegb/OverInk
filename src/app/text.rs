@@ -747,7 +747,9 @@ impl App {
             )
         });
         let units = self.input.canvas_units;
-        let scale = toolbar::menu_scale(canvas, MENU_SIZE, units);
+        // Keep annotation actions about 10% smaller than the default text
+        // box, while preserving the same HiDPI canvas scaling as the editor.
+        let scale = toolbar::menu_scale(canvas, MENU_SIZE, units) * 0.90;
         let actions =
             toolbar::context_menu_rect(item.rect(), canvas, MENU_SIZE * scale, protected, scale);
         let palette = self.input.text.color_wheel.map(|_| {
@@ -778,7 +780,7 @@ impl App {
         } else {
             4.
         };
-        let size = vec2(170., lines * 32. + 12.) * self.input.canvas_units;
+        let size = vec2(160., lines * 29. + 10.) * self.input.canvas_units;
         let min = pos2(
             point
                 .x
@@ -887,8 +889,8 @@ impl App {
             egui::Frame::new()
                 .fill(ui.visuals().window_fill())
                 .stroke(ui.visuals().window_stroke())
-                .corner_radius(egui::CornerRadius::same(12))
-                .inner_margin(egui::Margin::same(6))
+                .corner_radius(egui::CornerRadius::same(9))
+                .inner_margin(egui::Margin::same(5))
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing = Vec2::ZERO;
                     let entries = [
@@ -906,8 +908,14 @@ impl App {
                         }
                         if ui
                             .add_sized(
-                                vec2(rect.width() - 12., 32. * self.input.canvas_units),
-                                egui::Button::new(title),
+                                vec2(
+                                    rect.width() - 10. * self.input.canvas_units,
+                                    29. * self.input.canvas_units,
+                                ),
+                                egui::Button::new(
+                                    egui::RichText::new(title)
+                                        .size(toolbar::MENU_FONT_SIZE * self.input.canvas_units),
+                                ),
                             )
                             .clicked()
                         {
@@ -1344,7 +1352,7 @@ impl App {
                 let safe = screen.shrink2(inset);
                 let minimum = self.input.text.osk.minimum_size(safe.size());
                 let mut action = None;
-                let window = egui::Window::new("OverInk Keyboard")
+                let window = egui::Window::new("OverInk")
                     .id(ui.make_persistent_id("overink-on-screen-keyboard"))
                     .order(egui::Order::Foreground)
                     .default_pos(rect.min)
@@ -2845,7 +2853,7 @@ mod tests {
         let Some(menus) = app.text_menus(screen) else {
             panic!("expected scalable annotation menus");
         };
-        assert_eq!(menus.actions.size(), MENU_SIZE * 2.);
+        assert_eq!(menus.actions.size(), MENU_SIZE * 1.8);
         assert!(screen.contains_rect(menus.actions));
         let narrow = Rect::from_min_size(Pos2::ZERO, vec2(480., 650.));
         assert_eq!(
