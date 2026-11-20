@@ -934,6 +934,15 @@ impl App {
             Language::Simplified => format!("当前屏幕有 {count} 条笔迹"),
             Language::Traditional => format!("目前螢幕有 {count} 條筆跡"),
             Language::French => format!("{count} tracés sur cet écran"),
+            Language::Spanish => format!("{count} trazos en esta pantalla"),
+            Language::Japanese => format!("この画面の描画：{count} 本"),
+            Language::German => format!("{count} Striche auf diesem Bildschirm"),
+            Language::Russian => format!("Штрихов на экране: {count}"),
+            Language::Dutch => format!("{count} streken op dit scherm"),
+            Language::Turkish => format!("Bu ekrandaki çizgi: {count}"),
+            Language::Korean => format!("이 화면의 획: {count}개"),
+            Language::Portuguese => format!("{count} traços neste ecrã"),
+            Language::Italian => format!("{count} tratti su questo schermo"),
         });
         ui.separator();
         let (hdr, headroom) = render.hdr();
