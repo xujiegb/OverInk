@@ -1374,9 +1374,10 @@ impl App {
         }
     }
 
-    /// Apply only fully committed Unicode strings to the annotation draft.
-    /// This never fabricates SDL key events, modifies a platform IME's preedit
-    /// or displays candidates. The TextEdit cursor is restored on repaint.
+    /// Physical keys must reach the active OS input method on Windows/macOS.
+    /// A direct buffer edit bypasses the system candidate/preedit window.
+    /// Only Emoji and other non-physical Unicode sequences are inserted
+    /// directly, and never during a live IME composition.
     fn apply_osk_action(&mut self, action: osk::Action, composing: bool) {
         match action {
             osk::Action::Hide => {
@@ -1388,10 +1389,63 @@ impl App {
                 self.input.text.input_source_requested = true;
                 return;
             }
-            _ if composing => {
-                // The OS owns this preedit. Wait for its commit/cancellation.
-                return;
+            _ => {}
+        }
+
+        #[cfg(all(not(test), any(target_os = "windows", target_os = "macos")))]
+        {
+            use crate::keyboard::{PhysicalKey, send_physical_key};
+            // System IMEs expect physical key-down/up events, not committed
+            // Unicode text. This includes Backspace/Space/Enter while composing
+            // so the operating system can choose or dismiss candidates.
+            let physical = match &action {
+                osk::Action::Insert(value) => {
+                    let mut chars = value.chars();
+                    match (chars.next(), chars.next()) {
+                        (Some(' '), None) => Some(PhysicalKey::Space),
+                        (Some(ch), None) if crate::keyboard::supports_character(ch) => {
+                            Some(PhysicalKey::Char(ch))
+                        }
+                        _ => None,
+                    }
+                }
+                osk::Action::Backspace => Some(PhysicalKey::Backspace),
+                osk::Action::Return => Some(PhysicalKey::Return),
+                osk::Action::MoveLeft => Some(PhysicalKey::Left),
+                osk::Action::MoveRight => Some(PhysicalKey::Right),
+                osk::Action::SwitchInputMethod | osk::Action::Hide => None,
+            };
+            if let Some(key) = physical {
+                match send_physical_key(key) {
+                    Ok(()) => {
+                        // Restore egui's text editor focus after clicking a
+                        // drawn key; the physical key now flows through SDL's
+                        // established IME commit and preedit handling.
+                        if let Some(draft) = self.input.text.draft.as_mut() {
+                            draft.focus = true;
+                        }
+                        return;
+                    }
+                    Err(error) => {
+                        self.status = text(
+                            "System key input unavailable",
+                            "系统键盘输入不可用",
+                            "系統鍵盤輸入不可用",
+                        )
+                        .detail(error);
+                    }
+                }
             }
+        }
+
+        if composing {
+            // Do not corrupt the native IME's in-progress composition by
+            // modifying egui's text buffer when event injection is denied.
+            return;
+        }
+        match action {
+            _ => {}
+        }
             _ => {}
         }
         let Some(draft) = self.input.text.draft.as_mut() else {
