@@ -3,6 +3,7 @@
 #import <AppKit/AppKit.h>
 #import <objc/runtime.h>
 #include <stdint.h>
+#include <math.h>
 
 typedef struct SDL_Window SDL_Window;
 extern SDL_Window *SDL_GetWindowFromID(uint32_t);
