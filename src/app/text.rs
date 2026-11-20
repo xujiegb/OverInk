@@ -1357,10 +1357,7 @@ impl App {
                     // Title-only movement remains available, but the heading
                     // band should not waste a full button row of vertical space.
                     .title_frame(egui::Frame::window(ui.style()).inner_margin(
-                        egui::Margin::symmetric(
-                            (4. * scale).round() as i8,
-                            scale.round() as i8,
-                        ),
+                        egui::Margin::symmetric((4. * scale).round() as i8, scale.round() as i8),
                     ))
                     .id(ui.make_persistent_id((
                         "overink-on-screen-keyboard",
