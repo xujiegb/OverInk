@@ -2,6 +2,7 @@
 
 mod canvas;
 mod ink;
+mod osk;
 mod panel;
 #[cfg(test)]
 mod pen_input_tests;
@@ -11,7 +12,7 @@ mod text;
 
 use crate::sdl::dialog::{DialogKind, FileDialog};
 use crate::{
-    appearance::{Language, Preferences, Status, Text, ThemeMonitor, text},
+    appearance::{KeyboardSource, Language, Preferences, Status, Text, ThemeMonitor, text},
     color::{InkColor, PRESETS},
     display::{Display, Pages},
     export,
