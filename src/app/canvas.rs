@@ -245,7 +245,13 @@ impl Canvas {
                 SDL_EVENT_WINDOW_FOCUS_GAINED | SDL_EVENT_WINDOW_FOCUS_LOST
             )
         {
-            gui.sync_text_input(&self.window, self.window.input_focused());
+            // Windows TabTip and macOS Keyboard Viewer are separate processes:
+            // their activation can temporarily change SDL_WINDOW_INPUT_FOCUS.
+            // Do not send SDL_StopTextInput on their FocusLost event. That
+            // destroys the IME context and immediately collapses TabTip.
+            if self.window.input_focused() || !app.input.text.screen_keyboard_session() {
+                gui.sync_text_input(&self.window, self.window.input_focused());
+            }
         }
         changed
     }
@@ -471,7 +477,17 @@ impl Canvas {
         } else {
             gui.suspend_input(&self.window);
         }
-        let input = gui.canvas_input(&self.window);
+        let mut input = gui.canvas_input(&self.window);
+        if editing && app.input.text.screen_keyboard_session() {
+            // The separate keyboard's window does not own the egui editor.
+            // Keep its focus/IME state while native key/text events are
+            // delivered to our SDL canvas. Real pointer clicks outside the
+            // text still finish editing via text_ui's hit test.
+            input.focused = true;
+            input
+                .events
+                .retain(|event| !matches!(event, egui::Event::WindowFocused(false)));
+        }
         let focused = input.focused;
         let composing = gui.composing();
         let mut output = gui.ctx.run_ui(input, |ui| {

@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use super::App;
+use super::{App, osk};
 use crate::{
     appearance::text,
     color::{InkColor, PRESETS},
@@ -17,12 +17,13 @@ use egui::{
     vec2,
 };
 use std::time::{Duration, Instant};
+use unicode_segmentation::UnicodeSegmentation;
 
 mod color_wheel;
 use color_wheel::ColorWheel;
 
 const MENU_BUTTON: Vec2 = vec2(toolbar::RAIL_BUTTON_SIZE.x, 35.);
-const KEYBOARD_BUTTON: Vec2 = vec2(52., 35.);
+const KEYBOARD_BUTTON: Vec2 = vec2(44., 35.);
 const KEYBOARD_COLUMN: f32 = 7.;
 const MENU_GAP: f32 = 4.;
 const MENU_PADDING: f32 = 5.;
@@ -122,6 +123,12 @@ pub(super) struct TextInput {
     screen_pick_requested: bool,
     keyboard_requested: bool,
     keyboard_press: bool,
+    // A separately hosted system keyboard can temporarily steal the native
+    // window focus. Keep the current text editor's SDL/IME session alive until
+    // the user explicitly finishes editing instead of closing it on that loss.
+    screen_keyboard_session: bool,
+    osk: osk::Keyboard,
+    input_source_requested: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -212,6 +219,29 @@ impl TextInput {
         std::mem::take(&mut self.keyboard_requested)
     }
 
+    pub fn take_input_source_request(&mut self) -> bool {
+        std::mem::take(&mut self.input_source_requested)
+    }
+
+    pub fn open_osk(&mut self) {
+        if self.editing() {
+            // Unlike the optional native OS keyboard, this egui overlay stays
+            // inside the focused SDL canvas. Do not suppress real AppKit,
+            // Win32 or Wayland FocusLost events when switching away from the
+            // application; that could leave the IME session stuck active.
+            self.screen_keyboard_session = false;
+            self.osk.open();
+        }
+    }
+
+    pub fn screen_keyboard_session(&self) -> bool {
+        self.screen_keyboard_session && self.editing()
+    }
+
+    pub fn mark_screen_keyboard_open(&mut self) {
+        self.screen_keyboard_session = self.editing();
+    }
+
     pub fn has_edit(&self, history: &History) -> bool {
         self.draft
             .as_ref()
@@ -240,6 +270,8 @@ impl TextInput {
     }
 
     pub fn take_draft(&mut self, history: &History) -> Option<(Option<usize>, TextBox)> {
+        self.screen_keyboard_session = false;
+        self.osk.close();
         let draft = self.draft.take()?;
         let mut item = draft.item;
         item.text = draft.committed;
@@ -271,6 +303,8 @@ impl TextInput {
 
     fn edit(&mut self, index: Option<usize>, item: TextBox) {
         self.cancel_press();
+        self.screen_keyboard_session = false;
+        self.osk.close();
         self.menu_pointer = MenuPointer::default();
         self.context_menu = None;
         self.color_wheel = None;
@@ -1285,7 +1319,139 @@ impl App {
             if let Some(rect) = self.text_context_rect(screen) {
                 self.text_context_popup(ui, rect);
             }
+            // Draw last, above the annotation and color controls, but inside
+            // the same SDL canvas/egui context. It owns no native focus.
+            if self.input.text.editing()
+                && let Some(rect) = self.input.text.osk.rect(screen, self.input.canvas_units)
+            {
+                let mut action = None;
+                overlay(ui, "overink-on-screen-keyboard", rect, |ui| {
+                    action = self.input.text.osk.ui(ui, rect, self.input.canvas_units);
+                });
+                if let Some(action) = action {
+                    self.apply_osk_action(action, composing);
+                    ui.ctx().request_repaint();
+                }
+            }
         }
+    }
+
+    /// Apply only fully committed Unicode strings to the annotation draft.
+    /// This never fabricates SDL key events, modifies a platform IME's preedit
+    /// or displays candidates. The TextEdit cursor is restored on repaint.
+    fn apply_osk_action(&mut self, action: osk::Action, composing: bool) {
+        match action {
+            osk::Action::Hide => {
+                self.input.text.osk.close();
+                self.input.text.screen_keyboard_session = false;
+                return;
+            }
+            osk::Action::SwitchInputMethod => {
+                self.input.text.input_source_requested = true;
+                return;
+            }
+            _ if composing => {
+                // The OS owns this preedit. Wait for its commit/cancellation.
+                return;
+            }
+            _ => {}
+        }
+        let Some(draft) = self.input.text.draft.as_mut() else {
+            return;
+        };
+        let total = draft.item.text.chars().count();
+        let selected = draft.cursor.map(|cursor| cursor.as_sorted_char_range());
+        let mut start = selected
+            .as_ref()
+            .map_or(total, |range| usize::from(range.start))
+            .min(total);
+        let end = selected
+            .as_ref()
+            .map_or(total, |range| usize::from(range.end))
+            .min(total);
+        let deleting = matches!(&action, osk::Action::Backspace);
+        let mut insert = std::borrow::Cow::Borrowed("");
+        match action {
+            osk::Action::Insert(value) => insert = value,
+            osk::Action::Return => insert = std::borrow::Cow::Borrowed("\n"),
+            osk::Action::Backspace if start == end => {
+                if start == 0 {
+                    return;
+                }
+                let end_byte = draft
+                    .item
+                    .text
+                    .char_indices()
+                    .nth(start)
+                    .map_or(draft.item.text.len(), |(i, _)| i);
+                let before = &draft.item.text[..end_byte];
+                start = before
+                    .grapheme_indices(true)
+                    .next_back()
+                    .map_or(0, |(byte, _)| before[..byte].chars().count());
+            }
+            osk::Action::MoveLeft | osk::Action::MoveRight => {
+                let caret = if matches!(action, osk::Action::MoveLeft) {
+                    start
+                } else {
+                    end
+                };
+                let byte = draft
+                    .item
+                    .text
+                    .char_indices()
+                    .nth(caret)
+                    .map_or(draft.item.text.len(), |(i, _)| i);
+                let at = if matches!(action, osk::Action::MoveLeft) {
+                    draft.item.text[..byte]
+                        .grapheme_indices(true)
+                        .next_back()
+                        .map_or(0, |(i, _)| draft.item.text[..i].chars().count())
+                } else {
+                    let next = draft.item.text[byte..]
+                        .graphemes(true)
+                        .next()
+                        .map_or(0, |part| part.chars().count());
+                    (caret + next).min(total)
+                };
+                draft.cursor = Some(CCursorRange::one(CCursor::new(at)));
+                draft.focus = true;
+                return;
+            }
+            _ => {}
+        }
+        let available = MAX_TEXT_CHARS.saturating_sub(total.saturating_sub(end - start));
+        // A multi-codepoint emoji (ZWJ families, modifiers, flags and
+        // variation selectors) must never be cut in the middle by the text
+        // capacity limit. Only insert complete Unicode grapheme clusters.
+        let mut remaining = available;
+        let insertion: String = insert
+            .graphemes(true)
+            .take_while(|grapheme| {
+                let chars = grapheme.chars().count();
+                if chars > remaining {
+                    return false;
+                }
+                remaining -= chars;
+                true
+            })
+            .collect();
+        // A rejected multi-codepoint emoji must not erase selected text.
+        // Only Backspace intentionally deletes without replacement text.
+        if insertion.is_empty() && (!deleting || start == end) {
+            return;
+        }
+        draft
+            .item
+            .text
+            .delete_char_range(egui::text::CharIndex(start)..egui::text::CharIndex(end));
+        let count = draft
+            .item
+            .text
+            .insert_text(&insertion, egui::text::CharIndex(start));
+        draft.committed.clone_from(&draft.item.text);
+        draft.cursor = Some(CCursorRange::one(CCursor::new(start + count)));
+        draft.focus = true;
     }
 
     fn text_editor(
@@ -1297,6 +1463,11 @@ impl App {
     ) {
         let wheel_open = self.input.text.color_wheel.is_some();
         let context_rect = self.text_context_rect(ui.clip_rect());
+        let keyboard_rect = self
+            .input
+            .text
+            .osk
+            .rect(ui.clip_rect(), self.input.canvas_units);
         let Some(draft) = self.input.text.draft.as_mut() else {
             return;
         };
@@ -1326,6 +1497,7 @@ impl App {
             let menu_pointer = input.pointer.interact_pos().is_some_and(|point| {
                 menus.is_some_and(|menus| menus.contains(point))
                     || context_rect.is_some_and(|rect| rect.contains(point))
+                    || keyboard_rect.is_some_and(|rect| rect.contains(point))
             });
             let finish = lost_window_focus
                 || (!composing
@@ -1400,6 +1572,7 @@ impl App {
                 && !started
                 && !composing
                 && !wheel_open
+                && !self.input.text.osk.visible
                 && !menu_clicked
                 && output.response.lost_focus())
         {
@@ -1915,6 +2088,71 @@ mod tests {
         assert!(!app.history.can_undo());
         app.change_history(HistoryAction::Redo);
         assert!(app.history.document().is_empty());
+    }
+
+    #[test]
+    fn overink_keyboard_inserts_unicode_and_erases_whole_emoji_graphemes() {
+        let mut app = app();
+        app.use_tool(Tool::Text);
+        click(&mut app, pos2(130., 110.));
+        app.input.text.open_osk();
+        assert!(app.input.text.osk.visible);
+        assert!(!app.input.text.screen_keyboard_session());
+        app.apply_osk_action(osk::Action::Insert("a".into()), false);
+        app.apply_osk_action(osk::Action::Insert("👩‍🚀".into()), false);
+        assert_eq!(draft_preview(&app), Some("a👩‍🚀"));
+        app.apply_osk_action(osk::Action::Backspace, false);
+        assert_eq!(draft_preview(&app), Some("a"));
+        app.apply_osk_action(osk::Action::Backspace, false);
+        assert_eq!(draft_preview(&app), Some(""));
+        app.input.text.finish(&mut app.history);
+        assert!(!app.input.text.osk.visible);
+        assert!(!app.input.text.screen_keyboard_session());
+    }
+
+    #[test]
+    fn overink_keyboard_preserves_ime_preedit_and_selected_text_replacement() {
+        let mut app = app();
+        app.use_tool(Tool::Text);
+        click(&mut app, pos2(110., 160.));
+        app.apply_osk_action(osk::Action::Insert("abc".into()), false);
+        assert_eq!(draft_preview(&app), Some("abc"));
+        app.apply_osk_action(osk::Action::Insert("x".into()), true);
+        assert_eq!(draft_preview(&app), Some("abc"));
+        let Some(draft) = app.input.text.draft.as_mut() else {
+            panic!("text draft should exist");
+        };
+        draft.cursor = Some(CCursorRange::two(CCursor::new(0), CCursor::new(3)));
+        app.apply_osk_action(osk::Action::Insert("🌷".into()), false);
+        assert_eq!(draft_preview(&app), Some("🌷"));
+        app.apply_osk_action(osk::Action::SwitchInputMethod, false);
+        assert!(app.input.text.take_input_source_request());
+        assert!(!app.input.text.take_input_source_request());
+        app.apply_osk_action(osk::Action::Hide, false);
+        assert!(!app.input.text.osk.visible);
+    }
+
+    #[test]
+    fn external_keyboard_preserves_draft_during_focus_loss_and_resets_on_finish() {
+        let mut app = app();
+        assert!(!app.input.text.screen_keyboard_session());
+        app.use_tool(Tool::Text);
+        click(&mut app, pos2(150., 120.));
+        assert!(app.input.text.editing());
+        app.input.text.mark_screen_keyboard_open();
+        assert!(app.input.text.screen_keyboard_session());
+
+        let mut gui = Gui::new();
+        gui.raw.focused = false;
+        gui.raw.events.push(Event::WindowFocused(false));
+        // The main loop supplies keep_editor_open while the external OSK
+        // is active: losing AppKit/Win32 focus alone must not commit the box.
+        render_with_toolbar_focus(&mut app, &mut gui, true);
+        assert!(app.input.text.editing());
+        assert!(app.input.text.screen_keyboard_session());
+
+        app.input.text.finish(&mut app.history);
+        assert!(!app.input.text.screen_keyboard_session());
     }
 
     #[test]
@@ -2665,6 +2903,92 @@ mod tests {
         assert!(!app.matches_text_pick_target(&target));
         assert!(app.text_pick_target().is_none());
         assert!(app.pick_text_color(color).is_none());
+    }
+
+    #[test]
+    fn egui_keyboard_click_reaches_text_editor_without_committing_box() {
+        let mut app = app();
+        app.use_tool(Tool::Text);
+        click(&mut app, pos2(150., 120.));
+        app.input.text.open_osk();
+        let mut gui = Gui::new();
+        gui.ctx.set_fonts(app.text_fonts.definitions());
+        render(&mut app, &mut gui);
+        render(&mut app, &mut gui);
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::from(SIZE));
+        let Some(keyboard) = app.input.text.osk.rect(screen, 1.) else {
+            panic!("expected visible keyboard");
+        };
+        // Inside the first row's 'q' key for an 800x600 canvas.
+        let point = keyboard.min + vec2(18., 20.);
+        gui.raw.events.push(Event::PointerMoved(point));
+        render(&mut app, &mut gui);
+        for pressed in [true, false] {
+            gui.raw.events.push(Event::PointerButton {
+                pos: point,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            render(&mut app, &mut gui);
+        }
+        assert!(app.input.text.editing());
+        assert!(app.input.text.osk.visible);
+        assert_eq!(draft_committed(&app), Some("q"));
+    }
+
+    #[test]
+    fn osk_inserts_complete_emoji_and_respects_ime_preedit() {
+        let mut app = app();
+        app.use_tool(Tool::Text);
+        click(&mut app, pos2(150., 120.));
+        app.input.text.open_osk();
+        assert!(app.input.text.osk.visible);
+        assert!(!app.input.text.screen_keyboard_session());
+
+        // An active IME composition owns the preedit; the self-drawn
+        // keyboard does not overwrite or synthesize native input events.
+        app.apply_osk_action(osk::Action::Insert(std::borrow::Cow::Borrowed("😊")), true);
+        assert_eq!(draft_committed(&app), Some(""));
+
+        app.apply_osk_action(osk::Action::Insert(std::borrow::Cow::Borrowed("👩‍💻")), false);
+        assert_eq!(draft_committed(&app), Some("👩‍💻"));
+        app.apply_osk_action(osk::Action::Backspace, false);
+        assert_eq!(draft_committed(&app), Some(""));
+
+        let Some(draft) = app.input.text.draft.as_mut() else {
+            panic!("expected open text draft");
+        };
+        let filler = "x".repeat(MAX_TEXT_CHARS - 1);
+        draft.item.text.clone_from(&filler);
+        draft.committed = filler;
+        draft.cursor = Some(CCursorRange::one(CCursor::new(MAX_TEXT_CHARS - 1)));
+        app.apply_osk_action(osk::Action::Insert(std::borrow::Cow::Borrowed("👩‍💻")), false);
+        assert_eq!(
+            draft_committed(&app).map(str::chars).map(Iterator::count),
+            Some(MAX_TEXT_CHARS - 1)
+        );
+        app.apply_osk_action(osk::Action::Insert(std::borrow::Cow::Borrowed("🙂")), false);
+        assert_eq!(
+            draft_committed(&app).map(str::chars).map(Iterator::count),
+            Some(MAX_TEXT_CHARS)
+        );
+        // With one selected codepoint, a three-codepoint emoji cannot fit;
+        // rejecting it must preserve the existing selected character.
+        let Some(draft) = app.input.text.draft.as_mut() else {
+            panic!("expected open text draft");
+        };
+        draft.cursor = Some(CCursorRange::two(
+            CCursor::new(MAX_TEXT_CHARS - 1),
+            CCursor::new(MAX_TEXT_CHARS),
+        ));
+        app.apply_osk_action(osk::Action::Insert(std::borrow::Cow::Borrowed("👩‍💻")), false);
+        assert_eq!(
+            draft_committed(&app).map(str::chars).map(Iterator::count),
+            Some(MAX_TEXT_CHARS)
+        );
+        app.apply_osk_action(osk::Action::Hide, false);
+        assert!(!app.input.text.osk.visible);
     }
 
     #[test]

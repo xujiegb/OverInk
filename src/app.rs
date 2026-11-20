@@ -2,6 +2,7 @@
 
 mod canvas;
 mod ink;
+mod osk;
 mod panel;
 #[cfg(test)]
 mod pen_input_tests;
@@ -11,7 +12,7 @@ mod text;
 
 use crate::sdl::dialog::{DialogKind, FileDialog};
 use crate::{
-    appearance::{Language, Preferences, Status, Text, ThemeMonitor, text},
+    appearance::{KeyboardSource, Language, Preferences, Status, Text, ThemeMonitor, text},
     color::{InkColor, PRESETS},
     display::{Display, Pages},
     export,
@@ -2780,22 +2781,30 @@ fn run_inner(options: Options) -> Result<(), String> {
                         || !mouse_released()
                         || gui.ctx.input(|input| input.pointer.any_down())
                         || egui::Popup::is_any_open(&gui.ctx));
-                match text_focus.update(
-                    Instant::now(),
-                    canvas.window.input_focused(),
-                    toolbar_focused,
-                    toolbar_text_input,
-                    busy,
-                ) {
-                    text::FocusAction::Keep => (),
-                    text::FocusAction::ReturnToCanvas => {
-                        gui.sync_text_input(&toolbar, false);
-                        canvas.focus_text_editor();
-                        canvas.keep_toolbar_above(&toolbar);
-                    }
-                    text::FocusAction::Finish => {
-                        canvas.finish_text_editor(&mut app, theme)?;
-                        toolbar_dirty = true;
+                // A separately hosted on-screen keyboard may own the OS
+                // focus while still typing into this canvas. The ordinary
+                // toolbar-to-canvas 150ms timeout must not finish its editor.
+                // An actual toolbar text field still takes precedence.
+                if app.input.text.screen_keyboard_session() && !toolbar_text_input {
+                    text_focus.deadline = None;
+                } else {
+                    match text_focus.update(
+                        Instant::now(),
+                        canvas.window.input_focused(),
+                        toolbar_focused,
+                        toolbar_text_input,
+                        busy,
+                    ) {
+                        text::FocusAction::Keep => (),
+                        text::FocusAction::ReturnToCanvas => {
+                            gui.sync_text_input(&toolbar, false);
+                            canvas.focus_text_editor();
+                            canvas.keep_toolbar_above(&toolbar);
+                        }
+                        text::FocusAction::Finish => {
+                            canvas.finish_text_editor(&mut app, theme)?;
+                            toolbar_dirty = true;
+                        }
                     }
                 }
             } else {
@@ -2830,8 +2839,10 @@ fn run_inner(options: Options) -> Result<(), String> {
                 controller_display = toolbar.display_id();
                 follow_controller = true;
             }
-            let keep_editor_open =
-                restore_text_focus || toolbar.input_focused() || text_focus.deadline.is_some();
+            let keep_editor_open = restore_text_focus
+                || toolbar.input_focused()
+                || text_focus.deadline.is_some()
+                || app.input.text.screen_keyboard_session();
             let mouse = !picker.choosing() && app.mouse_ready();
             let mut unsafe_layer = false;
             let mut extended_ink_bytes: usize = canvases
@@ -2938,12 +2949,39 @@ fn run_inner(options: Options) -> Result<(), String> {
                 gui.sync_text_input(&toolbar, false);
                 canvas.focus_text_editor();
                 canvas.keep_toolbar_above(&toolbar);
-                text_focus.deadline = Some(Instant::now() + Duration::from_millis(150));
-                if let Err(error) = crate::keyboard::show(&canvas.window, &video) {
+                text_focus.deadline = None;
+                if app.preferences.keyboard_source == KeyboardSource::System
+                    && crate::keyboard::system_supported(&video)
+                {
+                    match crate::keyboard::show(&canvas.window, &video) {
+                        Ok(()) => app.input.text.mark_screen_keyboard_open(),
+                        Err(error) => {
+                            // The user explicitly opted in to a system OSK,
+                            // but every platform must retain a working
+                            // self-drawn keyboard if its launcher fails.
+                            app.input.text.open_osk();
+                            app.status = text(
+                                "Using OverInk keyboard",
+                                "已改用 OverInk 键盘",
+                                "已改用 OverInk 鍵盤",
+                            )
+                            .detail(error);
+                        }
+                    }
+                } else {
+                    // macOS and X11 have no reliable universal OSK request.
+                    // This egui overlay cannot steal the native editor focus.
+                    app.input.text.open_osk();
+                }
+                canvas.dirty = true;
+                toolbar_dirty = true;
+            }
+            if app.input.text.take_input_source_request() {
+                if let Err(error) = crate::keyboard::switch_input_method() {
                     app.status = text(
-                        "On-screen keyboard unavailable",
-                        "无法呼出屏幕键盘",
-                        "無法開啟螢幕鍵盤",
+                        "Could not switch input method",
+                        "无法切换系统输入法",
+                        "無法切換系統輸入法",
                     )
                     .detail(error);
                 }

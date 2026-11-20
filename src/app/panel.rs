@@ -1,6 +1,6 @@
 use super::{App, Board, Commands, canvas::Canvas, screenshot};
 use crate::{
-    appearance::{Language, Text, ThemeMode},
+    appearance::{KeyboardSource, Language, Text, ThemeMode},
     color::{InkColor, PRESETS, Space},
     frame_rate::FrameRate,
     model::Tool,
@@ -623,6 +623,48 @@ impl App {
                     }
                 });
         });
+        ui.separator();
+        ui.label(RichText::new(tr.text("On-screen keyboard", "屏幕键盘", "螢幕鍵盤")).strong());
+        ui.horizontal(|ui| {
+            ui.label(tr.text("Keyboard source", "键盘来源", "鍵盤來源"));
+            let source = &mut self.preferences.keyboard_source;
+            let system_supported = crate::keyboard::system_supported(video);
+            let display_source = if *source == KeyboardSource::System && system_supported {
+                tr.text("System keyboard", "系统键盘", "系統鍵盤")
+            } else {
+                tr.text("OverInk keyboard", "OverInk 键盘", "OverInk 鍵盤")
+            };
+            egui::ComboBox::from_id_salt("osk-source")
+                .selected_text(display_source)
+                .show_ui(ui, |ui| {
+                    commands.preferences |= ui
+                        .selectable_value(
+                            source,
+                            KeyboardSource::OverInk,
+                            tr.text(
+                                "OverInk keyboard (default)",
+                                "OverInk 键盘（默认）",
+                                "OverInk 鍵盤（預設）",
+                            ),
+                        )
+                        .changed();
+                    commands.preferences |= ui
+                        .add_enabled_ui(system_supported, |ui| {
+                            ui.selectable_value(
+                                source,
+                                KeyboardSource::System,
+                                tr.text("System keyboard", "系统键盘", "系統鍵盤"),
+                            )
+                        })
+                        .inner
+                        .changed();
+                });
+        });
+        ui.small(tr.text(
+            "The globe key changes your input method; the OverInk keyboard provides no candidate suggestions.",
+            "地球键切换系统输入法；OverInk 键盘不提供候选词。",
+            "地球鍵切換系統輸入法；OverInk 鍵盤不提供候選字。",
+        ));
         ui.separator();
         ui.label(RichText::new(tr.text("Annotation fonts", "标注字体", "標註字型")).strong());
         ui.small(tr.text(
