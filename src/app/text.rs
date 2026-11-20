@@ -1323,13 +1323,18 @@ impl App {
             // without stealing SDL text-input focus. Initial placement follows
             // the annotation: below when it fits, otherwise above. The user
             // may subsequently reposition/resize it inside the usable canvas.
-            let anchor = self.input.text.draft.as_ref().map(|draft| draft.item.rect());
+            let anchor = self
+                .input
+                .text
+                .draft
+                .as_ref()
+                .map(|draft| draft.item.rect());
             if self.input.text.editing()
-                && let Some(rect) = self.input.text.osk.rect_near(
-                    screen,
-                    anchor,
-                    self.input.canvas_units,
-                )
+                && let Some(rect) =
+                    self.input
+                        .text
+                        .osk
+                        .rect_near(screen, anchor, self.input.canvas_units)
             {
                 let scale = self.input.canvas_units;
                 let inset = egui::vec2(
@@ -1492,11 +1497,20 @@ impl App {
     ) {
         let wheel_open = self.input.text.color_wheel.is_some();
         let context_rect = self.text_context_rect(ui.clip_rect());
-        let keyboard_rect = self.input.text.osk.rect_near(
-            ui.clip_rect(),
-            self.input.text.draft.as_ref().map(|draft| draft.item.rect()),
-            self.input.canvas_units,
-        ).map(|rect| self.input.text.osk.current_rect(rect));
+        let keyboard_rect = self
+            .input
+            .text
+            .osk
+            .rect_near(
+                ui.clip_rect(),
+                self.input
+                    .text
+                    .draft
+                    .as_ref()
+                    .map(|draft| draft.item.rect()),
+                self.input.canvas_units,
+            )
+            .map(|rect| self.input.text.osk.current_rect(rect));
         let Some(draft) = self.input.text.draft.as_mut() else {
             return;
         };
