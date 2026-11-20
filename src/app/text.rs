@@ -1368,32 +1368,32 @@ impl App {
                 let window = egui::Window::new(
                     egui::RichText::new("OverInk").size(toolbar::MENU_FONT_SIZE * scale),
                 )
-                    // Title-only movement remains available, but the heading
-                    // band should not waste a full button row of vertical space.
-                    .title_frame(
-                        egui::Frame::window(ui.style()).inner_margin(egui::Margin::symmetric(
-                            (6. * scale).round() as i8,
-                            (1. * scale).round() as i8,
-                        )),
-                    )
-                    .id(ui.make_persistent_id("overink-on-screen-keyboard"))
-                    .order(egui::Order::Foreground)
-                    .default_pos(rect.min)
-                    .default_size(rect.size())
-                    .min_size(minimum)
-                    .max_size(safe.size())
-                    .constrain_to(safe)
-                    .resizable(true)
-                    // egui's default OnTouch drags a window from anywhere,
-                    // stealing finger/pen Emoji page swipes. The title bar is
-                    // the only move handle; keys keep their own gestures.
-                    .drag_area(egui::WindowDrag::TitleBar)
-                    .collapsible(false)
-                    .show(ui.ctx(), |keyboard_ui| {
-                        let keys = keyboard_ui.available_rect_before_wrap();
-                        keyboard_ui.set_min_size(keys.size());
-                        action = self.input.text.osk.ui(keyboard_ui, keys, scale);
-                    });
+                // Title-only movement remains available, but the heading
+                // band should not waste a full button row of vertical space.
+                .title_frame(
+                    egui::Frame::window(ui.style()).inner_margin(egui::Margin::symmetric(
+                        (6. * scale).round() as i8,
+                        (1. * scale).round() as i8,
+                    )),
+                )
+                .id(ui.make_persistent_id("overink-on-screen-keyboard"))
+                .order(egui::Order::Foreground)
+                .default_pos(rect.min)
+                .default_size(rect.size())
+                .min_size(minimum)
+                .max_size(safe.size())
+                .constrain_to(safe)
+                .resizable(true)
+                // egui's default OnTouch drags a window from anywhere,
+                // stealing finger/pen Emoji page swipes. The title bar is
+                // the only move handle; keys keep their own gestures.
+                .drag_area(egui::WindowDrag::TitleBar)
+                .collapsible(false)
+                .show(ui.ctx(), |keyboard_ui| {
+                    let keys = keyboard_ui.available_rect_before_wrap();
+                    keyboard_ui.set_min_size(keys.size());
+                    action = self.input.text.osk.ui(keyboard_ui, keys, scale);
+                });
                 if let Some(window) = window {
                     self.input.text.osk.set_window_rect(window.response.rect);
                 }
