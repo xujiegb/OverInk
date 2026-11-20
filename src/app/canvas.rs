@@ -545,11 +545,7 @@ pub(super) fn reconcile(
         app.finish_all_contacts();
         app.parked_input.clear();
         app.multi = false;
-        app.status = text(
-            "Using one canvas because a display window could not be opened",
-            "有屏幕的画布无法打开，已切回单窗口",
-            "有螢幕的畫布無法開啟，已切回單視窗",
-        )
+        app.status = text("Using one canvas because a display window could not be opened")
         .detail(error);
         reconcile_windows(canvases, app, toolbar, options)?;
     }
@@ -596,10 +592,6 @@ pub(super) fn event_window(event: &SDL_Event, ty: SDL_EventType) -> Option<SDL_W
 }
 
 pub(super) fn failure(error: impl ToString) -> crate::appearance::Status {
-    text(
-        "Drawing layer update failed",
-        "更新书写图层失败",
-        "更新書寫圖層失敗",
-    )
+    text("Drawing layer update failed")
     .detail(error)
 }

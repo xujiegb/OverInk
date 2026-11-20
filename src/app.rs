@@ -226,11 +226,7 @@ struct App {
 }
 impl App {
     fn mouse_mode_status() -> Status {
-        text(
-            "Mouse mode. Click the desktop or select a drawing tool to resume.",
-            "鼠标模式。可点击桌面，选择任一画具即可继续书写。",
-            "滑鼠模式。可點按桌面，選擇任一繪圖工具即可繼續書寫。",
-        )
+        text("Mouse mode. Click the desktop or select a drawing tool to resume.")
         .into()
     }
 
@@ -253,7 +249,7 @@ impl App {
                 Ok(0) => {}
                 Ok(pending) => status = pending_pages(pending),
                 Err(error) => {
-                    status = text("Session restore failed", "恢复会话失败", "還原工作階段失敗")
+                    status = text("Session restore failed")
                         .detail(error)
                 }
             }
@@ -362,16 +358,8 @@ impl App {
             &mut self.input.ink_damage,
         ) {
             self.show_sample_limit(match error {
-                EraseError::Samples => text(
-                    "This erase would exceed the one million sample limit.",
-                    "此次擦除会超出一百万采样点上限。",
-                    "此次擦除會超過一百萬取樣點上限。",
-                ),
-                EraseError::Preview => text(
-                    "This erase reached the preview limit. Erase in shorter passes.",
-                    "此次擦除达到预览上限，请分几次擦除。",
-                    "此次擦除達到預覽上限，請分幾次擦除。",
-                ),
+                EraseError::Samples => text("This erase would exceed the one million sample limit."),
+                EraseError::Preview => text("This erase reached the preview limit. Erase in shorter passes."),
             });
         }
     }
@@ -383,11 +371,7 @@ impl App {
         if self.draft_point_count() < MAX_POINTS {
             return true;
         }
-        self.show_sample_limit(text(
-            "One million sample limit reached. Export and clear the canvas.",
-            "已达到一百万采样点上限，请导出后清屏。",
-            "已達一百萬取樣點上限，請匯出後清除頁面。",
-        ));
+        self.show_sample_limit(text("One million sample limit reached. Export and clear the canvas."));
         false
     }
     fn cancel_gesture(&mut self, gesture: Gesture) {
@@ -593,16 +577,8 @@ impl App {
         self.wait_for_mouse_up = false;
         self.hidden = false;
         if let Some(hint) = match tool {
-            Tool::Text => Some(text(
-                "Click to add or edit text. Ctrl/Cmd+Enter finishes.",
-                "单击添加或编辑文字，Ctrl/Cmd+Enter 完成。",
-                "點按新增或編輯文字，Ctrl/Cmd+Enter 完成。",
-            )),
-            Tool::Select => Some(text(
-                "Drag to move. Double-click to edit. Delete removes the box.",
-                "拖动移动，双击编辑，Delete 删除文字框。",
-                "拖曳移動，點兩下編輯，Delete 刪除文字框。",
-            )),
+            Tool::Text => Some(text("Click to add or edit text. Ctrl/Cmd+Enter finishes.")),
+            Tool::Select => Some(text("Drag to move. Double-click to edit. Delete removes the box.")),
             _ => None,
         } {
             self.status = hint.into();
@@ -770,11 +746,7 @@ impl App {
         let layout = old.as_ref().map(|d| (d.id, d.bounds, d.scale))
             != new.map(|d| (d.id, d.bounds, d.scale));
         if removed {
-            self.status = text(
-                "Display disconnected. Its ink and undo history were cleared.",
-                "显示器已断开，已清除其笔迹和撤销记录。",
-                "顯示器已中斷連線，已清除其筆跡與復原記錄。",
-            )
+            self.status = text("Display disconnected. Its ink and undo history were cleared.")
             .into();
         }
         (layout, removed)
@@ -1320,19 +1292,15 @@ impl App {
         self.finish_all_contacts();
         let p = PathBuf::from(&self.path);
         let result = if p == self.save_path {
-            Err(text(
-                "Choose a different file for manual saves.",
-                "请为手动保存选择其他文件名。",
-                "請為手動儲存選擇其他檔名。",
-            )
+            Err(text("Choose a different file for manual saves.")
             .get(self.language)
             .into())
         } else {
             self.pages.save(&self.history, &p)
         };
         match result {
-            Ok(()) => self.status = text("Saved", "已保存", "已儲存").detail(p.display()),
-            Err(e) => self.status = text("Save failed", "保存失败", "儲存失敗").detail(e),
+            Ok(()) => self.status = text("Saved").detail(p.display()),
+            Err(e) => self.status = text("Save failed").detail(e),
         }
     }
     fn save_session(&mut self) -> Result<(), String> {
@@ -1363,9 +1331,9 @@ impl App {
         self.finish_all_contacts();
         let p = PathBuf::from(&self.path);
         match self.pages.load(&mut self.history, &p, false) {
-            Ok(0) => self.status = text("Session loaded", "已打开会话", "已開啟工作階段").into(),
+            Ok(0) => self.status = text("Session loaded").into(),
             Ok(pending) => self.status = pending_pages(pending),
-            Err(e) => self.status = text("Open failed", "打开失败", "開啟失敗").detail(e),
+            Err(e) => self.status = text("Open failed").detail(e),
         }
     }
     fn export(&mut self) {
@@ -1378,28 +1346,20 @@ impl App {
                 .map_err(|error| error.to_string())
         });
         match result {
-            Ok(()) => self.status = text("Exported", "已导出", "已匯出").detail(p.display()),
-            Err(e) => self.status = text("Export failed", "导出失败", "匯出失敗").detail(e),
+            Ok(()) => self.status = text("Exported").detail(p.display()),
+            Err(e) => self.status = text("Export failed").detail(e),
         }
     }
 
     fn install_annotation_font(&mut self, source: &Path, destination: &Path) -> bool {
         match self.text_fonts.install(source, destination) {
             Ok(()) => {
-                self.status = text(
-                    "Annotation font updated",
-                    "已更新标注字体",
-                    "已更新標註字型",
-                )
+                self.status = text("Annotation font updated")
                 .into();
                 true
             }
             Err(error) => {
-                self.status = text(
-                    "Could not use the annotation font",
-                    "无法使用此标注字体",
-                    "無法使用此標註字型",
-                )
+                self.status = text("Could not use the annotation font")
                 .detail(error);
                 false
             }
@@ -1418,11 +1378,7 @@ impl App {
     }
 }
 fn pending_pages(count: usize) -> Status {
-    text(
-        "Saved pages awaiting a matching display",
-        "等待匹配显示器的已保存页面",
-        "等待配對顯示器的已儲存頁面",
-    )
+    text("Saved pages awaiting a matching display")
     .detail(count)
 }
 
@@ -1539,7 +1495,7 @@ fn handle_screenshot_event(
 fn update_preferences(app: &mut App, previous: Preferences, multi_supported: bool) -> bool {
     if let Err(error) = app.preferences.save(&state_dir().join("ui.json")) {
         app.preferences = previous;
-        app.status = text("Settings save failed", "保存设置失败", "儲存設定失敗").detail(error);
+        app.status = text("Settings save failed").detail(error);
         return false;
     }
     app.language = app.preferences.language.unwrap_or_else(Language::system);
@@ -1550,20 +1506,12 @@ fn update_preferences(app: &mut App, previous: Preferences, multi_supported: boo
             app.remove_resume_file()
         };
         if let Err(error) = result {
-            app.status = text(
-                "Last session update failed",
-                "更新自动恢复会话失败",
-                "更新自動復原工作階段失敗",
-            )
+            app.status = text("Last session update failed")
             .detail(error);
         }
     }
     if previous.wayland != app.preferences.wayland {
-        app.status = text(
-            "Restart OverInk to switch the display backend.",
-            "重启 OverInk 后切换显示后端。",
-            "重新啟動 OverInk 後切換顯示後端。",
-        )
+        app.status = text("Restart OverInk to switch the display backend.")
         .into();
     }
     let multi = multi_supported && app.preferences.per_display_windows;
@@ -2162,17 +2110,13 @@ fn run_inner(options: Options) -> Result<(), String> {
                             if let Err(error) = app.preferences.save(&state_dir().join("ui.json")) {
                                 app.preferences.screenshot_folder = previous;
                                 app.status =
-                                    text("Settings save failed", "保存设置失败", "儲存設定失敗")
+                                    text("Settings save failed")
                                         .detail(error);
                             }
                         }
                         Ok(None) => (),
                         Err(error) => {
-                            app.status = text(
-                                "Could not choose a screenshot folder",
-                                "无法选择截图文件夹",
-                                "無法選擇螢幕擷取資料夾",
-                            )
+                            app.status = text("Could not choose a screenshot folder")
                             .detail(error);
                         }
                     },
@@ -2219,7 +2163,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                     .connected(&canvases[0].window)
                     .unwrap_or_else(|error| {
                         app.status =
-                            text("Display query failed", "查询显示器失败", "查詢顯示器失敗")
+                            text("Display query failed")
                                 .detail(error);
                         toolbar_dirty = true;
                         app.displays.clone()
@@ -2268,7 +2212,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                     && !wayland
                     && let Err(error) = toolbar.arrange_toolbar(toolbar_expanded, app.pages.active)
                 {
-                    app.status = text("Toolbar layout failed", "工具栏布局失败", "工具列配置失敗")
+                    app.status = text("Toolbar layout failed")
                         .detail(error);
                 }
                 if (was_suspended || removed)
@@ -2293,11 +2237,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                     }
                 }
                 if wayland && requested.is_some_and(|id| Some(id) != reported) {
-                    app.status = text(
-                        "The Wayland compositor controls window order and placement.",
-                        "Wayland 窗口层级和位置由合成器控制。",
-                        "Wayland 視窗層級與位置由合成器控制。",
-                    )
+                    app.status = text("The Wayland compositor controls window order and placement.")
                     .into();
                     toolbar_dirty = true;
                 }
@@ -2306,11 +2246,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                     && app.pages.needs_save(&app.history)
                     && let Err(error) = app.save_session()
                 {
-                    app.status = text(
-                        "Save after display removal failed",
-                        "断开显示器后保存失败",
-                        "中斷顯示器連線後儲存失敗",
-                    )
+                    app.status = text("Save after display removal failed")
                     .detail(error);
                     toolbar_dirty = true;
                 }
@@ -2354,7 +2290,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                         Err(error) => {
                             app.panel = Some(crate::toolbar::Panel::Settings);
                             app.status =
-                                text("Screenshot failed", "截图失败", "螢幕擷取失敗").detail(error);
+                                text("Screenshot failed").detail(error);
                             toolbar_dirty = true;
                             restore_toolbar_focus = true;
                             mode_changed = true;
@@ -2376,7 +2312,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 match result {
                     Ok(path) => {
                         app.screenshot.cancel();
-                        app.status = text("Screenshot saved", "截图已保存", "螢幕擷取已儲存")
+                        app.status = text("Screenshot saved")
                             .detail(path.display());
                         toolbar_dirty = true;
                         restore_toolbar_focus = true;
@@ -2386,11 +2322,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                         app.screenshot.confirm_replace(path);
                     }
                     Err(SaveError::Exists(path)) => {
-                        app.status = text(
-                            "Screenshot not saved; file already exists",
-                            "截图未保存：文件已存在",
-                            "螢幕擷取未儲存：檔案已存在",
-                        )
+                        app.status = text("Screenshot not saved; file already exists")
                         .detail(path.display());
                         toolbar_dirty = true;
                     }
@@ -2406,7 +2338,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                     }
                     Err(SaveError::Failed(error)) => {
                         app.status =
-                            text("Screenshot save failed", "保存截图失败", "儲存螢幕擷取失敗")
+                            text("Screenshot save failed")
                                 .detail(error);
                         toolbar_dirty = true;
                     }
@@ -2462,16 +2394,16 @@ fn run_inner(options: Options) -> Result<(), String> {
                             Some(color)
                         };
                         if let Some(color) = applied {
-                            text("Picked", "已取色", "已取色").detail(color.hex())
+                            text("Picked").detail(color.hex())
                         } else {
-                            text("Color selection cancelled", "已取消取色", "已取消取色").into()
+                            text("Color selection cancelled").into()
                         }
                     }
                     Ok(None) => {
-                        text("Color selection cancelled", "已取消取色", "已取消取色").into()
+                        text("Color selection cancelled").into()
                     }
                     Err(error) => {
-                        text("Screen color picker failed", "屏幕取色失败", "螢幕取色失敗")
+                        text("Screen color picker failed")
                             .detail(error)
                     }
                 };
@@ -2481,17 +2413,9 @@ fn run_inner(options: Options) -> Result<(), String> {
                     canvas.dirty = true;
                     toolbar_dirty = true;
                     app.status = match result {
-                        Ok(()) => text(
-                            "Desktop frozen. Select Live desktop to resume the background.",
-                            "桌面已冻结，选择实时桌面即可恢复。",
-                            "桌面已凍結，選擇即時桌面即可恢復。",
-                        )
+                        Ok(()) => text("Desktop frozen. Select Live desktop to resume the background.")
                         .into(),
-                        Err(error) => text(
-                            "Showing the live desktop",
-                            "已切回实时桌面",
-                            "已切回即時桌面",
-                        )
+                        Err(error) => text("Showing the live desktop")
                         .detail(error),
                     };
                 }
@@ -2528,7 +2452,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 controller_bounds_changed = true;
                 toolbar_expanded = expanded;
                 if let Err(error) = toolbar.arrange_toolbar(expanded, None) {
-                    app.status = text("Toolbar layout failed", "工具栏布局失败", "工具列配置失敗")
+                    app.status = text("Toolbar layout failed")
                         .detail(error);
                 }
             }
@@ -2627,11 +2551,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 match app.text_fonts.move_font(from, to, &annotation_font_path) {
                     Ok(()) => cmd.redraw_canvas = true,
                     Err(error) => {
-                        app.status = text(
-                            "Could not reorder fonts",
-                            "无法调整字体顺序",
-                            "無法調整字型順序",
-                        )
+                        app.status = text("Could not reorder fonts")
                         .detail(error);
                     }
                 }
@@ -2641,7 +2561,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 match app.text_fonts.remove_font(&id, &annotation_font_path) {
                     Ok(()) => cmd.redraw_canvas = true,
                     Err(error) => {
-                        app.status = text("Could not remove font", "无法删除字体", "無法刪除字型")
+                        app.status = text("Could not remove font")
                             .detail(error);
                     }
                 }
@@ -2650,20 +2570,12 @@ fn run_inner(options: Options) -> Result<(), String> {
             if cmd.reset_font {
                 match app.text_fonts.reset(&annotation_font_path) {
                     Ok(()) => {
-                        app.status = text(
-                            "Using the included annotation font",
-                            "已切换到内置标注字体",
-                            "已切換至內建標註字型",
-                        )
+                        app.status = text("Using the included annotation font")
                         .into();
                         cmd.redraw_canvas = true;
                     }
                     Err(error) => {
-                        app.status = text(
-                            "Could not reset the annotation font",
-                            "无法还原标注字体",
-                            "無法還原標註字型",
-                        )
+                        app.status = text("Could not reset the annotation font")
                         .detail(error)
                     }
                 }
@@ -2729,11 +2641,7 @@ fn run_inner(options: Options) -> Result<(), String> {
             }
             if cmd.frame_rate {
                 if let Err(error) = app.frame_rate.save(&state_dir().join("frame-rate.json")) {
-                    app.status = text(
-                        "Frame-rate setting save failed",
-                        "保存帧率设置失败",
-                        "儲存影格率設定失敗",
-                    )
+                    app.status = text("Frame-rate setting save failed")
                     .detail(error);
                 }
                 pacer.configure(app.frame_rate, app.refresh_hz(), Instant::now());
@@ -2965,17 +2873,9 @@ fn run_inner(options: Options) -> Result<(), String> {
                             // osk.exe. Report failure rather than silently
                             // substituting the keyboard the user opted out of.
                             #[cfg(target_os = "windows")]
-                            let message = text(
-                                "Windows system keyboard unavailable",
-                                "Windows 系统键盘不可用",
-                                "Windows 系統鍵盤不可用",
-                            );
+                            let message = text("Windows system keyboard unavailable");
                             #[cfg(not(target_os = "windows"))]
-                            let message = text(
-                                "Using OverInk keyboard",
-                                "已改用 OverInk 键盘",
-                                "已改用 OverInk 鍵盤",
-                            );
+                            let message = text("Using OverInk keyboard");
                             app.status = message.detail(error);
                         }
                     }
@@ -2989,11 +2889,7 @@ fn run_inner(options: Options) -> Result<(), String> {
             }
             if app.input.text.take_input_source_request() {
                 if let Err(error) = crate::keyboard::switch_input_method() {
-                    app.status = text(
-                        "Could not switch input method",
-                        "无法切换系统输入法",
-                        "無法切換系統輸入法",
-                    )
+                    app.status = text("Could not switch input method")
                     .detail(error);
                 }
                 toolbar_dirty = true;
@@ -3094,7 +2990,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                     && let Err(error) = app.save_session()
                 {
                     app.status =
-                        text("Autosave failed", "自动保存失败", "自動儲存失敗").detail(error);
+                        text("Autosave failed").detail(error);
                     toolbar_dirty = true;
                 }
                 app.last_save = Instant::now();

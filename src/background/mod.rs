@@ -286,28 +286,16 @@ pub fn snapshot_mode(
     xwayland: bool,
 ) -> SnapshotMode {
     if driver == "wayland" || xwayland {
-        return SnapshotMode::LiveOnly(crate::appearance::text(
-            "This session cannot guarantee HDR in a desktop screenshot",
-            "当前会话无法保证截屏保留 HDR",
-            "目前的工作階段無法保證螢幕擷取保留 HDR",
-        ));
+        return SnapshotMode::LiveOnly(crate::appearance::text("This session cannot guarantee HDR in a desktop screenshot"));
     }
     if hdr && (cfg!(target_os = "windows") || cfg!(target_os = "macos")) {
         if extended_available {
             SnapshotMode::Linear
         } else {
-            SnapshotMode::LiveOnly(crate::appearance::text(
-                "Freezing this desktop requires an extended-linear-sRGB renderer",
-                "冻结此桌面需要支持扩展线性 sRGB 的渲染器",
-                "凍結此桌面需要支援延伸線性 sRGB 的繪圖引擎",
-            ))
+            SnapshotMode::LiveOnly(crate::appearance::text("Freezing this desktop requires an extended-linear-sRGB renderer"))
         }
     } else if hdr {
-        SnapshotMode::LiveOnly(crate::appearance::text(
-            "HDR desktop capture is unavailable on this backend",
-            "当前显示后端不支持 HDR 截屏",
-            "目前的顯示後端不支援 HDR 螢幕擷取",
-        ))
+        SnapshotMode::LiveOnly(crate::appearance::text("HDR desktop capture is unavailable on this backend"))
     } else {
         SnapshotMode::Sdr
     }
@@ -645,11 +633,7 @@ mod tests {
         display_result(bg.display(Some(&screen), &connected, SnapshotMode::Linear, true))?;
         assert!(bg.images.is_empty());
         assert!(bg.pending());
-        let reason = crate::appearance::text(
-            "No HDR screenshot backend",
-            "没有 HDR 截屏后端",
-            "沒有 HDR 螢幕擷取後端",
-        );
+        let reason = crate::appearance::text("No HDR screenshot backend");
         let unavailable = SnapshotMode::LiveOnly(reason);
         assert!(
             bg.display(Some(&screen), &connected, unavailable, true)

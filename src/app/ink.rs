@@ -116,7 +116,7 @@ impl Ink {
         {
             background.live();
             app.status =
-                text("Frozen desktop unavailable", "无法冻结桌面", "無法凍結桌面").detail(error);
+                text("Frozen desktop unavailable").detail(error);
         }
 
         self.committed(&frame, app)?;

@@ -75,11 +75,7 @@ pub enum Guide {
     Unavailable(Status),
 }
 
-const RELOGIN: Text = text(
-    "Sign out of GNOME and sign back in. Then open OverInk to enable the extension.",
-    "请注销并重新登录 GNOME，然后打开 OverInk 启用扩展。",
-    "請登出並重新登入 GNOME，然後開啟 OverInk 啟用擴充套件。",
-);
+const RELOGIN: Text = text("Sign out of GNOME and sign back in. Then open OverInk to enable the extension.");
 
 impl Guide {
     pub fn check() -> Option<Self> {
@@ -89,11 +85,7 @@ impl Guide {
         })
         .unwrap_or_else(|error| {
             Some(Self::Unavailable(
-                text(
-                    "Could not check the GNOME extension",
-                    "无法检查 GNOME 扩展",
-                    "無法檢查 GNOME 擴充套件",
-                )
+                text("Could not check the GNOME extension")
                 .detail(error),
             ))
         })
@@ -102,53 +94,33 @@ impl Guide {
     pub fn ui(&self, ui: &mut egui::Ui, tr: Language, startup: bool) -> Option<Action> {
         let (message, proceed) = match self {
             Self::Install => (
-                tr.text(
-                    "Install OverInk Overlay to keep the canvas on top and position the toolbar in GNOME Wayland.",
-                    "安装 OverInk Overlay 扩展后，GNOME Wayland 才能将画布置顶并定位工具栏。",
-                    "安裝 OverInk Overlay 擴充套件後，GNOME Wayland 才能將畫布置頂並定位工具列。",
-                ),
-                tr.text("Install extension", "安装扩展", "安裝擴充套件"),
+                tr.text("Install OverInk Overlay to keep the canvas on top and position the toolbar in GNOME Wayland."),
+                tr.text("Install extension"),
             ),
             Self::Update => (
-                tr.text(
-                    "Update OverInk Overlay to use native Wayland with this version of OverInk.",
-                    "请更新 OverInk Overlay 扩展，以继续使用原生 Wayland。",
-                    "請更新 OverInk Overlay 擴充套件，以繼續使用原生 Wayland。",
-                ),
-                tr.text("Update extension", "更新扩展", "更新擴充套件"),
+                tr.text("Update OverInk Overlay to use native Wayland with this version of OverInk."),
+                tr.text("Update extension"),
             ),
             Self::Enable => (
-                tr.text(
-                    "Enable the installed OverInk Overlay extension to use native Wayland.",
-                    "启用已安装的 OverInk Overlay 扩展，即可使用原生 Wayland。",
-                    "啟用已安裝的 OverInk Overlay 擴充套件，即可使用原生 Wayland。",
-                ),
-                tr.text("Enable extension", "启用扩展", "啟用擴充套件"),
+                tr.text("Enable the installed OverInk Overlay extension to use native Wayland."),
+                tr.text("Enable extension"),
             ),
             Self::Relogin => (
                 RELOGIN.get(tr),
-                tr.text(
-                    "Use XWayland for now",
-                    "暂用 XWayland",
-                    "暫用 XWayland",
-                ),
+                tr.text("Use XWayland for now"),
             ),
             Self::Unavailable(status) => {
                 ui.label(status.get(tr));
-                ("", tr.text("Check again", "重新检查", "重新檢查"))
+                ("", tr.text("Check again"))
             }
         };
         if !message.is_empty() {
             ui.label(message);
         }
         let cancel = if startup {
-            tr.text(
-                "Turn off native Wayland",
-                "关闭原生 Wayland",
-                "關閉原生 Wayland",
-            )
+            tr.text("Turn off native Wayland")
         } else {
-            tr.text("Cancel", "取消", "取消")
+            tr.text("Cancel")
         };
         ui.horizontal_wrapped(|ui| {
             if ui.button(proceed).clicked() {
@@ -173,11 +145,7 @@ impl Guide {
                     Some(Self::Install | Self::Update) => match install_files() {
                         Ok(_) => Self::Relogin,
                         Err(error) => Self::Unavailable(
-                            text(
-                                "Could not write the GNOME extension",
-                                "无法写入 GNOME 扩展",
-                                "無法寫入 GNOME 擴充套件",
-                            )
+                            text("Could not write the GNOME extension")
                             .detail(error),
                         ),
                     },
@@ -189,11 +157,7 @@ impl Guide {
                 Ok(()) => Some(Decision::Native),
                 Err(error) => {
                     *self = Self::Unavailable(
-                        text(
-                            "Could not activate the GNOME extension",
-                            "无法启用 GNOME 扩展",
-                            "無法啟用 GNOME 擴充套件",
-                        )
+                        text("Could not activate the GNOME extension")
                         .detail(error),
                     );
                     None
@@ -239,11 +203,7 @@ pub fn start_video(
             return Ok((runtime, preferences, None));
         }
         Ok((Decision::Native, runtime)) => {
-            let status = text(
-                "Extension enabled. Restart OverInk to use native Wayland.",
-                "扩展已启用。重启 OverInk 后使用原生 Wayland。",
-                "擴充套件已啟用。重新啟動 OverInk 後使用原生 Wayland。",
-            )
+            let status = text("Extension enabled. Restart OverInk to use native Wayland.")
             .into();
             return Ok((runtime, preferences, Some(status)));
         }
@@ -262,11 +222,7 @@ pub fn start_video(
         }
         Err(error) => {
             eprintln!("OverInk: opening the GNOME extension guide failed ({error})");
-            text(
-                "Using XWayland because the extension guide could not open",
-                "扩展引导无法打开，正在使用 XWayland",
-                "擴充套件引導無法開啟，正在使用 XWayland",
-            )
+            text("Using XWayland because the extension guide could not open")
             .detail(error)
         }
     };
@@ -278,15 +234,11 @@ fn turn_off_wayland(preferences: &mut Preferences, path: &Path) -> Status {
     *preferences = Preferences::load(path);
     preferences.wayland = false;
     match preferences.save(path) {
-        Ok(()) => text(
-            "Using XWayland.",
-            "正在使用 XWayland。",
-            "正在使用 XWayland。",
-        )
+        Ok(()) => text("Using XWayland.")
         .into(),
         Err(error) => {
             eprintln!("OverInk: saving the XWayland preference failed ({error})");
-            text("Settings save failed", "保存设置失败", "儲存設定失敗").detail(error)
+            text("Settings save failed").detail(error)
         }
     }
 }
@@ -332,11 +284,7 @@ async fn inspect(shell: &Proxy<'_>) -> zbus::Result<Option<Guide>> {
     let guide = match state {
         Some(ACTIVE) => return Ok(None),
         Some(ERROR) => Guide::Unavailable(
-            text(
-                "GNOME reported an extension error",
-                "GNOME 报告扩展错误",
-                "GNOME 回報擴充套件錯誤",
-            )
+            text("GNOME reported an extension error")
             .detail(extension_error(&info).unwrap_or_default()),
         ),
         Some(INACTIVE | INITIALIZED) => {
@@ -344,11 +292,7 @@ async fn inspect(shell: &Proxy<'_>) -> zbus::Result<Option<Guide>> {
                 Guide::Enable
             } else {
                 Guide::Unavailable(
-                    text(
-                        "Open GNOME Extensions and turn on its main switch. Then check again.",
-                        "请打开 GNOME 扩展应用，开启总开关后重新检查。",
-                        "請開啟 GNOME 擴充套件應用程式，開啟總開關後重新檢查。",
-                    )
+                    text("Open GNOME Extensions and turn on its main switch. Then check again.")
                     .into(),
                 )
             }
@@ -364,11 +308,7 @@ async fn inspect(shell: &Proxy<'_>) -> zbus::Result<Option<Guide>> {
             }
         }
         _ => Guide::Unavailable(
-            text(
-                "OverInk Overlay is inactive. Check its status in GNOME Extensions.",
-                "扩展尚未生效，请在 GNOME 扩展应用中检查状态。",
-                "擴充套件尚未生效，請在 GNOME 擴充套件應用程式中檢查狀態。",
-            )
+            text("OverInk Overlay is inactive. Check its status in GNOME Extensions.")
             .into(),
         ),
     };
@@ -377,11 +317,7 @@ async fn inspect(shell: &Proxy<'_>) -> zbus::Result<Option<Guide>> {
 
 fn incompatible(version: String) -> Guide {
     Guide::Unavailable(
-        text(
-            "OverInk Overlay is incompatible with this GNOME Shell version",
-            "OverInk Overlay 与此 GNOME Shell 版本不兼容",
-            "OverInk Overlay 與此 GNOME Shell 版本不相容",
-        )
+        text("OverInk Overlay is incompatible with this GNOME Shell version")
         .detail(version),
     )
 }

@@ -485,21 +485,13 @@ impl Screenshot {
             format!(
                 "{} {}",
                 path.display(),
-                tr.text(
-                    "already exists. Replace it?",
-                    "已存在。要替换吗？",
-                    "已存在。要取代嗎？"
-                )
+                tr.text("already exists. Replace it?")
             )
         });
         let detail = self
             .cancel_blocked
             .then(|| {
-                tr.text(
-                    "The screenshot is being saved and can no longer be cancelled",
-                    "截图正在保存，已无法取消",
-                    "螢幕擷取正在儲存，已無法取消",
-                )
+                tr.text("The screenshot is being saved and can no longer be cancelled")
             })
             .or(self.error.as_deref())
             .or(replace.as_deref());
@@ -521,9 +513,9 @@ impl Screenshot {
         menu.spacing_mut().item_spacing = Vec2::splat(MENU_GAP * scale);
         menu.spacing_mut().button_padding = vec2(6., 4.) * scale;
         let primary = if self.replace.is_some() {
-            (MenuAction::Replace, tr.text("Replace", "替换", "取代"))
+            (MenuAction::Replace, tr.text("Replace"))
         } else {
-            (MenuAction::Save, tr.text("Save", "保存", "儲存"))
+            (MenuAction::Save, tr.text("Save"))
         };
         let saving = self.saving();
         menu.horizontal(|ui| {
@@ -531,9 +523,9 @@ impl Screenshot {
                 primary,
                 (
                     MenuAction::SaveAs,
-                    tr.text("Save As…", "另存为…", "另存為…"),
+                    tr.text("Save As…"),
                 ),
-                (MenuAction::Cancel, tr.text("Cancel", "取消", "取消")),
+                (MenuAction::Cancel, tr.text("Cancel")),
             ] {
                 let enabled =
                     !self.save_dialog && (!saving || matches!(action, MenuAction::Cancel));
@@ -691,11 +683,7 @@ pub fn hdr_available(window: &Window) -> bool {
 }
 
 pub fn unsupported_hdr(tr: Language) -> &'static str {
-    tr.text(
-        "HDR capture is unavailable for this display. Screenshots are saved in SDR.",
-        "当前显示器无法进行 HDR 截图，将保存为 SDR。",
-        "目前的顯示器無法進行 HDR 螢幕擷取，將儲存為 SDR。",
-    )
+    tr.text("HDR capture is unavailable for this display. Screenshots are saved in SDR.")
 }
 
 pub enum Destination {

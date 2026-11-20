@@ -627,11 +627,7 @@ impl App {
                     state.click = None;
                     if self.tool == Tool::Text {
                         if self.history.text_boxes().len() >= MAX_TEXT_BOXES {
-                            self.status = text(
-                                "Text box limit reached",
-                                "已达到文字框数量上限",
-                                "已達到文字框數量上限",
-                            )
+                            self.status = text("Text box limit reached")
                             .into();
                         } else {
                             state.edit(
@@ -920,11 +916,11 @@ impl App {
                     let entries = [
                         (
                             TextContextAction::SelectAll,
-                            tr.text("Select all", "全选", "全選"),
+                            tr.text("Select all"),
                         ),
-                        (TextContextAction::Copy, tr.text("Copy", "拷贝", "複製")),
-                        (TextContextAction::Paste, tr.text("Paste", "粘贴", "貼上")),
-                        (TextContextAction::Cut, tr.text("Cut", "剪切", "剪下")),
+                        (TextContextAction::Copy, tr.text("Copy")),
+                        (TextContextAction::Paste, tr.text("Paste")),
+                        (TextContextAction::Cut, tr.text("Cut")),
                     ];
                     for (choice, title) in entries {
                         if !has_text && choice != TextContextAction::Paste {
@@ -1048,10 +1044,10 @@ impl App {
             &mut menu,
             button,
             ActionIcon::Delete,
-            tr.text("Delete text box", "删除文本框", "刪除文字框"),
+            tr.text("Delete text box"),
         )
         .on_hover_text(
-            egui::RichText::new(tr.text("Delete text box", "删除文本框", "刪除文字框"))
+            egui::RichText::new(tr.text("Delete text box"))
                 .size(toolbar::MENU_FONT_SIZE * scale),
         )
         .clicked()
@@ -1061,13 +1057,13 @@ impl App {
         for (icon, hint, step, enabled) in [
             (
                 ActionIcon::Increase,
-                tr.text("Increase font size", "加大字号", "加大字級"),
+                tr.text("Increase font size"),
                 font_step,
                 font_size < *TextBox::FONT_SIZE.end(),
             ),
             (
                 ActionIcon::Decrease,
-                tr.text("Decrease font size", "缩小字号", "縮小字級"),
+                tr.text("Decrease font size"),
                 -font_step,
                 font_size > *TextBox::FONT_SIZE.start(),
             ),
@@ -1086,7 +1082,7 @@ impl App {
             let preset = InkColor::from_rgb8(rgb);
             let label = format!(
                 "{} {}",
-                tr.text("Text color", "文字颜色", "文字顏色"),
+                tr.text("Text color"),
                 preset.hex()
             );
             if toolbar::swatch_button(&mut menu, button, rgb, &label, color.srgb8() == rgb)
@@ -1097,7 +1093,7 @@ impl App {
                 self.input.text.color_wheel = None;
             }
         }
-        let keyboard_label = tr.text("Show on-screen keyboard", "呼出屏幕键盘", "開啟螢幕鍵盤");
+        let keyboard_label = tr.text("Show on-screen keyboard");
         let (icon_rect, keyboard_response) =
             menu.allocate_exact_size(KEYBOARD_BUTTON * scale, egui::Sense::click());
         keyboard_response.widget_info(|| {
@@ -1136,7 +1132,7 @@ impl App {
             acted |= self.request_text_keyboard();
         }
         let wheel_open = self.input.text.color_wheel.is_some();
-        let label = tr.text("Color wheel", "色轮", "色輪");
+        let label = tr.text("Color wheel");
         let (icon, response) = menu.allocate_exact_size(button, egui::Sense::click());
         response.widget_info(|| {
             egui::WidgetInfo::selected(egui::Role::Button, menu.is_enabled(), wheel_open, label)
@@ -1184,7 +1180,7 @@ impl App {
         palette.horizontal(|ui| {
             ui.set_width(inner.width());
             ui.label(
-                egui::RichText::new(tr.text("Brightness", "亮度", "亮度"))
+                egui::RichText::new(tr.text("Brightness"))
                     .size(toolbar::MENU_FONT_SIZE * scale),
             );
             let remaining = ui.available_width().max(0.);
@@ -1204,13 +1200,13 @@ impl App {
                 let apply = ui
                     .add_sized(
                         size,
-                        toolbar::menu_button(tr.text("Apply", "应用", "套用"), scale),
+                        toolbar::menu_button(tr.text("Apply"), scale),
                     )
                     .clicked();
                 let pick = ui
                     .add_sized(
                         size,
-                        toolbar::menu_button(tr.text("Pick screen", "屏幕取色", "螢幕取色"), scale),
+                        toolbar::menu_button(tr.text("Pick screen"), scale),
                     )
                     .clicked();
                 (apply, pick)
@@ -1458,11 +1454,7 @@ impl App {
                         return;
                     }
                     Err(error) => {
-                        self.status = text(
-                            "System key input unavailable",
-                            "系统键盘输入不可用",
-                            "系統鍵盤輸入不可用",
-                        )
+                        self.status = text("System key input unavailable")
                         .detail(error);
                     }
                 }
