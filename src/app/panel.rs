@@ -637,18 +637,27 @@ impl App {
             egui::ComboBox::from_id_salt("osk-source")
                 .selected_text(display_source)
                 .show_ui(ui, |ui| {
-                    commands.preferences |= ui.selectable_value(
-                        source,
-                        KeyboardSource::OverInk,
-                        tr.text("OverInk keyboard (default)", "OverInk 键盘（默认）", "OverInk 鍵盤（預設）"),
-                    ).changed();
-                    commands.preferences |= ui.add_enabled_ui(system_supported, |ui| {
-                        ui.selectable_value(
+                    commands.preferences |= ui
+                        .selectable_value(
                             source,
-                            KeyboardSource::System,
-                            tr.text("System keyboard", "系统键盘", "系統鍵盤"),
+                            KeyboardSource::OverInk,
+                            tr.text(
+                                "OverInk keyboard (default)",
+                                "OverInk 键盘（默认）",
+                                "OverInk 鍵盤（預設）",
+                            ),
                         )
-                    }).inner.changed();
+                        .changed();
+                    commands.preferences |= ui
+                        .add_enabled_ui(system_supported, |ui| {
+                            ui.selectable_value(
+                                source,
+                                KeyboardSource::System,
+                                tr.text("System keyboard", "系统键盘", "系統鍵盤"),
+                            )
+                        })
+                        .inner
+                        .changed();
                 });
         });
         ui.small(tr.text(
