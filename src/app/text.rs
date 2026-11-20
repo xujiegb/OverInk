@@ -2608,8 +2608,7 @@ mod tests {
         assert!(app.input.text.color_wheel.is_none());
 
         tap(&mut app, wheel_button);
-        let Some((palette, scale)) = app.text_menus(screen).and_then(|menus| menus.palette)
-        else {
+        let Some((palette, scale)) = app.text_menus(screen).and_then(|menus| menus.palette) else {
             panic!("expected palette after reopening");
         };
         let inner = palette.shrink(PALETTE_MARGIN * scale);
