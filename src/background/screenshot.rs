@@ -28,12 +28,39 @@ impl Job {
     pub fn start(
         window: &Window,
         display: &Display,
+        displays: &[Display],
+        region: Rect,
+        hdr: bool,
+        portal: bool,
+    ) -> Result<Self, String> {
+        Self::start_inner(window, display, displays, region, hdr, portal, false)
+    }
+
+    /// Pickers use an already validated active canvas and need an owned
+    /// compositor screenshot even on GNOME systems without the optional
+    /// GNOME Shell extension. Unlike ordinary screenshots, their canvas has
+    /// already been hidden and may not report an SDL display ID anymore.
+    pub fn start_picker(
+        window: &Window,
+        display: &Display,
+        displays: &[Display],
+        region: Rect,
+    ) -> Result<Self, String> {
+        Self::start_inner(window, display, displays, region, false, true, true)
+    }
+
+    fn start_inner(
+        window: &Window,
+        display: &Display,
         _displays: &[Display],
         region: Rect,
         _hdr: bool,
         _portal: bool,
+        _prefer_portal: bool,
     ) -> Result<Self, String> {
-        if window.display_id() != Some(display.id) {
+        if window.display_id() != Some(display.id)
+            && !(_prefer_portal && window.hidden())
+        {
             return Err("The screenshot display has changed".into());
         }
         let size = window.size();
@@ -58,7 +85,7 @@ impl Job {
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         {
             #[cfg(target_os = "linux")]
-            if crate::gnome::in_wayland_session() {
+            if crate::gnome::in_wayland_session() && !_prefer_portal {
                 // Route GNOME Wayland and XWayland captures asynchronously
                 // through the compositor. The X11 framebuffer cannot capture
                 // native Wayland windows, and can silently omit screen content.
