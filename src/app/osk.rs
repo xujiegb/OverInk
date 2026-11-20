@@ -618,7 +618,9 @@ impl Keyboard {
             self.emoji_drag_start = self.emoji_page;
             self.emoji_wheel_remainder = 0.;
         }
-        if drag.dragged() && let Some(total_delta) = drag.total_drag_delta() {
+        if drag.dragged()
+            && let Some(total_delta) = drag.total_drag_delta()
+        {
             // Unlike drag_delta(), this is the total gesture distance:
             // slow touch/stylus motions must still advance the page.
             let step = (grid.width() * 0.18).clamp(28. * scale, 92. * scale);
