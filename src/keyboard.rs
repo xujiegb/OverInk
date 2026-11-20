@@ -15,6 +15,16 @@ pub fn show(window: &Window, _video: &str) -> Result<(), String> {
         // TabTip is the modern Windows touch/handwriting panel, not the
         // legacy osk.exe accessibility keyboard. Language and handwriting
         // layout remain under the user's Windows input-method settings.
+        // On Windows 11, TabTip.exe is often already running. Spawning it
+        // again does not guarantee the keyboard is displayed. Ask Windows
+        // to show the input pane for the actual SDL canvas HWND first.
+        // Windows may refuse (e.g. with a physical keyboard connected), so
+        // retain TabTip as a best-effort fallback.
+        match crate::native::windows_keyboard::try_show(window) {
+            Ok(true) => return Ok(()),
+            Ok(false) => (),
+            Err(error) => eprintln!("OverInk: InputPane TryShow unavailable: {error}"),
+        }
         let path = ["CommonProgramW6432", "CommonProgramFiles"]
             .into_iter()
             .filter_map(env::var_os)
@@ -26,16 +36,6 @@ pub fn show(window: &Window, _video: &str) -> Result<(), String> {
             })
             .find(|path| path.is_file())
             .ok_or("Windows touch keyboard (TabTip.exe) is unavailable")?;
-        // On Windows 11, TabTip.exe is often already running. Spawning it
-        // again does not guarantee the keyboard is displayed. Ask Windows
-        // to show the input pane for the actual SDL canvas HWND first.
-        // Windows may refuse (e.g. with a physical keyboard connected), so
-        // retain TabTip as a best-effort fallback.
-        match crate::native::windows_keyboard::try_show(window) {
-            Ok(true) => return Ok(()),
-            Ok(false) => (),
-            Err(error) => eprintln!("OverInk: InputPane TryShow unavailable: {error}"),
-        }
         Command::new(path)
             .spawn()
             .map(|_| ())
