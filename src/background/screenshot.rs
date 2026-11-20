@@ -40,6 +40,7 @@ impl Job {
     /// compositor screenshot even on GNOME systems without the optional
     /// GNOME Shell extension. Unlike ordinary screenshots, their canvas has
     /// already been hidden and may not report an SDL display ID anymore.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     pub fn start_picker(
         window: &Window,
         display: &Display,
