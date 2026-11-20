@@ -6,12 +6,10 @@ use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
 mod catalog;
-mod en;
-mod zh_hans;
-mod zh_hant;
-mod fr;
 mod de;
+mod en;
 mod es;
+mod fr;
 mod it;
 mod ja;
 mod ko;
@@ -19,6 +17,8 @@ mod nl;
 mod pt;
 mod ru;
 mod tr;
+mod zh_hans;
+mod zh_hant;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Language {
@@ -186,7 +186,10 @@ impl Text {
     }
 
     pub fn detail(self, detail: impl ToString) -> Status {
-        Status { label: self, detail: detail.to_string() }
+        Status {
+            label: self,
+            detail: detail.to_string(),
+        }
     }
 }
 
@@ -216,7 +219,6 @@ impl Status {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,10 +228,19 @@ mod tests {
             assert_eq!(catalog::index(english), Some(index));
         }
         for entries in [
-            &en::STRINGS, &zh_hans::STRINGS, &zh_hant::STRINGS,
-            &fr::STRINGS, &es::STRINGS, &ja::STRINGS, &de::STRINGS,
-            &ru::STRINGS, &nl::STRINGS, &tr::STRINGS, &ko::STRINGS,
-            &pt::STRINGS, &it::STRINGS,
+            &en::STRINGS,
+            &zh_hans::STRINGS,
+            &zh_hant::STRINGS,
+            &fr::STRINGS,
+            &es::STRINGS,
+            &ja::STRINGS,
+            &de::STRINGS,
+            &ru::STRINGS,
+            &nl::STRINGS,
+            &tr::STRINGS,
+            &ko::STRINGS,
+            &pt::STRINGS,
+            &it::STRINGS,
         ] {
             assert_eq!(entries.len(), 184);
             assert!(entries.iter().all(|value| !value.is_empty()));
@@ -241,6 +252,9 @@ mod tests {
         assert_eq!(Language::Simplified.text("Settings"), "设置");
         assert_eq!(Language::Traditional.text("Settings"), "設定");
         assert_eq!(Language::French.text("Settings"), "Réglages");
-        assert_eq!(Language::French.text("Untranslated UI key"), "Untranslated UI key");
+        assert_eq!(
+            Language::French.text("Untranslated UI key"),
+            "Untranslated UI key"
+        );
     }
 }

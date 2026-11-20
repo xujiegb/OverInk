@@ -545,8 +545,8 @@ pub(super) fn reconcile(
         app.finish_all_contacts();
         app.parked_input.clear();
         app.multi = false;
-        app.status = text("Using one canvas because a display window could not be opened")
-        .detail(error);
+        app.status =
+            text("Using one canvas because a display window could not be opened").detail(error);
         reconcile_windows(canvases, app, toolbar, options)?;
     }
     Ok(())
@@ -592,6 +592,5 @@ pub(super) fn event_window(event: &SDL_Event, ty: SDL_EventType) -> Option<SDL_W
 }
 
 pub(super) fn failure(error: impl ToString) -> crate::appearance::Status {
-    text("Drawing layer update failed")
-    .detail(error)
+    text("Drawing layer update failed").detail(error)
 }

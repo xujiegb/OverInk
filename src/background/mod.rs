@@ -286,16 +286,22 @@ pub fn snapshot_mode(
     xwayland: bool,
 ) -> SnapshotMode {
     if driver == "wayland" || xwayland {
-        return SnapshotMode::LiveOnly(crate::appearance::text("This session cannot guarantee HDR in a desktop screenshot"));
+        return SnapshotMode::LiveOnly(crate::appearance::text(
+            "This session cannot guarantee HDR in a desktop screenshot",
+        ));
     }
     if hdr && (cfg!(target_os = "windows") || cfg!(target_os = "macos")) {
         if extended_available {
             SnapshotMode::Linear
         } else {
-            SnapshotMode::LiveOnly(crate::appearance::text("Freezing this desktop requires an extended-linear-sRGB renderer"))
+            SnapshotMode::LiveOnly(crate::appearance::text(
+                "Freezing this desktop requires an extended-linear-sRGB renderer",
+            ))
         }
     } else if hdr {
-        SnapshotMode::LiveOnly(crate::appearance::text("HDR desktop capture is unavailable on this backend"))
+        SnapshotMode::LiveOnly(crate::appearance::text(
+            "HDR desktop capture is unavailable on this backend",
+        ))
     } else {
         SnapshotMode::Sdr
     }

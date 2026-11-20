@@ -75,7 +75,8 @@ pub enum Guide {
     Unavailable(Status),
 }
 
-const RELOGIN: Text = text("Sign out of GNOME and sign back in. Then open OverInk to enable the extension.");
+const RELOGIN: Text =
+    text("Sign out of GNOME and sign back in. Then open OverInk to enable the extension.");
 
 impl Guide {
     pub fn check() -> Option<Self> {
@@ -85,8 +86,7 @@ impl Guide {
         })
         .unwrap_or_else(|error| {
             Some(Self::Unavailable(
-                text("Could not check the GNOME extension")
-                .detail(error),
+                text("Could not check the GNOME extension").detail(error),
             ))
         })
     }
@@ -145,8 +145,7 @@ impl Guide {
                     Some(Self::Install | Self::Update) => match install_files() {
                         Ok(_) => Self::Relogin,
                         Err(error) => Self::Unavailable(
-                            text("Could not write the GNOME extension")
-                            .detail(error),
+                            text("Could not write the GNOME extension").detail(error),
                         ),
                     },
                     Some(guide) => guide,
@@ -157,8 +156,7 @@ impl Guide {
                 Ok(()) => Some(Decision::Native),
                 Err(error) => {
                     *self = Self::Unavailable(
-                        text("Could not activate the GNOME extension")
-                        .detail(error),
+                        text("Could not activate the GNOME extension").detail(error),
                     );
                     None
                 }
@@ -203,8 +201,7 @@ pub fn start_video(
             return Ok((runtime, preferences, None));
         }
         Ok((Decision::Native, runtime)) => {
-            let status = text("Extension enabled. Restart OverInk to use native Wayland.")
-            .into();
+            let status = text("Extension enabled. Restart OverInk to use native Wayland.").into();
             return Ok((runtime, preferences, Some(status)));
         }
         Ok((Decision::Relogin, runtime)) => {
@@ -222,8 +219,7 @@ pub fn start_video(
         }
         Err(error) => {
             eprintln!("OverInk: opening the GNOME extension guide failed ({error})");
-            text("Using XWayland because the extension guide could not open")
-            .detail(error)
+            text("Using XWayland because the extension guide could not open").detail(error)
         }
     };
     Ok((Runtime::new(true, false, false)?, preferences, Some(status)))
@@ -234,8 +230,7 @@ fn turn_off_wayland(preferences: &mut Preferences, path: &Path) -> Status {
     *preferences = Preferences::load(path);
     preferences.wayland = false;
     match preferences.save(path) {
-        Ok(()) => text("Using XWayland.")
-        .into(),
+        Ok(()) => text("Using XWayland.").into(),
         Err(error) => {
             eprintln!("OverInk: saving the XWayland preference failed ({error})");
             text("Settings save failed").detail(error)
@@ -285,7 +280,7 @@ async fn inspect(shell: &Proxy<'_>) -> zbus::Result<Option<Guide>> {
         Some(ACTIVE) => return Ok(None),
         Some(ERROR) => Guide::Unavailable(
             text("GNOME reported an extension error")
-            .detail(extension_error(&info).unwrap_or_default()),
+                .detail(extension_error(&info).unwrap_or_default()),
         ),
         Some(INACTIVE | INITIALIZED) => {
             if shell.get_property::<bool>("UserExtensionsEnabled").await? {
@@ -293,7 +288,7 @@ async fn inspect(shell: &Proxy<'_>) -> zbus::Result<Option<Guide>> {
             } else {
                 Guide::Unavailable(
                     text("Open GNOME Extensions and turn on its main switch. Then check again.")
-                    .into(),
+                        .into(),
                 )
             }
         }
@@ -308,8 +303,7 @@ async fn inspect(shell: &Proxy<'_>) -> zbus::Result<Option<Guide>> {
             }
         }
         _ => Guide::Unavailable(
-            text("OverInk Overlay is inactive. Check its status in GNOME Extensions.")
-            .into(),
+            text("OverInk Overlay is inactive. Check its status in GNOME Extensions.").into(),
         ),
     };
     Ok(Some(guide))
@@ -317,8 +311,7 @@ async fn inspect(shell: &Proxy<'_>) -> zbus::Result<Option<Guide>> {
 
 fn incompatible(version: String) -> Guide {
     Guide::Unavailable(
-        text("OverInk Overlay is incompatible with this GNOME Shell version")
-        .detail(version),
+        text("OverInk Overlay is incompatible with this GNOME Shell version").detail(version),
     )
 }
 

@@ -627,8 +627,7 @@ impl App {
                     state.click = None;
                     if self.tool == Tool::Text {
                         if self.history.text_boxes().len() >= MAX_TEXT_BOXES {
-                            self.status = text("Text box limit reached")
-                            .into();
+                            self.status = text("Text box limit reached").into();
                         } else {
                             state.edit(
                                 None,
@@ -914,10 +913,7 @@ impl App {
                     ui.spacing_mut().item_spacing = Vec2::ZERO;
                     ui.spacing_mut().button_padding = vec2(5., 3.) * scale;
                     let entries = [
-                        (
-                            TextContextAction::SelectAll,
-                            tr.text("Select all"),
-                        ),
+                        (TextContextAction::SelectAll, tr.text("Select all")),
                         (TextContextAction::Copy, tr.text("Copy")),
                         (TextContextAction::Paste, tr.text("Paste")),
                         (TextContextAction::Cut, tr.text("Cut")),
@@ -1047,8 +1043,7 @@ impl App {
             tr.text("Delete text box"),
         )
         .on_hover_text(
-            egui::RichText::new(tr.text("Delete text box"))
-                .size(toolbar::MENU_FONT_SIZE * scale),
+            egui::RichText::new(tr.text("Delete text box")).size(toolbar::MENU_FONT_SIZE * scale),
         )
         .clicked()
         {
@@ -1080,11 +1075,7 @@ impl App {
         }
         for rgb in PRESETS {
             let preset = InkColor::from_rgb8(rgb);
-            let label = format!(
-                "{} {}",
-                tr.text("Text color"),
-                preset.hex()
-            );
+            let label = format!("{} {}", tr.text("Text color"), preset.hex());
             if toolbar::swatch_button(&mut menu, button, rgb, &label, color.srgb8() == rgb)
                 .on_hover_text(egui::RichText::new(label).size(toolbar::MENU_FONT_SIZE * scale))
                 .clicked()
@@ -1180,8 +1171,7 @@ impl App {
         palette.horizontal(|ui| {
             ui.set_width(inner.width());
             ui.label(
-                egui::RichText::new(tr.text("Brightness"))
-                    .size(toolbar::MENU_FONT_SIZE * scale),
+                egui::RichText::new(tr.text("Brightness")).size(toolbar::MENU_FONT_SIZE * scale),
             );
             let remaining = ui.available_width().max(0.);
             ui.spacing_mut().slider_width = remaining;
@@ -1198,16 +1188,10 @@ impl App {
                 let button_width = ((ui.available_width() - gap) / 2.).max(0.);
                 let size = vec2(button_width, MENU_BUTTON.y * scale);
                 let apply = ui
-                    .add_sized(
-                        size,
-                        toolbar::menu_button(tr.text("Apply"), scale),
-                    )
+                    .add_sized(size, toolbar::menu_button(tr.text("Apply"), scale))
                     .clicked();
                 let pick = ui
-                    .add_sized(
-                        size,
-                        toolbar::menu_button(tr.text("Pick screen"), scale),
-                    )
+                    .add_sized(size, toolbar::menu_button(tr.text("Pick screen"), scale))
                     .clicked();
                 (apply, pick)
             })
@@ -1454,8 +1438,7 @@ impl App {
                         return;
                     }
                     Err(error) => {
-                        self.status = text("System key input unavailable")
-                        .detail(error);
+                        self.status = text("System key input unavailable").detail(error);
                     }
                 }
             }

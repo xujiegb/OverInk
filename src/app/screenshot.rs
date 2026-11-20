@@ -490,9 +490,7 @@ impl Screenshot {
         });
         let detail = self
             .cancel_blocked
-            .then(|| {
-                tr.text("The screenshot is being saved and can no longer be cancelled")
-            })
+            .then(|| tr.text("The screenshot is being saved and can no longer be cancelled"))
             .or(self.error.as_deref())
             .or(replace.as_deref());
         let size = MENU_SIZE + vec2(0., if detail.is_some() { 26. } else { 0. });
@@ -521,10 +519,7 @@ impl Screenshot {
         menu.horizontal(|ui| {
             for (action, label) in [
                 primary,
-                (
-                    MenuAction::SaveAs,
-                    tr.text("Save As…"),
-                ),
+                (MenuAction::SaveAs, tr.text("Save As…")),
                 (MenuAction::Cancel, tr.text("Cancel")),
             ] {
                 let enabled =

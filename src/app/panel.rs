@@ -147,14 +147,7 @@ impl App {
             self.rail_tools(ui, commands);
         }
         ui.add_space(1.);
-        if toolbar::rail_button(
-            ui,
-            Icon::Quit,
-            tr.text("Quit OverInk"),
-            false,
-        )
-        .clicked()
-        {
+        if toolbar::rail_button(ui, Icon::Quit, tr.text("Quit OverInk"), false).clicked() {
             commands.quit = true;
         }
     }
@@ -365,14 +358,9 @@ impl App {
 
     fn brush(&mut self, ui: &mut Ui) {
         let tr = self.language;
-        ui.add(
-            egui::Slider::new(&mut self.width, 1.0..=48.0).text(tr.text("Width")),
-        );
+        ui.add(egui::Slider::new(&mut self.width, 1.0..=48.0).text(tr.text("Width")));
         ui.add(egui::Slider::new(&mut self.opacity, 0.1..=1.).text(tr.text("Opacity")));
-        ui.checkbox(
-            &mut self.pressure,
-            tr.text("Pen pressure"),
-        );
+        ui.checkbox(&mut self.pressure, tr.text("Pen pressure"));
         ui.add(egui::Slider::new(&mut self.curve, 0.2..=3.).text(tr.text("Pressure curve")));
         ui.separator();
         let pen = self
@@ -437,10 +425,7 @@ impl App {
             }
         });
         if self.hex_entry.invalid {
-            ui.colored_label(
-                ui.visuals().error_fg_color,
-                tr.text("Use #RRGGBB or #RGB"),
-            );
+            ui.colored_label(ui.visuals().error_fg_color, tr.text("Use #RRGGBB or #RGB"));
         }
         let label = |space| match space {
             Space::Srgb => tr.text("sRGB color"),
@@ -482,10 +467,7 @@ impl App {
         }
         let freeze = ui
             .add_enabled_ui(freeze_unavailable.is_none(), |ui| {
-                let response = ui.selectable_label(
-                    self.frozen,
-                    tr.text("Frozen desktop"),
-                );
+                let response = ui.selectable_label(self.frozen, tr.text("Frozen desktop"));
                 if let Some(reason) = freeze_unavailable {
                     toolbar::hint(response, reason)
                 } else {
@@ -501,11 +483,7 @@ impl App {
         if let Some(reason) = freeze_unavailable {
             ui.small(reason);
         }
-        if self.frozen
-            && ui
-                .button(tr.text("Refresh snapshot"))
-                .clicked()
-        {
+        if self.frozen && ui.button(tr.text("Refresh snapshot")).clicked() {
             commands.background = true;
         }
         for (board, label) in [
@@ -599,7 +577,9 @@ impl App {
         ui.small(tr.text("The globe key changes your input method; the OverInk keyboard provides no candidate suggestions."));
         ui.separator();
         ui.label(RichText::new(tr.text("Annotation fonts")).strong());
-        ui.small(tr.text("Drag ☰ to change fallback priority. The three included fonts cannot be removed."));
+        ui.small(tr.text(
+            "Drag ☰ to change fallback priority. The three included fonts cannot be removed.",
+        ));
         for (index, (id, name, bundled)) in self.text_fonts.entries().enumerate() {
             let frame = egui::Frame::default().inner_margin(egui::Margin::symmetric(5, 3));
             let (_, dropped) = ui.dnd_drop_zone::<usize, ()>(frame, |ui| {
@@ -639,7 +619,8 @@ impl App {
         }
         if self.adding_font {
             ui.add(
-                egui::TextEdit::singleline(&mut self.font_search).hint_text(tr.text("Search fonts")),
+                egui::TextEdit::singleline(&mut self.font_search)
+                    .hint_text(tr.text("Search fonts")),
             );
             let filter = self.font_search.to_lowercase();
             let mut added = false;
@@ -668,10 +649,7 @@ impl App {
         ui.label(RichText::new(tr.text("Screenshots")).strong());
         let hdr_available = screenshot::hdr_available(&canvas.window);
         let mut hdr = hdr_available && self.preferences.screenshot_hdr;
-        let checkbox = egui::Checkbox::new(
-            &mut hdr,
-            tr.text("Save HDR PNG"),
-        );
+        let checkbox = egui::Checkbox::new(&mut hdr, tr.text("Save HDR PNG"));
         if ui.add_enabled(hdr_available, checkbox).changed() {
             self.preferences.screenshot_hdr = hdr;
             commands.preferences = true;
@@ -686,16 +664,11 @@ impl App {
         ));
         ui.add_enabled_ui(!dialog_open, |ui| {
             ui.horizontal_wrapped(|ui| {
-                if ui
-                    .button(tr.text("Choose folder…"))
-                    .clicked()
-                {
+                if ui.button(tr.text("Choose folder…")).clicked() {
                     commands.screenshot_folder = true;
                 }
                 if self.preferences.screenshot_folder.is_some()
-                    && ui
-                        .button(tr.text("Use Downloads"))
-                        .clicked()
+                    && ui.button(tr.text("Use Downloads")).clicked()
                 {
                     self.preferences.screenshot_folder = None;
                     commands.preferences = true;
@@ -785,10 +758,7 @@ impl App {
                 });
         });
         if ui
-            .checkbox(
-                &mut self.touch_enabled,
-                tr.text("Touch draw"),
-            )
+            .checkbox(&mut self.touch_enabled, tr.text("Touch draw"))
             .changed()
         {
             self.for_each_page(|app| app.discard_touches());
@@ -812,10 +782,7 @@ impl App {
                 self.load();
                 commands.redraw_canvas = true;
             }
-            if ui
-                .button(tr.text("Export SVG"))
-                .clicked()
-            {
+            if ui.button(tr.text("Export SVG")).clicked() {
                 self.export();
                 commands.redraw_canvas = true;
             }
@@ -854,10 +821,7 @@ impl App {
             ui.small(tr.text("The Wayland compositor controls window order and placement."));
         }
         ui.add_space(6.);
-        if ui
-            .button(tr.text("Quit OverInk"))
-            .clicked()
-        {
+        if ui.button(tr.text("Quit OverInk")).clicked() {
             commands.quit = true;
         }
     }

@@ -115,8 +115,7 @@ impl Ink {
             && let Err(error) = background.draw(renderer, window, color)
         {
             background.live();
-            app.status =
-                text("Frozen desktop unavailable").detail(error);
+            app.status = text("Frozen desktop unavailable").detail(error);
         }
 
         self.committed(&frame, app)?;

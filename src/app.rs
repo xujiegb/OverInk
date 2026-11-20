@@ -226,8 +226,7 @@ struct App {
 }
 impl App {
     fn mouse_mode_status() -> Status {
-        text("Mouse mode. Click the desktop or select a drawing tool to resume.")
-        .into()
+        text("Mouse mode. Click the desktop or select a drawing tool to resume.").into()
     }
 
     fn new(
@@ -248,10 +247,7 @@ impl App {
             match pages.load(&mut history, &save_path, true) {
                 Ok(0) => {}
                 Ok(pending) => status = pending_pages(pending),
-                Err(error) => {
-                    status = text("Session restore failed")
-                        .detail(error)
-                }
+                Err(error) => status = text("Session restore failed").detail(error),
             }
         }
         Self {
@@ -358,8 +354,12 @@ impl App {
             &mut self.input.ink_damage,
         ) {
             self.show_sample_limit(match error {
-                EraseError::Samples => text("This erase would exceed the one million sample limit."),
-                EraseError::Preview => text("This erase reached the preview limit. Erase in shorter passes."),
+                EraseError::Samples => {
+                    text("This erase would exceed the one million sample limit.")
+                }
+                EraseError::Preview => {
+                    text("This erase reached the preview limit. Erase in shorter passes.")
+                }
             });
         }
     }
@@ -371,7 +371,9 @@ impl App {
         if self.draft_point_count() < MAX_POINTS {
             return true;
         }
-        self.show_sample_limit(text("One million sample limit reached. Export and clear the canvas."));
+        self.show_sample_limit(text(
+            "One million sample limit reached. Export and clear the canvas.",
+        ));
         false
     }
     fn cancel_gesture(&mut self, gesture: Gesture) {
@@ -578,7 +580,9 @@ impl App {
         self.hidden = false;
         if let Some(hint) = match tool {
             Tool::Text => Some(text("Click to add or edit text. Ctrl/Cmd+Enter finishes.")),
-            Tool::Select => Some(text("Drag to move. Double-click to edit. Delete removes the box.")),
+            Tool::Select => Some(text(
+                "Drag to move. Double-click to edit. Delete removes the box.",
+            )),
             _ => None,
         } {
             self.status = hint.into();
@@ -746,8 +750,8 @@ impl App {
         let layout = old.as_ref().map(|d| (d.id, d.bounds, d.scale))
             != new.map(|d| (d.id, d.bounds, d.scale));
         if removed {
-            self.status = text("Display disconnected. Its ink and undo history were cleared.")
-            .into();
+            self.status =
+                text("Display disconnected. Its ink and undo history were cleared.").into();
         }
         (layout, removed)
     }
@@ -1293,8 +1297,8 @@ impl App {
         let p = PathBuf::from(&self.path);
         let result = if p == self.save_path {
             Err(text("Choose a different file for manual saves.")
-            .get(self.language)
-            .into())
+                .get(self.language)
+                .into())
         } else {
             self.pages.save(&self.history, &p)
         };
@@ -1354,13 +1358,11 @@ impl App {
     fn install_annotation_font(&mut self, source: &Path, destination: &Path) -> bool {
         match self.text_fonts.install(source, destination) {
             Ok(()) => {
-                self.status = text("Annotation font updated")
-                .into();
+                self.status = text("Annotation font updated").into();
                 true
             }
             Err(error) => {
-                self.status = text("Could not use the annotation font")
-                .detail(error);
+                self.status = text("Could not use the annotation font").detail(error);
                 false
             }
         }
@@ -1378,8 +1380,7 @@ impl App {
     }
 }
 fn pending_pages(count: usize) -> Status {
-    text("Saved pages awaiting a matching display")
-    .detail(count)
+    text("Saved pages awaiting a matching display").detail(count)
 }
 
 fn state_dir() -> PathBuf {
@@ -1506,13 +1507,11 @@ fn update_preferences(app: &mut App, previous: Preferences, multi_supported: boo
             app.remove_resume_file()
         };
         if let Err(error) = result {
-            app.status = text("Last session update failed")
-            .detail(error);
+            app.status = text("Last session update failed").detail(error);
         }
     }
     if previous.wayland != app.preferences.wayland {
-        app.status = text("Restart OverInk to switch the display backend.")
-        .into();
+        app.status = text("Restart OverInk to switch the display backend.").into();
     }
     let multi = multi_supported && app.preferences.per_display_windows;
     if multi != app.multi {
@@ -2109,15 +2108,12 @@ fn run_inner(options: Options) -> Result<(), String> {
                             let previous = app.preferences.screenshot_folder.replace(path);
                             if let Err(error) = app.preferences.save(&state_dir().join("ui.json")) {
                                 app.preferences.screenshot_folder = previous;
-                                app.status =
-                                    text("Settings save failed")
-                                        .detail(error);
+                                app.status = text("Settings save failed").detail(error);
                             }
                         }
                         Ok(None) => (),
                         Err(error) => {
-                            app.status = text("Could not choose a screenshot folder")
-                            .detail(error);
+                            app.status = text("Could not choose a screenshot folder").detail(error);
                         }
                     },
                     DialogKind::ScreenshotFile => {
@@ -2162,9 +2158,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 let displays = topology
                     .connected(&canvases[0].window)
                     .unwrap_or_else(|error| {
-                        app.status =
-                            text("Display query failed")
-                                .detail(error);
+                        app.status = text("Display query failed").detail(error);
                         toolbar_dirty = true;
                         app.displays.clone()
                     })
@@ -2212,8 +2206,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                     && !wayland
                     && let Err(error) = toolbar.arrange_toolbar(toolbar_expanded, app.pages.active)
                 {
-                    app.status = text("Toolbar layout failed")
-                        .detail(error);
+                    app.status = text("Toolbar layout failed").detail(error);
                 }
                 if (was_suspended || removed)
                     && let Some(id) = app.pages.active
@@ -2237,8 +2230,8 @@ fn run_inner(options: Options) -> Result<(), String> {
                     }
                 }
                 if wayland && requested.is_some_and(|id| Some(id) != reported) {
-                    app.status = text("The Wayland compositor controls window order and placement.")
-                    .into();
+                    app.status =
+                        text("The Wayland compositor controls window order and placement.").into();
                     toolbar_dirty = true;
                 }
                 if removed
@@ -2246,8 +2239,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                     && app.pages.needs_save(&app.history)
                     && let Err(error) = app.save_session()
                 {
-                    app.status = text("Save after display removal failed")
-                    .detail(error);
+                    app.status = text("Save after display removal failed").detail(error);
                     toolbar_dirty = true;
                 }
                 topology_dirty = false;
@@ -2289,8 +2281,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                         }
                         Err(error) => {
                             app.panel = Some(crate::toolbar::Panel::Settings);
-                            app.status =
-                                text("Screenshot failed").detail(error);
+                            app.status = text("Screenshot failed").detail(error);
                             toolbar_dirty = true;
                             restore_toolbar_focus = true;
                             mode_changed = true;
@@ -2312,8 +2303,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 match result {
                     Ok(path) => {
                         app.screenshot.cancel();
-                        app.status = text("Screenshot saved")
-                            .detail(path.display());
+                        app.status = text("Screenshot saved").detail(path.display());
                         toolbar_dirty = true;
                         restore_toolbar_focus = true;
                         mode_changed = true;
@@ -2323,7 +2313,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                     }
                     Err(SaveError::Exists(path)) => {
                         app.status = text("Screenshot not saved; file already exists")
-                        .detail(path.display());
+                            .detail(path.display());
                         toolbar_dirty = true;
                     }
                     Err(SaveError::Cancelled) => {
@@ -2337,9 +2327,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                         open_save_as = direct;
                     }
                     Err(SaveError::Failed(error)) => {
-                        app.status =
-                            text("Screenshot save failed")
-                                .detail(error);
+                        app.status = text("Screenshot save failed").detail(error);
                         toolbar_dirty = true;
                     }
                 }
@@ -2399,13 +2387,8 @@ fn run_inner(options: Options) -> Result<(), String> {
                             text("Color selection cancelled").into()
                         }
                     }
-                    Ok(None) => {
-                        text("Color selection cancelled").into()
-                    }
-                    Err(error) => {
-                        text("Screen color picker failed")
-                            .detail(error)
-                    }
+                    Ok(None) => text("Color selection cancelled").into(),
+                    Err(error) => text("Screen color picker failed").detail(error),
                 };
             }
             for canvas in &mut canvases {
@@ -2413,10 +2396,11 @@ fn run_inner(options: Options) -> Result<(), String> {
                     canvas.dirty = true;
                     toolbar_dirty = true;
                     app.status = match result {
-                        Ok(()) => text("Desktop frozen. Select Live desktop to resume the background.")
-                        .into(),
-                        Err(error) => text("Showing the live desktop")
-                        .detail(error),
+                        Ok(()) => {
+                            text("Desktop frozen. Select Live desktop to resume the background.")
+                                .into()
+                        }
+                        Err(error) => text("Showing the live desktop").detail(error),
                     };
                 }
             }
@@ -2452,8 +2436,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 controller_bounds_changed = true;
                 toolbar_expanded = expanded;
                 if let Err(error) = toolbar.arrange_toolbar(expanded, None) {
-                    app.status = text("Toolbar layout failed")
-                        .detail(error);
+                    app.status = text("Toolbar layout failed").detail(error);
                 }
             }
             let theme = appearance.theme(app.preferences.theme);
@@ -2551,8 +2534,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 match app.text_fonts.move_font(from, to, &annotation_font_path) {
                     Ok(()) => cmd.redraw_canvas = true,
                     Err(error) => {
-                        app.status = text("Could not reorder fonts")
-                        .detail(error);
+                        app.status = text("Could not reorder fonts").detail(error);
                     }
                 }
                 toolbar_dirty = true;
@@ -2561,8 +2543,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 match app.text_fonts.remove_font(&id, &annotation_font_path) {
                     Ok(()) => cmd.redraw_canvas = true,
                     Err(error) => {
-                        app.status = text("Could not remove font")
-                            .detail(error);
+                        app.status = text("Could not remove font").detail(error);
                     }
                 }
                 toolbar_dirty = true;
@@ -2570,13 +2551,11 @@ fn run_inner(options: Options) -> Result<(), String> {
             if cmd.reset_font {
                 match app.text_fonts.reset(&annotation_font_path) {
                     Ok(()) => {
-                        app.status = text("Using the included annotation font")
-                        .into();
+                        app.status = text("Using the included annotation font").into();
                         cmd.redraw_canvas = true;
                     }
                     Err(error) => {
-                        app.status = text("Could not reset the annotation font")
-                        .detail(error)
+                        app.status = text("Could not reset the annotation font").detail(error)
                     }
                 }
                 toolbar_dirty = true;
@@ -2641,8 +2620,7 @@ fn run_inner(options: Options) -> Result<(), String> {
             }
             if cmd.frame_rate {
                 if let Err(error) = app.frame_rate.save(&state_dir().join("frame-rate.json")) {
-                    app.status = text("Frame-rate setting save failed")
-                    .detail(error);
+                    app.status = text("Frame-rate setting save failed").detail(error);
                 }
                 pacer.configure(app.frame_rate, app.refresh_hz(), Instant::now());
             }
@@ -2889,8 +2867,7 @@ fn run_inner(options: Options) -> Result<(), String> {
             }
             if app.input.text.take_input_source_request() {
                 if let Err(error) = crate::keyboard::switch_input_method() {
-                    app.status = text("Could not switch input method")
-                    .detail(error);
+                    app.status = text("Could not switch input method").detail(error);
                 }
                 toolbar_dirty = true;
             }
@@ -2989,8 +2966,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 if app.pages.needs_save(&app.history)
                     && let Err(error) = app.save_session()
                 {
-                    app.status =
-                        text("Autosave failed").detail(error);
+                    app.status = text("Autosave failed").detail(error);
                     toolbar_dirty = true;
                 }
                 app.last_save = Instant::now();

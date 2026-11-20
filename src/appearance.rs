@@ -3,9 +3,7 @@
 use crate::sdl::*;
 use egui::Theme;
 use serde::{Deserialize, Serialize};
-use std::{
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 pub use crate::language::{Language, Status, Text, text};
 
@@ -178,14 +176,8 @@ mod tests {
             Language::Traditional
         );
         assert_eq!(Language::French.name(), "Français");
-        assert_eq!(
-            Language::French.text("Settings"),
-            "Réglages"
-        );
-        assert_eq!(
-            Language::French.text("Pick screen"),
-            "Pipette"
-        );
+        assert_eq!(Language::French.text("Settings"), "Réglages");
+        assert_eq!(Language::French.text("Pick screen"), "Pipette");
         assert_eq!(ThemeMode::System.label(Language::French), "Système");
         assert_eq!(
             text("Save failed").get(Language::French),

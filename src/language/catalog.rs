@@ -47,7 +47,9 @@ pub(super) fn index(english: &str) -> Option<usize> {
         "System keyboard" => 41,
         "OverInk keyboard" => 42,
         "OverInk keyboard (default)" => 43,
-        "The globe key changes your input method; the OverInk keyboard provides no candidate suggestions." => 44,
+        "The globe key changes your input method; the OverInk keyboard provides no candidate suggestions." => {
+            44
+        }
         "Annotation fonts" => 45,
         "Drag ☰ to change fallback priority. The three included fonts cannot be removed." => 46,
         "Included font" => 47,
@@ -151,7 +153,9 @@ pub(super) fn index(english: &str) -> Option<usize> {
         "Autosave failed" => 145,
         "Sign out of GNOME and sign back in. Then open OverInk to enable the extension." => 146,
         "Could not check the GNOME extension" => 147,
-        "Install OverInk Overlay to keep the canvas on top and position the toolbar in GNOME Wayland." => 148,
+        "Install OverInk Overlay to keep the canvas on top and position the toolbar in GNOME Wayland." => {
+            148
+        }
         "Install extension" => 149,
         "Update OverInk Overlay to use native Wayland with this version of OverInk." => 150,
         "Update extension" => 151,
