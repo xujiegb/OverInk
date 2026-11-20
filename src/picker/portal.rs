@@ -411,7 +411,8 @@ async fn request(
     // the request handle. Keep its future alive until cancellation has been
     // delivered, then close the (pre-subscribed) request again to cover the
     // race where the backend exports the Request after the first Close.
-    let mut invoking = Box::pin(screenshot.call::<_, _, OwnedObjectPath>(method, &("", options)));
+    let arguments = ("", options);
+    let mut invoking = Box::pin(screenshot.call::<_, _, OwnedObjectPath>(method, &arguments));
     let handle = future::or(async { Some(invoking.as_mut().await) }, async {
         let _ = cancelled.recv().await;
         None
