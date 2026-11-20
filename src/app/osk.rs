@@ -627,7 +627,10 @@ impl Keyboard {
         // Pointer-based hit test rather than Response::hovered: emoji buttons
         // sit above the drag surface and are supposed to receive hover.
         let over_grid = ui.input(|input| {
-            input.pointer.hover_pos().is_some_and(|pos| grid.contains(pos))
+            input
+                .pointer
+                .hover_pos()
+                .is_some_and(|pos| grid.contains(pos))
         });
         if over_grid && !drag.dragged() {
             let wheel = ui.input(|input| {
@@ -705,7 +708,12 @@ impl Keyboard {
         );
         // Dock-like magnification on hover, with neighbouring dots also
         // gently growing. A finger or pen can press and scrub across them.
-        let pointer = ui.input(|input| input.pointer.interact_pos().or_else(|| input.pointer.hover_pos()));
+        let pointer = ui.input(|input| {
+            input
+                .pointer
+                .interact_pos()
+                .or_else(|| input.pointer.hover_pos())
+        });
         let nearby = pointer.filter(|pos| dots_area.contains(*pos) || dots.dragged());
         if (dots.clicked() || dots.dragged())
             && let Some(pos) = dots.interact_pointer_pos()
@@ -719,8 +727,8 @@ impl Keyboard {
                 (1. - ((pos.x - center.x).abs() / (dot_spacing * 1.8))).max(0.)
             });
             let active = self.emoji_page == page;
-            let radius = (if active { 4.2 } else { 3.0 }) * scale
-                + 6.0 * scale * proximity * proximity;
+            let radius =
+                (if active { 4.2 } else { 3.0 }) * scale + 6.0 * scale * proximity * proximity;
             if proximity > 0.1 {
                 ui.painter().circle_filled(
                     center,
