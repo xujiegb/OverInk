@@ -1113,11 +1113,7 @@ impl App {
             - (PALETTE_SLIDER_HEIGHT + MENU_BUTTON.y + 2. * PALETTE_GAP) * scale)
             .max(0.)
             .min(inner.width());
-        let mut palette = ui.new_child(
-            UiBuilder::new()
-                .id_salt("wheel-controls")
-                .max_rect(inner),
-        );
+        let mut palette = ui.new_child(UiBuilder::new().id_salt("wheel-controls").max_rect(inner));
         palette.set_width(inner.width());
         palette.spacing_mut().item_spacing = vec2(PALETTE_GAP, PALETTE_GAP) * scale;
         palette.spacing_mut().button_padding = vec2(6., 4.) * scale;
@@ -1143,7 +1139,10 @@ impl App {
                 let button_width = ((ui.available_width() - gap) / 2.).max(0.);
                 let size = vec2(button_width, MENU_BUTTON.y * scale);
                 let apply = ui
-                    .add_sized(size, toolbar::menu_button(tr.text("Apply", "应用", "套用"), scale))
+                    .add_sized(
+                        size,
+                        toolbar::menu_button(tr.text("Apply", "应用", "套用"), scale),
+                    )
                     .clicked();
                 let pick = ui
                     .add_sized(
@@ -1427,12 +1426,13 @@ fn annotation_icon_button(
     label: &str,
 ) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
-    response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), label)
-    });
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), label));
     if response.hovered() || response.has_focus() {
-        ui.painter()
-            .rect_filled(rect, 6. * (size.y / MENU_BUTTON.y), ui.visuals().widgets.hovered.bg_fill);
+        ui.painter().rect_filled(
+            rect,
+            6. * (size.y / MENU_BUTTON.y),
+            ui.visuals().widgets.hovered.bg_fill,
+        );
     }
     let scale = size.y / MENU_BUTTON.y;
     let color = if ui.is_enabled() {
@@ -1443,7 +1443,8 @@ fn annotation_icon_button(
     let stroke = Stroke::new(2. * scale, color);
     let at = |x: f32, y: f32| rect.center() + vec2(x, y) * scale;
     let draw = |a: (f32, f32), b: (f32, f32)| {
-        ui.painter().line_segment([at(a.0, a.1), at(b.0, b.1)], stroke);
+        ui.painter()
+            .line_segment([at(a.0, a.1), at(b.0, b.1)], stroke);
     };
     match icon {
         ActionIcon::Delete => {
@@ -1476,15 +1477,15 @@ fn annotation_icon_button(
 /// round wheel) is fitted into the larger unobstructed vertical side of the
 /// toolbar, then clipped by the canvas. No independent fixed palette size.
 fn palette_layout(actions: Rect, canvas: Rect, scale: f32) -> (Vec2, f32) {
-    let controls = (2. * PALETTE_MARGIN
-        + 2. * PALETTE_GAP
-        + PALETTE_SLIDER_HEIGHT
-        + MENU_BUTTON.y) * scale;
+    let controls =
+        (2. * PALETTE_MARGIN + 2. * PALETTE_GAP + PALETTE_SLIDER_HEIGHT + MENU_BUTTON.y) * scale;
     let below = (canvas.bottom() - actions.bottom() - MENU_GAP * scale).max(0.);
     let above = (actions.top() - canvas.top() - MENU_GAP * scale).max(0.);
-    let max_height = below.max(above).min(canvas.height() - 2. * MENU_GAP * scale);
-    let wheel = (actions.width() - 2. * PALETTE_MARGIN * scale)
-        .min((max_height - controls).max(0.));
+    let max_height = below
+        .max(above)
+        .min(canvas.height() - 2. * MENU_GAP * scale);
+    let wheel =
+        (actions.width() - 2. * PALETTE_MARGIN * scale).min((max_height - controls).max(0.));
     (vec2(actions.width(), controls + wheel), scale)
 }
 
