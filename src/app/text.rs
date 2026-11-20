@@ -1378,6 +1378,14 @@ impl App {
                     self.input.text.osk.set_window_rect(window.response.rect);
                 }
                 if let Some(action) = action {
+                    // An egui keyboard button is not an editor: its click must
+                    // not transfer IME ownership or reset the preedit range.
+                    // Restore focus without setting Draft::focus, which would
+                    // replace TextEditState and duplicate or truncate pinyin.
+                    if !matches!(action, osk::Action::Hide) {
+                        let editor = ui.make_persistent_id("annotation-editor");
+                        ui.memory_mut(|memory| memory.request_focus(editor));
+                    }
                     self.apply_osk_action(action, composing);
                     ui.ctx().request_repaint();
                 }
@@ -1429,12 +1437,10 @@ impl App {
             if let Some(key) = physical {
                 match send_physical_key(key) {
                     Ok(()) => {
-                        // Restore egui's text editor focus after clicking a
-                        // drawn key; the physical key now flows through SDL's
-                        // established IME commit and preedit handling.
-                        if let Some(draft) = self.input.text.draft.as_mut() {
-                            draft.focus = true;
-                        }
+                        // The keyboard UI has already restored the editor's
+                        // egui focus. Never set Draft::focus here: doing so
+                        // replaces TextEditState on the next frame, erasing
+                        // the active IME cursor/preedit state after every key.
                         return;
                     }
                     Err(error) => {
