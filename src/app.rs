@@ -2844,7 +2844,10 @@ fn run_inner(options: Options) -> Result<(), String> {
                 // The native chooser owns interaction while pending. Even a
                 // screenshot canvas kept as a Wayland transient parent would
                 // remain fullscreen and always-on-top behind the chooser.
-                let visible = if file_dialog.pending() {
+                let visible = if file_dialog.pending() || picker.hides_canvas() {
+                    // Native macOS and Wayland portal samplers must see the
+                    // desktop beneath OverInk, not its transparent ink canvas.
+                    // Keep only the movable Cancel/Quit controller visible.
                     false
                 } else {
                     screenshot
