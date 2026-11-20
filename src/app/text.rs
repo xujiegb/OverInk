@@ -1319,15 +1319,44 @@ impl App {
             if let Some(rect) = self.text_context_rect(screen) {
                 self.text_context_popup(ui, rect);
             }
-            // Draw last, above the annotation and color controls, but inside
-            // the same SDL canvas/egui context. It owns no native focus.
+            // An egui Window (NOT a native OS window) supports drag/resize
+            // without stealing SDL text-input focus. Initial placement follows
+            // the annotation: below when it fits, otherwise above. The user
+            // may subsequently reposition/resize it inside the usable canvas.
+            let anchor = self.input.text.draft.as_ref().map(|draft| draft.item.rect());
             if self.input.text.editing()
-                && let Some(rect) = self.input.text.osk.rect(screen, self.input.canvas_units)
+                && let Some(rect) = self.input.text.osk.rect_near(
+                    screen,
+                    anchor,
+                    self.input.canvas_units,
+                )
             {
+                let scale = self.input.canvas_units;
+                let inset = egui::vec2(
+                    (screen.width() * 0.025).clamp(8., 28.),
+                    (screen.height() * 0.10).clamp(24., 120.),
+                );
+                let safe = screen.shrink2(inset);
+                let minimum = self.input.text.osk.minimum_size(safe.size());
                 let mut action = None;
-                overlay(ui, "overink-on-screen-keyboard", rect, |ui| {
-                    action = self.input.text.osk.ui(ui, rect, self.input.canvas_units);
-                });
+                let window = egui::Window::new("OverInk Keyboard")
+                    .id(ui.make_persistent_id("overink-on-screen-keyboard"))
+                    .order(egui::Order::Foreground)
+                    .default_pos(rect.min)
+                    .default_size(rect.size())
+                    .min_size(minimum)
+                    .max_size(safe.size())
+                    .constrain_to(safe)
+                    .resizable(true)
+                    .collapsible(false)
+                    .show(ui.ctx(), |keyboard_ui| {
+                        let keys = keyboard_ui.available_rect_before_wrap();
+                        keyboard_ui.set_min_size(keys.size());
+                        action = self.input.text.osk.ui(keyboard_ui, keys, scale);
+                    });
+                if let Some(window) = window {
+                    self.input.text.osk.set_window_rect(window.response.rect);
+                }
                 if let Some(action) = action {
                     self.apply_osk_action(action, composing);
                     ui.ctx().request_repaint();
@@ -1463,11 +1492,11 @@ impl App {
     ) {
         let wheel_open = self.input.text.color_wheel.is_some();
         let context_rect = self.text_context_rect(ui.clip_rect());
-        let keyboard_rect = self
-            .input
-            .text
-            .osk
-            .rect(ui.clip_rect(), self.input.canvas_units);
+        let keyboard_rect = self.input.text.osk.rect_near(
+            ui.clip_rect(),
+            self.input.text.draft.as_ref().map(|draft| draft.item.rect()),
+            self.input.canvas_units,
+        ).map(|rect| self.input.text.osk.current_rect(rect));
         let Some(draft) = self.input.text.draft.as_mut() else {
             return;
         };
