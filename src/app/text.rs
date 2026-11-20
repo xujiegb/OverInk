@@ -1932,6 +1932,29 @@ mod tests {
     }
 
     #[test]
+    fn external_keyboard_preserves_draft_during_focus_loss_and_resets_on_finish() {
+        let mut app = app();
+        assert!(!app.input.text.screen_keyboard_session());
+        app.use_tool(Tool::Text);
+        click(&mut app, pos2(150., 120.));
+        assert!(app.input.text.editing());
+        app.input.text.mark_screen_keyboard_open();
+        assert!(app.input.text.screen_keyboard_session());
+
+        let mut gui = Gui::new();
+        gui.raw.focused = false;
+        gui.raw.events.push(Event::WindowFocused(false));
+        // The main loop supplies keep_editor_open while the external OSK
+        // is active: losing AppKit/Win32 focus alone must not commit the box.
+        render_with_toolbar_focus(&mut app, &mut gui, true);
+        assert!(app.input.text.editing());
+        assert!(app.input.text.screen_keyboard_session());
+
+        app.input.text.finish(&mut app.history);
+        assert!(!app.input.text.screen_keyboard_session());
+    }
+
+    #[test]
     fn toolbar_releases_focus_after_actions_and_finishes_if_activation_fails() {
         let mut focus = ToolbarTextFocus::default();
         let now = Instant::now();
