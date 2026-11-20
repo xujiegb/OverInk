@@ -12,6 +12,10 @@ use egui::{Color32, CornerRadius, Rect, RichText, Stroke, StrokeKind, Ui, pos2, 
 mod emoji_data;
 use emoji_data::{ACTIVITIES, FACES, FOOD, HEARTS, NATURE, OBJECTS, PEOPLE, SYMBOLS_EMOJI, TRAVEL};
 
+// Virtual keys must accept pointer/touch clicks without taking keyboard focus
+// away from TextEdit: IME preedit and its caret belong to that editor.
+const KEY_SENSE: egui::Sense = egui::Sense::CLICK;
+
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Page {
     #[default]
@@ -528,6 +532,7 @@ impl Keyboard {
         let response = ui.put(
             rect,
             egui::Button::new(RichText::new(label).size(font_size).color(Color32::WHITE))
+                .sense(KEY_SENSE)
                 .fill(fill)
                 .corner_radius(CornerRadius::same(9))
                 .stroke(Stroke::NONE),
@@ -819,6 +824,7 @@ impl Keyboard {
             .put(
                 Rect::from_min_size(selector.min, vec2(unit, row_h)),
                 egui::Button::new(RichText::new("ABC").color(Color32::WHITE).size(14. * scale))
+                    .sense(KEY_SENSE)
                     .fill(Color32::from_rgb(70, 70, 73)),
             )
             .clicked()
@@ -839,6 +845,7 @@ impl Keyboard {
                 .put(
                     rect,
                     egui::Button::new(RichText::new(*icon).size(17. * scale))
+                        .sense(KEY_SENSE)
                         .fill(fill)
                         .corner_radius(CornerRadius::same(8)),
                 )
@@ -856,7 +863,7 @@ impl Keyboard {
         if ui
             .put(
                 Rect::from_min_size(pos2(nav_x, bottom.top()), vec2(nav_width, row_h)),
-                egui::Button::new(RichText::new("‹").size(row_h * 0.50)),
+                egui::Button::new(RichText::new("‹").size(row_h * 0.50)).sense(KEY_SENSE),
             )
             .clicked()
         {
@@ -869,7 +876,7 @@ impl Keyboard {
                     pos2(nav_x + nav_width, bottom.top()),
                     vec2(nav_width, row_h),
                 ),
-                egui::Button::new(RichText::new("›").size(row_h * 0.50)),
+                egui::Button::new(RichText::new("›").size(row_h * 0.50)).sense(KEY_SENSE),
             )
             .clicked()
         {
