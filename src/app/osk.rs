@@ -98,9 +98,18 @@ const LEFT: Cell = Cell::wide(Key::Left, 1.);
 const RIGHT: Cell = Cell::wide(Key::Right, 1.);
 
 const LETTER_ROW_0: [Cell; 12] = [
-    Cell::text("1"), Cell::text("2"), Cell::text("3"), Cell::text("4"),
-    Cell::text("5"), Cell::text("6"), Cell::text("7"), Cell::text("8"),
-    Cell::text("9"), Cell::text("0"), Cell::text("-"), Cell::text("="),
+    Cell::text("1"),
+    Cell::text("2"),
+    Cell::text("3"),
+    Cell::text("4"),
+    Cell::text("5"),
+    Cell::text("6"),
+    Cell::text("7"),
+    Cell::text("8"),
+    Cell::text("9"),
+    Cell::text("0"),
+    Cell::text("-"),
+    Cell::text("="),
 ];
 const LETTER_ROW_1: [Cell; 11] = [
     Cell::text("q"),
@@ -287,12 +296,18 @@ fn emoji_dot_at(x: f32, left: f32, spacing: f32, count: usize) -> usize {
 /// The extra top row uses standard US Shift number/symbol pairs.
 fn shifted_key_label(label: &'static str) -> Cow<'static, str> {
     match label {
-        "1" => Cow::Borrowed("!"), "2" => Cow::Borrowed("@"),
-        "3" => Cow::Borrowed("#"), "4" => Cow::Borrowed("$"),
-        "5" => Cow::Borrowed("%"), "6" => Cow::Borrowed("^"),
-        "7" => Cow::Borrowed("&"), "8" => Cow::Borrowed("*"),
-        "9" => Cow::Borrowed("("), "0" => Cow::Borrowed(")"),
-        "-" => Cow::Borrowed("_"), "=" => Cow::Borrowed("+"),
+        "1" => Cow::Borrowed("!"),
+        "2" => Cow::Borrowed("@"),
+        "3" => Cow::Borrowed("#"),
+        "4" => Cow::Borrowed("$"),
+        "5" => Cow::Borrowed("%"),
+        "6" => Cow::Borrowed("^"),
+        "7" => Cow::Borrowed("&"),
+        "8" => Cow::Borrowed("*"),
+        "9" => Cow::Borrowed("("),
+        "0" => Cow::Borrowed(")"),
+        "-" => Cow::Borrowed("_"),
+        "=" => Cow::Borrowed("+"),
         _ => Cow::Owned(label.to_uppercase()),
     }
 }
@@ -324,7 +339,9 @@ impl Keyboard {
         let (fraction, maximum) = (0.52, 740.);
         #[cfg(not(target_os = "macos"))]
         let (fraction, maximum) = (0.60, 900.);
-        let width = (safe.width() * fraction).clamp(280., maximum).min(safe.width());
+        let width = (safe.width() * fraction)
+            .clamp(280., maximum)
+            .min(safe.width());
         let height = (width * 0.44).clamp(210., 370.).min(safe.height());
         let size = vec2(width, height);
         let gap = (height * 0.035).max(5.);
@@ -890,13 +907,22 @@ mod tests {
     #[test]
     fn five_row_keyboard_has_twelve_number_keys_and_shift_symbols() {
         assert_eq!(LETTER_ROW_0.len(), 12);
-        assert_eq!(LETTER_ROW_0.iter().map(|cell| cell.weight).sum::<f32>(), 12.);
+        assert_eq!(
+            LETTER_ROW_0.iter().map(|cell| cell.weight).sum::<f32>(),
+            12.
+        );
         let mut k = Keyboard::default();
         k.act(Key::Shift);
-        assert_eq!(k.act(Key::Text("1")), Some(Action::Insert(Cow::Borrowed("!"))));
+        assert_eq!(
+            k.act(Key::Text("1")),
+            Some(Action::Insert(Cow::Borrowed("!")))
+        );
         assert!(!k.shift);
         k.act(Key::Shift);
-        assert_eq!(k.act(Key::Text("=")), Some(Action::Insert(Cow::Borrowed("+"))));
+        assert_eq!(
+            k.act(Key::Text("=")),
+            Some(Action::Insert(Cow::Borrowed("+")))
+        );
     }
 
     #[test]
