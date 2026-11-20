@@ -413,6 +413,11 @@ foreach ($culture in $themeCultures | Select-Object -Skip $baseCultureCount) {
 }
 for ($index = 0; $index -lt $themeCultures.Count; $index++) {
     $culture = $themeCultures[$index]
+    $localizedItems = if ($index -lt $baseCultureCount) {
+        @()
+    } else {
+        @($installerLocaleStrings[[string]$culture.Culture])
+    }
     $script:BuildStage = "Generating localization for $($culture.Culture) (index $index)"
     $path = Join-Path $work ("$($culture.Culture).thm.wxl")
     $strings = for ($item = 0; $item -lt $localizationEntries.Count; $item++) {
@@ -421,8 +426,7 @@ for ($index = 0; $index -lt $themeCultures.Count; $index++) {
             $values = @($entry.Value)
             [string]$values[$index]
         } else {
-            $values = @($installerLocaleStrings[[string]$culture.Culture])
-            [string]$values[$item]
+            [string]$localizedItems[$item]
         }
         $value = ConvertTo-XmlAttribute $localized
         "  <String Id=`"$($entry.Key)`" Value=`"$value`" />"
