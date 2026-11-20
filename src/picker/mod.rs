@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 pub(crate) mod desktop;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub(crate) mod portal;
@@ -5,7 +7,7 @@ pub(crate) mod portal;
 use crate::background::screenshot::Job as PortalCapture;
 #[cfg(target_os = "macos")]
 use crate::background::system::Job as MacCapture;
-#[cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd", test))]
 use crate::background::Image;
 use crate::display::Display;
 use crate::{color::InkColor, sdl::*};
@@ -288,6 +290,46 @@ impl Drop for Picker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn captured_picker_samples_rgba8_using_logical_window_coordinates() {
+        let mut image = Image::buffer(2, 2).expect("test image allocation");
+        image.rgba.copy_from_slice(&[
+            255, 0, 0, 255,
+            0, 255, 0, 255,
+            0, 0, 255, 255,
+            255, 255, 255, 255,
+        ]);
+        let size = [800., 600.];
+        assert_eq!(sample_image(&image, [100., 100.], size).map(|c| c.srgb8()), Some([255, 0, 0]));
+        assert_eq!(sample_image(&image, [500., 100.], size).map(|c| c.srgb8()), Some([0, 255, 0]));
+        assert_eq!(sample_image(&image, [100., 500.], size).map(|c| c.srgb8()), Some([0, 0, 255]));
+        assert_eq!(sample_image(&image, [500., 500.], size).map(|c| c.srgb8()), Some([255, 255, 255]));
+        assert!(sample_image(&image, [-1., 10.], size).is_none());
+        assert!(sample_image(&image, [800., 10.], size).is_none());
+        assert!(sample_image(&image, [10., f32::NAN], size).is_none());
+        assert!(sample_image(&image, [10., 10.], [0., 600.]).is_none());
+        image.rgba.truncate(2);
+        assert!(sample_image(&image, [100., 100.], size).is_none());
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd"))]
+    #[test]
+    fn cancellation_discards_cached_pixels_and_can_restart() {
+        let image = Image::buffer(2, 2).expect("test image allocation");
+        let mut picker = Picker::default();
+        picker.stage = Stage::ChoosingImage(image);
+        assert!(picker.choosing());
+        assert!(!picker.hides_windows());
+        picker.cancel();
+        assert!(!picker.active());
+        assert!(matches!(picker.result, Some(Ok(None))));
+        picker.start(true);
+        assert!(picker.hides_windows());
+        assert!(!picker.choosing());
+        picker.cancel();
+        assert!(!picker.active());
+    }
+
     #[test]
     fn controller_exclusion_moves_with_draggable_toolbar() {
         let bounds = [120., 80., 56., 180.];
