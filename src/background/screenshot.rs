@@ -40,7 +40,8 @@ impl Job {
         let crop = Crop { region, size };
         #[cfg(target_os = "windows")]
         {
-            super::windows::start(display.id, move |image| crop.apply(image)).map(Self::Native)
+            super::windows::start(display.id, _hdr, move |image| crop.apply(image))
+                .map(Self::Native)
         }
         #[cfg(target_os = "macos")]
         {
