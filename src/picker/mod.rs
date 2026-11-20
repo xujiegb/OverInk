@@ -3,12 +3,12 @@
 pub(crate) mod desktop;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub(crate) mod portal;
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd", test))]
+use crate::background::Image;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use crate::background::screenshot::Job as PortalCapture;
 #[cfg(target_os = "macos")]
 use crate::background::system::Job as MacCapture;
-#[cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd", test))]
-use crate::background::Image;
 use crate::display::Display;
 use crate::{color::InkColor, sdl::*};
 use std::time::{Duration, Instant};
@@ -57,7 +57,10 @@ fn sample_image(image: &Image, point: [f32; 2], size: [f32; 2]) -> Option<InkCol
         || image.height == 0
         || point.iter().chain(size.iter()).any(|v| !v.is_finite())
         || size.iter().any(|v| *v <= 0.)
-        || point.iter().zip(size).any(|(p, limit)| *p < 0. || *p >= limit)
+        || point
+            .iter()
+            .zip(size)
+            .any(|(p, limit)| *p < 0. || *p >= limit)
     {
         return None;
     }
@@ -201,10 +204,10 @@ impl Picker {
             }
             #[cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd"))]
             if let Stage::ChoosingImage(image) = &self.stage {
-                let result = sample_image(image, local, window.size())
-                    .map_or(Err("The chosen pixel is outside the display".into()), |color| {
-                        Ok(Some(color))
-                    });
+                let result = sample_image(image, local, window.size()).map_or(
+                    Err("The chosen pixel is outside the display".into()),
+                    |color| Ok(Some(color)),
+                );
                 self.finish(result);
                 return;
             }
@@ -234,7 +237,8 @@ impl Picker {
             }
             #[cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd"))]
             Stage::Preparing(due) if Instant::now() >= *due => {
-                let bounds = _display.ok_or_else(|| "The picker display was disconnected".to_owned());
+                let bounds =
+                    _display.ok_or_else(|| "The picker display was disconnected".to_owned());
                 #[cfg(target_os = "macos")]
                 let capture = bounds.and_then(|display| {
                     crate::background::macos::start(
@@ -251,7 +255,10 @@ impl Picker {
                         window,
                         display,
                         _displays,
-                        egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::from(window.size())),
+                        egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::Vec2::from(window.size()),
+                        ),
                         false,
                         true,
                     )
@@ -295,16 +302,25 @@ mod tests {
             panic!("test image allocation failed");
         };
         image.rgba.copy_from_slice(&[
-            255, 0, 0, 255,
-            0, 255, 0, 255,
-            0, 0, 255, 255,
-            255, 255, 255, 255,
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
         ]);
         let size = [800., 600.];
-        assert_eq!(sample_image(&image, [100., 100.], size).map(|c| c.srgb8()), Some([255, 0, 0]));
-        assert_eq!(sample_image(&image, [500., 100.], size).map(|c| c.srgb8()), Some([0, 255, 0]));
-        assert_eq!(sample_image(&image, [100., 500.], size).map(|c| c.srgb8()), Some([0, 0, 255]));
-        assert_eq!(sample_image(&image, [500., 500.], size).map(|c| c.srgb8()), Some([255, 255, 255]));
+        assert_eq!(
+            sample_image(&image, [100., 100.], size).map(|c| c.srgb8()),
+            Some([255, 0, 0])
+        );
+        assert_eq!(
+            sample_image(&image, [500., 100.], size).map(|c| c.srgb8()),
+            Some([0, 255, 0])
+        );
+        assert_eq!(
+            sample_image(&image, [100., 500.], size).map(|c| c.srgb8()),
+            Some([0, 0, 255])
+        );
+        assert_eq!(
+            sample_image(&image, [500., 500.], size).map(|c| c.srgb8()),
+            Some([255, 255, 255])
+        );
         assert!(sample_image(&image, [-1., 10.], size).is_none());
         assert!(sample_image(&image, [800., 10.], size).is_none());
         assert!(sample_image(&image, [10., f32::NAN], size).is_none());
