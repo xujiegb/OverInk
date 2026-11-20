@@ -54,7 +54,7 @@ pub fn show(window: &Window, _video: &str) -> Result<(), String> {
             Ok(false) => (),
             Err(error) => eprintln!("OverInk: system InputPane unavailable: {error}"),
         }
-        let path = ["CommonProgramW6432", "CommonProgramFiles"]
+        let tabtip = ["CommonProgramW6432", "CommonProgramFiles"]
             .into_iter()
             .filter_map(env::var_os)
             .map(|root| {
@@ -63,12 +63,19 @@ pub fn show(window: &Window, _video: &str) -> Result<(), String> {
                     .join("ink")
                     .join("TabTip.exe")
             })
-            .find(|path| path.is_file())
-            .ok_or("Windows touch keyboard (TabTip.exe) is unavailable")?;
-        Command::new(path)
+            .find(|path| path.is_file());
+        if let Some(path) = tabtip
+            && Command::new(path).spawn().is_ok()
+        {
+            return Ok(());
+        }
+        // Tablet-mode InputPane can refuse to appear with a hardware
+        // keyboard attached. The built-in Windows Accessibility OSK is still
+        // a native system keyboard and does not require unsafe API calls.
+        Command::new("osk.exe")
             .spawn()
             .map(|_| ())
-            .map_err(|error| format!("Could not launch Windows touch keyboard: {error}"))
+            .map_err(|error| format!("Windows InputPane, TabTip and osk.exe unavailable: {error}"))
     }
     #[cfg(target_os = "linux")]
     {
