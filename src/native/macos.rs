@@ -1,4 +1,6 @@
+mod direct_touch;
 mod pencil;
+pub use direct_touch::DirectTouchMonitor;
 pub use pencil::PencilModeMonitor;
 
 use crate::sdl::*;
