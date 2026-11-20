@@ -97,6 +97,11 @@ const SPACE: Cell = Cell::wide(Key::Space, 4.5);
 const LEFT: Cell = Cell::wide(Key::Left, 1.);
 const RIGHT: Cell = Cell::wide(Key::Right, 1.);
 
+const LETTER_ROW_0: [Cell; 12] = [
+    Cell::text("1"), Cell::text("2"), Cell::text("3"), Cell::text("4"),
+    Cell::text("5"), Cell::text("6"), Cell::text("7"), Cell::text("8"),
+    Cell::text("9"), Cell::text("0"), Cell::text("-"), Cell::text("="),
+];
 const LETTER_ROW_1: [Cell; 11] = [
     Cell::text("q"),
     Cell::text("w"),
@@ -279,6 +284,19 @@ fn emoji_dot_at(x: f32, left: f32, spacing: f32, count: usize) -> usize {
         .clamp(0., (count - 1) as f32) as usize
 }
 
+/// The extra top row uses standard US Shift number/symbol pairs.
+fn shifted_key_label(label: &'static str) -> Cow<'static, str> {
+    match label {
+        "1" => Cow::Borrowed("!"), "2" => Cow::Borrowed("@"),
+        "3" => Cow::Borrowed("#"), "4" => Cow::Borrowed("$"),
+        "5" => Cow::Borrowed("%"), "6" => Cow::Borrowed("^"),
+        "7" => Cow::Borrowed("&"), "8" => Cow::Borrowed("*"),
+        "9" => Cow::Borrowed("("), "0" => Cow::Borrowed(")"),
+        "-" => Cow::Borrowed("_"), "=" => Cow::Borrowed("+"),
+        _ => Cow::Owned(label.to_uppercase()),
+    }
+}
+
 impl Keyboard {
     pub fn open(&mut self) {
         self.visible = true;
@@ -302,8 +320,12 @@ impl Keyboard {
         if safe.width() < 240. || safe.height() < 145. {
             return None;
         }
-        let width = (safe.width() * 0.68).clamp(260., 960.).min(safe.width());
-        let height = (width * 0.37).clamp(170., 350.).min(safe.height());
+        #[cfg(target_os = "macos")]
+        let (fraction, maximum) = (0.52, 740.);
+        #[cfg(not(target_os = "macos"))]
+        let (fraction, maximum) = (0.60, 900.);
+        let width = (safe.width() * fraction).clamp(280., maximum).min(safe.width());
+        let height = (width * 0.44).clamp(210., 370.).min(safe.height());
         let size = vec2(width, height);
         let gap = (height * 0.035).max(5.);
         let desired_x = anchor.map_or(safe.center().x, |r| r.center().x) - width * 0.5;
@@ -336,7 +358,7 @@ impl Keyboard {
     }
 
     pub fn minimum_size(&self, available: egui::Vec2) -> egui::Vec2 {
-        vec2(260., 170.).min(available)
+        vec2(280., 210.).min(available)
     }
 
     pub fn ui(&mut self, ui: &mut Ui, rect: Rect, scale: f32) -> Option<Action> {
@@ -345,11 +367,13 @@ impl Keyboard {
         let margin = (8. * scale).max(3.);
         let gap = (5. * scale).max(2.);
         let inside = rect.shrink(margin);
-        let row_h = ((inside.height() - 3. * gap) / 4.).max(0.);
+        let rows = if self.page == Page::Letters { 5 } else { 4 };
+        let row_h = ((inside.height() - (rows - 1) as f32 * gap) / rows as f32).max(0.);
         let mut result = None;
         match self.page {
             Page::Letters => {
                 for (i, row) in [
+                    LETTER_ROW_0.as_slice(),
                     LETTER_ROW_1.as_slice(),
                     LETTER_ROW_2.as_slice(),
                     LETTER_ROW_3.as_slice(),
@@ -358,7 +382,7 @@ impl Keyboard {
                 .into_iter()
                 .enumerate()
                 {
-                    if let Some(action) = self.row(ui, row, inside, i, gap) {
+                    if let Some(action) = self.row(ui, row, inside, i, gap, rows) {
                         result = Some(action);
                     }
                 }
@@ -373,7 +397,7 @@ impl Keyboard {
                 .into_iter()
                 .enumerate()
                 {
-                    if let Some(action) = self.row(ui, row, inside, i, gap) {
+                    if let Some(action) = self.row(ui, row, inside, i, gap, rows) {
                         result = Some(action);
                     }
                 }
@@ -388,7 +412,7 @@ impl Keyboard {
                 .into_iter()
                 .enumerate()
                 {
-                    if let Some(action) = self.row(ui, row, inside, i, gap) {
+                    if let Some(action) = self.row(ui, row, inside, i, gap, rows) {
                         result = Some(action);
                     }
                 }
@@ -407,8 +431,9 @@ impl Keyboard {
         inside: Rect,
         row: usize,
         gap: f32,
+        rows: usize,
     ) -> Option<Action> {
-        let height = ((inside.height() - 3. * gap) / 4.).max(0.);
+        let height = ((inside.height() - (rows - 1) as f32 * gap) / rows as f32).max(0.);
         let total: f32 = keys.iter().map(|cell| cell.weight).sum();
         let unit = ((inside.width() - gap * (keys.len().saturating_sub(1)) as f32) / total).max(0.);
         let mut x = inside.left();
@@ -446,8 +471,8 @@ impl Keyboard {
         };
         let upper;
         let label = if self.shift && self.page == Page::Letters && !special {
-            upper = label.to_uppercase();
-            upper.as_str()
+            upper = shifted_key_label(label);
+            upper.as_ref()
         } else {
             label
         };
@@ -519,7 +544,7 @@ impl Keyboard {
         match key {
             Key::Text(value) => {
                 let value = if self.shift && self.page == Page::Letters {
-                    Cow::Owned(value.to_uppercase())
+                    shifted_key_label(value)
                 } else {
                     Cow::Borrowed(value)
                 };
@@ -860,6 +885,18 @@ mod tests {
         assert!(EMOJI_CATEGORIES.iter().all(|(_, items)| !items.is_empty()));
         k.act(Key::LetterPage);
         assert_eq!(k.page, Page::Letters);
+    }
+
+    #[test]
+    fn five_row_keyboard_has_twelve_number_keys_and_shift_symbols() {
+        assert_eq!(LETTER_ROW_0.len(), 12);
+        assert_eq!(LETTER_ROW_0.iter().map(|cell| cell.weight).sum::<f32>(), 12.);
+        let mut k = Keyboard::default();
+        k.act(Key::Shift);
+        assert_eq!(k.act(Key::Text("1")), Some(Action::Insert(Cow::Borrowed("!"))));
+        assert!(!k.shift);
+        k.act(Key::Shift);
+        assert_eq!(k.act(Key::Text("=")), Some(Action::Insert(Cow::Borrowed("+"))));
     }
 
     #[test]
