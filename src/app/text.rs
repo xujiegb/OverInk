@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use super::App;
+use super::{App, osk};
 use crate::{
     appearance::text,
     color::{InkColor, PRESETS},
@@ -17,6 +17,7 @@ use egui::{
     vec2,
 };
 use std::time::{Duration, Instant};
+use unicode_segmentation::UnicodeSegmentation;
 
 mod color_wheel;
 use color_wheel::ColorWheel;
@@ -126,6 +127,8 @@ pub(super) struct TextInput {
     // window focus. Keep the current text editor's SDL/IME session alive until
     // the user explicitly finishes editing instead of closing it on that loss.
     screen_keyboard_session: bool,
+    osk: osk::Keyboard,
+    input_source_requested: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -216,6 +219,17 @@ impl TextInput {
         std::mem::take(&mut self.keyboard_requested)
     }
 
+    pub fn take_input_source_request(&mut self) -> bool {
+        std::mem::take(&mut self.input_source_requested)
+    }
+
+    pub fn open_osk(&mut self) {
+        if self.editing() {
+            self.osk.open();
+            self.mark_screen_keyboard_open();
+        }
+    }
+
     pub fn screen_keyboard_session(&self) -> bool {
         self.screen_keyboard_session && self.editing()
     }
@@ -253,6 +267,7 @@ impl TextInput {
 
     pub fn take_draft(&mut self, history: &History) -> Option<(Option<usize>, TextBox)> {
         self.screen_keyboard_session = false;
+        self.osk.close();
         let draft = self.draft.take()?;
         let mut item = draft.item;
         item.text = draft.committed;
@@ -285,6 +300,7 @@ impl TextInput {
     fn edit(&mut self, index: Option<usize>, item: TextBox) {
         self.cancel_press();
         self.screen_keyboard_session = false;
+        self.osk.close();
         self.menu_pointer = MenuPointer::default();
         self.context_menu = None;
         self.color_wheel = None;
