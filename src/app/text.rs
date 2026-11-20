@@ -1356,8 +1356,12 @@ impl App {
         };
         let total = draft.item.text.chars().count();
         let selected = draft.cursor.map(|cursor| cursor.as_sorted_char_range());
-        let mut start = selected.map_or(total, |range| usize::from(range.start)).min(total);
-        let end = selected.map_or(total, |range| usize::from(range.end)).min(total);
+        let mut start = selected
+            .map_or(total, |range| usize::from(range.start))
+            .min(total);
+        let end = selected
+            .map_or(total, |range| usize::from(range.end))
+            .min(total);
         let mut insert = String::new();
         match action {
             osk::Action::Insert(value) => insert = value,
@@ -1366,10 +1370,15 @@ impl App {
                 if start == 0 {
                     return;
                 }
-                let end_byte = draft.item.text.char_indices()
-                    .nth(start).map_or(draft.item.text.len(), |(i, _)| i);
+                let end_byte = draft
+                    .item
+                    .text
+                    .char_indices()
+                    .nth(start)
+                    .map_or(draft.item.text.len(), |(i, _)| i);
                 let before = &draft.item.text[..end_byte];
-                start = before.grapheme_indices(true)
+                start = before
+                    .grapheme_indices(true)
                     .last()
                     .map_or(0, |(byte, _)| before[..byte].chars().count());
             }
@@ -1379,15 +1388,22 @@ impl App {
                 } else {
                     end
                 };
-                let byte = draft.item.text.char_indices()
-                    .nth(caret).map_or(draft.item.text.len(), |(i, _)| i);
+                let byte = draft
+                    .item
+                    .text
+                    .char_indices()
+                    .nth(caret)
+                    .map_or(draft.item.text.len(), |(i, _)| i);
                 let at = if matches!(action, osk::Action::MoveLeft) {
-                    draft.item.text[..byte].grapheme_indices(true)
+                    draft.item.text[..byte]
+                        .grapheme_indices(true)
                         .last()
                         .map_or(0, |(i, _)| draft.item.text[..i].chars().count())
                 } else {
-                    let next = draft.item.text[byte..].graphemes(true)
-                        .next().map_or(0, |part| part.chars().count());
+                    let next = draft.item.text[byte..]
+                        .graphemes(true)
+                        .next()
+                        .map_or(0, |part| part.chars().count());
                     (caret + next).min(total)
                 };
                 draft.cursor = Some(CCursorRange::one(CCursor::new(at)));
@@ -1401,10 +1417,14 @@ impl App {
         if insertion.is_empty() && start == end {
             return;
         }
-        draft.item.text.delete_char_range(
-            egui::text::CharIndex(start)..egui::text::CharIndex(end),
-        );
-        let count = draft.item.text.insert_text(&insertion, egui::text::CharIndex(start));
+        draft
+            .item
+            .text
+            .delete_char_range(egui::text::CharIndex(start)..egui::text::CharIndex(end));
+        let count = draft
+            .item
+            .text
+            .insert_text(&insertion, egui::text::CharIndex(start));
         draft.committed.clone_from(&draft.item.text);
         draft.cursor = Some(CCursorRange::one(CCursor::new(start + count)));
         draft.focus = true;
@@ -1419,7 +1439,11 @@ impl App {
     ) {
         let wheel_open = self.input.text.color_wheel.is_some();
         let context_rect = self.text_context_rect(ui.clip_rect());
-        let keyboard_rect = self.input.text.osk.rect(ui.clip_rect(), self.input.canvas_units);
+        let keyboard_rect = self
+            .input
+            .text
+            .osk
+            .rect(ui.clip_rect(), self.input.canvas_units);
         let Some(draft) = self.input.text.draft.as_mut() else {
             return;
         };
