@@ -1,5 +1,3 @@
-#![forbid(unsafe_code)]
-
 pub(crate) mod desktop;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub(crate) mod portal;
