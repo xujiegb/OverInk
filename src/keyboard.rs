@@ -120,10 +120,10 @@ pub fn switch_input_method() -> Result<(), String> {
             .args(["engine", next])
             .status()
             .map_err(|error| error.to_string())?;
-        return status
+        status
             .success()
             .then_some(())
-            .ok_or("IBus could not switch input source".into());
+            .ok_or("IBus could not switch input source".into())
     }
     #[cfg(target_os = "macos")]
     {
@@ -137,7 +137,7 @@ pub fn switch_input_method() -> Result<(), String> {
             ])
             .output()
             .map_err(|error| error.to_string())?;
-        return output.status.success().then_some(()).ok_or_else(|| {
+        output.status.success().then_some(()).ok_or_else(|| {
             format!(
                 "Enable Accessibility for input-source switching: {}",
                 String::from_utf8_lossy(&output.stderr).trim()
