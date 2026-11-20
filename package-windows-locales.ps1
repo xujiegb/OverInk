@@ -477,7 +477,7 @@ $installerLocaleStrings['it-IT'] = @(
     'Installazione OverInk'
     'Installa, ripara o rimuovi OverInk.'
     'Chiudi'
-    'Pronto per l’installazione'
+    'Pronto per l''installazione'
     'Strumento leggero per lezioni e presentazioni.'
     'Versione [WixBundleVersion]'
     'La cartella attuale sarà mantenuta.'
