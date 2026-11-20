@@ -611,7 +611,7 @@ impl Keyboard {
             bounds.min,
             vec2(bounds.width(), 3. * emoji_row_h + 2. * gap),
         );
-        let drag = ui.interact(grid, ui.id().with("emoji-grid-drag"), egui::Sense::drag());
+        let drag = ui.interact(grid, ui.id().with("emoji-grid-drag"), egui::Sense::DRAG);
         if drag.drag_started() {
             self.emoji_drag_start = self.emoji_page;
             self.emoji_wheel_remainder = 0.;
@@ -704,21 +704,25 @@ impl Keyboard {
         let dots = ui.interact(
             dots_area,
             ui.id().with("emoji-page-dots"),
-            egui::Sense::click_and_drag(),
+            egui::Sense::CLICK | egui::Sense::DRAG,
         );
         // Dock-like magnification on hover, with neighbouring dots also
         // gently growing. A finger or pen can press and scrub across them.
         let pointer = ui.input(|input| {
             input
                 .pointer
-                .interact_pos()
-                .or_else(|| input.pointer.hover_pos())
+                .hover_pos()
+                .or_else(|| input.pointer.interact_pos())
         });
         let nearby = pointer.filter(|pos| dots_area.contains(*pos) || dots.dragged());
         if (dots.clicked() || dots.dragged())
             && let Some(pos) = dots.interact_pointer_pos()
         {
-            self.emoji_page = emoji_dot_at(pos.x, left, dot_spacing, dot_count);
+            let selected = emoji_dot_at(pos.x, left, dot_spacing, dot_count);
+            if selected != self.emoji_page {
+                self.emoji_page = selected;
+                ui.ctx().request_repaint();
+            }
             self.emoji_wheel_remainder = 0.;
         }
         for page in 0..dot_count {
