@@ -151,7 +151,7 @@ impl Image {
         }
         for (y, row) in self.rgba.chunks_exact_mut(row_bytes).enumerate() {
             copy(y * stride, row);
-            for pixel in row.chunks_exact_mut(4) {
+            for pixel in row.as_chunks_mut::<4>().0 {
                 pixel.swap(0, 2);
                 pixel[3] = 255;
             }
