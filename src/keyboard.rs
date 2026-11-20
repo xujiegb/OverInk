@@ -77,7 +77,7 @@ pub fn show(window: &Window, _video: &str) -> Result<(), String> {
 /// `spawn()` as evidence that Launch Services actually launched the viewer.
 #[cfg(target_os = "macos")]
 fn show_macos_keyboard() -> Result<(), String> {
-    use std::{path::Path, process::Command};
+    use std::path::Path;
     let app = Path::new("/System/Library/Input Methods/KeyboardViewer.app");
     if !app.is_dir() {
         return Err(
