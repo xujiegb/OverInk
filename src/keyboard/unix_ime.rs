@@ -203,11 +203,14 @@ fn try_ibus() -> Result<(), String> {
         .map(quoted_gvariant_strings)
         .unwrap_or_default();
 
+    let has_configured_order = !preferred.is_empty();
     let configured: Vec<&str> = preferred
         .into_iter()
         .filter(|engine| available.contains(engine))
         .collect();
-    let methods: &[&str] = if configured.len() >= 2 {
+    // Never silently activate an unconfigured engine when the user has
+    // explicitly selected fewer than two in IBus preferences.
+    let methods: &[&str] = if has_configured_order {
         &configured
     } else {
         &available
