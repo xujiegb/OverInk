@@ -63,6 +63,8 @@ pub fn show(window: &Window, _video: &str) -> Result<(), String> {
         std::process::Command::new("onboard")
             .spawn()
             .map(|_| ())
-            .map_err(|error| format!("Could not start Onboard (install the X11 on-screen keyboard): {error}"))
+            .map_err(|error| {
+                format!("Could not start Onboard (install the X11 on-screen keyboard): {error}")
+            })
     }
 }
