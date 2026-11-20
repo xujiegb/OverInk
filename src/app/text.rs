@@ -2787,9 +2787,7 @@ mod tests {
             } else {
                 menu.actions.min
                     + vec2(
-                        MENU_PADDING
-                            + MENU_BUTTON.x * 0.5
-                            + column * (MENU_BUTTON.x + MENU_GAP),
+                        MENU_PADDING + MENU_BUTTON.x * 0.5 + column * (MENU_BUTTON.x + MENU_GAP),
                         MENU_SIZE.y * 0.5,
                     ) * menu.scale
             };
