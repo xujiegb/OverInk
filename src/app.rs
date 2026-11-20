@@ -3030,7 +3030,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                     &mut toolbar_hidden,
                     hide,
                     false,
-                    )?;
+                )?;
             }
             if restore_toolbar_focus && !toolbar_hidden && !file_dialog.pending() {
                 toolbar.raise();
