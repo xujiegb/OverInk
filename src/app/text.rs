@@ -1032,7 +1032,7 @@ impl App {
         let (icon_rect, keyboard_response) =
             menu.allocate_exact_size(KEYBOARD_BUTTON * scale, egui::Sense::click());
         keyboard_response.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Button, menu.is_enabled(), keyboard_label)
+            egui::WidgetInfo::labeled(egui::Role::Button, menu.is_enabled(), keyboard_label)
         });
         if keyboard_response.hovered() || keyboard_response.has_focus() {
             menu.painter().rect_filled(
