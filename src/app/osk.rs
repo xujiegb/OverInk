@@ -579,7 +579,11 @@ impl Keyboard {
             let center = pos2(left + page as f32 * dot_spacing, dot_y);
             ui.painter().circle_filled(
                 center,
-                if self.emoji_page == page { 3.5 * scale } else { 2.5 * scale },
+                if self.emoji_page == page {
+                    3.5 * scale
+                } else {
+                    2.5 * scale
+                },
                 if self.emoji_page == page {
                     Color32::WHITE
                 } else {
@@ -716,11 +720,7 @@ mod tests {
             let pages = items.len().div_ceil(EMOJI_PAGE_SIZE);
             assert!(pages > 0);
             for page in 0..pages {
-                assert!(!items[page * EMOJI_PAGE_SIZE..]
-                    .iter()
-                    .take(EMOJI_PAGE_SIZE)
-                    .collect::<Vec<_>>()
-                    .is_empty());
+                assert!(items.get(page * EMOJI_PAGE_SIZE).is_some());
             }
         }
     }
