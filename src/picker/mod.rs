@@ -52,7 +52,13 @@ impl Picker {
     pub fn choosing(&self) -> bool {
         matches!(self.stage, Stage::Choosing)
     }
+    /// Hide both application windows only for the brief desktop-pixel
+    /// readback. The native macOS / Wayland picker still needs an accessible
+    /// Cancel / Quit controller, so its stage only hides the canvas.
     pub fn hides_windows(&self) -> bool {
+        matches!(self.stage, Stage::SampleAfter(..))
+    }
+    pub fn hides_canvas(&self) -> bool {
         matches!(
             self.stage,
             Stage::SampleAfter(..) | Stage::LaunchAfter(..) | Stage::System(..)
@@ -186,12 +192,14 @@ mod tests {
         let mut picker = Picker::default();
         picker.start(false);
         assert_eq!(picker.choosing(), !cfg!(target_os = "macos"));
-        assert_eq!(picker.hides_windows(), cfg!(target_os = "macos"));
+        assert!(!picker.hides_windows());
+        assert_eq!(picker.hides_canvas(), cfg!(target_os = "macos"));
         picker.cancel();
         assert!(!picker.active());
         assert!(matches!(picker.result, Some(Ok(None))));
         picker.start(true);
-        assert!(picker.hides_windows());
+        assert!(!picker.hides_windows());
+        assert!(picker.hides_canvas());
         picker.cancel();
         assert!(!picker.active());
     }
