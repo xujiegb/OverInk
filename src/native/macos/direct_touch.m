@@ -45,7 +45,8 @@ typedef struct {
         _fingerIDs = [[NSMutableDictionary alloc] init];
         _pending = [[NSMutableData alloc] init];
         self.allowedTouchTypes = NSTouchTypeMaskDirect;
-        [self addTarget:self action:@selector(publishTouches:)];
+        self.target = self;
+        self.action = @selector(publishTouches:);
     }
     return self;
 }
