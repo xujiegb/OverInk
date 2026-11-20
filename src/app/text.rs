@@ -26,7 +26,12 @@ const KEYBOARD_BUTTON: Vec2 = vec2(52., 35.);
 const KEYBOARD_COLUMN: f32 = 7.;
 const MENU_GAP: f32 = 4.;
 const MENU_PADDING: f32 = 5.;
-const PALETTE_SIZE: Vec2 = vec2(240., 272.);
+// Palette width is derived from the text action bar, not an independent
+// fixed pixel width. Reserve only the control rows; the wheel fills the
+// available vertical space without stretching beyond its natural circle.
+const PALETTE_MARGIN: f32 = 10.;
+const PALETTE_GAP: f32 = 7.;
+const PALETTE_SLIDER_HEIGHT: f32 = 32.;
 const MENU_SIZE: Vec2 = vec2(
     8. * MENU_BUTTON.x + KEYBOARD_BUTTON.x + 8. * MENU_GAP + 2. * MENU_PADDING,
     MENU_BUTTON.y + 2. * MENU_PADDING,
@@ -712,14 +717,14 @@ impl App {
         let actions =
             toolbar::context_menu_rect(item.rect(), canvas, MENU_SIZE * scale, protected, scale);
         let palette = self.input.text.color_wheel.map(|_| {
-            let scale = toolbar::menu_scale(canvas, PALETTE_SIZE, units);
+            let (size, scale) = palette_layout(actions, canvas, scale);
             // At most two obstacles: avoid allocating a Vec every palette frame.
             let obstacles = [actions, protected.unwrap_or(actions)];
             let count = if protected.is_some() { 2 } else { 1 };
             let rect = toolbar::context_menu_rect_avoiding(
                 actions,
                 canvas,
-                PALETTE_SIZE * scale,
+                size,
                 &obstacles[..count],
                 scale,
             );
@@ -1101,34 +1106,46 @@ impl App {
             ui.visuals().window_stroke(),
             StrokeKind::Inside,
         );
+        let inner = rect.shrink(PALETTE_MARGIN * scale);
+        let wheel_diameter = (inner.height()
+            - (PALETTE_SLIDER_HEIGHT + MENU_BUTTON.y + 2. * PALETTE_GAP) * scale)
+            .max(0.)
+            .min(inner.width());
         let mut palette = ui.new_child(
             UiBuilder::new()
                 .id_salt("wheel-controls")
-                .max_rect(rect.shrink(10. * scale)),
+                .max_rect(inner),
         );
-        palette.spacing_mut().item_spacing = vec2(6., 7.) * scale;
+        palette.set_width(inner.width());
+        palette.spacing_mut().item_spacing = vec2(PALETTE_GAP, PALETTE_GAP) * scale;
         palette.spacing_mut().button_padding = vec2(6., 4.) * scale;
-        palette.vertical_centered(|ui| wheel.show(ui, 164. * scale, scale));
+        palette.vertical_centered(|ui| wheel.show(ui, wheel_diameter, scale));
         palette.horizontal(|ui| {
+            ui.set_width(inner.width());
             ui.label(
                 egui::RichText::new(tr.text("Brightness", "亮度", "亮度"))
                     .size(toolbar::MENU_FONT_SIZE * scale),
             );
-            ui.spacing_mut().slider_width = 135. * scale;
-            ui.spacing_mut().interact_size.y = 28. * scale;
-            ui.add(egui::Slider::new(&mut wheel.value.v, 0. ..=1.).show_value(false));
+            let remaining = ui.available_width().max(0.);
+            ui.spacing_mut().slider_width = remaining;
+            ui.spacing_mut().interact_size.y = PALETTE_SLIDER_HEIGHT * scale;
+            ui.add_sized(
+                vec2(remaining, PALETTE_SLIDER_HEIGHT * scale),
+                egui::Slider::new(&mut wheel.value.v, 0. ..=1.).show_value(false),
+            );
         });
         let (apply, pick) = palette
             .horizontal(|ui| {
+                ui.set_width(inner.width());
+                let gap = ui.spacing().item_spacing.x;
+                let button_width = ((ui.available_width() - gap) / 2.).max(0.);
+                let size = vec2(button_width, MENU_BUTTON.y * scale);
                 let apply = ui
-                    .add_sized(
-                        vec2(88., MENU_BUTTON.y) * scale,
-                        toolbar::menu_button(tr.text("Apply", "应用", "套用"), scale),
-                    )
+                    .add_sized(size, toolbar::menu_button(tr.text("Apply", "应用", "套用"), scale))
                     .clicked();
                 let pick = ui
                     .add_sized(
-                        vec2(114., MENU_BUTTON.y) * scale,
+                        size,
                         toolbar::menu_button(tr.text("Pick screen", "屏幕取色", "螢幕取色"), scale),
                     )
                     .clicked();
@@ -1390,6 +1407,22 @@ impl App {
             ui.ctx().request_repaint();
         }
     }
+}
+
+/// Use exactly the text action bar's width. The palette's height (and its
+/// round wheel) is fitted into the larger unobstructed vertical side of the
+/// toolbar, then clipped by the canvas. No independent fixed palette size.
+fn palette_layout(actions: Rect, canvas: Rect, scale: f32) -> (Vec2, f32) {
+    let controls = (2. * PALETTE_MARGIN
+        + 2. * PALETTE_GAP
+        + PALETTE_SLIDER_HEIGHT
+        + MENU_BUTTON.y) * scale;
+    let below = (canvas.bottom() - actions.bottom() - MENU_GAP * scale).max(0.);
+    let above = (actions.top() - canvas.top() - MENU_GAP * scale).max(0.);
+    let max_height = below.max(above).min(canvas.height() - 2. * MENU_GAP * scale);
+    let wheel = (actions.width() - 2. * PALETTE_MARGIN * scale)
+        .min((max_height - controls).max(0.));
+    (vec2(actions.width(), controls + wheel), scale)
 }
 
 fn overlay(ui: &Ui, id: &str, rect: Rect, content: impl FnOnce(&mut Ui)) {
