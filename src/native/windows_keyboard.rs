@@ -25,12 +25,8 @@ windows::core::imp::define_interface!(
 #[allow(non_snake_case)]
 pub struct IInputPaneInterop_Vtbl {
     pub base__: IInspectable_Vtbl,
-    pub GetForWindow: unsafe extern "system" fn(
-        *mut c_void,
-        HWND,
-        *const GUID,
-        *mut *mut c_void,
-    ) -> HRESULT,
+    pub GetForWindow:
+        unsafe extern "system" fn(*mut c_void, HWND, *const GUID, *mut *mut c_void) -> HRESULT,
 }
 
 struct Apartment(bool);
