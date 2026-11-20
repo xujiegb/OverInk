@@ -5,7 +5,7 @@
 //! informed by the GNOME Shell OSK's public UX (GPL-2.0-or-later). No GNOME
 //! JavaScript, layouts, stylesheets or data files are incorporated here.
 //! The IME and candidate window always belong to the operating system.
-use egui::{Color32, CornerRadius, Rect, RichText, Stroke, Ui, Vec2, pos2, vec2};
+use egui::{Color32, CornerRadius, Rect, RichText, Stroke, Ui, pos2, vec2};
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Page {
