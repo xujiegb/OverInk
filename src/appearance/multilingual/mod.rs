@@ -4,15 +4,15 @@
 
 use super::Language;
 
-mod es;
-mod ja;
 mod de;
-mod ru;
-mod nl;
-mod tr;
-mod ko;
-mod pt;
+mod es;
 mod it;
+mod ja;
+mod ko;
+mod nl;
+mod pt;
+mod ru;
+mod tr;
 
 #[rustfmt::skip]
 pub(super) fn short(english: &'static str, language: Language) -> &'static str {
