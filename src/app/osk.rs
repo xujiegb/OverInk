@@ -964,7 +964,10 @@ mod tests {
                 &ctx,
                 screen,
                 rect,
-                vec![egui::Event::PointerMoved(start), pointer_button(start, true)],
+                vec![
+                    egui::Event::PointerMoved(start),
+                    pointer_button(start, true),
+                ],
             ),
             None
         );
@@ -1021,7 +1024,10 @@ mod tests {
             &ctx,
             screen,
             rect,
-            vec![egui::Event::PointerMoved(second), pointer_button(second, true)],
+            vec![
+                egui::Event::PointerMoved(second),
+                pointer_button(second, true),
+            ],
         );
         emoji_frame(
             &mut keyboard,
@@ -1037,7 +1043,10 @@ mod tests {
             &ctx,
             screen,
             rect,
-            vec![egui::Event::PointerMoved(first), pointer_button(first, true)],
+            vec![
+                egui::Event::PointerMoved(first),
+                pointer_button(first, true),
+            ],
         );
         let last = page(last_page);
         emoji_frame(
