@@ -916,7 +916,7 @@ mod tests {
         let Some(rect) = keyboard.rect_near(screen, None) else {
             panic!("Keyboard bounds are required for pointer regression");
         };
-        let editor_id = egui::Id::new("ime-editor");
+        let editor_id = egui::Id::unique();
         let mut editor_text = String::new();
         let mut frame = |events: Vec<egui::Event>, initially_focus: bool| {
             let input = egui::RawInput {
