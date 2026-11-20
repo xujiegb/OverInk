@@ -320,6 +320,15 @@ impl Keyboard {
         self.visible = false;
         self.window_rect = None;
     }
+    /// Usable keyboard area, shared by initial placement and egui's
+    /// draggable-window constraint. Do not maintain separate Dock insets
+    /// that can diverge after window resizes or display transitions.
+    pub fn safe_area(screen: Rect) -> Rect {
+        let inset_x = (screen.width() * 0.025).clamp(8., 28.);
+        let inset_y = (screen.height() * 0.10).clamp(24., 120.);
+        screen.shrink2(vec2(inset_x, inset_y))
+    }
+
     /// Geometry uses canvas coordinates; `Gui` alone resolves the
     /// display DPI. No second screen-scale query belongs in this widget.
     pub fn rect_near(&self, screen: Rect, anchor: Option<Rect>) -> Option<Rect> {
@@ -328,9 +337,7 @@ impl Keyboard {
         }
         // Keep a bottom work-area inset so an always-visible macOS Dock does
         // not cover the initial keyboard position on a fullscreen SDL canvas.
-        let inset_x = (screen.width() * 0.025).clamp(8., 28.);
-        let inset_y = (screen.height() * 0.10).clamp(24., 120.);
-        let safe = screen.shrink2(vec2(inset_x, inset_y));
+        let safe = Self::safe_area(screen);
         if safe.width() < 240. || safe.height() < 145. {
             return None;
         }
