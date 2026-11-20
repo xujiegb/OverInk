@@ -235,7 +235,7 @@ fn try_gnome_source() -> Result<bool, String> {
     // Use the already-linked, safe zbus client instead of spawning gdbus or
     // parsing its human-readable output. The timeout bounds the UI action if
     // Shell or its extension is hung.
-    zbus::block_on(async {
+    futures_lite::future::block_on(async {
         let connection = zbus::connection::Builder::session()
             .method_timeout(std::time::Duration::from_millis(750))
             .build()
