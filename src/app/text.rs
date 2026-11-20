@@ -122,6 +122,10 @@ pub(super) struct TextInput {
     screen_pick_requested: bool,
     keyboard_requested: bool,
     keyboard_press: bool,
+    // A separately hosted system keyboard can temporarily steal the native
+    // window focus. Keep the current text editor's SDL/IME session alive until
+    // the user explicitly finishes editing instead of closing it on that loss.
+    screen_keyboard_session: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -212,6 +216,14 @@ impl TextInput {
         std::mem::take(&mut self.keyboard_requested)
     }
 
+    pub fn screen_keyboard_session(&self) -> bool {
+        self.screen_keyboard_session && self.editing()
+    }
+
+    pub fn mark_screen_keyboard_open(&mut self) {
+        self.screen_keyboard_session = self.editing();
+    }
+
     pub fn has_edit(&self, history: &History) -> bool {
         self.draft
             .as_ref()
@@ -240,6 +252,7 @@ impl TextInput {
     }
 
     pub fn take_draft(&mut self, history: &History) -> Option<(Option<usize>, TextBox)> {
+        self.screen_keyboard_session = false;
         let draft = self.draft.take()?;
         let mut item = draft.item;
         item.text = draft.committed;
@@ -271,6 +284,7 @@ impl TextInput {
 
     fn edit(&mut self, index: Option<usize>, item: TextBox) {
         self.cancel_press();
+        self.screen_keyboard_session = false;
         self.menu_pointer = MenuPointer::default();
         self.context_menu = None;
         self.color_wheel = None;
