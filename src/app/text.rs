@@ -2521,6 +2521,24 @@ mod tests {
     }
 
     #[test]
+    fn palette_tracks_text_menu_width_and_available_window_height() {
+        let mut app = app();
+        app.use_tool(Tool::Text);
+        click(&mut app, pos2(150., 120.));
+        app.input.text.color_wheel = Some(ColorWheel::new(app.color));
+        for screen_size in [vec2(800., 600.), vec2(500., 420.), vec2(1100., 700.)] {
+            let screen = Rect::from_min_size(Pos2::ZERO, screen_size);
+            let menus = app.text_menus(screen).expect("text annotation menu");
+            let (palette, scale) = menus.palette.expect("color palette");
+            assert!((palette.width() - menus.actions.width()).abs() < 0.01);
+            assert!(screen.contains_rect(menus.actions));
+            assert!(palette.width() > 0.);
+            assert!(palette.height() >= 0.);
+            assert!(scale > 0.);
+        }
+    }
+
+    #[test]
     fn annotation_palette_requests_a_screen_pick_without_finishing_a_draft() {
         let mut app = app();
         app.use_tool(Tool::Text);
@@ -2556,7 +2574,14 @@ mod tests {
         };
         assert!(screen.contains_rect(palette));
         assert!(app.input.text.editing());
-        tap(&mut app, palette.min + vec2(180., 110.) * scale);
+        assert!((palette.width() - row.width()).abs() < 0.01);
+        let inner = palette.shrink(PALETTE_MARGIN * scale);
+        let wheel_size = (inner.height()
+            - (PALETTE_SLIDER_HEIGHT + MENU_BUTTON.y + 2. * PALETTE_GAP) * scale)
+            .max(0.)
+            .min(inner.width());
+        let wheel_center = pos2(inner.center().x, inner.top() + wheel_size * 0.5);
+        tap(&mut app, wheel_center + vec2(wheel_size * 0.3, 0.));
         let Some(color) = app
             .input
             .text
@@ -2565,7 +2590,13 @@ mod tests {
         else {
             panic!("expected color-wheel selection");
         };
-        tap(&mut app, palette.min + vec2(60., 230.) * scale);
+        tap(
+            &mut app,
+            pos2(
+                inner.left() + inner.width() * 0.25,
+                inner.bottom() - MENU_BUTTON.y * scale * 0.5,
+            ),
+        );
         assert_eq!(
             app.input.text.draft.as_ref().map(|draft| draft.item.color),
             Some(color)
@@ -2574,7 +2605,18 @@ mod tests {
         assert!(app.input.text.color_wheel.is_none());
 
         tap(&mut app, wheel_button);
-        tap(&mut app, palette.min + vec2(175., 230.) * scale);
+        let (palette, scale) = app
+            .text_menus(screen)
+            .and_then(|menus| menus.palette)
+            .expect("palette remains available after reopening");
+        let inner = palette.shrink(PALETTE_MARGIN * scale);
+        tap(
+            &mut app,
+            pos2(
+                inner.left() + inner.width() * 0.75,
+                inner.bottom() - MENU_BUTTON.y * scale * 0.5,
+            ),
+        );
         assert!(app.input.text.take_screen_pick());
         assert!(!app.input.text.take_screen_pick());
         assert!(app.input.text.color_wheel.is_none());
