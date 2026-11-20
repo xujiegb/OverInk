@@ -60,7 +60,10 @@ struct Cell {
 }
 impl Cell {
     const fn text(value: &'static str) -> Self {
-        Self { key: Key::Text(value), weight: 1. }
+        Self {
+            key: Key::Text(value),
+            weight: 1.,
+        }
     }
     const fn wide(key: Key, weight: f32) -> Self {
         Self { key, weight }
@@ -80,36 +83,258 @@ const SPACE: Cell = Cell::wide(Key::Space, 4.5);
 const LEFT: Cell = Cell::wide(Key::Left, 1.);
 const RIGHT: Cell = Cell::wide(Key::Right, 1.);
 
-const LETTER_ROW_1: [Cell; 11] = [Cell::text("q"),Cell::text("w"),Cell::text("e"),Cell::text("r"),Cell::text("t"),Cell::text("y"),Cell::text("u"),Cell::text("i"),Cell::text("o"),Cell::text("p"),DELETE];
-const LETTER_ROW_2: [Cell; 10] = [Cell::text("a"),Cell::text("s"),Cell::text("d"),Cell::text("f"),Cell::text("g"),Cell::text("h"),Cell::text("j"),Cell::text("k"),Cell::text("l"),ENTER];
-const LETTER_ROW_3: [Cell; 11] = [SHIFT,Cell::text("z"),Cell::text("x"),Cell::text("c"),Cell::text("v"),Cell::text("b"),Cell::text("n"),Cell::text("m"),Cell::text(","),Cell::text("."),SHIFT];
-const LETTER_ROW_4: [Cell; 5] = [SYMBOLS,EMOJI,SPACE,INPUT,HIDE];
+const LETTER_ROW_1: [Cell; 11] = [
+    Cell::text("q"),
+    Cell::text("w"),
+    Cell::text("e"),
+    Cell::text("r"),
+    Cell::text("t"),
+    Cell::text("y"),
+    Cell::text("u"),
+    Cell::text("i"),
+    Cell::text("o"),
+    Cell::text("p"),
+    DELETE,
+];
+const LETTER_ROW_2: [Cell; 10] = [
+    Cell::text("a"),
+    Cell::text("s"),
+    Cell::text("d"),
+    Cell::text("f"),
+    Cell::text("g"),
+    Cell::text("h"),
+    Cell::text("j"),
+    Cell::text("k"),
+    Cell::text("l"),
+    ENTER,
+];
+const LETTER_ROW_3: [Cell; 11] = [
+    SHIFT,
+    Cell::text("z"),
+    Cell::text("x"),
+    Cell::text("c"),
+    Cell::text("v"),
+    Cell::text("b"),
+    Cell::text("n"),
+    Cell::text("m"),
+    Cell::text(","),
+    Cell::text("."),
+    SHIFT,
+];
+const LETTER_ROW_4: [Cell; 5] = [SYMBOLS, EMOJI, SPACE, INPUT, HIDE];
 
-const NUM_ROW_1: [Cell; 11] = [Cell::text("1"),Cell::text("2"),Cell::text("3"),Cell::text("4"),Cell::text("5"),Cell::text("6"),Cell::text("7"),Cell::text("8"),Cell::text("9"),Cell::text("0"),DELETE];
-const NUM_ROW_2: [Cell; 10] = [Cell::text("@"),Cell::text("#"),Cell::text("$"),Cell::text("%"),Cell::text("&"),Cell::text("-"),Cell::text("+"),Cell::text("("),Cell::text(")"),ENTER];
-const NUM_ROW_3: [Cell; 9] = [EXTRA,Cell::text("*"),Cell::text("\""),Cell::text("'"),Cell::text(":"),Cell::text(";"),Cell::text("!"),Cell::text("?"),EXTRA];
-const NUM_ROW_4: [Cell; 9] = [LETTERS,Cell::text("_"),Cell::text("/"),Cell::wide(Key::Space,3.),Cell::text(","),Cell::text("."),EMOJI,INPUT,HIDE];
+const NUM_ROW_1: [Cell; 11] = [
+    Cell::text("1"),
+    Cell::text("2"),
+    Cell::text("3"),
+    Cell::text("4"),
+    Cell::text("5"),
+    Cell::text("6"),
+    Cell::text("7"),
+    Cell::text("8"),
+    Cell::text("9"),
+    Cell::text("0"),
+    DELETE,
+];
+const NUM_ROW_2: [Cell; 10] = [
+    Cell::text("@"),
+    Cell::text("#"),
+    Cell::text("$"),
+    Cell::text("%"),
+    Cell::text("&"),
+    Cell::text("-"),
+    Cell::text("+"),
+    Cell::text("("),
+    Cell::text(")"),
+    ENTER,
+];
+const NUM_ROW_3: [Cell; 9] = [
+    EXTRA,
+    Cell::text("*"),
+    Cell::text("\""),
+    Cell::text("'"),
+    Cell::text(":"),
+    Cell::text(";"),
+    Cell::text("!"),
+    Cell::text("?"),
+    EXTRA,
+];
+const NUM_ROW_4: [Cell; 9] = [
+    LETTERS,
+    Cell::text("_"),
+    Cell::text("/"),
+    Cell::wide(Key::Space, 3.),
+    Cell::text(","),
+    Cell::text("."),
+    EMOJI,
+    INPUT,
+    HIDE,
+];
 
-const EXTRA_ROW_1: [Cell; 11] = [Cell::text("~"),Cell::text("`"),Cell::text("|"),Cell::text("·"),Cell::text("√"),Cell::text("π"),Cell::text("÷"),Cell::text("×"),Cell::text("¶"),Cell::text("Δ"),DELETE];
-const EXTRA_ROW_2: [Cell; 10] = [Cell::text("£"),Cell::text("¢"),Cell::text("€"),Cell::text("¥"),Cell::text("^"),Cell::text("°"),Cell::text("="),Cell::text("{"),Cell::text("}"),ENTER];
-const EXTRA_ROW_3: [Cell; 9] = [SYMBOLS,Cell::text("\\"),Cell::text("©"),Cell::text("®"),Cell::text("™"),Cell::text("℅"),Cell::text("["),Cell::text("]"),SYMBOLS];
-const EXTRA_ROW_4: [Cell; 9] = [LETTERS,LEFT,RIGHT,Cell::wide(Key::Space,3.),Cell::text(","),Cell::text("."),EMOJI,INPUT,HIDE];
+const EXTRA_ROW_1: [Cell; 11] = [
+    Cell::text("~"),
+    Cell::text("`"),
+    Cell::text("|"),
+    Cell::text("·"),
+    Cell::text("√"),
+    Cell::text("π"),
+    Cell::text("÷"),
+    Cell::text("×"),
+    Cell::text("¶"),
+    Cell::text("Δ"),
+    DELETE,
+];
+const EXTRA_ROW_2: [Cell; 10] = [
+    Cell::text("£"),
+    Cell::text("¢"),
+    Cell::text("€"),
+    Cell::text("¥"),
+    Cell::text("^"),
+    Cell::text("°"),
+    Cell::text("="),
+    Cell::text("{"),
+    Cell::text("}"),
+    ENTER,
+];
+const EXTRA_ROW_3: [Cell; 9] = [
+    SYMBOLS,
+    Cell::text("\\"),
+    Cell::text("©"),
+    Cell::text("®"),
+    Cell::text("™"),
+    Cell::text("℅"),
+    Cell::text("["),
+    Cell::text("]"),
+    SYMBOLS,
+];
+const EXTRA_ROW_4: [Cell; 9] = [
+    LETTERS,
+    LEFT,
+    RIGHT,
+    Cell::wide(Key::Space, 3.),
+    Cell::text(","),
+    Cell::text("."),
+    EMOJI,
+    INPUT,
+    HIDE,
+];
 
 // Curated Unicode sequences, not imported GNOME emoji data. Color emoji are
 // rendered by OverInk's existing OpenMoji fallback; no candidate strip.
-const FACES: &[&str] = &["😀","😁","😂","🤣","😃","😄","😅","😆","😉","😊","😋","😎","😍","😘","😗","😙","😚","🙂","🤗","🤩","🤔","🤨","😐","😑","😶","🙄","😏","😣","😥","😮","😯","😪","😫","🥱","😴","😌","😛","😜","😝","🤤","😒","😓","😔","😕","🙃","🫠","🤑","😲","☹️","🙁","😖","😞","😟","😤","😢","😭","😦","😧","😨","😩","🤯","😬","😰","😱","🥺","😳","🤪","😵","🥴","😠","😡","🤬","🤢","🤮","🤧","😷","🤒","🤕","🤠","👻","💀","🤖"];
-const PEOPLE: &[&str] = &["👍","👎","👏","🙌","👐","🤲","🤝","🙏","✍️","💪","👋","🤚","🖐️","✋","🖖","👌","🤌","🤏","✌️","🤞","🤟","🤘","🤙","👈","👉","👆","👇","☝️","✊","👊","🤛","🤜","❤️","🫶","👀","👂","👃","👄"];
-const NATURE: &[&str] = &["🌷","🌹","🌺","🌸","🌼","🌻","💐","🍀","🌿","🌱","🌳","🌲","🌵","🍁","🍂","🌾","🌴","🍄","🌞","🌝","🌚","⭐","🌟","🌈","🌊","🔥","❄️","☀️","🌙","🌎","🐈","🐕","🦋","🐝","🐢"];
-const FOOD: &[&str] = &["🍎","🍐","🍊","🍋","🍌","🍉","🍇","🍓","🫐","🍒","🍑","🥭","🍍","🥝","🍅","🥑","🥦","🥕","🌽","🥐","🍞","🧀","🍳","🍔","🍟","🍕","🌭","🥪","🌮","🍜","🍣","🍩","🍪","🍰","☕","🍵"];
-const TRAVEL: &[&str] = &["✈️","🚀","🚗","🚕","🚌","🚎","🏎️","🚓","🚑","🚒","🚚","🚲","🛴","🚄","🚆","🚇","🚢","⛵","🛳️","🛫","🛬","🛎️","🏠","🏫","🏢","🏖️","🏕️","⛰️","🌋","🗻","🏝️","🌆","🌉"];
-const ACTIVITIES: &[&str] = &["🏃","🚶","🚴","🏊","⚽","🏀","🏈","⚾","🎾","🏐","🏓","🏸","🥊","🎳","🎯","🎲","🎮","🎨","🎭","🎬","🎤","🎧","🎹","🎸","🥁","📸","🏆","🥇","🥈","🥉"];
-const OBJECTS: &[&str] = &["🔔","🔕","📱","💻","⌨️","🖥️","🖨️","📷","📹","🎥","🔋","💡","🔦","🕯️","📚","📝","✏️","🖊️","🖌️","✂️","🔒","🔑","🔧","⚙️","🧲","🔬","🧪","📎","📌","📍"];
-const HEARTS: &[&str] = &["❤️","🧡","💛","💚","💙","💜","🖤","🤍","🤎","💖","💗","💓","💕","💞","💘","💝","💟","❣️","💔","❤️‍🔥","❤️‍🩹","♥️","💯","✨","💫","⭐","🌟","💥","🔥","✅","❌"];
-const SYMBOLS_EMOJI: &[&str] = &["🏳️","🏴","🏁","🚩","🏳️‍🌈","🏳️‍⚧️","⚠️","☮️","☯️","♻️","✔️","☑️","❎","🔴","🟠","🟡","🟢","🔵","🟣","⚫","⚪","🔶","🔷","🔺","🔻","↗️","↘️","⬆️","⬇️","➡️","⬅️","🔁","🔀"];
+const FACES: &[&str] = &[
+    "😀", "😁", "😂", "🤣", "😃", "😄", "😅", "😆", "😉", "😊", "😋", "😎", "😍", "😘", "😗", "😙",
+    "😚", "🙂", "🤗", "🤩", "🤔", "🤨", "😐", "😑", "😶", "🙄", "😏", "😣", "😥", "😮", "😯", "😪",
+    "😫", "🥱", "😴", "😌", "😛", "😜", "😝", "🤤", "😒", "😓", "😔", "😕", "🙃", "🫠", "🤑", "😲",
+    "☹️", "🙁", "😖", "😞", "😟", "😤", "😢", "😭", "😦", "😧", "😨", "😩", "🤯", "😬", "😰", "😱",
+    "🥺", "😳", "🤪", "😵", "🥴", "😠", "😡", "🤬", "🤢", "🤮", "🤧", "😷", "🤒", "🤕", "🤠", "👻",
+    "💀", "🤖",
+];
+const PEOPLE: &[&str] = &[
+    "👍", "👎", "👏", "🙌", "👐", "🤲", "🤝", "🙏", "✍️", "💪", "👋", "🤚", "🖐️", "✋", "🖖", "👌",
+    "🤌", "🤏", "✌️", "🤞", "🤟", "🤘", "🤙", "👈", "👉", "👆", "👇", "☝️", "✊", "👊", "🤛", "🤜",
+    "❤️", "🫶", "👀", "👂", "👃", "👄",
+];
+const NATURE: &[&str] = &[
+    "🌷", "🌹", "🌺", "🌸", "🌼", "🌻", "💐", "🍀", "🌿", "🌱", "🌳", "🌲", "🌵", "🍁", "🍂", "🌾",
+    "🌴", "🍄", "🌞", "🌝", "🌚", "⭐", "🌟", "🌈", "🌊", "🔥", "❄️", "☀️", "🌙", "🌎", "🐈", "🐕",
+    "🦋", "🐝", "🐢",
+];
+const FOOD: &[&str] = &[
+    "🍎", "🍐", "🍊", "🍋", "🍌", "🍉", "🍇", "🍓", "🫐", "🍒", "🍑", "🥭", "🍍", "🥝", "🍅", "🥑",
+    "🥦", "🥕", "🌽", "🥐", "🍞", "🧀", "🍳", "🍔", "🍟", "🍕", "🌭", "🥪", "🌮", "🍜", "🍣", "🍩",
+    "🍪", "🍰", "☕", "🍵",
+];
+const TRAVEL: &[&str] = &[
+    "✈️", "🚀", "🚗", "🚕", "🚌", "🚎", "🏎️", "🚓", "🚑", "🚒", "🚚", "🚲", "🛴", "🚄", "🚆", "🚇",
+    "🚢", "⛵", "🛳️", "🛫", "🛬", "🛎️", "🏠", "🏫", "🏢", "🏖️", "🏕️", "⛰️", "🌋", "🗻", "🏝️", "🌆",
+    "🌉",
+];
+const ACTIVITIES: &[&str] = &[
+    "🏃", "🚶", "🚴", "🏊", "⚽", "🏀", "🏈", "⚾", "🎾", "🏐", "🏓", "🏸", "🥊", "🎳", "🎯", "🎲",
+    "🎮", "🎨", "🎭", "🎬", "🎤", "🎧", "🎹", "🎸", "🥁", "📸", "🏆", "🥇", "🥈", "🥉",
+];
+const OBJECTS: &[&str] = &[
+    "🔔", "🔕", "📱", "💻", "⌨️", "🖥️", "🖨️", "📷", "📹", "🎥", "🔋", "💡", "🔦", "🕯️", "📚", "📝",
+    "✏️", "🖊️", "🖌️", "✂️", "🔒", "🔑", "🔧", "⚙️", "🧲", "🔬", "🧪", "📎", "📌", "📍",
+];
+const HEARTS: &[&str] = &[
+    "❤️",
+    "🧡",
+    "💛",
+    "💚",
+    "💙",
+    "💜",
+    "🖤",
+    "🤍",
+    "🤎",
+    "💖",
+    "💗",
+    "💓",
+    "💕",
+    "💞",
+    "💘",
+    "💝",
+    "💟",
+    "❣️",
+    "💔",
+    "❤️‍🔥",
+    "❤️‍🩹",
+    "♥️",
+    "💯",
+    "✨",
+    "💫",
+    "⭐",
+    "🌟",
+    "💥",
+    "🔥",
+    "✅",
+    "❌",
+];
+const SYMBOLS_EMOJI: &[&str] = &[
+    "🏳️",
+    "🏴",
+    "🏁",
+    "🚩",
+    "🏳️‍🌈",
+    "🏳️‍⚧️",
+    "⚠️",
+    "☮️",
+    "☯️",
+    "♻️",
+    "✔️",
+    "☑️",
+    "❎",
+    "🔴",
+    "🟠",
+    "🟡",
+    "🟢",
+    "🔵",
+    "🟣",
+    "⚫",
+    "⚪",
+    "🔶",
+    "🔷",
+    "🔺",
+    "🔻",
+    "↗️",
+    "↘️",
+    "⬆️",
+    "⬇️",
+    "➡️",
+    "⬅️",
+    "🔁",
+    "🔀",
+];
 const EMOJI_CATEGORIES: &[(&str, &[&str])] = &[
-    ("😀", FACES), ("👍", PEOPLE), ("🌷", NATURE),
-    ("🍴", FOOD), ("✈️", TRAVEL), ("🏃", ACTIVITIES),
-    ("🔔", OBJECTS), ("❤️", HEARTS), ("🚩", SYMBOLS_EMOJI),
+    ("😀", FACES),
+    ("👍", PEOPLE),
+    ("🌷", NATURE),
+    ("🍴", FOOD),
+    ("✈️", TRAVEL),
+    ("🏃", ACTIVITIES),
+    ("🔔", OBJECTS),
+    ("❤️", HEARTS),
+    ("🚩", SYMBOLS_EMOJI),
 ];
 const EMOJI_COLUMNS: usize = 11;
 const EMOJI_ROWS: usize = 3;
@@ -128,10 +353,14 @@ impl Keyboard {
         }
         let margin = 10. * scale;
         let width = (screen.width() - 2. * margin).max(0.).min(1020. * scale);
-        let height = (width * 0.29).clamp(142. * scale, 320. * scale)
+        let height = (width * 0.29)
+            .clamp(142. * scale, 320. * scale)
             .min((screen.height() - 2. * margin).max(0.) * 0.56);
         Some(Rect::from_min_size(
-            pos2(screen.center().x - width * 0.5, screen.bottom() - height - margin),
+            pos2(
+                screen.center().x - width * 0.5,
+                screen.bottom() - height - margin,
+            ),
             vec2(width, height),
         ))
     }
@@ -147,9 +376,14 @@ impl Keyboard {
         match self.page {
             Page::Letters => {
                 for (i, row) in [
-                    LETTER_ROW_1.as_slice(), LETTER_ROW_2.as_slice(),
-                    LETTER_ROW_3.as_slice(), LETTER_ROW_4.as_slice(),
-                ].into_iter().enumerate() {
+                    LETTER_ROW_1.as_slice(),
+                    LETTER_ROW_2.as_slice(),
+                    LETTER_ROW_3.as_slice(),
+                    LETTER_ROW_4.as_slice(),
+                ]
+                .into_iter()
+                .enumerate()
+                {
                     if let Some(action) = self.row(ui, row, inside, i, row_h, gap, scale) {
                         result = Some(action);
                     }
@@ -157,9 +391,14 @@ impl Keyboard {
             }
             Page::Symbols => {
                 for (i, row) in [
-                    NUM_ROW_1.as_slice(), NUM_ROW_2.as_slice(),
-                    NUM_ROW_3.as_slice(), NUM_ROW_4.as_slice(),
-                ].into_iter().enumerate() {
+                    NUM_ROW_1.as_slice(),
+                    NUM_ROW_2.as_slice(),
+                    NUM_ROW_3.as_slice(),
+                    NUM_ROW_4.as_slice(),
+                ]
+                .into_iter()
+                .enumerate()
+                {
                     if let Some(action) = self.row(ui, row, inside, i, row_h, gap, scale) {
                         result = Some(action);
                     }
@@ -167,9 +406,14 @@ impl Keyboard {
             }
             Page::ExtraSymbols => {
                 for (i, row) in [
-                    EXTRA_ROW_1.as_slice(), EXTRA_ROW_2.as_slice(),
-                    EXTRA_ROW_3.as_slice(), EXTRA_ROW_4.as_slice(),
-                ].into_iter().enumerate() {
+                    EXTRA_ROW_1.as_slice(),
+                    EXTRA_ROW_2.as_slice(),
+                    EXTRA_ROW_3.as_slice(),
+                    EXTRA_ROW_4.as_slice(),
+                ]
+                .into_iter()
+                .enumerate()
+                {
                     if let Some(action) = self.row(ui, row, inside, i, row_h, gap, scale) {
                         result = Some(action);
                     }
@@ -193,8 +437,7 @@ impl Keyboard {
         scale: f32,
     ) -> Option<Action> {
         let total: f32 = keys.iter().map(|cell| cell.weight).sum();
-        let unit = ((inside.width() - gap * (keys.len().saturating_sub(1)) as f32)
-            / total).max(0.);
+        let unit = ((inside.width() - gap * (keys.len().saturating_sub(1)) as f32) / total).max(0.);
         let mut x = inside.left();
         let y = inside.top() + row as f32 * (height + gap);
         let mut pressed = None;
@@ -247,7 +490,8 @@ impl Keyboard {
                 .fill(fill)
                 .corner_radius(CornerRadius::same(9))
                 .stroke(Stroke::NONE),
-        ).clicked()
+        )
+        .clicked()
     }
 
     fn act(&mut self, key: Key) -> Option<Action> {
@@ -292,7 +536,14 @@ impl Keyboard {
         }
     }
 
-    fn emoji_ui(&mut self, ui: &mut Ui, bounds: Rect, row_h: f32, gap: f32, scale: f32) -> Option<Action> {
+    fn emoji_ui(
+        &mut self,
+        ui: &mut Ui,
+        bounds: Rect,
+        row_h: f32,
+        gap: f32,
+        scale: f32,
+    ) -> Option<Action> {
         let Some((_, items)) = EMOJI_CATEGORIES.get(self.emoji_category).copied() else {
             return None;
         };
@@ -303,7 +554,10 @@ impl Keyboard {
             let col = (i % EMOJI_COLUMNS) as f32;
             let row = (i / EMOJI_COLUMNS) as f32;
             let rect = Rect::from_min_size(
-                pos2(bounds.left() + col * (cell + gap), bounds.top() + row * (row_h + gap)),
+                pos2(
+                    bounds.left() + col * (cell + gap),
+                    bounds.top() + row * (row_h + gap),
+                ),
                 vec2(cell, row_h),
             );
             if self.key(ui, rect, Key::Text(emoji), scale) {
@@ -317,11 +571,14 @@ impl Keyboard {
         let categories_width = (bottom.width() - 120. * scale).max(0.);
         let selector = Rect::from_min_size(bottom.min, vec2(categories_width, bottom.height()));
         let unit = selector.width() / (EMOJI_CATEGORIES.len() + 1) as f32;
-        if ui.put(
-            Rect::from_min_size(selector.min, vec2(unit, row_h)),
-            egui::Button::new(RichText::new("ABC").color(Color32::WHITE).size(14. * scale))
-                .fill(Color32::from_rgb(70, 70, 73)),
-        ).clicked() {
+        if ui
+            .put(
+                Rect::from_min_size(selector.min, vec2(unit, row_h)),
+                egui::Button::new(RichText::new("ABC").color(Color32::WHITE).size(14. * scale))
+                    .fill(Color32::from_rgb(70, 70, 73)),
+            )
+            .clicked()
+        {
             self.page = Page::Letters;
         }
         for (i, (icon, _)) in EMOJI_CATEGORIES.iter().enumerate() {
@@ -334,11 +591,15 @@ impl Keyboard {
             } else {
                 Color32::from_rgb(70, 70, 73)
             };
-            if ui.put(
-                rect,
-                egui::Button::new(RichText::new(*icon).size(17. * scale))
-                    .fill(fill).corner_radius(CornerRadius::same(8)),
-            ).clicked() {
+            if ui
+                .put(
+                    rect,
+                    egui::Button::new(RichText::new(*icon).size(17. * scale))
+                        .fill(fill)
+                        .corner_radius(CornerRadius::same(8)),
+                )
+                .clicked()
+            {
                 self.emoji_category = i;
                 self.emoji_page = 0;
             }
@@ -346,16 +607,25 @@ impl Keyboard {
         let nav_width = 28. * scale;
         let nav_x = selector.right();
         let max_page = items.len().saturating_sub(1) / EMOJI_PAGE_SIZE;
-        if ui.put(
-            Rect::from_min_size(pos2(nav_x, bottom.top()), vec2(nav_width, row_h)),
-            egui::Button::new("‹"),
-        ).clicked() {
+        if ui
+            .put(
+                Rect::from_min_size(pos2(nav_x, bottom.top()), vec2(nav_width, row_h)),
+                egui::Button::new("‹"),
+            )
+            .clicked()
+        {
             self.emoji_page = self.emoji_page.saturating_sub(1);
         }
-        if ui.put(
-            Rect::from_min_size(pos2(nav_x + nav_width, bottom.top()), vec2(nav_width, row_h)),
-            egui::Button::new("›"),
-        ).clicked() {
+        if ui
+            .put(
+                Rect::from_min_size(
+                    pos2(nav_x + nav_width, bottom.top()),
+                    vec2(nav_width, row_h),
+                ),
+                egui::Button::new("›"),
+            )
+            .clicked()
+        {
             self.emoji_page = (self.emoji_page + 1).min(max_page);
         }
         let input_rect = Rect::from_min_size(
@@ -399,12 +669,17 @@ mod tests {
     fn responsive_overlay_stays_within_canvas() {
         let mut k = Keyboard::default();
         k.open();
-        for (w, h) in [(800.,600.), (320.,240.), (1920.,1080.)] {
-            let area = Rect::from_min_size(egui::Pos2::ZERO, vec2(w,h));
-            let Some(r) = k.rect(area,1.) else { panic!("keyboard should fit"); };
+        for (w, h) in [(800., 600.), (320., 240.), (1920., 1080.)] {
+            let area = Rect::from_min_size(egui::Pos2::ZERO, vec2(w, h));
+            let Some(r) = k.rect(area, 1.) else {
+                panic!("keyboard should fit");
+            };
             assert!(area.contains_rect(r));
         }
         k.close();
-        assert!(k.rect(Rect::from_min_size(egui::Pos2::ZERO, vec2(800.,600.)),1.).is_none());
+        assert!(
+            k.rect(Rect::from_min_size(egui::Pos2::ZERO, vec2(800., 600.)), 1.)
+                .is_none()
+        );
     }
 }
