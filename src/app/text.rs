@@ -2196,6 +2196,105 @@ mod tests {
     }
 
     #[test]
+    fn native_mouse_pen_and_finger_clicks_open_the_selected_text_keyboard() {
+        for device in ["mouse", "pen", "finger"] {
+            let mut app = app();
+            app.use_tool(Tool::Select);
+            let canvas = Rect::from_min_size(Pos2::ZERO, Vec2::from(SIZE));
+            let mut item = TextBox::new(pos2(200., 150.), canvas, app.color, 1.);
+            item.text = "Keyboard".into();
+            assert!(app.history.set_text_box(None, item).is_some());
+            app.input.text.selected = Some(0);
+            let point = app
+                .keyboard_button_rect(canvas)
+                .expect("selected item has keyboard button")
+                .center();
+            let window = SDL_WindowID(1);
+            let mut gui = Gui::new();
+            for down in [true, false] {
+                let event = match device {
+                    "mouse" => SDL_Event {
+                        button: SDL_MouseButtonEvent {
+                            r#type: if down {
+                                SDL_EVENT_MOUSE_BUTTON_DOWN
+                            } else {
+                                SDL_EVENT_MOUSE_BUTTON_UP
+                            },
+                            windowID: window,
+                            which: SDL_MouseID(1),
+                            button: SDL_BUTTON_LEFT as u8,
+                            down,
+                            x: point.x,
+                            y: point.y,
+                            ..Default::default()
+                        },
+                    },
+                    "pen" => SDL_Event {
+                        ptouch: SDL_PenTouchEvent {
+                            r#type: if down {
+                                SDL_EVENT_PEN_DOWN
+                            } else {
+                                SDL_EVENT_PEN_UP
+                            },
+                            windowID: window,
+                            down,
+                            x: point.x,
+                            y: point.y,
+                            ..Default::default()
+                        },
+                    },
+                    _ => SDL_Event {
+                        tfinger: SDL_TouchFingerEvent {
+                            r#type: if down {
+                                SDL_EVENT_FINGER_DOWN
+                            } else {
+                                SDL_EVENT_FINGER_UP
+                            },
+                            windowID: window,
+                            touchID: SDL_TouchID(45),
+                            fingerID: SDL_FingerID(9),
+                            x: point.x / SIZE[0],
+                            y: point.y / SIZE[1],
+                            ..Default::default()
+                        },
+                    },
+                };
+                app.text_event(&mut gui, &event, window, SIZE);
+                assert_eq!(app.input.text.take_keyboard_request(), !down, "{device}");
+            }
+            assert!(app.input.text.editing(), "{device}");
+        }
+    }
+
+    #[test]
+    fn keyboard_click_requires_release_inside_and_does_not_create_text_box() {
+        let mut app = app();
+        app.use_tool(Tool::Select);
+        let canvas = Rect::from_min_size(Pos2::ZERO, Vec2::from(SIZE));
+        let mut item = TextBox::new(pos2(150., 120.), canvas, app.color, 1.);
+        item.text = "Test".into();
+        assert!(app.history.set_text_box(None, item).is_some());
+        app.input.text.selected = Some(0);
+        let area = app.keyboard_button_rect(canvas).expect("keyboard menu");
+        let down = Event::PointerButton {
+            pos: area.center(),
+            button: PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let outside_up = Event::PointerButton { pos: Pos2::ZERO, pressed: false, ..down.clone() };
+        assert!(app.keyboard_pointer(&down, canvas));
+        assert!(!app.keyboard_pointer(&outside_up, canvas));
+        assert!(!app.input.text.editing());
+        assert!(!app.input.text.take_keyboard_request());
+        assert!(app.keyboard_pointer(&down, canvas));
+        assert!(app.keyboard_pointer(&Event::PointerButton { pressed: false, ..down }, canvas));
+        assert_eq!(app.history.text_boxes().len(), 1);
+        assert!(app.input.text.editing());
+        assert!(app.input.text.take_keyboard_request());
+    }
+
+    #[test]
     fn mouse_editing_does_not_request_keyboard_automatically() {
         let mut app = app();
         app.use_tool(Tool::Text);
