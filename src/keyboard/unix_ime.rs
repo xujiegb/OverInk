@@ -219,15 +219,13 @@ fn try_ibus() -> Result<(), String> {
     checked_command("ibus", &["engine", next])
 }
 
-/// On GNOME Wayland the Shell input source manager controls XKB and IBus
+/// On GNOME X11 and Wayland Shell's input source manager controls XKB and IBus
 /// together. The bundled authenticated Overlay extension exposes this action
 /// for the focused OverInk canvas; gsettings "current" does not switch layouts.
 #[cfg(target_os = "linux")]
 fn try_gnome_source() -> Result<bool, String> {
     let desktop = env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
-    if !desktop.split(':').any(|part| part.eq_ignore_ascii_case("GNOME"))
-        || env::var("XDG_SESSION_TYPE").as_deref() != Ok("wayland")
-    {
+    if !desktop.split(':').any(|part| part.eq_ignore_ascii_case("GNOME")) {
         return Ok(false);
     }
     let Some(result) = success_stdout(
