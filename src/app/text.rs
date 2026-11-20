@@ -1983,6 +1983,44 @@ mod tests {
     }
 
     #[test]
+    fn overink_keyboard_keeps_incremental_chinese_preedit_in_one_range() {
+        let mut app = app();
+        app.use_tool(Tool::Text);
+        click(&mut app, pos2(150., 120.));
+        let mut gui = Gui::new();
+        gui.ctx.set_fonts(app.text_fonts.definitions());
+        render(&mut app, &mut gui);
+        app.input.text.open_osk();
+        render(&mut app, &mut gui);
+
+        // A candidate is shown for each growing pinyin sequence. The text
+        // editor must replace the previous preedit, never append a duplicate.
+        for partial in ["a", "ap", "app", "appl", "apple"] {
+            ime(&mut gui, SDL_EVENT_TEXT_EDITING, partial);
+            render(&mut app, &mut gui);
+            assert_eq!(draft_preview(&app), Some(partial));
+            assert_eq!(draft_committed(&app), Some(""));
+        }
+        ime(&mut gui, SDL_EVENT_TEXT_INPUT, "苹果");
+        render(&mut app, &mut gui);
+        assert_eq!(draft_preview(&app), Some("苹果"));
+        assert_eq!(draft_committed(&app), Some("苹果"));
+
+        for partial in ["z", "zh", "zho", "zhon", "zhong"] {
+            ime(&mut gui, SDL_EVENT_TEXT_EDITING, partial);
+            render(&mut app, &mut gui);
+            assert_eq!(
+                draft_preview(&app),
+                Some(format!("苹果{partial}").as_str())
+            );
+            assert_eq!(draft_committed(&app), Some("苹果"));
+        }
+        // Closing the editor must discard only uncommitted pinyin.
+        app.stop();
+        assert_eq!(app.history.text_boxes()[0].text, "苹果");
+    }
+
+    #[test]
     fn editor_waits_for_initial_window_focus_and_finishes_when_it_is_lost() {
         let mut app = app();
         app.use_tool(Tool::Text);
