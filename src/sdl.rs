@@ -1026,7 +1026,7 @@ pub fn push_macos_direct_touch(window_id: u32, finger_id: u64, phase: u32, x: f3
     // than INDIRECT for an unregistered device ID.
     let mut event = SDL_Event::default();
     event.tfinger = SDL_TouchFingerEvent {
-        r#type: kind.0,
+        r#type: kind,
         windowID: SDL_WindowID(window_id),
         touchID: SDL_TouchID(0x4f56_4552_0000_0000 | u64::from(window_id)),
         fingerID: SDL_FingerID(finger_id),
