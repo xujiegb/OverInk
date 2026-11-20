@@ -1027,8 +1027,7 @@ impl App {
                 self.input.text.color_wheel = None;
             }
         }
-        let keyboard_label =
-            tr.text("Show on-screen keyboard", "呼出屏幕键盘", "開啟螢幕鍵盤");
+        let keyboard_label = tr.text("Show on-screen keyboard", "呼出屏幕键盘", "開啟螢幕鍵盤");
         let (icon_rect, keyboard_response) =
             menu.allocate_exact_size(KEYBOARD_BUTTON * scale, egui::Sense::click());
         keyboard_response.widget_info(|| {
@@ -1043,26 +1042,25 @@ impl App {
         }
         // A vector keyboard is legible on every OS; the previous Unicode
         // "⌨" was rendered as a tiny fallback glyph on some installations.
-        let keyboard_rect = Rect::from_center_size(
-            icon_rect.center(),
-            vec2(31., 22.) * scale,
-        );
+        let keyboard_rect = Rect::from_center_size(icon_rect.center(), vec2(31., 22.) * scale);
         let stroke = Stroke::new(2.0 * scale, menu.visuals().text_color());
-        menu.painter().rect_stroke(keyboard_rect, 3. * scale, stroke, StrokeKind::Inside);
+        menu.painter()
+            .rect_stroke(keyboard_rect, 3. * scale, stroke, StrokeKind::Inside);
         for row in 0..2 {
             for col in 0..5 {
-                let center = keyboard_rect.min
-                    + vec2(5. + 5.25 * col as f32, 6. + 6. * row as f32) * scale;
-                menu.painter().circle_filled(center, 1.25 * scale, stroke.color);
+                let center =
+                    keyboard_rect.min + vec2(5. + 5.25 * col as f32, 6. + 6. * row as f32) * scale;
+                menu.painter()
+                    .circle_filled(center, 1.25 * scale, stroke.color);
             }
         }
         let spacebar = keyboard_rect.min + vec2(8., 18.) * scale;
-        menu.painter().line_segment(
-            [spacebar, spacebar + vec2(15., 0.) * scale],
-            stroke,
-        );
+        menu.painter()
+            .line_segment([spacebar, spacebar + vec2(15., 0.) * scale], stroke);
         if keyboard_response
-            .on_hover_text(egui::RichText::new(keyboard_label).size(toolbar::MENU_FONT_SIZE * scale))
+            .on_hover_text(
+                egui::RichText::new(keyboard_label).size(toolbar::MENU_FONT_SIZE * scale),
+            )
             .clicked()
         {
             acted |= self.request_text_keyboard();
