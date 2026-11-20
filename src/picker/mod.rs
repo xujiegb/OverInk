@@ -29,6 +29,19 @@ enum Stage {
     LaunchAfter(Instant),
     System(SystemJob),
 }
+/// Native controller bounds are in canvas-local logical coordinates.
+/// Require finite positive geometry and reject clicks on the draggable grip
+/// or action buttons even when an underlying overlay receives the SDL packet.
+fn controller_contains([x, y, w, h]: [f32; 4], [px, py]: [f32; 2]) -> bool {
+    [x, y, w, h, px, py].into_iter().all(f32::is_finite)
+        && w > 0.
+        && h > 0.
+        && px >= x
+        && py >= y
+        && px < x + w
+        && py < y + h
+}
+
 pub struct Picker {
     stage: Stage,
     result: Option<PickResult>,
@@ -135,13 +148,7 @@ impl Picker {
             // a desktop sample. The overlap is recomputed on every click,
             // so moving the controller immediately updates the exclusion.
             if crate::native::controller_bounds(window, toolbar)
-                .is_some_and(|[x, y, w, h]| {
-                    w > 0. && h > 0.
-                        && local[0] >= x
-                        && local[1] >= y
-                        && local[0] < x + w
-                        && local[1] < y + h
-                })
+                .is_some_and(|bounds| controller_contains(bounds, local))
             {
                 return;
             }
@@ -187,6 +194,19 @@ impl Drop for Picker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn controller_exclusion_moves_with_draggable_toolbar() {
+        let bounds = [120., 80., 56., 180.];
+        assert!(controller_contains(bounds, [125., 85.]));
+        assert!(controller_contains(bounds, [125., 240.]));
+        assert!(!controller_contains(bounds, [119., 85.]));
+        assert!(!controller_contains(bounds, [176., 85.]));
+        assert!(!controller_contains(bounds, [125., 260.]));
+        assert!(!controller_contains([400., 80., 56., 180.], [125., 85.]));
+        assert!(!controller_contains([f32::NAN, 80., 56., 180.], [125., 85.]));
+        assert!(!controller_contains([120., 80., 0., 180.], [125., 85.]));
+    }
+
     #[test]
     fn cancellation_resets_desktop_and_delayed_system_selection() {
         let mut picker = Picker::default();
