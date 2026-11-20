@@ -1315,7 +1315,100 @@ impl App {
             if let Some(rect) = self.text_context_rect(screen) {
                 self.text_context_popup(ui, rect);
             }
+            // Draw last, above the annotation and color controls, but inside
+            // the same SDL canvas/egui context. It owns no native focus.
+            if self.input.text.editing()
+                && let Some(rect) = self.input.text.osk.rect(screen, self.input.canvas_units)
+            {
+                let mut action = None;
+                overlay(ui, "overink-on-screen-keyboard", rect, |ui| {
+                    action = self.input.text.osk.ui(ui, rect, self.input.canvas_units);
+                });
+                if let Some(action) = action {
+                    self.apply_osk_action(action, composing);
+                    ui.ctx().request_repaint();
+                }
+            }
         }
+    }
+
+    /// Apply only fully committed Unicode strings to the annotation draft.
+    /// This never fabricates SDL key events, modifies a platform IME's preedit
+    /// or displays candidates. The TextEdit cursor is restored on repaint.
+    fn apply_osk_action(&mut self, action: osk::Action, composing: bool) {
+        match action {
+            osk::Action::Hide => {
+                self.input.text.osk.close();
+                return;
+            }
+            osk::Action::SwitchInputMethod => {
+                self.input.text.input_source_requested = true;
+                return;
+            }
+            _ if composing => {
+                // The OS owns this preedit. Wait for its commit/cancellation.
+                return;
+            }
+            _ => {}
+        }
+        let Some(draft) = self.input.text.draft.as_mut() else {
+            return;
+        };
+        let total = draft.item.text.chars().count();
+        let selected = draft.cursor.map(|cursor| cursor.as_sorted_char_range());
+        let mut start = selected.map_or(total, |range| usize::from(range.start)).min(total);
+        let mut end = selected.map_or(total, |range| usize::from(range.end)).min(total);
+        let mut insert = String::new();
+        match action {
+            osk::Action::Insert(value) => insert = value,
+            osk::Action::Return => insert.push('\n'),
+            osk::Action::Backspace if start == end => {
+                if start == 0 {
+                    return;
+                }
+                let end_byte = draft.item.text.char_indices()
+                    .nth(start).map_or(draft.item.text.len(), |(i, _)| i);
+                let before = &draft.item.text[..end_byte];
+                start = before.grapheme_indices(true)
+                    .last()
+                    .map_or(0, |(byte, _)| before[..byte].chars().count());
+            }
+            osk::Action::MoveLeft | osk::Action::MoveRight => {
+                let caret = if matches!(action, osk::Action::MoveLeft) {
+                    start
+                } else {
+                    end
+                };
+                let byte = draft.item.text.char_indices()
+                    .nth(caret).map_or(draft.item.text.len(), |(i, _)| i);
+                let at = if matches!(action, osk::Action::MoveLeft) {
+                    draft.item.text[..byte].grapheme_indices(true)
+                        .last()
+                        .map_or(0, |(i, _)| draft.item.text[..i].chars().count())
+                } else {
+                    let next = draft.item.text[byte..].graphemes(true)
+                        .next().map_or(0, str::chars)
+                        .count();
+                    (caret + next).min(total)
+                };
+                draft.cursor = Some(CCursorRange::one(CCursor::new(at)));
+                draft.focus = true;
+                return;
+            }
+            _ => {}
+        }
+        let available = MAX_TEXT_CHARS.saturating_sub(total.saturating_sub(end - start));
+        let insertion: String = insert.chars().take(available).collect();
+        if insertion.is_empty() && start == end {
+            return;
+        }
+        draft.item.text.delete_char_range(
+            egui::text::CharIndex(start)..egui::text::CharIndex(end),
+        );
+        let count = draft.item.text.insert_text(&insertion, egui::text::CharIndex(start));
+        draft.committed.clone_from(&draft.item.text);
+        draft.cursor = Some(CCursorRange::one(CCursor::new(start + count)));
+        draft.focus = true;
     }
 
     fn text_editor(
@@ -1327,6 +1420,7 @@ impl App {
     ) {
         let wheel_open = self.input.text.color_wheel.is_some();
         let context_rect = self.text_context_rect(ui.clip_rect());
+        let keyboard_rect = self.input.text.osk.rect(ui.clip_rect(), self.input.canvas_units);
         let Some(draft) = self.input.text.draft.as_mut() else {
             return;
         };
@@ -1356,6 +1450,7 @@ impl App {
             let menu_pointer = input.pointer.interact_pos().is_some_and(|point| {
                 menus.is_some_and(|menus| menus.contains(point))
                     || context_rect.is_some_and(|rect| rect.contains(point))
+                    || keyboard_rect.is_some_and(|rect| rect.contains(point))
             });
             let finish = lost_window_focus
                 || (!composing
@@ -1430,6 +1525,7 @@ impl App {
                 && !started
                 && !composing
                 && !wheel_open
+                && !self.input.text.osk.visible
                 && !menu_clicked
                 && output.response.lost_focus())
         {
