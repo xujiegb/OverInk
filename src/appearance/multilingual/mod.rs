@@ -204,6 +204,7 @@ pub(super) fn short(english: &'static str, language: Language) -> &'static str {
         _ => return english,
     };
     match language {
+        Language::French => super::french::STRINGS[index],
         Language::Spanish => es::STRINGS[index],
         Language::Japanese => ja::STRINGS[index],
         Language::German => de::STRINGS[index],
@@ -223,6 +224,7 @@ mod tests {
     #[test]
     fn all_catalogs_have_compact_nonempty_strings() {
         for locale in [
+            &super::super::french::STRINGS,
             &es::STRINGS,
             &ja::STRINGS,
             &de::STRINGS,
