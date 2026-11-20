@@ -323,8 +323,7 @@ impl Keyboard {
                 // Neither side fits: choose the side with more available space
                 // and clamp rather than covering the OS Dock or moving offscreen.
                 let more_below = safe.bottom() - text.bottom() >= text.top() - safe.top();
-                (if more_below { below } else { above })
-                    .clamp(safe.top(), safe.bottom() - height)
+                (if more_below { below } else { above }).clamp(safe.top(), safe.bottom() - height)
             }
         } else {
             safe.bottom() - height
@@ -506,9 +505,7 @@ impl Keyboard {
                 CornerRadius::same(9),
                 Stroke::new(
                     (1.5 * hovered + 2. * down).max(0.5),
-                    Color32::from_white_alpha(
-                        (110. * hovered + 110. * down).min(220.) as u8,
-                    ),
+                    Color32::from_white_alpha((110. * hovered + 110. * down).min(220.) as u8),
                 ),
                 StrokeKind::Inside,
             );
@@ -742,8 +739,8 @@ impl Keyboard {
                 (1. - ((pos.x - center.x).abs() / (dot_spacing * 1.8))).max(0.)
             });
             let active = self.emoji_page == page;
-            let radius = (if active { 0.22 } else { 0.16 }) * dots_h
-                + 0.32 * dots_h * proximity * proximity;
+            let radius =
+                (if active { 0.22 } else { 0.16 }) * dots_h + 0.32 * dots_h * proximity * proximity;
             if proximity > 0.1 {
                 ui.painter().circle_filled(
                     center,
