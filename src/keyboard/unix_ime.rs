@@ -225,17 +225,26 @@ fn try_ibus() -> Result<(), String> {
 #[cfg(target_os = "linux")]
 fn try_gnome_source() -> Result<bool, String> {
     let desktop = env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
-    if !desktop.split(':').any(|part| part.eq_ignore_ascii_case("GNOME")) {
+    if !desktop
+        .split(':')
+        .any(|part| part.eq_ignore_ascii_case("GNOME"))
+    {
         return Ok(false);
     }
     let Some(result) = success_stdout(
         "gdbus",
         &[
-            "call", "--session", "--dest", "org.overink.Overlay",
-            "--object-path", "/org/overink/Overlay",
-            "--method", "org.overink.Overlay.NextInputSource",
+            "call",
+            "--session",
+            "--dest",
+            "org.overink.Overlay",
+            "--object-path",
+            "/org/overink/Overlay",
+            "--method",
+            "org.overink.Overlay.NextInputSource",
         ],
-    )? else {
+    )?
+    else {
         return Ok(false);
     };
     Ok(result.contains("true"))
