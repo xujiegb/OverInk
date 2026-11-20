@@ -1359,7 +1359,7 @@ impl App {
                     .title_frame(egui::Frame::window(ui.style()).inner_margin(
                         egui::Margin::symmetric(
                             (4. * scale).round() as i8,
-                            (1. * scale).round() as i8,
+                            scale.round() as i8,
                         ),
                     ))
                     .id(ui.make_persistent_id((

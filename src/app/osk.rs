@@ -352,10 +352,7 @@ impl Keyboard {
             return None;
         }
         let scale = Self::layout_scale(screen, units);
-        let design = vec2(600., 247.);
-        let size = (design * scale)
-            .max(self.minimum_size(safe.size(), scale))
-            .min(safe.size());
+        let size = (vec2(600., 247.) * scale).min(safe.size());
         let width = size.x;
         let height = size.y;
         let gap = (height * 0.035).max(5. * scale);
