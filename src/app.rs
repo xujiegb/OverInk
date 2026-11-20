@@ -2426,7 +2426,7 @@ fn run_inner(options: Options) -> Result<(), String> {
             )?;
             app.screenshot.acknowledge_portal_fallback_hidden();
             let mut restore_text_focus = false;
-            if let Some(result) = picker.poll(&canvases[active].window) {
+            if let Some(result) = picker.poll(&canvases[active].window, &toolbar) {
                 app.picking = false;
                 let origin = text_pick.take();
                 let canvas = &canvases[active];
