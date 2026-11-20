@@ -99,9 +99,6 @@ impl Picker {
             _ => false,
         }
     }
-    pub fn hides_canvas(&self) -> bool {
-        self.hides_windows()
-    }
     pub fn start(&mut self, wayland_session: bool) {
         self.cancel();
         self.result = None;
@@ -334,13 +331,11 @@ mod tests {
         let live_x11 = cfg!(any(target_os = "linux", target_os = "freebsd"));
         assert_eq!(picker.choosing(), live_x11);
         assert_eq!(picker.hides_windows(), !live_x11);
-        assert_eq!(picker.hides_canvas(), !live_x11);
         picker.cancel();
         assert!(!picker.active());
         assert!(matches!(picker.result, Some(Ok(None))));
         picker.start(true);
         assert!(picker.hides_windows());
-        assert!(picker.hides_canvas());
         picker.cancel();
         assert!(!picker.active());
     }
