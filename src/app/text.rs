@@ -932,10 +932,7 @@ impl App {
                         }
                         if ui
                             .add_sized(
-                                vec2(
-                                    rect.width() - 10. * scale,
-                                    29. * scale,
-                                ),
+                                vec2(rect.width() - 10. * scale, 29. * scale),
                                 egui::Button::new(
                                     egui::RichText::new(title)
                                         .size(toolbar::MENU_FONT_SIZE * scale),
@@ -1362,11 +1359,7 @@ impl App {
                 .as_ref()
                 .map(|draft| draft.item.rect());
             if self.input.text.editing()
-                && let Some(rect) =
-                    self.input
-                        .text
-                        .osk
-                        .rect_near(screen, anchor)
+                && let Some(rect) = self.input.text.osk.rect_near(screen, anchor)
             {
                 let scale = self.input.canvas_units;
                 let inset = egui::vec2(
