@@ -203,7 +203,10 @@ mod tests {
         assert!(!controller_contains(bounds, [176., 85.]));
         assert!(!controller_contains(bounds, [125., 260.]));
         assert!(!controller_contains([400., 80., 56., 180.], [125., 85.]));
-        assert!(!controller_contains([f32::NAN, 80., 56., 180.], [125., 85.]));
+        assert!(!controller_contains(
+            [f32::NAN, 80., 56., 180.],
+            [125., 85.]
+        ));
         assert!(!controller_contains([120., 80., 0., 180.], [125., 85.]));
     }
 
