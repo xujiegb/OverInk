@@ -132,6 +132,8 @@ enum SdlNativeAction<'a> {
     WaitEvent(i32),
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     PushUserEvent(&'a mut SDL_Event),
+    #[cfg(target_os = "macos")]
+    PushMacosTouch(&'a mut SDL_Event),
     #[cfg(target_os = "linux")]
     FlushQuitEvent,
 }
@@ -584,6 +586,8 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
             }
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             SdlNativeAction::PushUserEvent(event) => SdlNativeResult::Success(SDL_PushEvent(event)),
+            #[cfg(target_os = "macos")]
+            SdlNativeAction::PushMacosTouch(event) => SdlNativeResult::Success(SDL_PushEvent(event)),
             #[cfg(target_os = "linux")]
             SdlNativeAction::FlushQuitEvent => {
                 SDL_FlushEvent(SDL_EVENT_QUIT.0);
@@ -992,6 +996,50 @@ pub fn push_user_event(ty: u32) -> bool {
     let mut event = SDL_Event::default();
     event.r#type = ty;
     sdl_native(SdlNativeAction::PushUserEvent(&mut event)).succeeded()
+}
+
+/// Push a macOS 27 AppKit *direct finger* sample into the existing checked
+/// SDL event pipeline. The Cocoa bridge passes only scalar values; this code
+/// never takes ownership of any Cocoa or SDL native pointer.
+#[cfg(target_os = "macos")]
+pub fn push_macos_direct_touch(
+    window_id: u32,
+    finger_id: u64,
+    phase: u32,
+    x: f32,
+    y: f32,
+) -> bool {
+    if !is_main_thread()
+        || !SDL_VIDEO_READY.load(std::sync::atomic::Ordering::Acquire)
+        || window_id == 0
+        || finger_id == 0
+        || !x.is_finite()
+        || !y.is_finite()
+    {
+        return false;
+    }
+    let kind = match phase {
+        0 => SDL_EVENT_FINGER_DOWN,
+        1 => SDL_EVENT_FINGER_MOTION,
+        2 => SDL_EVENT_FINGER_UP,
+        3 => SDL_EVENT_FINGER_CANCELED,
+        _ => return false,
+    };
+    // Each canvas has a separate synthetic touch device. This ID cannot be
+    // mistaken for a trackpad: SDL_GetTouchDeviceType returns INVALID rather
+    // than INDIRECT for an unregistered device ID.
+    let mut event = SDL_Event::default();
+    event.tfinger = SDL_TouchFingerEvent {
+        r#type: kind.0,
+        windowID: SDL_WindowID(window_id),
+        touchID: SDL_TouchID(0x4f56_4552_0000_0000 | u64::from(window_id)),
+        fingerID: SDL_FingerID(finger_id),
+        x,
+        y,
+        pressure: 1.,
+        ..Default::default()
+    };
+    sdl_native(SdlNativeAction::PushMacosTouch(&mut event)).succeeded()
 }
 
 /// Owned display metadata, copied from SDL before its native allocation is freed.
