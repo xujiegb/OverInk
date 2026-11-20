@@ -1082,7 +1082,8 @@ mod tests {
     fn unicode_categories_include_flags_and_regional_variants() {
         assert_eq!(EMOJI_CATEGORIES.len(), 9);
         assert!(SYMBOLS_EMOJI.len() >= 270);
-        for flag in ["🇨🇳", "🇫🇷", "🇯🇵", "🇺🇸", "🇬🇧", "🇺🇳", "🏳️‍🌈"] {
+        for flag in ["🇨🇳", "🇫🇷", "🇯🇵", "🇺🇸", "🇬🇧", "🇺🇳", "🏳️‍🌈"]
+        {
             assert!(SYMBOLS_EMOJI.contains(&flag), "Missing flag: {flag}");
         }
         assert!(FACES.len() > 100);
