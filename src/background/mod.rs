@@ -38,7 +38,7 @@ pub struct Image {
     encoding: Encoding,
 }
 impl Image {
-    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos", test))]
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos", target_os = "windows", test))]
     pub fn buffer(width: u32, height: u32) -> Result<Self, String> {
         Self::allocate(width, height, Encoding::Srgb8)
     }
@@ -119,6 +119,40 @@ impl Image {
         }
         Ok(())
     }
+    // WGC supplies BGRA8 for SDR monitors. Validate the mapped D3D11 pitch
+    // before copying; the snapshot format consumed by SDL remains opaque RGBA8.
+    #[cfg(any(target_os = "windows", test))]
+    fn copy_sdr_bgra_rows(
+        &mut self,
+        len: usize,
+        stride: usize,
+        mut copy: impl FnMut(usize, &mut [u8]),
+    ) -> Result<(), String> {
+        let row_bytes = (self.width as usize)
+            .checked_mul(4)
+            .ok_or("Invalid SDR capture row width")?;
+        let needed = (self.height as usize)
+            .checked_sub(1)
+            .and_then(|last| last.checked_mul(stride))
+            .and_then(|offset| offset.checked_add(row_bytes));
+        if row_bytes == 0
+            || self.encoding != Encoding::Srgb8
+            || row_bytes.checked_mul(self.height as usize) != Some(self.rgba.len())
+            || stride < row_bytes
+            || needed.is_none_or(|size| size > len)
+        {
+            return Err("Invalid SDR capture row pitch".into());
+        }
+        for (y, row) in self.rgba.chunks_exact_mut(row_bytes).enumerate() {
+            copy(y * stride, row);
+            for pixel in row.chunks_exact_mut(4) {
+                pixel.swap(0, 2);
+                pixel[3] = 255;
+            }
+        }
+        Ok(())
+    }
+
     #[cfg(any(target_os = "linux", target_os = "freebsd", test))]
     pub fn load(path: &std::path::Path) -> Result<Self, String> {
         use image::ImageDecoder;
@@ -252,7 +286,7 @@ pub fn snapshot_mode(
             "目前的工作階段無法保證螢幕擷取保留 HDR",
         ));
     }
-    if cfg!(target_os = "windows") || (cfg!(target_os = "macos") && hdr) {
+    if hdr && (cfg!(target_os = "windows") || cfg!(target_os = "macos")) {
         if extended_available {
             SnapshotMode::Linear
         } else {
@@ -435,7 +469,7 @@ impl Background {
         #[cfg(any(target_os = "windows", target_os = "macos"))]
         {
             #[cfg(target_os = "windows")]
-            let job = windows::start(id, Snapshot::compress);
+            let job = windows::start(id, self.mode == SnapshotMode::Linear, Snapshot::compress);
             #[cfg(target_os = "macos")]
             let job = macos::start(
                 self.bounds,
@@ -502,6 +536,25 @@ mod tests {
     use super::*;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn sdr_capture_converts_bgra_with_stride_and_rejects_short_frames() -> TestResult {
+        let mut image = Image::buffer(2, 2)?;
+        let row0 = [3_u8, 2, 1, 45, 6, 5, 4, 12, 99, 99, 99, 99];
+        let row1 = [9_u8, 8, 7, 32, 12, 11, 10, 0, 88, 88, 88, 88];
+        let mut data = Vec::from(row0);
+        data.extend_from_slice(&row1);
+        assert!(image.copy_sdr_bgra_rows(18, 12, |_, _| {}).is_err());
+        image.copy_sdr_bgra_rows(data.len(), 12, |offset, row| {
+            row.copy_from_slice(&data[offset..offset + row.len()]);
+        })?;
+        assert_eq!(
+            image.rgba,
+            [1, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 255, 10, 11, 12, 255]
+        );
+        assert_eq!(image.encoding, Encoding::Srgb8);
+        Ok(())
+    }
 
     fn display_result(result: Result<(), crate::appearance::Text>) -> TestResult {
         result.map_err(|message| message.get(crate::appearance::Language::English).into())
