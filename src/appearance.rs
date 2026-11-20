@@ -27,7 +27,12 @@ pub enum Language {
 }
 
 impl Language {
-    pub const ALL: [Self; 4] = [Self::English, Self::Simplified, Self::Traditional, Self::French];
+    pub const ALL: [Self; 4] = [
+        Self::English,
+        Self::Simplified,
+        Self::Traditional,
+        Self::French,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -296,13 +301,28 @@ mod tests {
     #[test]
     fn french_selection_is_backward_compatible_and_localized() -> serde_json::Result<()> {
         assert_eq!(serde_json::to_string(&Language::French)?, r#""fr""#);
-        assert_eq!(serde_json::from_str::<Language>(r#""fr""#)?, Language::French);
-        assert_eq!(serde_json::from_str::<Language>(r#""zh-Hant""#)?, Language::Traditional);
+        assert_eq!(
+            serde_json::from_str::<Language>(r#""fr""#)?,
+            Language::French
+        );
+        assert_eq!(
+            serde_json::from_str::<Language>(r#""zh-Hant""#)?,
+            Language::Traditional
+        );
         assert_eq!(Language::French.name(), "Français");
-        assert_eq!(Language::French.text("Settings", "设置", "設定"), "Réglages");
-        assert_eq!(Language::French.text("Pick screen", "屏幕取色", "螢幕取色"), "Pipette");
+        assert_eq!(
+            Language::French.text("Settings", "设置", "設定"),
+            "Réglages"
+        );
+        assert_eq!(
+            Language::French.text("Pick screen", "屏幕取色", "螢幕取色"),
+            "Pipette"
+        );
         assert_eq!(ThemeMode::System.label(Language::French), "Système");
-        assert_eq!(text("Save failed", "保存失败", "儲存失敗").get(Language::French), "Échec d’enregistrement");
+        assert_eq!(
+            text("Save failed", "保存失败", "儲存失敗").get(Language::French),
+            "Échec d’enregistrement"
+        );
         Ok(())
     }
 
