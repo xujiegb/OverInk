@@ -1,24 +1,13 @@
 pub(crate) mod desktop;
-#[cfg(target_os = "macos")]
-mod macos;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub(crate) mod portal;
-#[cfg(target_os = "macos")]
-use macos::SystemJob;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-use portal::SystemJob;
-#[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "macos")))]
-struct SystemJob;
-#[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "macos")))]
-impl SystemJob {
-    fn start() -> Result<Self, String> {
-        Err("No native color sampler for this display backend".into())
-    }
-    fn poll(&mut self) -> Option<PickResult> {
-        None
-    }
-    fn cancel(&mut self) {}
-}
+use crate::background::screenshot::Job as PortalCapture;
+#[cfg(target_os = "macos")]
+use crate::background::system::Job as MacCapture;
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd"))]
+use crate::background::Image;
+use crate::display::Display;
 use crate::{color::InkColor, sdl::*};
 use std::time::{Duration, Instant};
 pub type PickResult = Result<Option<InkColor>, String>;
@@ -26,9 +15,57 @@ enum Stage {
     Idle,
     Choosing,
     SampleAfter(desktop::ScreenPoint, Instant),
-    LaunchAfter(Instant),
-    System(SystemJob),
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd"))]
+    Preparing(Instant),
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd"))]
+    Capturing(CaptureJob),
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd"))]
+    ChoosingImage(Image),
 }
+
+/// The native sampler has no public cancel API on macOS, while some Wayland
+/// portals use modal dialogs. Capture the desktop *once* while both OverInk
+/// windows are hidden; then use OverInk's own cancellable pointer/UI event
+/// loop to select a color from that clean, owned frame.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd"))]
+enum CaptureJob {
+    #[cfg(target_os = "macos")]
+    Mac(MacCapture<Image>),
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    Portal(PortalCapture),
+}
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd"))]
+impl CaptureJob {
+    fn poll(&mut self) -> Option<Result<Option<Image>, String>> {
+        match self {
+            #[cfg(target_os = "macos")]
+            Self::Mac(job) => job.poll(),
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            Self::Portal(job) => job.poll(),
+        }
+    }
+}
+
+/// Match a canvas-logical pointer position against the privately captured
+/// RGBA8 screen buffer, independent of output DPI. Never index an out-of-range
+/// pixel or return colors from invalid/cancelled image data.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd", test))]
+fn sample_image(image: &Image, point: [f32; 2], size: [f32; 2]) -> Option<InkColor> {
+    if image.width == 0
+        || image.height == 0
+        || point.iter().chain(size.iter()).any(|v| !v.is_finite())
+        || size.iter().any(|v| *v <= 0.)
+        || point.iter().zip(size).any(|(p, limit)| *p < 0. || *p >= limit)
+    {
+        return None;
+    }
+    let x = ((point[0] / size[0]) * image.width as f32).floor() as usize;
+    let y = ((point[1] / size[1]) * image.height as f32).floor() as usize;
+    let offset = (y.checked_mul(image.width as usize)?.checked_add(x)?).checked_mul(4)?;
+    let rgb = image.rgba.get(offset..offset.checked_add(3)?)?;
+    Some(InkColor::from_rgb8([rgb[0], rgb[1], rgb[2]]))
+}
+
 /// Native controller bounds are in canvas-local logical coordinates.
 /// Require finite positive geometry and reject clicks on the draggable grip
 /// or action buttons even when an underlying overlay receives the SDL packet.
@@ -63,30 +100,38 @@ impl Picker {
         !matches!(self.stage, Stage::Idle)
     }
     pub fn choosing(&self) -> bool {
-        matches!(self.stage, Stage::Choosing)
+        match self.stage {
+            Stage::Choosing => true,
+            #[cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd"))]
+            Stage::ChoosingImage(_) => true,
+            _ => false,
+        }
     }
-    /// Hide both application windows only for the brief desktop-pixel
-    /// readback. The native macOS / Wayland picker still needs an accessible
-    /// Cancel / Quit controller, so its stage only hides the canvas.
+    /// Hide both windows only during capture; the entire interactive picking
+    /// phase uses our own visible, movable Cancel / Quit controller.
     pub fn hides_windows(&self) -> bool {
-        matches!(self.stage, Stage::SampleAfter(..))
+        match self.stage {
+            Stage::SampleAfter(..) => true,
+            #[cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd"))]
+            Stage::Preparing(..) | Stage::Capturing(..) => true,
+            _ => false,
+        }
     }
     pub fn hides_canvas(&self) -> bool {
-        matches!(
-            self.stage,
-            Stage::SampleAfter(..) | Stage::LaunchAfter(..) | Stage::System(..)
-        )
+        self.hides_windows()
     }
     pub fn start(&mut self, wayland_session: bool) {
         self.cancel();
         self.result = None;
         self.started = Instant::now();
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd"))]
         if cfg!(target_os = "macos") || wayland_session {
-            self.stage = Stage::LaunchAfter(Instant::now() + Duration::from_millis(100));
-        } else {
-            self.stage = Stage::Choosing;
-            self.cursor = SystemCursor::crosshair();
+            self.stage = Stage::Preparing(Instant::now() + Duration::from_millis(120));
+            return;
         }
+        let _ = wayland_session;
+        self.stage = Stage::Choosing;
+        self.cursor = SystemCursor::crosshair();
     }
     fn reset_cursor(&mut self) {
         self.cursor = None;
@@ -97,9 +142,9 @@ impl Picker {
         self.reset_cursor();
     }
     pub fn cancel(&mut self) {
-        if let Stage::System(ref mut job) = self.stage {
-            job.cancel();
-        }
+        // Replacing Capturing drops its job, which signals the macOS capture
+        // worker or closes the Wayland portal request immediately. Results
+        // from old jobs can never be mistaken for a new pick.
         self.finish(Ok(None));
     }
     pub fn event(&mut self, event: &SDL_Event, window: &Window, toolbar: &Window) {
@@ -152,6 +197,15 @@ impl Picker {
             {
                 return;
             }
+            #[cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd"))]
+            if let Stage::ChoosingImage(image) = &self.stage {
+                let result = sample_image(image, local, window.size())
+                    .map_or(Err("The chosen pixel is outside the display".into()), |color| {
+                        Ok(Some(color))
+                    });
+                self.finish(result);
+                return;
+            }
             match desktop::position(window, local) {
                 Ok(point) => {
                     self.stage =
@@ -161,7 +215,13 @@ impl Picker {
             }
         }
     }
-    pub fn poll(&mut self, window: &Window, _toolbar: &Window) -> Option<PickResult> {
+    pub fn poll(
+        &mut self,
+        window: &Window,
+        _toolbar: &Window,
+        _display: Option<&Display>,
+        _displays: &[Display],
+    ) -> Option<PickResult> {
         if self.active() && self.started.elapsed() > Duration::from_secs(120) {
             self.cancel();
             self.result = Some(Err("Screen color selection timed out".into()));
@@ -171,30 +231,47 @@ impl Picker {
                 let result = desktop::sample(window, *point).map(Some);
                 self.finish(result);
             }
-            Stage::LaunchAfter(due) if Instant::now() >= *due => match SystemJob::start() {
-                Ok(job) => self.stage = Stage::System(job),
-                Err(e) => self.finish(Err(e)),
-            },
-            Stage::System(job) => {
+            #[cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd"))]
+            Stage::Preparing(due) if Instant::now() >= *due => {
+                let bounds = _display.ok_or("The picker display was disconnected");
+                #[cfg(target_os = "macos")]
+                let capture = bounds.and_then(|display| {
+                    crate::background::macos::start(
+                        display.bounds,
+                        window.pixel_size(),
+                        crate::background::SnapshotMode::Sdr,
+                        Ok,
+                    )
+                    .map(CaptureJob::Mac)
+                });
+                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                let capture = bounds.and_then(|display| {
+                    crate::background::screenshot::Job::start(
+                        window,
+                        display,
+                        _displays,
+                        Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::from(window.size())),
+                        false,
+                        true,
+                    )
+                    .map(CaptureJob::Portal)
+                });
+                match capture {
+                    Ok(job) => self.stage = Stage::Capturing(job),
+                    Err(error) => self.finish(Err(error)),
+                }
+            }
+            #[cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd"))]
+            Stage::Capturing(job) => {
                 if let Some(result) = job.poll() {
-                    // NSColorSampler reports any clicked pixel, including
-                    // app-owned controls. Never apply the toolbar's color if
-                    // its Cancel/Quit button or draggable grip was clicked.
-                    #[cfg(target_os = "macos")]
-                    let result = if matches!(&result, Ok(Some(_)))
-                        && crate::sdl::global_mouse_position().is_some_and(|point| {
-                            let Ok([x, y]) = _toolbar.position() else {
-                                return false;
-                            };
-                            let [w, h] = _toolbar.size();
-                            controller_contains([x as f32, y as f32, w, h], point)
-                        })
-                    {
-                        Ok(None)
-                    } else {
-                        result
-                    };
-                    self.finish(result)
+                    match result {
+                        Ok(Some(image)) => {
+                            self.stage = Stage::ChoosingImage(image);
+                            self.cursor = SystemCursor::crosshair();
+                        }
+                        Ok(None) => self.finish(Ok(None)),
+                        Err(error) => self.finish(Err(error)),
+                    }
                 }
             }
             _ => {}
@@ -232,14 +309,16 @@ mod tests {
         let mut picker = Picker::default();
         picker.start(false);
         assert_eq!(picker.choosing(), !cfg!(target_os = "macos"));
-        assert!(!picker.hides_windows());
+        assert_eq!(picker.hides_windows(), cfg!(target_os = "macos"));
         assert_eq!(picker.hides_canvas(), cfg!(target_os = "macos"));
         picker.cancel();
         assert!(!picker.active());
         assert!(matches!(picker.result, Some(Ok(None))));
         picker.start(true);
-        assert!(!picker.hides_windows());
-        assert!(picker.hides_canvas());
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd"))]
+        assert!(picker.hides_windows());
+        #[cfg(target_os = "windows")]
+        assert!(!picker.hides_canvas());
         picker.cancel();
         assert!(!picker.active());
     }
