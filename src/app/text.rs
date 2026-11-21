@@ -422,6 +422,31 @@ impl App {
 
         let ty = event_type(event);
         let editing = self.input.text.editing();
+        // The keyboard's hover highlight changes only at key boundaries.
+        // Reprocessing motion *within* one key would unnecessarily redraw
+        // the whole transparent canvas and re-layout every text box.
+        // Never suppress a drag, pen/touch input, or the Emoji pager's
+        // position-dependent hover/scrubbing interactions.
+        if editing
+            && ty == SDL_EVENT_MOUSE_MOTION
+            && let Some(motion) = mouse_motion_event(event)
+            && motion.windowID == window
+            && motion.which != SDL_TOUCH_MOUSEID
+            && motion.which != SDL_PEN_MOUSEID
+            && self
+                .input
+                .text
+                .osk
+                .motion_inside_hovered_key(pos2(motion.x, motion.y))
+            && !gui.ctx.input(|input| input.pointer.any_down())
+            && !gui
+                .raw
+                .events
+                .iter()
+                .any(|event| matches!(event, Event::PointerButton { pressed: true, .. }))
+        {
+            return false;
+        }
         if !editing && self.input.text.selected.is_none() {
             gui.clear_events();
         }
