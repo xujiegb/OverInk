@@ -2887,8 +2887,10 @@ fn run_inner(options: Options) -> Result<(), String> {
                     let painted = canvas.paint(
                         &mut app,
                         &options,
-                        picker.choosing(),
-                        keep_editor_open,
+                        canvas::PaintFlags {
+                            picker_choosing: picker.choosing(),
+                            keep_editor_open,
+                        },
                         theme,
                         ink::MAX_EXTENDED_INK_TEXTURE_BYTES.saturating_sub(extended_ink_bytes),
                         performance.as_ref().map(|_| &mut breakdown),
