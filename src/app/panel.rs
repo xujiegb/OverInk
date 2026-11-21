@@ -631,7 +631,7 @@ impl App {
                     .show(ui, |ui| {
                         for font in catalog
                             .iter()
-                            .filter(|font| font.name.to_lowercase().contains(&filter))
+                            .filter(|font| font.matches_search(&filter))
                         {
                             if ui.selectable_label(false, &font.name).clicked() {
                                 commands.font_path = Some(font.path.clone());
