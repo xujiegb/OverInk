@@ -20,7 +20,24 @@ fn hint_id() -> Id {
     Id::unique("overink-native-tooltip")
 }
 
+fn hover_id() -> Id {
+    Id::new("overink-toolbar-hover")
+}
+
+pub fn clear_hover(ctx: &egui::Context) {
+    ctx.data_mut(|data| data.remove_temp::<egui::Rect>(hover_id()));
+}
+
+pub fn hovered_rect(ctx: &egui::Context) -> Option<egui::Rect> {
+    ctx.data(|data| data.get_temp::<egui::Rect>(hover_id()))
+}
+
 pub fn hint(response: Response, text: &str) -> Response {
+    if response.hovered() {
+        response
+            .ctx
+            .data_mut(|data| data.insert_temp(hover_id(), response.rect));
+    }
     if Tooltip::should_show_tooltip(&response, false) {
         let size = response.ctx.fonts_mut(|fonts| {
             fonts
