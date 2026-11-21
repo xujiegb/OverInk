@@ -275,12 +275,12 @@ impl Canvas {
             _ => None,
         });
         gui.event(event, self.window.id, self.window.size());
-        gui.raw.events.len() != before
-            || (event_type(event) == SDL_EVENT_MOUSE_MOTION
-                && previous_pos.is_some()
-                && gui.raw.events.last().is_some_and(|event| {
-                    matches!(event, egui::Event::PointerMoved(pos) if Some(*pos) != previous_pos)
-                }))
+        screenshot_input_changed(
+            before,
+            previous_pos,
+            &gui.raw.events,
+            event_type(event) == SDL_EVENT_MOUSE_MOTION,
+        )
     }
 
     pub fn activate_text_editor(&mut self) {
@@ -548,6 +548,51 @@ impl Canvas {
             self.text = None;
             self.text_style = None;
         }
+    }
+}
+
+// Replacing a queued SDL mouse move must still mark the screenshot UI dirty.
+// A queue-length-only check would swallow rapid transitions across buttons.
+fn screenshot_input_changed(
+    before: usize,
+    previous_pos: Option<egui::Pos2>,
+    events: &[egui::Event],
+    mouse_motion: bool,
+) -> bool {
+    events.len() != before
+        || (mouse_motion
+            && previous_pos.is_some_and(|pos| {
+                matches!(events.last(), Some(egui::Event::PointerMoved(current)) if *current != pos)
+            }))
+}
+
+#[cfg(test)]
+mod screenshot_input_tests {
+    use super::screenshot_input_changed;
+    use egui::{Event, pos2};
+
+    #[test]
+    fn coalesced_screenshot_mouse_move_still_repaints() {
+        let events = [Event::PointerMoved(pos2(22., 30.))];
+        assert!(screenshot_input_changed(
+            1,
+            Some(pos2(10., 30.)),
+            &events,
+            true
+        ));
+        assert!(!screenshot_input_changed(
+            1,
+            Some(pos2(22., 30.)),
+            &events,
+            true
+        ));
+        assert!(!screenshot_input_changed(
+            1,
+            Some(pos2(10., 30.)),
+            &events,
+            false
+        ));
+        assert!(screenshot_input_changed(0, None, &events, false));
     }
 }
 
