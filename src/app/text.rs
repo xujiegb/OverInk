@@ -445,6 +445,9 @@ impl App {
                     .text
                     .hovered_control
                     .is_some_and(|rect| rect.contains(pos2(motion.x, motion.y))))
+            // A prior move in this SDL batch can target another control.
+            // Keep the final position instead of reusing stale hover geometry.
+            && !gui.raw.events.iter().any(|event| matches!(event, Event::PointerMoved(_)))
             && !gui.ctx.input(|input| input.pointer.any_down())
             && !gui
                 .raw
