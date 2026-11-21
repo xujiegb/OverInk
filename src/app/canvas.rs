@@ -81,9 +81,7 @@ fn static_text_region(
     logical: [f32; 2],
     pixels: [i32; 2],
 ) -> Option<[i32; 4]> {
-    if logical.iter().any(|v| !v.is_finite() || *v <= 0.)
-        || pixels.iter().any(|v| *v <= 0)
-    {
+    if logical.iter().any(|v| !v.is_finite() || *v <= 0.) || pixels.iter().any(|v| *v <= 0) {
         return None;
     }
     let frame = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::from(logical));
@@ -588,16 +586,12 @@ impl Canvas {
             self.static_text = None;
             return Ok(false);
         }
-        if self
-            .static_text
-            .as_ref()
-            .is_some_and(|layer| {
-                layer.region != region
-                    || layer.full_pixels != full_pixels
-                    || layer.logical_size != logical_size
-                    || layer.format != format
-            })
-        {
+        if self.static_text.as_ref().is_some_and(|layer| {
+            layer.region != region
+                || layer.full_pixels != full_pixels
+                || layer.logical_size != logical_size
+                || layer.format != format
+        }) {
             self.static_text = None;
         }
         let key = (region, format);
@@ -1000,11 +994,14 @@ mod screenshot_input_tests {
             ),
             Some([22, 40, 838, 440])
         );
-        assert!(static_text_region(
-            std::iter::once(Rect::from_min_size(pos2(1100., 800.), vec2(10., 10.))),
-            [1000., 600.],
-            [2000, 1200],
-        ).is_none());
+        assert!(
+            static_text_region(
+                std::iter::once(Rect::from_min_size(pos2(1100., 800.), vec2(10., 10.))),
+                [1000., 600.],
+                [2000, 1200],
+            )
+            .is_none()
+        );
     }
 
     #[test]
