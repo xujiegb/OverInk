@@ -136,64 +136,64 @@ def font(size, role='normal'):
 
 def render(scale):
     S = scale
-    image = Image.new('RGB', (W*S, H*S), '#f7fafc')
+    image = Image.new('RGB', (W*S, H*S), '#f8fafc')
     d = ImageDraw.Draw(image)
-    def xy(box): return tuple(round(v*S) for v in box)
-    def rounded(box, radius, fill, outline=None, stroke=1):
-        d.rounded_rectangle(xy(box), radius=round(radius*S), fill=fill,
-                            outline=outline, width=round(stroke*S))
+
+    def xy(box):
+        return tuple(round(value*S) for value in box)
+
+    def rounded(box, radius, fill, outline=None):
+        d.rounded_rectangle(xy(box), radius=round(radius*S),
+                            fill=fill, outline=outline, width=S)
+
     def label(x, y, value, size, color, weight='normal', anchor=None):
         f = font(round(size*S), weight)
         px, py = round(x*S), round(y*S)
         if anchor == 'center':
-            width = d.textbbox((0,0),value,font=f)[2]
-            px -= width//2
-        d.text((px,py), value, font=f, fill=color, stroke_width=0)
-    def line(points, fill, width):
-        d.line(xy(points), fill=fill, width=round(width*S), joint='curve')
+            bbox = d.textbbox((0, 0), value, font=f)
+            px -= (bbox[2] - bbox[0])//2
+        d.text((px, py), value, font=f, fill=color)
 
-    # Brand header and negative space
-    d.rectangle(xy((0,0,W,126)), fill=navy)
-    d.ellipse(xy((718,-165,1080,210)),fill='#18394d')
-    d.ellipse(xy((815,-112,1140,172)),fill='#1c4559')
-    d.rectangle(xy((0,126,W,H)), fill='#f7fafc')
-    d.rectangle(xy((0,122,W,126)), fill=aqua)
-    logo = Image.open(icon_file).convert('RGBA').resize((76*S,76*S), Image.Resampling.LANCZOS)
-    image.paste(logo, (49*S,25*S), logo)
-    label(143,25,'OverInk',37,'#ffffff','bold')
-    label(145,82,'DRAW  ·  PRESENT  ·  EXPRESS',11,'#a7c6d1')
-    rounded((751,42,853,80),19,'#25465a', '#466777')
-    label(802,50,'v'+version,15,'#ffffff','bold','center')
+    # Lightweight macOS-style header; no full-width dark masthead.
+    logo = Image.open(icon_file).convert('RGBA').resize(
+        (65*S, 65*S), Image.Resampling.LANCZOS)
+    image.paste(logo, (53*S, 24*S), logo)
+    label(131, 34, 'OverInk', 29, navy, 'bold')
+    label(133, 75, 'DRAW  ·  PRESENT  ·  EXPRESS', 11, '#708a99')
+    rounded((760, 39, 853, 74), 17, '#edf5f8', '#d4e6ec')
+    label(806.5, 47, 'v'+version, 14, navy, anchor='center')
+    d.line(xy((47, 110, 853, 110)), fill='#dce8ed', width=S)
 
-    # Trilingual title, each language gets its own baseline
-    rounded((42,152,48,240),3,aqua)
-    label(67,145,'将 OverInk 拖入「应用程序」文件夹',27,navy,'bold')
-    label(67,185,'Drag OverInk to the Applications folder',18,'#36576a')
-    label(67,214,'Glissez OverInk dans le dossier Applications',18,'#36576a')
+    # Three languages have the same visual emphasis and predictable leading.
+    rounded((49, 137, 54, 224), 2, aqua)
+    label(75, 131, '将 OverInk 拖入「应用程序」文件夹', 21, navy, 'bold')
+    label(75, 165, 'Drag OverInk to the Applications folder', 20, navy)
+    label(75, 198, "Glissez OverInk dans le dossier Applications", 20, navy)
 
-    # Two live Finder icons; all decoration stays outside their hit targets
-    rounded((40,267,860,490),23,'#eaf2f6','#d5e6ed')
-    rounded((82,293,337,468),19,'#ffffff','#d5e6ed')
-    rounded((563,293,818,468),19,'#ffffff','#d5e6ed')
-    rounded((101,283,140,319),13,navy)
-    label(120.5,290,'01',15,'#ffffff','bold','center')
-    rounded((582,283,621,319),13,'#237988')
-    label(601.5,290,'02',15,'#ffffff','bold','center')
-    # Finder positions real OverInk.app / Applications icons at (210,385) and (690,385).
-    # Background deliberately does not draw fake icons or labels.
-    line((392,376,501,376), '#2b98a8', 7)
-    d.polygon([xy((491,361)),xy((516,376)),xy((491,391))],fill='#2b98a8')
-    label(454,418,'拖动   ·   Drag   ·   Glisser',14,'#375967','bold','center')
+    # Real Finder icons and names are placed by dmgbuild at (210, 374)
+    # and (690, 374). The background only frames the drop targets.
+    rounded((47, 249, 853, 499), 22, '#ebf4f8', '#d5e6ed')
+    rounded((87, 277, 334, 466), 18, '#ffffff', '#d6e6ec')
+    rounded((566, 277, 813, 466), 18, '#ffffff', '#d6e6ec')
+    label(107, 289, '01', 14, '#698a9b', 'bold')
+    label(587, 289, '02', 14, '#698a9b', 'bold')
+    d.line(xy((386, 372, 507, 372)), fill='#3296a5', width=5*S)
+    d.polygon([xy((498, 359)), xy((522, 372)), xy((498, 385))],
+              fill='#3296a5')
+    label(454, 417, '拖动  ·  Drag  ·  Glisser', 15, '#436778',
+          anchor='center')
 
-    # Troubleshooting: non-destructive reminder, no auto-run
-    rounded((40,508,860,628),19,'#ffffff','#d9e6ed')
-    rounded((58,525,64,610),3,amber)
-    label(80,519,'无法打开？  ·  Can’t open it?  ·  Impossible de l’ouvrir ?',16,navy,'bold')
-    label(80,549,'请先确认安装包来源可信，再考虑使用以下命令。',12,'#607584')
-    label(80,571,'Only if you trust the source.',12,'#607584')
-    label(80,593,'Seulement si la source est fiable.',12,'#607584')
-    rounded((485,557,838,599),11,'#e8f3f6','#d2e5e9')
-    label(661.5,569,'xattr -cr /Applications/OverInk.app',12,'#1b485c','mono','center')
+    # Keep Gatekeeper advice visible but subordinate to installation.
+    rounded((47, 513, 853, 626), 18, '#ffffff', '#dce8ed')
+    rounded((66, 532, 71, 606), 2, amber)
+    label(91, 524, "无法打开？  ·  Can't open it?  ·  Impossible de l'ouvrir ?",
+          16, navy, 'bold')
+    label(91, 559, '请仅在确认来源可信时使用以下命令。', 13, '#526b7a')
+    label(91, 580, 'Only if you trust the source.', 13, '#526b7a')
+    label(91, 601, 'Seulement si la source est fiable.', 13, '#526b7a')
+    rounded((480, 561, 830, 605), 11, '#edf6f8', '#d5e7ed')
+    label(655, 574, 'xattr -cr /Applications/OverInk.app', 12,
+          '#254d60', 'mono', 'center')
 
     return image
 
