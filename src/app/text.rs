@@ -2907,7 +2907,13 @@ mod tests {
         let screen = Rect::from_min_size(Pos2::ZERO, Vec2::from(SIZE));
         let item = TextBox::new(pos2(350., 100.), screen, InkColor::default(), 1.);
         app.input.text.selected = app.history.set_text_box(None, item);
-        let area = Rect::from_min_size(pos2(40., 40.), vec2(80., 40.));
+        let Some(menus) = app.text_menus(screen) else {
+            panic!("expected selected annotation action menu");
+        };
+        let area = Rect::from_min_size(
+            menus.actions.min + vec2(MENU_PADDING, MENU_PADDING) * menus.scale,
+            MENU_BUTTON * menus.scale,
+        );
         app.input.text.hovered_control = Some(area);
         let window = SDL_WindowID(1);
         let motion = SDL_Event {
