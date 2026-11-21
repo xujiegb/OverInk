@@ -566,36 +566,6 @@ fn screenshot_input_changed(
             }))
 }
 
-#[cfg(test)]
-mod screenshot_input_tests {
-    use super::screenshot_input_changed;
-    use egui::{Event, pos2};
-
-    #[test]
-    fn coalesced_screenshot_mouse_move_still_repaints() {
-        let events = [Event::PointerMoved(pos2(22., 30.))];
-        assert!(screenshot_input_changed(
-            1,
-            Some(pos2(10., 30.)),
-            &events,
-            true
-        ));
-        assert!(!screenshot_input_changed(
-            1,
-            Some(pos2(22., 30.)),
-            &events,
-            true
-        ));
-        assert!(!screenshot_input_changed(
-            1,
-            Some(pos2(10., 30.)),
-            &events,
-            false
-        ));
-        assert!(screenshot_input_changed(0, None, &events, false));
-    }
-}
-
 pub(super) fn active_index(canvases: &[Canvas], output: Option<u32>) -> usize {
     canvases
         .iter()
@@ -664,4 +634,34 @@ pub(super) fn event_window(event: &SDL_Event, ty: SDL_EventType) -> Option<SDL_W
 
 pub(super) fn failure(error: impl ToString) -> crate::appearance::Status {
     text("Drawing layer update failed").detail(error)
+}
+
+#[cfg(test)]
+mod screenshot_input_tests {
+    use super::screenshot_input_changed;
+    use egui::{Event, pos2};
+
+    #[test]
+    fn coalesced_screenshot_mouse_move_still_repaints() {
+        let events = [Event::PointerMoved(pos2(22., 30.))];
+        assert!(screenshot_input_changed(
+            1,
+            Some(pos2(10., 30.)),
+            &events,
+            true
+        ));
+        assert!(!screenshot_input_changed(
+            1,
+            Some(pos2(22., 30.)),
+            &events,
+            true
+        ));
+        assert!(!screenshot_input_changed(
+            1,
+            Some(pos2(10., 30.)),
+            &events,
+            false
+        ));
+        assert!(screenshot_input_changed(0, None, &events, false));
+    }
 }
