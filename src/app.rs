@@ -1432,6 +1432,7 @@ struct PerformanceCounts {
     canvas_ink_time: Duration,
     canvas_text_ui_time: Duration,
     canvas_text_geometry_time: Duration,
+    canvas_static_text_time: Duration,
     canvas_swap_time: Duration,
     precise_waits: u64,
     frame_sleeps: u64,
@@ -1469,7 +1470,7 @@ impl PerformanceMonitor {
         }
         let c = &self.counts;
         eprintln!(
-            "OverInk perf/5s: loops={} events={} window={} motion={} toolbar={} canvas={} toolbar_ui_ms={:.1} toolbar_present_ms={:.1} canvas_present_ms={:.1} ink_ms={:.1} text_ui_ms={:.1} text_geometry_ms={:.1} swap_ms={:.1} precise_wait={} frame_sleep={} event_wait={}",
+            "OverInk perf/5s: loops={} events={} window={} motion={} toolbar={} canvas={} toolbar_ui_ms={:.1} toolbar_present_ms={:.1} canvas_present_ms={:.1} ink_ms={:.1} text_ui_ms={:.1} text_geometry_ms={:.1} static_text_ms={:.1} swap_ms={:.1} precise_wait={} frame_sleep={} event_wait={}",
             c.iterations,
             c.events,
             c.window_events,
@@ -1482,6 +1483,7 @@ impl PerformanceMonitor {
             c.canvas_ink_time.as_secs_f64() * 1000.,
             c.canvas_text_ui_time.as_secs_f64() * 1000.,
             c.canvas_text_geometry_time.as_secs_f64() * 1000.,
+            c.canvas_static_text_time.as_secs_f64() * 1000.,
             c.canvas_swap_time.as_secs_f64() * 1000.,
             c.precise_waits,
             c.frame_sleeps,
@@ -2899,6 +2901,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                         monitor.counts.canvas_ink_time += breakdown.ink;
                         monitor.counts.canvas_text_ui_time += breakdown.text_ui;
                         monitor.counts.canvas_text_geometry_time += breakdown.text_geometry;
+                        monitor.counts.canvas_static_text_time += breakdown.static_text;
                         monitor.counts.canvas_swap_time += breakdown.present;
                     }
                     if screenshot && painted {
