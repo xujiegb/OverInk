@@ -483,6 +483,9 @@ impl Canvas {
         let gui = self.text.get_or_insert_with(Gui::new);
         if self.text_style != Some(style) {
             gui.ctx.set_fonts(app.text_fonts.definitions());
+            // The font atlas was replaced; old galley UVs are invalid even
+            // when another canvas has the same document and font revision.
+            crate::fonts::clear_layout_cache(&gui.ctx);
             self.text_style = Some(style);
         }
         if gui.ctx.theme() != theme {
