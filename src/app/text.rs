@@ -2915,7 +2915,8 @@ mod tests {
         let mut app = app();
         let mut gui = Gui::new();
         let screen = Rect::from_min_size(Pos2::ZERO, Vec2::from(SIZE));
-        let item = TextBox::new(pos2(350., 100.), screen, InkColor::default(), 1.);
+        let mut item = TextBox::new(pos2(350., 100.), screen, InkColor::default(), 1.);
+        item.text = "Annotation".into();
         app.input.text.selected = app.history.set_text_box(None, item);
         let Some(menus) = app.text_menus(screen) else {
             panic!("expected selected annotation action menu");
