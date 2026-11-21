@@ -1798,6 +1798,10 @@ fn run_inner(options: Options) -> Result<(), String> {
             let mut controller_scale_changed = false;
             let mut controller_moved = false;
             let mut controller_bounds_changed = false;
+            // A slideshow may become foreground after OverInk is already
+            // running. Losing focus must restore the canvas too, not only the
+            // controller (and not only after choosing a drawing tool).
+            let mut overlay_order_lost = false;
             let mut mode_changed = false;
             // Keep the rest of this event batch modal even if Escape ends the screenshot.
             let screenshot_owns_input = app.screenshot.active();
@@ -1869,6 +1873,15 @@ fn run_inner(options: Options) -> Result<(), String> {
                         controller_scale_changed |= ty == SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED;
                         topology_dirty |= !options.smoke && (moved || controller_scale_changed);
                         toolbar_dirty |= redraw;
+                        // External full-screen windows can enter the topmost
+                        // band after our windows have been created.
+                        overlay_order_lost |= matches!(
+                            ty,
+                            SDL_EVENT_WINDOW_FOCUS_LOST
+                                | SDL_EVENT_WINDOW_SHOWN
+                                | SDL_EVENT_WINDOW_RESTORED
+                                | SDL_EVENT_WINDOW_EXPOSED
+                        );
                         if matches!(
                             ty,
                             SDL_EVENT_WINDOW_FOCUS_GAINED | SDL_EVENT_WINDOW_FOCUS_LOST
@@ -1888,8 +1901,15 @@ fn run_inner(options: Options) -> Result<(), String> {
                             canvas.surface_changed();
                             toolbar_dirty = true;
                         }
-                        if matches!(ty, SDL_EVENT_WINDOW_SHOWN | SDL_EVENT_WINDOW_FOCUS_GAINED) {
-                            canvas.keep_toolbar_above(&toolbar);
+                        if matches!(
+                            ty,
+                            SDL_EVENT_WINDOW_SHOWN
+                                | SDL_EVENT_WINDOW_FOCUS_GAINED
+                                | SDL_EVENT_WINDOW_FOCUS_LOST
+                                | SDL_EVENT_WINDOW_RESTORED
+                                | SDL_EVENT_WINDOW_EXPOSED
+                        ) {
+                            overlay_order_lost = true;
                         }
                         if ty == SDL_EVENT_WINDOW_CLOSE_REQUESTED {
                             if app.screenshot.active() {
@@ -2988,6 +3008,24 @@ fn run_inner(options: Options) -> Result<(), String> {
                         app.status = canvas::failure(error);
                         unsafe_layer = true;
                         break;
+                    }
+                }
+            }
+            if !unsafe_layer
+                && overlay_order_lost
+                && !toolbar_hidden
+                && !app.hidden
+                && !app.suspended
+                && !picker.active()
+                && !app.screenshot.active()
+                && !file_dialog.pending()
+            {
+                // Reassert both native windows after a focus/visibility change.
+                // Avoid doing it per-frame or on mouse motion; Windows uses
+                // SWP_NOACTIVATE so PowerPoint keeps accepting slide controls.
+                for canvas in &canvases {
+                    if canvas.visible {
+                        canvas.keep_toolbar_above(&toolbar);
                     }
                 }
             }
