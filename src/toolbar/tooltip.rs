@@ -38,7 +38,7 @@ pub fn hint(response: Response, text: &str) -> Response {
             .ctx
             .data_mut(|data| data.insert_temp(hover_id(), Some(response.rect)));
     }
-    if Tooltip::should_show_tooltip(&response, false) {
+    if response.contains_pointer() && Tooltip::should_show_tooltip(&response, false) {
         let size = response.ctx.fonts_mut(|fonts| {
             fonts
                 .layout(

@@ -81,7 +81,6 @@ struct SdlAllocation<T>(NonNull<T>);
 enum SdlNativeAction<'a> {
     IsMainThread,
     ModState,
-    DelayPrecise(u64),
     ScreenshotTimestamp,
     RegisterUserEvent,
     Shutdown,
@@ -285,10 +284,6 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
         match action {
             SdlNativeAction::IsMainThread => SdlNativeResult::Success(SDL_IsMainThread()),
             SdlNativeAction::ModState => SdlNativeResult::ModState(SDL_GetModState()),
-            SdlNativeAction::DelayPrecise(nanoseconds) => {
-                sdl3_sys::timer::SDL_DelayPrecise(nanoseconds);
-                SdlNativeResult::Done
-            }
             SdlNativeAction::ScreenshotTimestamp => {
                 use sdl3_sys::time::{SDL_DateTime, SDL_GetCurrentTime, SDL_TimeToDateTime};
                 let mut ticks = 0;
@@ -896,11 +891,6 @@ pub fn indirect_touch_device(device: SDL_TouchID) -> bool {
     is_main_thread()
         && SDL_VIDEO_READY.load(std::sync::atomic::Ordering::Acquire)
         && sdl_native(SdlNativeAction::IndirectTouch(device)).succeeded()
-}
-
-/// Sleep with SDL's precise delay without exposing raw native calls to users.
-pub fn delay_precise(nanoseconds: u64) {
-    let _ = sdl_native(SdlNativeAction::DelayPrecise(nanoseconds));
 }
 
 /// Validate SDL-provided array counts before forming slices over foreign
@@ -1655,18 +1645,14 @@ impl Window {
                         return Err("Toolbar window is too small for rounded corners".into());
                     }
                     let surface = OwnedSurface(
-                        NonNull::new(SDL_CreateSurface(width, height, SDL_PIXELFORMAT_RGBA32))
+                        NonNull::new(SDL_CreateSurface(width, height, SDL_PIXELFORMAT_ARGB32))
                             .ok_or_else(error)?,
                     );
                     let surface_handle = surface.as_non_null();
-                    let transparent = SDL_MapSurfaceRGBA(surface_handle.as_ptr(), 0, 0, 0, 0);
                     let opaque = SDL_MapSurfaceRGBA(surface_handle.as_ptr(), 255, 255, 255, 255);
-                    check(SDL_FillSurfaceRect(
-                        surface_handle.as_ptr(),
-                        ptr::null(),
-                        transparent,
-                    ))?;
 
+                    // SDL_CreateSurface zeroes the pixels, so only paint
+                    // the opaque interior and antialiased corner edges.
                     let middle = SDL_Rect {
                         x: 0,
                         y: radius,
@@ -1781,8 +1767,8 @@ impl Window {
         self.query_bool(WindowBooleanQuery::TextInputActive)
     }
 
-    pub fn set_text_input_area(&self, area: &SDL_Rect) {
-        let _ = self.run_command(WindowCommand::InputArea(area));
+    pub fn set_text_input_area(&self, area: &SDL_Rect) -> bool {
+        self.run_command(WindowCommand::InputArea(area)).is_ok()
     }
 
     pub fn sync_text_input(&self, enabled: bool) {
@@ -1946,19 +1932,28 @@ impl Window {
         let _ = self.run_command(WindowCommand::ToolbarSetup(size, &mut pixels));
     }
     /// Rebuild the native shape only after an actual pixel-size/DPI change.
-    /// It masks both the compositor output and pointer hit-testing region.
-    pub fn update_rounded_shape(&self, applied: &mut Option<[i32; 2]>) -> Result<(), String> {
+    pub fn update_rounded_shape(
+        &self,
+        applied: &mut Option<([i32; 2], i32)>,
+    ) -> Result<(), String> {
         let pixels = self.pixel_size();
-        if *applied == Some(pixels) {
-            return Ok(());
-        }
         // SDL's native hit-test uses physical pixels. UI layout uses
         // gui::window_units instead; these are deliberately different spaces.
         // The display scale already includes pixel density, so do not multiply
         // both a UI scale and pixel density here.
         let radius = (f32::from(crate::toolbar::OUTER_RADIUS) * self.scale()).round() as i32;
-        self.run_command(WindowCommand::RoundedCorners(pixels, radius.max(1)))?;
-        *applied = Some(pixels);
+        let key = (pixels, radius.max(1));
+        if *applied == Some(key) {
+            return Ok(());
+        }
+        *applied = Some(key);
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        if let Some(id) = self.x11_window_number() {
+            let size = self.query_size(false).ok_or("No X11 toolbar size")?;
+            let radius = (f32::from(crate::toolbar::OUTER_RADIUS) * self.ui_scale()).round() as i32;
+            return crate::x11::set_rounded_input(id, size, radius.max(1));
+        }
+        self.run_command(WindowCommand::RoundedCorners(key.0, key.1))?;
         Ok(())
     }
 
@@ -1981,7 +1976,11 @@ impl Window {
             w = w.min((available_width - 16).max(1));
             h = h.min((available_height - 16).max(1));
         }
-        self.run_command(WindowCommand::SetSize([w, h]))?;
+        let size = [w, h];
+        let resized = self.query_size(false) != Some(size);
+        if resized {
+            self.run_command(WindowCommand::SetSize(size))?;
+        }
         let video = driver();
         if let Some([left, top, available_width, available_height]) =
             bounds.filter(|_| video != "wayland")
@@ -1998,11 +1997,12 @@ impl Window {
             };
             let x = x.clamp(left, left + (available_width - w).max(0));
             let y = y.clamp(top, top + (available_height - h).max(0));
-            if current.is_none() || (x, y) != (current_x, current_y) {
+            let moved = current.is_none() || (x, y) != (current_x, current_y);
+            if moved {
                 self.run_command(WindowCommand::SetPosition([x, y]))?;
             }
             // X11 reports the actual geometry through ConfigureNotify.
-            if video != "x11" {
+            if video != "x11" && (resized || moved) {
                 self.run_command(WindowCommand::SyncWindow(false))?;
             }
         }

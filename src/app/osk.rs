@@ -302,6 +302,13 @@ fn emoji_dot_at(x: f32, left: f32, spacing: f32, count: usize) -> usize {
 
 /// The extra top row uses standard US Shift number/symbol pairs.
 fn shifted_key_label(label: &'static str) -> Cow<'static, str> {
+    const UPPERCASE: [&str; 26] = [
+        "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R",
+        "S", "T", "U", "V", "W", "X", "Y", "Z",
+    ];
+    if let [letter @ b'a'..=b'z'] = label.as_bytes() {
+        return Cow::Borrowed(UPPERCASE[usize::from(letter - b'a')]);
+    }
     match label {
         "1" => Cow::Borrowed("!"),
         "2" => Cow::Borrowed("@"),
@@ -315,6 +322,7 @@ fn shifted_key_label(label: &'static str) -> Cow<'static, str> {
         "0" => Cow::Borrowed(")"),
         "-" => Cow::Borrowed("_"),
         "=" => Cow::Borrowed("+"),
+        "" | "," | "." => Cow::Borrowed(label),
         _ => Cow::Owned(label.to_uppercase()),
     }
 }
@@ -495,7 +503,9 @@ impl Keyboard {
     }
 
     fn key(&mut self, ui: &mut Ui, rect: Rect, key: Key) -> bool {
-        if rect.width() < 2. || rect.height() < 2. {
+        let id = ui.next_auto_id();
+        ui.skip_ahead_auto_ids(1);
+        if rect.width() < 2. || rect.height() < 2. || !ui.is_rect_visible(rect) {
             return false;
         }
         let (label, special) = match key {
@@ -543,17 +553,29 @@ impl Keyboard {
         // Fit lettering and Emoji glyphs to the actual key height rather than
         // applying one fixed 17pt value to every screen and DPI density.
         let font_size = (rect.height() * 0.46).min(rect.width() * 0.65).max(12.);
-        let response = ui.put(
-            rect,
-            egui::Button::new(RichText::new(label).size(font_size).color(Color32::WHITE))
-                .sense(KEY_SENSE)
-                .fill(fill)
-                .corner_radius(CornerRadius::same(9))
-                .stroke(Stroke::NONE),
-        );
+        // The grid has already placed the key. Register its hit rectangle
+        // and paint it directly instead of running a Button layout per key.
+        let response = ui.interact(rect, id, KEY_SENSE);
         response.widget_info(|| {
             egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), description)
         });
+        let painter = ui.painter();
+        painter.rect_filled(rect, CornerRadius::same(9), fill);
+        if !label.is_empty() {
+            let galley = painter.layout_no_wrap(
+                label.to_owned(),
+                egui::FontId::proportional(font_size),
+                Color32::WHITE,
+            );
+            let text = Rect::from_center_size(rect.center(), galley.size());
+            if rect.contains_rect(text) {
+                painter.galley(text.min, galley, Color32::WHITE);
+            } else {
+                painter
+                    .with_clip_rect(rect)
+                    .galley(text.min, galley, Color32::WHITE);
+            }
+        }
         let hovered = response.hovered();
         let down = response.is_pointer_button_down_on();
         if hovered {

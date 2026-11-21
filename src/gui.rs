@@ -34,6 +34,7 @@ pub struct Gui {
     touch_positions: BTreeMap<TouchKey, egui::Pos2>,
     composing: bool,
     composition_ended: Option<u64>,
+    input_area: Option<SDL_Rect>,
 }
 impl Gui {
     pub fn new() -> Self {
@@ -76,6 +77,7 @@ impl Gui {
             touch_positions: BTreeMap::new(),
             composing: false,
             composition_ended: None,
+            input_area: None,
         }
     }
     pub fn input(&mut self, w: &Window) -> RawInput {
@@ -118,6 +120,7 @@ impl Gui {
         if !enabled {
             self.composing = false;
             self.composition_ended = None;
+            self.input_area = None;
         }
     }
 
@@ -211,27 +214,35 @@ impl Gui {
         self.last_mouse_motion = true;
     }
 
-    /// Only the native main toolbar publishes stable button bounds.
-    /// Other egui instances (text canvas, screenshot, OSK) must always receive
-    /// pointer motion; avoid an unnecessary egui temporary-map lookup there.
-    pub fn toolbar_event(&mut self, e: &SDL_Event, id: SDL_WindowID, size: [f32; 2]) {
-        if let Some(motion) = real_mouse_motion(e)
-            && motion.windowID == id
-            && motion.state.0 == 0
+    /// Handle native toolbar motion without querying window size. Only the
+    /// toolbar publishes these stable hover bounds in its egui context.
+    pub fn toolbar_motion(&mut self, motion: SDL_MouseMotionEvent) {
+        let position = egui::pos2(motion.x / self.units, motion.y / self.units);
+        if motion.state.0 == 0
             && self.raw.events.is_empty()
-            && crate::toolbar::hovered_rect(&self.ctx).is_some_and(|rect| {
-                rect.contains(egui::pos2(motion.x / self.units, motion.y / self.units))
-            })
+            && crate::toolbar::hovered_rect(&self.ctx).is_some_and(|rect| rect.contains(position))
             && !self.ctx.input(|input| input.pointer.any_down())
         {
             return;
         }
-        self.event(e, id, size);
+        self.queue_mouse_position(position);
     }
 
     /// Decode tagged SDL events through the checked, owning SDL API.
     pub fn event(&mut self, e: &SDL_Event, id: SDL_WindowID, size: [f32; 2]) {
         let ty = event_type(e);
+        if matches!(
+            ty,
+            SDL_EVENT_WINDOW_MOVED
+                | SDL_EVENT_WINDOW_DISPLAY_CHANGED
+                | SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED
+                | SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED
+                | SDL_EVENT_WINDOW_FOCUS_GAINED
+                | SDL_EVENT_WINDOW_FOCUS_LOST
+        ) && window_event_id(e) == Some(id)
+        {
+            self.input_area = None;
+        }
         let scale = self.units;
         if ty != SDL_EVENT_MOUSE_MOTION {
             self.last_mouse_motion = false;
@@ -542,10 +553,14 @@ impl Gui {
                 w: 1,
                 h: (cursor.height() * self.units).ceil() as i32,
             };
-            window.set_text_input_area(&area);
+            if self.input_area != Some(area) && window.set_text_input_area(&area) {
+                self.input_area = Some(area);
+            }
             if ime.should_interrupt_composition {
                 self.clear_composition(window);
             }
+        } else {
+            self.input_area = None;
         }
         let free = std::mem::take(&mut output.textures_delta.free);
         for (id, deltas) in output.textures_delta.set.drain() {

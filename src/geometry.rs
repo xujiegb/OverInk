@@ -152,9 +152,10 @@ fn ribbon(m: &mut Mesh, p: &[Point], range: RangeInclusive<usize>, stroke: &Stro
 pub fn mesh(stroke: &Stroke, aa: f32) -> Mesh {
     let mut m = Mesh::default();
     let mut samples = Vec::new();
+    let mut outline = [Point::EMPTY; Stroke::OUTLINE_POINTS];
     prepare_samples(
         stroke,
-        PointSpan::new(&stroke.polyline()),
+        PointSpan::new(stroke.polyline(&mut outline)),
         true,
         &mut samples,
     );

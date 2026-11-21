@@ -1222,7 +1222,7 @@ impl App {
             menu.painter()
                 .rect_filled(icon, 6. * scale, menu.visuals().widgets.hovered.bg_fill);
         }
-        color_wheel::paint_disc(menu.painter(), icon.center(), 12. * scale, 1.);
+        color_wheel::paint_disc(menu.painter(), icon.center(), 12. * scale, 20, 2);
         if response
             .on_hover_text(egui::RichText::new(label).size(toolbar::MENU_FONT_SIZE * scale))
             .clicked()

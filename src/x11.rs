@@ -94,6 +94,42 @@ pub fn raise(connection: &RustConnection, id: u32) {
     }
 }
 
+pub fn set_rounded_input(id: u32, [width, height]: [i32; 2], radius: i32) -> Result<(), String> {
+    if width <= 0 || height <= 0 || radius <= 0 {
+        return Err("Invalid X11 toolbar geometry".into());
+    }
+    let radius = radius.min(width / 2).min(height / 2);
+    let mut spans = Vec::new();
+    let mut row = |x, y, width, height| -> Result<(), String> {
+        spans.push(Rectangle {
+            x: i16::try_from(x).map_err(|_| "Toolbar shape is too large")?,
+            y: i16::try_from(y).map_err(|_| "Toolbar shape is too large")?,
+            width: u16::try_from(width).map_err(|_| "Toolbar shape is too large")?,
+            height: u16::try_from(height).map_err(|_| "Toolbar shape is too large")?,
+        });
+        Ok(())
+    };
+    let r = f64::from(radius);
+    for y in 0..radius {
+        let vertical = r - (f64::from(y) + 0.5);
+        let edge = r - (r * r - vertical * vertical).sqrt();
+        // The previous mask included any edge pixel with nonzero alpha.
+        let x = edge.floor() as i32;
+        row(x, y, width - x * 2, 1)?;
+        row(x, height - y - 1, width - x * 2, 1)?;
+    }
+    if height > 2 * radius {
+        row(0, radius, width, height - 2 * radius)?;
+    }
+    // The egui toolbar already paints its rounded outline. Set just the
+    // native hit region, avoiding SDL's pixmap and per-present shape texture.
+    connection()?
+        .shape_rectangles(SO::SET, SK::INPUT, ClipOrdering::UNSORTED, id, 0, 0, &spans)
+        .map_err(|error| error.to_string())?
+        .check()
+        .map_err(|error| format!("Cannot set the X11 toolbar shape: {error}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,6 +191,13 @@ mod tests {
             .rectangles;
         assert_eq!(rects.len(), 1);
         assert_eq!([rects[0].width, rects[0].height], [800, 600]);
+        set_rounded_input(id, bounds, 12)?;
+        let rects = connection
+            .shape_get_rectangles(id, SK::INPUT)?
+            .reply()?
+            .rectangles;
+        assert!(rects.iter().any(|rect| rect.y == 0 && rect.x > 0));
+        assert!(rects.iter().any(|rect| rect.x == 0 && rect.width == 800));
         connection.destroy_window(id)?.check()?;
         assert!(set_input(&connection, id, bounds, true, None).is_err());
         Ok(())

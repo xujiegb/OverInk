@@ -839,6 +839,15 @@ impl Canvas {
                 {
                     gui.paint(&self.render, &self.window, &self.color, output)?;
                 }
+                if page.screenshot.targets(self.window.id) && page.screenshot.selecting() {
+                    let [r, g, b, _] = crate::toolbar::ACTIVE.to_array();
+                    page.screenshot.paint_selection(
+                        &self.render,
+                        self.window.size(),
+                        page.input.canvas_units,
+                        self.color.map([r, g, b].map(|v| f32::from(v) / 255.)),
+                    )?;
+                }
                 if let (Some(start), Some(metrics)) = (mesh_started, timings.as_deref_mut()) {
                     metrics.text_geometry += start.elapsed();
                 }
@@ -869,14 +878,17 @@ impl Canvas {
         keep_editor_open: bool,
         cached_static_text: &StaticTextPaint,
     ) -> Option<egui::FullOutput> {
-        let screenshot = app.screenshot.targets(self.window.id);
+        let screenshot = app.screenshot.targets(self.window.id) && app.screenshot.ready();
         let interactive =
             !app.screenshot.active() && !app.picking && app.tool.is_text() && !app.pass;
         let editing = interactive && app.input.text.editing();
         if !app.touch_enabled {
             self.cancel_text_touches(app);
         }
-        if matches!(cached_static_text, StaticTextPaint::Cached) && !interactive && !screenshot {
+        if (app.hidden || matches!(cached_static_text, StaticTextPaint::Cached))
+            && !interactive
+            && !screenshot
+        {
             // Mouse/pass-through mode needs no interactive egui run at all:
             // the committed labels already live in the retained GPU layer.
             self.stop_text_input(false);

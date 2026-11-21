@@ -30,26 +30,19 @@ impl App {
             .rect_filled(ui.max_rect(), f32::from(toolbar::OUTER_RADIUS), rail_color);
         let opened = self.panel.filter(|_| !self.picking);
         let shown = opened.or(self.panel_retiring);
-        // Animate each panel independently so switching fades in and the
-        // previous panel stays on screen while the toolbar closes.
-        let mut panel_alpha = 0.;
-        for panel in [
-            Panel::Shapes,
-            Panel::Brush,
-            Panel::Colors,
-            Panel::Background,
-            Panel::Settings,
-        ] {
-            let alpha = ui.ctx().animate_bool_with_time(
-                ui.scope_id().with(("panel-transition", panel)),
-                opened == Some(panel),
-                0.18,
-            );
-            if shown == Some(panel) {
-                panel_alpha = alpha;
-            }
+        // Only the on-screen panel can advance an animation. Seed a newly
+        // selected panel at zero so every tab still fades in from a fresh state.
+        let transition = ui.scope_id().with("panel-transition");
+        if opened.is_some() && opened != self.panel_retiring {
+            ui.ctx().animate_bool_with_time(transition, false, 0.);
         }
+        let panel_alpha = ui
+            .ctx()
+            .animate_bool_with_time(transition, opened.is_some(), 0.18);
         let visible = shown.filter(|_| panel_alpha > 0.005).or(opened);
+        if visible != self.panel_retiring {
+            ui.ctx().request_repaint();
+        }
         self.panel_retiring = visible;
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 0.;

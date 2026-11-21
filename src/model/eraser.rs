@@ -153,12 +153,11 @@ impl Paths {
     }
 
     fn new(stroke: &Stroke, bounds: StrokeBounds) -> Self {
-        let polyline = stroke.polyline();
+        let mut buffer = [Point::EMPTY; Stroke::OUTLINE_POINTS];
+        let polyline = stroke.polyline(&mut buffer);
         let count = polyline.len();
-        let outline = match polyline {
-            Cow::Owned(points) => Some(points.into_boxed_slice()),
-            Cow::Borrowed(_) => None,
-        };
+        let outline =
+            (stroke.tool.is_shape() && !stroke.points.is_empty()).then(|| Box::from(polyline));
         let head = stroke.arrow_head();
         let mut fragments = Vec::with_capacity(1 + usize::from(head.is_some()));
         fragments.push(Fragment {

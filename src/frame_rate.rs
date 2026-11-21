@@ -94,12 +94,6 @@ impl FramePacer {
         };
         delay
     }
-    pub fn wait(&mut self) {
-        let delay = self.delay(Instant::now());
-        if !delay.is_zero() {
-            crate::sdl::delay_precise(delay.as_nanos() as u64);
-        }
-    }
 }
 
 #[cfg(test)]

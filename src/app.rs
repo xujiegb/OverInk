@@ -397,7 +397,7 @@ impl App {
         let now = Instant::now();
         if !starts_segment
             && let Some(last) = trail.back_mut()
-            && last.point.dist(point) <= 0.05
+            && last.point.dist(point) <= Point::MERGE_DISTANCE
         {
             last.at = now;
             return;
@@ -1436,7 +1436,6 @@ struct PerformanceCounts {
     canvas_text_geometry_time: Duration,
     canvas_static_text_time: Duration,
     canvas_swap_time: Duration,
-    precise_waits: u64,
     frame_sleeps: u64,
     event_waits: u64,
 }
@@ -1472,7 +1471,7 @@ impl PerformanceMonitor {
         }
         let c = &self.counts;
         eprintln!(
-            "OverInk perf/5s: loops={} events={} window={} motion={} toolbar={} canvas={} toolbar_ui_ms={:.1} toolbar_present_ms={:.1} canvas_present_ms={:.1} ink_ms={:.1} text_ui_ms={:.1} text_geometry_ms={:.1} static_text_ms={:.1} swap_ms={:.1} precise_wait={} frame_sleep={} event_wait={}",
+            "OverInk perf/5s: loops={} events={} window={} motion={} toolbar={} canvas={} toolbar_ui_ms={:.1} toolbar_present_ms={:.1} canvas_present_ms={:.1} ink_ms={:.1} text_ui_ms={:.1} text_geometry_ms={:.1} static_text_ms={:.1} swap_ms={:.1} frame_sleep={} event_wait={}",
             c.iterations,
             c.events,
             c.window_events,
@@ -1487,7 +1486,6 @@ impl PerformanceMonitor {
             c.canvas_text_geometry_time.as_secs_f64() * 1000.,
             c.canvas_static_text_time.as_secs_f64() * 1000.,
             c.canvas_swap_time.as_secs_f64() * 1000.,
-            c.precise_waits,
             c.frame_sleeps,
             c.event_waits,
         );
@@ -1670,6 +1668,7 @@ pub fn run(options: Options) -> Result<(), String> {
 }
 
 const HOVER_FRAME_PERIOD: Duration = Duration::from_millis(22);
+const UI_FRAME_PERIOD: Duration = Duration::from_nanos(16_666_667);
 
 fn run_inner(options: Options) -> Result<(), String> {
     let base = state_dir();
@@ -1797,13 +1796,15 @@ fn run_inner(options: Options) -> Result<(), String> {
             let mut controller_scale_changed = false;
             let mut controller_moved = false;
             let mut controller_bounds_changed = false;
+            let mut toolbar_color_changed = false;
             let mut mode_changed = false;
             // Keep the rest of this event batch modal even if Escape ends the screenshot.
             let screenshot_owns_input = app.screenshot.active();
             let mut event = SDL_Event::default();
             while poll_event(&mut event) {
                 let ty = event_type(&event);
-                if real_mouse_motion(&event).is_some_and(|motion| motion.state.0 == 0) {
+                let motion = real_mouse_motion(&event);
+                if motion.is_some_and(|motion| motion.state.0 == 0) {
                     saw_passive_mouse_motion = true;
                 } else {
                     only_mouse_motion = false;
@@ -1869,9 +1870,12 @@ fn run_inner(options: Options) -> Result<(), String> {
                         controller_scale_changed |= ty == SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED;
                         topology_dirty |= !options.smoke && (moved || controller_scale_changed);
                         toolbar_dirty |= redraw;
-                        if surface_changed {
-                            toolbar_color.refresh(&toolbar, toolbar_render.extended);
-                        }
+                        toolbar_color_changed |= matches!(
+                            ty,
+                            SDL_EVENT_WINDOW_DISPLAY_CHANGED
+                                | SDL_EVENT_WINDOW_HDR_STATE_CHANGED
+                                | SDL_EVENT_WINDOW_ICCPROF_CHANGED
+                        );
                         if matches!(
                             ty,
                             SDL_EVENT_WINDOW_FOCUS_GAINED | SDL_EVENT_WINDOW_FOCUS_LOST
@@ -1976,6 +1980,14 @@ fn run_inner(options: Options) -> Result<(), String> {
                 let active = canvas::active_index(&canvases, app.pages.active);
                 let was_picking = picker.active();
                 picker.event(&event, &canvases[active].window, &toolbar);
+                if ty == SDL_EVENT_MOUSE_MOTION && id == Some(toolbar.id) {
+                    if !file_dialog.pending()
+                        && let Some(motion) = motion
+                    {
+                        gui.toolbar_motion(motion);
+                    }
+                    continue;
+                }
                 // Outside the toolbar, passive motion has no consumer in ink or
                 // passthrough mode. The picker has already seen the packet.
                 if ty == SDL_EVENT_MOUSE_MOTION
@@ -2019,10 +2031,8 @@ fn run_inner(options: Options) -> Result<(), String> {
                     }
                     continue;
                 }
-                if !file_dialog.pending()
-                    && (ty != SDL_EVENT_MOUSE_MOTION || id == Some(toolbar.id))
-                {
-                    gui.toolbar_event(&event, toolbar.id, toolbar.size());
+                if !file_dialog.pending() && ty != SDL_EVENT_MOUSE_MOTION {
+                    gui.event(&event, toolbar.id, toolbar.size());
                 }
                 if id == Some(toolbar.id)
                     && ty == SDL_EVENT_WINDOW_FOCUS_LOST
@@ -2179,6 +2189,9 @@ fn run_inner(options: Options) -> Result<(), String> {
                     app.for_each_page(|page| page.release_pen(pen.which.0, true));
                 }
             }
+            if toolbar_color_changed {
+                toolbar_color.refresh(&toolbar, toolbar_render.extended);
+            }
             #[cfg(target_os = "macos")]
             if let Some(monitor) = &pencil_mode {
                 let taps = monitor.take();
@@ -2221,7 +2234,6 @@ fn run_inner(options: Options) -> Result<(), String> {
             }
 
             let pace_hover = !options.smoke
-                && app.frame_rate == FrameRate::Auto
                 && pacer.period < HOVER_FRAME_PERIOD
                 && only_mouse_motion
                 && !mode_changed
@@ -2875,7 +2887,6 @@ fn run_inner(options: Options) -> Result<(), String> {
                     // rounded, alpha-composited UI rather than terminating the
                     // entire application; retry after a real size/DPI change.
                     eprintln!("OverInk: native toolbar shape unavailable: {error}");
-                    toolbar_shape_size = Some(toolbar.pixel_size());
                 }
                 toolbar_render.begin(&toolbar, [0.; 4])?;
                 gui.paint(&toolbar_render, &toolbar, &toolbar_color, output)?;
@@ -3182,22 +3193,26 @@ fn run_inner(options: Options) -> Result<(), String> {
                 running = false;
             }
             if presented {
-                if app.has_contacts() || !app.input.laser.is_empty() {
-                    // Preserve precise pacing only during active drawing or
-                    // laser animation, where its latency can be perceptible.
-                    if let Some(monitor) = &mut performance {
-                        monitor.counts.precise_waits += 1;
-                    }
-                    pacer.wait();
-                } else if pace_hover && saw_passive_mouse_motion {
-                    let _ = pacer.delay(Instant::now());
+                let now = Instant::now();
+                let delay = pacer.delay(now);
+                if pace_hover && saw_passive_mouse_motion {
                     next_hover_frame = Some(iteration_started + HOVER_FRAME_PERIOD);
                 } else {
-                    // Keep ordinary UI refresh paced without a precise spin wait.
+                    // Active strokes keep their requested frame rate. UI
+                    // animation and fading trails need at most 60 Hz.
+                    let delay = if options.smoke || app.has_contacts() {
+                        delay
+                    } else {
+                        delay.max(
+                            (iteration_started + UI_FRAME_PERIOD).saturating_duration_since(now),
+                        )
+                    };
                     if let Some(monitor) = &mut performance {
                         monitor.counts.frame_sleeps += 1;
                     }
-                    std::thread::sleep(pacer.delay(Instant::now()));
+                    if !delay.is_zero() {
+                        std::thread::sleep(delay);
+                    }
                 }
             } else if (!toolbar_dirty || toolbar_hidden) && !topology_dirty {
                 let now = Instant::now();
