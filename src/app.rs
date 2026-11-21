@@ -99,7 +99,7 @@ const RIGHT_BUTTON: u8 = SDL_BUTTON_RIGHT as u8;
 const LASER_LIFETIME: Duration = Duration::from_millis(900);
 const MAX_LASER_SAMPLES: usize = 4096;
 const X11_DISPLAY_POLL: Duration = Duration::from_millis(500);
-const COLOR_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
+const IDLE_EVENT_WAIT: Duration = Duration::from_secs(30);
 const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(10);
 #[derive(Default)]
 struct Commands {
@@ -113,7 +113,7 @@ struct Commands {
     #[cfg(target_os = "linux")]
     gnome_action: Option<crate::gnome::Action>,
     redraw_canvas: bool,
-    font_path: Option<PathBuf>,
+    font_selection: Option<usize>,
     reset_font: bool,
     font_reorder: Option<(usize, usize)>,
     font_remove: Option<String>,
@@ -1685,7 +1685,7 @@ fn run_inner(options: Options) -> Result<(), String> {
     let wayland = video == "wayland";
     let window =
         with_autorelease_pool(|| Window::new("OverInk - canvas", 1100, 720, !options.smoke))?;
-    let topology = crate::display::Topology::new(&video);
+    let mut topology = crate::display::Topology::new(&video);
     let displays = with_autorelease_pool(|| topology.connected()).unwrap_or_default();
     let xwayland = crate::background::is_xwayland(&video);
     let mut app = with_autorelease_pool(|| {
@@ -1761,7 +1761,7 @@ fn run_inner(options: Options) -> Result<(), String> {
         with_autorelease_pool(|| smoke_events(&mut app, canvases[0].window.id))?;
     }
     let mut picker = crate::picker::Picker::default();
-    let mut file_dialog = FileDialog::default();
+    let mut file_dialog = FileDialog::new();
     let annotation_font_path = base.join("annotation-font");
     let mut tooltips = crate::toolbar::Tooltips::default();
     let mut toolbar_hidden = false;
@@ -1769,7 +1769,6 @@ fn run_inner(options: Options) -> Result<(), String> {
     let mut toolbar_shape_size = None;
     let mut running = true;
     let mut frame = 0;
-    let mut last_color = Instant::now();
     let mut last_displays = Instant::now();
     let mut controller_display = None;
     let mut follow_controller = false;
@@ -1823,6 +1822,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 }
                 if (SDL_EVENT_DISPLAY_FIRST..=SDL_EVENT_DISPLAY_LAST).contains(&ty) {
                     topology_dirty = !options.smoke;
+                    topology.invalidate();
                     if ty == SDL_EVENT_DISPLAY_REMOVED
                         && let Some(display) = removed_display_id(&event)
                     {
@@ -1869,6 +1869,9 @@ fn run_inner(options: Options) -> Result<(), String> {
                         controller_scale_changed |= ty == SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED;
                         topology_dirty |= !options.smoke && (moved || controller_scale_changed);
                         toolbar_dirty |= redraw;
+                        if surface_changed {
+                            toolbar_color.refresh(&toolbar, toolbar_render.extended);
+                        }
                         if matches!(
                             ty,
                             SDL_EVENT_WINDOW_FOCUS_GAINED | SDL_EVENT_WINDOW_FOCUS_LOST
@@ -2290,9 +2293,11 @@ fn run_inner(options: Options) -> Result<(), String> {
                 }
             }
 
-            if !options.smoke
-                && (topology_dirty || video == "x11" && last_displays.elapsed() >= X11_DISPLAY_POLL)
-            {
+            if !options.smoke && video == "x11" && last_displays.elapsed() >= X11_DISPLAY_POLL {
+                topology_dirty |= topology.poll_x11();
+                last_displays = Instant::now();
+            }
+            if !options.smoke && topology_dirty {
                 let moved_to = if follow_controller && controller_moved {
                     let reported = toolbar.display_id();
                     (std::mem::replace(&mut controller_display, reported) != reported)
@@ -2393,7 +2398,6 @@ fn run_inner(options: Options) -> Result<(), String> {
                     toolbar_dirty = true;
                 }
                 topology_dirty = false;
-                last_displays = Instant::now();
             }
 
             let active = canvas::active_index(&canvases, app.pages.active);
@@ -2573,15 +2577,6 @@ fn run_inner(options: Options) -> Result<(), String> {
                 return Ok(());
             }
 
-            if last_color.elapsed() >= COLOR_REFRESH_INTERVAL {
-                let previous_toolbar = toolbar_color.revision;
-                toolbar_color.refresh(&toolbar, toolbar_render.extended);
-                toolbar_dirty |= previous_toolbar != toolbar_color.revision;
-                for canvas in &mut canvases {
-                    toolbar_dirty |= canvas.refresh_color();
-                }
-                last_color = Instant::now();
-            }
             let expanded = (app.panel.is_some() || app.panel_retiring.is_some()) && !app.picking;
             if expanded != toolbar_expanded || controller_scale_changed {
                 toolbar_dirty = true;
@@ -2685,10 +2680,16 @@ fn run_inner(options: Options) -> Result<(), String> {
                 mode_changed = true;
                 cmd.redraw_canvas = true;
             }
-            if let Some(source) = cmd.font_path.take() {
-                app.finish_all_contacts();
-                cmd.redraw_canvas |= app.install_annotation_font(&source, &annotation_font_path);
-                toolbar_dirty = true;
+            if let Some(index) = cmd.font_selection
+                && let Some(catalog) = app.font_catalog.take()
+            {
+                if let Some(font) = catalog.get(index) {
+                    app.finish_all_contacts();
+                    cmd.redraw_canvas |=
+                        app.install_annotation_font(&font.path, &annotation_font_path);
+                    toolbar_dirty = true;
+                }
+                app.font_catalog = Some(catalog);
             }
             if let Some((from, to)) = cmd.font_reorder {
                 match app.text_fonts.move_font(from, to, &annotation_font_path) {
@@ -3202,14 +3203,14 @@ fn run_inner(options: Options) -> Result<(), String> {
                 let now = Instant::now();
                 let mut timeout = if app.wait_for_mouse_up
                     || picker.active()
-                    || file_dialog.pending()
+                    || file_dialog.needs_poll()
                     || app.screenshot.waiting()
                 {
                     Duration::from_millis(8)
                 } else if app.input.text.editing() && toolbar.input_focused() {
                     Duration::from_millis(24)
                 } else {
-                    COLOR_REFRESH_INTERVAL.saturating_sub(now.duration_since(last_color))
+                    IDLE_EVENT_WAIT
                 };
                 // SDL still wakes immediately on events. Keep the X11
                 // topology and autosave deadlines without a generic 500 ms poll.

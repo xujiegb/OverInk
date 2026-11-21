@@ -538,23 +538,12 @@ impl Canvas {
         self.ink.extended_bytes()
     }
 
-    pub fn refresh_color(&mut self) -> bool {
-        let revision = self.color.revision;
-        self.color.refresh(&self.window, self.render.extended);
-        if self.color.revision == revision {
-            return false;
-        }
-        self.background.invalidate_texture();
-        self.invalidate(DirtyReason::Surface);
-        true
-    }
-
     pub fn update_guard(&mut self, toolbar: &Window, mouse: bool) -> Result<(), String> {
         if self.guard_dirty || self.mouse != mouse {
             let (protected, shape_changed) =
                 self.guard
                     .update(&self.window, toolbar, mouse, self.render.name != "software")?;
-            if shape_changed {
+            if self.guard_dirty || shape_changed {
                 self.native.invalidate();
             }
             self.invalidate_if(

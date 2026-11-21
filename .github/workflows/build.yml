@@ -887,6 +887,9 @@ jobs:
             pkg install -y curl cmake ninja pkgconf python3 libX11 libXext libXi libXrandr \
               libXcursor libXfixes libXrender libXScrnSaver libXtst libxcb libglvnd \
               wayland wayland-protocols libxkbcommon mesa-libs
+            if [ '${{ matrix.target }}' = 'x86_64-unknown-freebsd' ]; then
+              pkg install -y xorg-vfbserver
+            fi
           run: |
             set -eu
             export PATH="/usr/local/bin:$PATH"
@@ -979,6 +982,22 @@ jobs:
             CMAKE
             else
               cargo test --locked --release --target "$target"
+              xvfb_dir=$(mktemp -d)
+              Xvfb -displayfd 3 -screen 0 3840x2160x24 -nolisten tcp -noreset \
+                3>"$xvfb_dir/display" >"$xvfb_dir/log" 2>&1 &
+              xvfb_pid=$!
+              trap 'kill "$xvfb_pid" 2>/dev/null || true' EXIT
+              for attempt in $(seq 1 10); do
+                if [ -s "$xvfb_dir/display" ]; then break; fi
+                if ! kill -0 "$xvfb_pid" 2>/dev/null; then break; fi
+                sleep 1
+              done
+              if [ ! -s "$xvfb_dir/display" ]; then
+                cat "$xvfb_dir/log"
+                exit 1
+              fi
+              DISPLAY=":$(cat "$xvfb_dir/display")" \
+                cargo test --locked --release --target "$target" x11_live_ -- --ignored
             fi
             if [ "$build_std" = true ]; then
               RUSTC_BOOTSTRAP=1 CARGO_PROFILE_RELEASE_PANIC=abort cargo build \

@@ -49,8 +49,6 @@ enum NativeWindowProperty {
     #[cfg(target_os = "macos")]
     CocoaWindow,
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    X11Display,
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     WaylandSurface,
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     WaylandDisplay,
@@ -63,8 +61,6 @@ impl NativeWindowProperty {
             Self::Win32Hwnd => SDL_PROP_WINDOW_WIN32_HWND_POINTER,
             #[cfg(target_os = "macos")]
             Self::CocoaWindow => SDL_PROP_WINDOW_COCOA_WINDOW_POINTER,
-            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-            Self::X11Display => SDL_PROP_WINDOW_X11_DISPLAY_POINTER,
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             Self::WaylandSurface => SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER,
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -87,7 +83,6 @@ enum SdlNativeAction<'a> {
     ModState,
     DelayPrecise(u64),
     ScreenshotTimestamp,
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     RegisterUserEvent,
     Shutdown,
     FreeAllocation(NonNull<c_void>),
@@ -129,7 +124,6 @@ enum SdlNativeAction<'a> {
     MouseButtonsReleased,
     PollEvent(&'a mut SDL_Event),
     WaitEvent(i32),
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     PushUserEvent(&'a mut SDL_Event),
     #[cfg(target_os = "macos")]
     PushMacosTouch(&'a mut SDL_Event),
@@ -141,7 +135,6 @@ enum SdlNativeResult {
     Done,
     ModState(SDL_Keymod),
     ScreenshotTimestamp(String),
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     EventType(u32),
     Properties(SDL_PropertiesID),
     Cursor(Option<NonNull<SDL_Cursor>>),
@@ -254,7 +247,6 @@ impl SdlNativeResult {
         }
     }
 
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     fn event_type(self) -> u32 {
         if let Self::EventType(ty) = self {
             ty
@@ -313,7 +305,6 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
                 };
                 SdlNativeResult::ScreenshotTimestamp(stem)
             }
-            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             SdlNativeAction::RegisterUserEvent => SdlNativeResult::EventType(SDL_RegisterEvents(1)),
             SdlNativeAction::Shutdown => {
                 SDL_Quit();
@@ -576,7 +567,6 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
             SdlNativeAction::WaitEvent(timeout) => {
                 SdlNativeResult::Success(SDL_WaitEventTimeout(ptr::null_mut(), timeout))
             }
-            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             SdlNativeAction::PushUserEvent(event) => SdlNativeResult::Success(SDL_PushEvent(event)),
             #[cfg(target_os = "macos")]
             SdlNativeAction::PushMacosTouch(event) => {
@@ -970,7 +960,6 @@ pub fn system_theme() -> SDL_SystemTheme {
 }
 
 /// Reserve one user event type while the video subsystem is active.
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub fn register_user_event() -> u32 {
     if !is_main_thread() || !SDL_VIDEO_READY.load(std::sync::atomic::Ordering::Acquire) {
         return 0;
@@ -978,9 +967,7 @@ pub fn register_user_event() -> u32 {
     sdl_native(SdlNativeAction::RegisterUserEvent).event_type()
 }
 
-/// Only registered SDL user event types may be used to wake the portal
-/// monitor; safe callers can no longer enqueue an arbitrary SDL union.
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+/// Wake the SDL loop with a registered user event carrying no native data.
 pub fn push_user_event(ty: u32) -> bool {
     if !(SDL_EVENT_USER.0..SDL_EVENT_LAST.0).contains(&ty) {
         return false;
@@ -2099,12 +2086,6 @@ impl Window {
             .and_then(|tag| tag.try_into().ok())
     }
 
-    /// Borrow the native X11 Display for the lifetime of the SDL window.
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    pub fn x11_display(&self) -> Option<NativeWindowHandle<'_>> {
-        self.native_pointer_property(NativeWindowProperty::X11Display)
-    }
-
     /// Borrow the Wayland wl_surface from SDL for the lifetime of this window.
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     pub fn wayland_surface(&self) -> Option<NativeWindowHandle<'_>> {
@@ -2119,8 +2100,10 @@ impl Window {
 
     /// Return the X11 drawable ID associated with this window.
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    pub fn x11_window_number(&self) -> std::ffi::c_ulong {
-        self.query_number(WindowNumberQuery::X11Window) as std::ffi::c_ulong
+    pub fn x11_window_number(&self) -> Option<u32> {
+        u32::try_from(self.query_number(WindowNumberQuery::X11Window))
+            .ok()
+            .filter(|&id| id != 0)
     }
 
     pub fn icc_profile(&self) -> Option<Vec<u8>> {

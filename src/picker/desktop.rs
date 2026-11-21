@@ -15,19 +15,13 @@ pub struct ScreenPoint {
     pixels: [i16; 2],
 }
 
-fn connect() -> Result<RustConnection, String> {
-    RustConnection::connect(None)
-        .map(|(connection, _)| connection)
-        .map_err(|error| format!("Cannot connect to the X11 display: {error}"))
-}
-
 pub fn is_xwayland() -> bool {
     if std::env::var_os("WAYLAND_DISPLAY").is_some_and(|value| !value.is_empty())
         || std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland")
     {
         return true;
     }
-    connect().is_ok_and(|connection| {
+    crate::x11::connection().is_ok_and(|connection| {
         connection
             .query_extension(b"XWAYLAND")
             .ok()
@@ -65,7 +59,7 @@ fn translate(
         .capture_coordinate_sizes()
         .ok_or("Cannot pick from a zero-sized or unavailable window")?;
     let [x, y] = scaled_pixels(local, logical, physical)?;
-    let id = u32::try_from(window.x11_window_number()).map_err(|_| "Invalid X11 window ID")?;
+    let id = window.x11_window_number().ok_or("Invalid X11 window ID")?;
     let root = connection
         .get_geometry(id)
         .map_err(|error| error.to_string())?
@@ -87,7 +81,8 @@ fn translate(
 }
 
 pub fn position(window: &Window, local: [f32; 2]) -> Result<ScreenPoint, String> {
-    translate(&connect()?, window, local)
+    let connection = crate::x11::connection()?;
+    translate(&connection, window, local)
 }
 
 #[derive(Clone, Copy)]
@@ -232,6 +227,17 @@ impl PixelLayout {
     }
 }
 
+const IMAGE_REPLY_HEADER_BYTES: usize = 32;
+
+fn image_reply_metadata(reply: &[u8]) -> Option<(u8, u32)> {
+    let (header, pixels) = reply.split_at_checked(IMAGE_REPLY_HEADER_BYTES)?;
+    // RustConnection negotiates the client's native byte order. X11 stores
+    // the payload length in four-byte words and the visual at byte 8.
+    let words = u32::from_ne_bytes(header[4..8].try_into().ok()?);
+    let visual = u32::from_ne_bytes(header[8..12].try_into().ok()?);
+    (header[0] == 1 && u64::from(words) * 4 == pixels.len() as u64).then_some((header[1], visual))
+}
+
 fn readback(
     connection: &RustConnection,
     point: ScreenPoint,
@@ -263,13 +269,14 @@ fn readback(
             u32::MAX,
         )
         .map_err(|error| error.to_string())?
-        .reply()
+        .raw_reply()
         .map_err(|error| format!("Cannot read the X11 desktop: {error}"))?;
+    let (depth, visual_id) = image_reply_metadata(&reply).ok_or("Invalid X11 screenshot reply")?;
     let setup = connection.setup();
     let format = setup
         .pixmap_formats
         .iter()
-        .find(|format| format.depth == reply.depth)
+        .find(|format| format.depth == depth)
         .ok_or("Missing X11 pixmap format")?;
     let visuals = setup
         .roots
@@ -279,14 +286,14 @@ fn readback(
             screen
                 .allowed_depths
                 .iter()
-                .find(|depth| depth.depth == reply.depth)
+                .find(|entry| entry.depth == depth)
         });
     let visual = visuals
         .and_then(|depth| {
             depth
                 .visuals
                 .iter()
-                .find(|visual| visual.visual_id == reply.visual)
+                .find(|visual| visual.visual_id == visual_id)
         })
         .ok_or("Missing X11 screenshot visual")?;
     let layout = PixelLayout::new(width, format, setup.image_byte_order, visual)?;
@@ -295,22 +302,29 @@ fn readback(
         .checked_mul(usize::from(height))
         .ok_or("X11 screenshot is too large")?;
     // X11 pads the entire reply to 32 bits in addition to row padding.
-    if reply.data.len() != bytes.next_multiple_of(4) {
+    if reply.len() != IMAGE_REPLY_HEADER_BYTES + bytes.next_multiple_of(4) {
         return Err("Invalid X11 screenshot size".into());
     }
-    reply.data.truncate(bytes);
-    Ok((layout, reply.data))
+    // GetImageReply::reply() would copy the entire payload into a second
+    // allocation. Keep the raw reply's backing storage for pixel conversion.
+    reply.copy_within(
+        IMAGE_REPLY_HEADER_BYTES..IMAGE_REPLY_HEADER_BYTES + bytes,
+        0,
+    );
+    reply.truncate(bytes);
+    Ok((layout, reply))
 }
 
 pub fn sample(window: &Window, point: ScreenPoint) -> Result<InkColor, String> {
-    let (layout, data) = readback(&connect()?, point, [1, 1])?;
+    let connection = crate::x11::connection()?;
+    let (layout, data) = readback(&connection, point, [1, 1])?;
     let pixel = layout.pixel(&data[..layout.pixel_bytes]);
     let rgb = layout.channels.map(|channel| channel.normalized(pixel));
     Ok(crate::icc::display_sample_to_srgb(window, rgb))
 }
 
 pub fn capture(window: &Window) -> Result<Image, String> {
-    let connection = connect()?;
+    let connection = crate::x11::connection()?;
     let origin = translate(&connection, window, [0.; 2])?;
     let [w, h] = window.pixel_size();
     let width = u16::try_from(w).map_err(|_| "Invalid X11 desktop capture width")?;
@@ -326,6 +340,50 @@ pub fn capture(window: &Window) -> Result<Image, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_reply_checks_the_header_and_payload_length() {
+        let mut reply = [0; IMAGE_REPLY_HEADER_BYTES + 4];
+        reply[0] = 1;
+        reply[1] = 24;
+        reply[4..8].copy_from_slice(&1_u32.to_ne_bytes());
+        reply[8..12].copy_from_slice(&0x0123_4567_u32.to_ne_bytes());
+        assert_eq!(image_reply_metadata(&reply), Some((24, 0x0123_4567)));
+        assert_eq!(image_reply_metadata(&reply[..31]), None);
+        assert_eq!(image_reply_metadata(&reply[..35]), None);
+        reply[4..8].copy_from_slice(&u32::MAX.to_ne_bytes());
+        assert_eq!(image_reply_metadata(&reply), None);
+    }
+
+    #[test]
+    #[ignore = "requires an isolated X11 display"]
+    fn x11_live_root_capture_reuses_the_reply_buffer() -> Result<(), String> {
+        let connection = crate::x11::connection()?;
+        let root = connection.setup().roots.first().ok_or("No X11 screen")?;
+        let size = [root.width_in_pixels, root.height_in_pixels];
+        let (layout, data) = readback(
+            &connection,
+            ScreenPoint {
+                root: root.root,
+                pixels: [0, 0],
+            },
+            size,
+        )?;
+        let image = layout.image(size, data)?;
+        assert_eq!(
+            image.rgba.len(),
+            Image::rgba8_len(image.width, image.height)?
+        );
+        assert!(
+            image
+                .rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| pixel[3] == 255)
+        );
+        Ok(())
+    }
 
     #[test]
     fn scales_and_rejects_invalid_window_dimensions() {

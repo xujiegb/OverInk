@@ -623,21 +623,21 @@ impl App {
                     .hint_text(tr.text("Search fonts")),
             );
             let filter = self.font_search.to_lowercase();
-            let mut added = false;
             if let Some(catalog) = &self.font_catalog {
                 egui::ScrollArea::vertical()
                     .id_salt("installed-fonts")
                     .max_height(180.)
                     .show(ui, |ui| {
-                        for font in catalog.iter().filter(|font| font.matches_search(&filter)) {
-                            if ui.selectable_label(false, &font.name).clicked() {
-                                commands.font_path = Some(font.path.clone());
-                                added = true;
+                        for (index, font) in catalog.iter().enumerate() {
+                            if font.matches_search(&filter)
+                                && ui.selectable_label(false, &font.name).clicked()
+                            {
+                                commands.font_selection = Some(index);
                             }
                         }
                     });
             }
-            if added {
+            if commands.font_selection.is_some() {
                 self.adding_font = false;
                 self.font_search.clear();
             }
