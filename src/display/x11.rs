@@ -1,6 +1,10 @@
+use std::rc::Rc;
 use x11rb::{
     connection::Connection,
-    protocol::randr::{ConnectionExt as _, GetCrtcInfoReply, SetConfig},
+    protocol::{
+        Event,
+        randr::{ConnectionExt as _, GetCrtcInfoReply, NotifyMask, SetConfig},
+    },
     rust_connection::RustConnection,
 };
 
@@ -9,23 +13,78 @@ const MAX_CRTCS: usize = 4096;
 
 // SDL can retain a display while its output is disabled. Consult RandR
 // before assigning a page, and fall back to SDL if the snapshot is incomplete.
-pub(super) struct Randr(RustConnection);
+pub(super) struct Randr {
+    connection: Rc<RustConnection>,
+    areas: Option<Vec<[i32; 4]>>,
+    watch: bool,
+    dirty: bool,
+}
 
 impl Randr {
     pub(super) fn connect() -> Option<Self> {
-        let (connection, _) = RustConnection::connect(None).ok()?;
+        let connection = crate::x11::connection().ok()?;
         let version = connection.randr_query_version(1, 3).ok()?.reply().ok()?;
-        ((version.major_version, version.minor_version) >= (1, 3)).then_some(Self(connection))
-    }
-
-    pub(super) fn active_areas(&self) -> Option<Vec<[i32; 4]>> {
-        let screens = &self.0.setup().roots;
-        if !(1..=MAX_SCREENS).contains(&screens.len()) {
+        let screens = &connection.setup().roots;
+        if (version.major_version, version.minor_version) < (1, 3)
+            || !(1..=MAX_SCREENS).contains(&screens.len())
+        {
             return None;
         }
-        let resources = screens
+        let mask = NotifyMask::SCREEN_CHANGE | NotifyMask::CRTC_CHANGE | NotifyMask::OUTPUT_CHANGE;
+        let watch = screens.iter().all(|screen| {
+            connection
+                .randr_select_input(screen.root, mask)
+                .is_ok_and(|request| request.check().is_ok())
+        });
+        Some(Self {
+            connection,
+            areas: None,
+            watch,
+            dirty: true,
+        })
+    }
+
+    pub(super) fn invalidate(&mut self) {
+        self.dirty = true;
+    }
+
+    pub(super) fn poll(&mut self) -> bool {
+        loop {
+            match self.connection.poll_for_event() {
+                Ok(Some(Event::RandrNotify(_) | Event::RandrScreenChangeNotify(_))) => {
+                    self.dirty = true;
+                }
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(_) => {
+                    self.watch = false;
+                    break;
+                }
+            }
+        }
+        self.dirty |= !self.watch;
+        self.dirty
+    }
+
+    pub(super) fn active_areas(&mut self) -> Option<&[[i32; 4]]> {
+        if self.dirty {
+            self.areas = self.query_areas();
+            self.dirty = self.areas.is_none();
+        }
+        self.areas.as_deref()
+    }
+
+    fn query_areas(&self) -> Option<Vec<[i32; 4]>> {
+        let resources = self
+            .connection
+            .setup()
+            .roots
             .iter()
-            .map(|screen| self.0.randr_get_screen_resources_current(screen.root).ok())
+            .map(|screen| {
+                self.connection
+                    .randr_get_screen_resources_current(screen.root)
+                    .ok()
+            })
             .collect::<Option<Vec<_>>>()?;
         let mut areas = Vec::new();
         let mut queried = false;
@@ -41,7 +100,7 @@ impl Randr {
                 .crtcs
                 .into_iter()
                 .map(|id| {
-                    self.0
+                    self.connection
                         .randr_get_crtc_info(id, resources.config_timestamp)
                         .ok()
                 })

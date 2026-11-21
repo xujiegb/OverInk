@@ -42,7 +42,7 @@ pub enum KeyboardSource {
     System,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Preferences {
     pub language: Option<Language>,
@@ -71,6 +71,14 @@ impl Default for Preferences {
 }
 
 impl Preferences {
+    /// Snapshot the panel controls without copying the owned screenshot path.
+    pub fn panel_values(&self) -> Self {
+        Self {
+            screenshot_folder: None,
+            ..*self
+        }
+    }
+
     pub fn load(path: &Path) -> Self {
         if std::fs::metadata(path).is_ok_and(|m| m.len() <= 256 * 1024) {
             std::fs::read(path)

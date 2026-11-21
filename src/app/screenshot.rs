@@ -272,6 +272,70 @@ impl Screenshot {
         matches!(self.stage, Stage::Ready(..))
     }
 
+    pub fn selecting(&self) -> bool {
+        matches!(self.stage, Stage::Selecting(_))
+    }
+
+    /// Draw the live selection without an egui context or a full-window mesh.
+    pub fn paint_selection(
+        &self,
+        renderer: &Renderer,
+        size: [f32; 2],
+        units: f32,
+        accent: [f32; 3],
+    ) -> Result<(), String> {
+        let Stage::Selecting(drag) = self.stage else {
+            return Ok(());
+        };
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::from(size));
+        let fill = |rects: &[Rect], [r, g, b, a]: [f32; 4]| {
+            let color = SDL_FColor { r, g, b, a };
+            let mut quads = [[SDL_Vertex::default(); 4]; 4];
+            for (&rect, quad) in rects.iter().zip(&mut quads) {
+                *quad = [
+                    rect.left_top(),
+                    rect.right_top(),
+                    rect.right_bottom(),
+                    rect.left_bottom(),
+                ]
+                .map(|pos| SDL_Vertex {
+                    position: SDL_FPoint { x: pos.x, y: pos.y },
+                    color,
+                    tex_coord: SDL_FPoint::default(),
+                });
+            }
+            let indices = [
+                [0, 1, 2, 0, 2, 3],
+                [4, 5, 6, 4, 6, 7],
+                [8, 9, 10, 8, 10, 11],
+                [12, 13, 14, 12, 14, 15],
+            ];
+            renderer.geometry(
+                GeometryTexture::Solid,
+                quads[..rects.len()].as_flattened(),
+                indices[..rects.len()].as_flattened(),
+            )
+        };
+        let dim = [0., 0., 0., 76. / 255.];
+        if let Some(drag) = drag {
+            let region = Rect::from_two_pos(drag.start, drag.end).intersect(screen);
+            if !region.is_positive() {
+                return fill(&[screen], dim);
+            }
+            fill(&outside_selection(screen, region), dim)?;
+            let border = (1.5 * units)
+                .min(region.width() * 0.5)
+                .min(region.height() * 0.5);
+            let [r, g, b] = accent;
+            fill(
+                &outside_selection(region, region.shrink(border)),
+                [r, g, b, 1.],
+            )
+        } else {
+            fill(&[screen], dim)
+        }
+    }
+
     /// Hide OverInk's annotations only after the Shell bridge is confirmed
     /// absent; its normal capture path still needs a visible canvas actor.
     pub fn portal_fallback_requested(&self) -> bool {
@@ -352,7 +416,7 @@ impl Screenshot {
     }
 
     pub fn event(&mut self, event: &SDL_Event, window: &Window, touch_enabled: bool) -> bool {
-        if !matches!(self.stage, Stage::Selecting(_)) {
+        if !self.selecting() {
             return false;
         }
         let size = window.size();
@@ -499,16 +563,10 @@ impl Screenshot {
         self.hovered_button = None;
         self.menu_rect = None;
         let screen = ui.clip_rect();
-        let region = match self.stage {
-            Stage::Selecting(drag) => {
-                let region = drag.map(|drag| Rect::from_two_pos(drag.start, drag.end));
-                shade(ui, screen, region, units);
-                return;
-            }
-            Stage::Ready(region, _) => region,
-            _ => return,
+        let Stage::Ready(region, _) = self.stage else {
+            return;
         };
-        shade(ui, screen, Some(region), units);
+        shade(ui, screen, region, units);
         let replace = self.replace.as_ref().map(|path| {
             format!(
                 "{} {}",
@@ -665,27 +723,27 @@ impl Screenshot {
     }
 }
 
-fn shade(ui: &Ui, screen: Rect, region: Option<Rect>, units: f32) {
+fn outside_selection(screen: Rect, region: Rect) -> [Rect; 4] {
+    [
+        Rect::from_min_max(screen.min, pos2(screen.right(), region.top())),
+        Rect::from_min_max(pos2(screen.left(), region.bottom()), screen.max),
+        Rect::from_min_max(pos2(screen.left(), region.top()), region.left_bottom()),
+        Rect::from_min_max(region.right_top(), pos2(screen.right(), region.bottom())),
+    ]
+}
+
+fn shade(ui: &Ui, screen: Rect, region: Rect, units: f32) {
     let shade = Color32::from_black_alpha(76);
     let painter = ui.painter();
-    if let Some(region) = region {
-        for rect in [
-            Rect::from_min_max(screen.min, pos2(screen.right(), region.top())),
-            Rect::from_min_max(pos2(screen.left(), region.bottom()), screen.max),
-            Rect::from_min_max(pos2(screen.left(), region.top()), region.left_bottom()),
-            Rect::from_min_max(region.right_top(), pos2(screen.right(), region.bottom())),
-        ] {
-            painter.rect_filled(rect, 0., shade);
-        }
-        painter.rect_stroke(
-            region,
-            0.,
-            Stroke::new(1.5 * units, toolbar::ACTIVE),
-            StrokeKind::Inside,
-        );
-    } else {
-        painter.rect_filled(screen, 0., shade);
+    for rect in outside_selection(screen, region) {
+        painter.rect_filled(rect, 0., shade);
     }
+    painter.rect_stroke(
+        region,
+        0.,
+        Stroke::new(1.5 * units, toolbar::ACTIVE),
+        StrokeKind::Inside,
+    );
 }
 
 pub fn default_folder(preferences: &Preferences) -> Option<Cow<'_, Path>> {
@@ -875,6 +933,31 @@ mod tests {
     use super::*;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn live_drag_shades_the_exterior_and_updates_the_selection_hole() -> TestResult {
+        let renderer = TestSurface::new([100, 80])?.software_renderer()?;
+        let pointer = Pointer::Pen(SDL_PenID(1));
+        let size = [100., 80.];
+        let mut screenshot = Screenshot {
+            stage: Stage::Selecting(None),
+            ..Default::default()
+        };
+        assert!(screenshot.select(SelectionEvent::Down(pointer, pos2(20., 20.)), size));
+        assert!(screenshot.select(SelectionEvent::Move(pointer, pos2(70., 60.)), size));
+        renderer.clear([0.; 4])?;
+        screenshot.paint_selection(&renderer, size, 2., [0., 1., 0.])?;
+        assert_eq!(TestSurface::pixel(&renderer, 40, 40)?, [0; 4]);
+        assert_eq!(TestSurface::pixel(&renderer, 20, 22)?, [0, 255, 0, 255]);
+        assert!((74..=77).contains(&TestSurface::pixel(&renderer, 5, 5)?[3]));
+
+        assert!(screenshot.select(SelectionEvent::Move(pointer, pos2(35., 35.)), size));
+        renderer.clear([0.; 4])?;
+        screenshot.paint_selection(&renderer, size, 2., [0., 1., 0.])?;
+        assert_eq!(TestSurface::pixel(&renderer, 28, 28)?, [0; 4]);
+        assert!((74..=77).contains(&TestSurface::pixel(&renderer, 40, 40)?[3]));
+        Ok(())
+    }
 
     #[test]
     fn screenshot_actions_accept_clicks_in_the_scaled_button_area() -> TestResult {

@@ -34,19 +34,42 @@ impl Topology {
             randr: (_video == "x11").then(x11::Randr::connect).flatten(),
         }
     }
-    pub fn connected(&self) -> Result<Vec<Display>, String> {
-        let result = sdl_displays()?;
+    pub fn invalidate(&mut self) {
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        let result = if let Some(areas) = self.randr.as_ref().and_then(x11::Randr::active_areas) {
-            result
-                .into_iter()
-                .filter(|d| areas.contains(&d.bounds))
-                .collect()
-        } else {
-            result
-        };
-        Ok(result)
+        if let Some(randr) = &mut self.randr {
+            randr.invalidate();
+        }
     }
+
+    pub fn poll_x11(&mut self) -> bool {
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        if let Some(randr) = &mut self.randr {
+            return randr.poll();
+        }
+        true
+    }
+
+    pub fn connected(&mut self) -> Result<Vec<Display>, String> {
+        let displays = sdl_displays()?;
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        if let Some(areas) = self.randr.as_mut().and_then(x11::Randr::active_areas) {
+            return Ok(filter_x11_displays(displays, areas));
+        }
+        Ok(displays)
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "freebsd", test))]
+fn filter_x11_displays(mut displays: Vec<Display>, areas: &[[i32; 4]]) -> Vec<Display> {
+    // SDL and RandR run on separate connections. Until SDL sees the whole
+    // layout, a live output can have stale bounds. Keep its page in that case.
+    if areas
+        .iter()
+        .all(|area| displays.iter().any(|display| display.bounds == *area))
+    {
+        displays.retain(|display| areas.contains(&display.bounds));
+    }
+    displays
 }
 fn sdl_displays() -> Result<Vec<Display>, String> {
     crate::sdl::display_info().map(|displays| {
@@ -404,6 +427,16 @@ mod tests {
     };
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn x11_does_not_remove_live_pages_while_sdl_reports_stale_bounds() {
+        let displays = || vec![screen(10, "Left", 0), screen(20, "Right", 800)];
+        let matching = [displays()[0].bounds, displays()[1].bounds];
+        let moved = [matching[0], [960, 0, matching[1][2], matching[1][3]]];
+        assert_eq!(filter_x11_displays(displays(), &moved).len(), 2);
+        assert_eq!(filter_x11_displays(displays(), &matching[..1]).len(), 1);
+        assert!(filter_x11_displays(displays(), &[]).is_empty());
+    }
 
     #[test]
     fn unique_page_extraction_preserves_ambiguous_matches() {

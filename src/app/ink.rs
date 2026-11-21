@@ -246,7 +246,7 @@ impl Ink {
             }
             !trail.is_empty()
         });
-        let mut laser = Stroke {
+        let laser = Stroke {
             tool: Tool::Laser,
             color: InkColor::from_rgb8([246, 72, 99]),
             width: 4. * app.input.canvas_units,
@@ -255,21 +255,23 @@ impl Ink {
             pressure_enabled: false,
             points: Vec::new(),
         };
+        let rgb = frame
+            .color
+            .map(laser.color.output_rgb(frame.renderer.extended));
+        self.painter.samples.clear();
         for trail in app.input.laser.values() {
-            laser.points.clear();
             for sample in trail {
-                if sample.starts_segment && !laser.points.is_empty() {
-                    self.painter.stroke(frame, &laser)?;
-                    laser.points.clear();
+                if sample.starts_segment {
+                    self.painter.paint_laser_segment(frame, &laser, rgb)?;
                 }
-                laser.points.push(Point {
+                self.painter.samples.push(Point {
                     pressure: 1.
                         - now.duration_since(sample.at).as_secs_f32()
                             / LASER_LIFETIME.as_secs_f32(),
                     ..sample.point
                 });
             }
-            self.painter.stroke(frame, &laser)?;
+            self.painter.paint_laser_segment(frame, &laser, rgb)?;
         }
         Ok(())
     }
@@ -664,13 +666,7 @@ impl StrokePainter {
                     }
                 },
             ) {
-                self.path(
-                    frame,
-                    stroke,
-                    PointSpan::new(&stroke.polyline()),
-                    region,
-                    white,
-                )?;
+                self.stroke_in(frame, stroke, region, white)?;
             }
             result?;
         }
@@ -678,7 +674,38 @@ impl StrokePainter {
     }
 
     fn stroke(&mut self, frame: &Frame<'_>, stroke: &Stroke) -> Result<(), String> {
-        self.path(frame, stroke, PointSpan::new(&stroke.polyline()), None, 1.)
+        self.stroke_in(frame, stroke, None, 1.)
+    }
+
+    fn paint_laser_segment(
+        &mut self,
+        frame: &Frame<'_>,
+        laser: &Stroke,
+        rgb: [f32; 3],
+    ) -> Result<(), String> {
+        self.draw_ribbon(frame, laser, rgb, None, false)?;
+        self.samples.clear();
+        Ok(())
+    }
+
+    fn stroke_in(
+        &mut self,
+        frame: &Frame<'_>,
+        stroke: &Stroke,
+        region: Option<InkClip>,
+        white: f32,
+    ) -> Result<(), String> {
+        if !stroke.tool.is_shape() {
+            return self.path(frame, stroke, PointSpan::new(&stroke.points), region, white);
+        }
+        let mut outline = [Point::EMPTY; Stroke::OUTLINE_POINTS];
+        self.path(
+            frame,
+            stroke,
+            PointSpan::new(stroke.polyline(&mut outline)),
+            region,
+            white,
+        )
     }
 
     fn path(
@@ -706,44 +733,54 @@ impl StrokePainter {
             }
         }
         renderer.with_color_scale(white, || {
-            let margin = stroke.max_radius() * 2. + frame.aa;
-            let visible = |a, b| {
-                stroke.tool == Tool::Arrow
-                    || region.is_none_or(|region| {
-                        region.intersects(Bounds::between(a, b).padded(margin))
-                    })
-            };
-            let scale = if region.is_some() {
-                frame.scale
-            } else {
-                [1.; 2]
-            };
-            for range in geometry::mesh_ranges(&self.samples, MESH_SEGMENTS, visible) {
-                self.mesh
-                    .update(stroke, &self.samples, range, frame.aa, vertex_grain);
-                set_vertices(
-                    &self.mesh,
-                    &mut self.vertices,
-                    rgb,
-                    stroke.opacity,
-                    scale,
-                    region.map_or([0; 2], |region| region.origin),
-                    !vertex_grain,
-                );
-                #[cfg(test)]
-                {
-                    self.submitted_indices += self.mesh.indices.len();
-                }
-                submit(
-                    renderer,
-                    if use_paper { self.paper.as_ref() } else { None },
-                    &self.vertices,
-                    &self.mesh.indices,
-                    &mut self.queued,
-                )?;
-            }
-            Ok(())
+            self.draw_ribbon(frame, stroke, rgb, region, use_paper)
         })
+    }
+
+    fn draw_ribbon(
+        &mut self,
+        frame: &Frame<'_>,
+        stroke: &Stroke,
+        rgb: [f32; 3],
+        region: Option<InkClip>,
+        use_paper: bool,
+    ) -> Result<(), String> {
+        let margin = stroke.max_radius() * 2. + frame.aa;
+        let visible = |a, b| {
+            stroke.tool == Tool::Arrow
+                || region
+                    .is_none_or(|region| region.intersects(Bounds::between(a, b).padded(margin)))
+        };
+        let scale = if region.is_some() {
+            frame.scale
+        } else {
+            [1.; 2]
+        };
+        for range in geometry::mesh_ranges(&self.samples, MESH_SEGMENTS, visible) {
+            self.mesh
+                .update(stroke, &self.samples, range, frame.aa, !use_paper);
+            set_vertices(
+                &self.mesh,
+                &mut self.vertices,
+                rgb,
+                stroke.opacity,
+                scale,
+                region.map_or([0; 2], |region| region.origin),
+                use_paper,
+            );
+            #[cfg(test)]
+            {
+                self.submitted_indices += self.mesh.indices.len();
+            }
+            submit(
+                frame.renderer,
+                if use_paper { self.paper.as_ref() } else { None },
+                &self.vertices,
+                &self.mesh.indices,
+                &mut self.queued,
+            )?;
+        }
+        Ok(())
     }
 
     fn ensure_paper_texture(&mut self, renderer: &Renderer) -> bool {
@@ -1024,6 +1061,37 @@ mod tests {
                 .collect(),
         });
         app.history.commit();
+    }
+
+    #[test]
+    fn fading_laser_keeps_breaks_and_prunes_expired_samples() -> TestResult {
+        let canvas = TestCanvas::new([104, 64])?;
+        let mut app = app();
+        let mut ink = Ink::default();
+        for (x, starts_segment) in [
+            (5., true),
+            (20., false),
+            (30., false),
+            (65., true),
+            (80., false),
+        ] {
+            app.laser_sample(1, Point::new(x, 30., 1., [0.; 2]), starts_segment);
+        }
+        let first = app
+            .input
+            .laser
+            .get_mut(&1)
+            .and_then(|trail| trail.front_mut())
+            .ok_or("No laser sample")?;
+        first.at -= LASER_LIFETIME;
+        canvas.renderer.clear([0.; 4])?;
+        ink.paint_laser(&canvas.frame(), &mut app)?;
+        assert!(canvas.pixel(24, 30)?[3] > 200);
+        assert_eq!(canvas.pixel(48, 30)?[3], 0);
+        assert!(canvas.pixel(72, 30)?[3] > 200);
+        assert_eq!(canvas.pixel(8, 30)?[3], 0);
+        assert!(ink.painter.samples.is_empty());
+        Ok(())
     }
 
     #[test]

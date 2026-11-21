@@ -15,6 +15,11 @@ pub enum DialogKind {
 
 type ResultPath = Result<Option<PathBuf>, String>;
 
+struct Callback {
+    result: Option<ResultPath>,
+    wake: u32,
+}
+
 // Cocoa can access the SDL parent from the sheet completion handler, and
 // Windows can look up its native handle from a worker thread.
 pub const USE_WINDOW_PARENT: bool = !cfg!(any(windows, target_os = "macos"));
@@ -28,7 +33,7 @@ pub(super) const fn use_window_parent(kind: DialogKind) -> bool {
 
 struct Callbacks {
     last_id: usize,
-    results: BTreeMap<usize, Option<ResultPath>>,
+    results: BTreeMap<usize, Callback>,
 }
 
 static CALLBACKS: Mutex<Callbacks> = Mutex::new(Callbacks {
@@ -43,11 +48,25 @@ fn callbacks() -> MutexGuard<'static, Callbacks> {
 }
 
 #[derive(Default)]
-pub struct FileDialog(Option<(usize, DialogKind)>);
+pub struct FileDialog {
+    request: Option<(usize, DialogKind)>,
+    wake: u32,
+}
 
 impl FileDialog {
+    pub fn new() -> Self {
+        Self {
+            wake: super::register_user_event(),
+            ..Self::default()
+        }
+    }
+
     pub fn pending(&self) -> bool {
-        self.0.is_some()
+        self.request.is_some()
+    }
+
+    pub fn needs_poll(&self) -> bool {
+        self.pending() && self.wake == 0
     }
 
     fn begin(&mut self, kind: DialogKind) -> Option<usize> {
@@ -57,8 +76,14 @@ impl FileDialog {
         let mut callbacks = callbacks();
         let id = callbacks.last_id.checked_add(1)?;
         callbacks.last_id = id;
-        callbacks.results.insert(id, None);
-        self.0 = Some((id, kind));
+        callbacks.results.insert(
+            id,
+            Callback {
+                result: None,
+                wake: self.wake,
+            },
+        );
+        self.request = Some((id, kind));
         Some(id)
     }
 
@@ -71,18 +96,18 @@ impl FileDialog {
     }
 
     pub fn poll(&mut self) -> Option<(DialogKind, ResultPath)> {
-        let (id, kind) = self.0?;
+        let (id, kind) = self.request?;
         let mut callbacks = callbacks();
-        let result = callbacks.results.get_mut(&id)?.take()?;
+        let result = callbacks.results.get_mut(&id)?.result.take()?;
         callbacks.results.remove(&id);
-        self.0 = None;
+        self.request = None;
         Some((kind, result))
     }
 }
 
 impl Drop for FileDialog {
     fn drop(&mut self) {
-        if let Some((id, _)) = self.0 {
+        if let Some((id, _)) = self.request {
             callbacks().results.remove(&id);
         }
     }
@@ -90,11 +115,14 @@ impl Drop for FileDialog {
 
 pub(super) fn complete(id: usize, value: impl FnOnce() -> ResultPath) {
     let mut callbacks = callbacks();
-    let Some(result) = callbacks.results.get_mut(&id) else {
+    let Some(callback) = callbacks.results.get_mut(&id) else {
         return;
     };
-    if result.is_none() {
-        *result = Some(value());
+    if callback.result.is_none() {
+        callback.result = Some(value());
+        // Serialize the wake with FileDialog::drop. SDL is still initialized
+        // while an active request is registered.
+        super::push_user_event(callback.wake);
     }
 }
 

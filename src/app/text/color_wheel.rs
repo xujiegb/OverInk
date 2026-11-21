@@ -38,7 +38,7 @@ impl ColorWheel {
             self.select(pos - center, radius);
         }
 
-        paint_disc(ui.painter(), center, radius, 1.);
+        paint_disc(ui.painter(), center, radius, 60, 4);
         let selected = center + direction(self.value.h) * (radius * self.value.s);
         ui.painter().circle_filled(selected, 5. * scale, self.value);
         ui.painter().circle_stroke(
@@ -71,33 +71,26 @@ fn direction(hue: f32) -> Vec2 {
     vec2(cos, sin)
 }
 
-pub(super) fn paint_disc(painter: &Painter, center: Pos2, radius: f32, value: f32) {
-    const SEGMENTS: u32 = 60;
-    const RINGS: u32 = 4;
-    let color = |h, s| {
-        HsvaGamma {
-            h,
-            s,
-            v: value,
-            a: 1.,
-        }
-        .into()
-    };
+pub(super) fn paint_disc(painter: &Painter, center: Pos2, radius: f32, segments: u32, rings: u32) {
+    let color = |h, s| HsvaGamma { h, s, v: 1., a: 1. }.into();
     let mut mesh = Mesh::default();
+    mesh.vertices.reserve_exact((1 + rings * segments) as usize);
+    mesh.indices
+        .reserve_exact((3 * (2 * rings - 1) * segments) as usize);
     mesh.colored_vertex(center, color(0., 0.));
-    for ring in 1..=RINGS {
-        let sat = ring as f32 / RINGS as f32;
-        let start = 1 + (ring - 1) * SEGMENTS;
-        for segment in 0..SEGMENTS {
-            let hue = segment as f32 / SEGMENTS as f32;
+    for ring in 1..=rings {
+        let sat = ring as f32 / rings as f32;
+        let start = 1 + (ring - 1) * segments;
+        for segment in 0..segments {
+            let hue = segment as f32 / segments as f32;
             mesh.colored_vertex(center + direction(hue) * (radius * sat), color(hue, sat));
             let here = start + segment;
-            let next = start + (segment + 1) % SEGMENTS;
+            let next = start + (segment + 1) % segments;
             if ring == 1 {
                 mesh.add_triangle(0, here, next);
             } else {
-                mesh.add_triangle(here - SEGMENTS, here, next);
-                mesh.add_triangle(here - SEGMENTS, next, next - SEGMENTS);
+                mesh.add_triangle(here - segments, here, next);
+                mesh.add_triangle(here - segments, next, next - segments);
             }
         }
     }

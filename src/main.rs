@@ -30,6 +30,8 @@ mod picker_desktop;
 mod sdl;
 mod toolbar;
 mod touch;
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+mod x11;
 
 const VERSION: &str = match option_env!("OVERINK_BUILD_VERSION") {
     Some(version) if !version.is_empty() => version,

@@ -49,8 +49,6 @@ enum NativeWindowProperty {
     #[cfg(target_os = "macos")]
     CocoaWindow,
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    X11Display,
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     WaylandSurface,
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     WaylandDisplay,
@@ -63,8 +61,6 @@ impl NativeWindowProperty {
             Self::Win32Hwnd => SDL_PROP_WINDOW_WIN32_HWND_POINTER,
             #[cfg(target_os = "macos")]
             Self::CocoaWindow => SDL_PROP_WINDOW_COCOA_WINDOW_POINTER,
-            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-            Self::X11Display => SDL_PROP_WINDOW_X11_DISPLAY_POINTER,
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             Self::WaylandSurface => SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER,
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -85,9 +81,7 @@ struct SdlAllocation<T>(NonNull<T>);
 enum SdlNativeAction<'a> {
     IsMainThread,
     ModState,
-    DelayPrecise(u64),
     ScreenshotTimestamp,
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     RegisterUserEvent,
     Shutdown,
     FreeAllocation(NonNull<c_void>),
@@ -129,7 +123,6 @@ enum SdlNativeAction<'a> {
     MouseButtonsReleased,
     PollEvent(&'a mut SDL_Event),
     WaitEvent(i32),
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     PushUserEvent(&'a mut SDL_Event),
     #[cfg(target_os = "macos")]
     PushMacosTouch(&'a mut SDL_Event),
@@ -141,7 +134,6 @@ enum SdlNativeResult {
     Done,
     ModState(SDL_Keymod),
     ScreenshotTimestamp(String),
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     EventType(u32),
     Properties(SDL_PropertiesID),
     Cursor(Option<NonNull<SDL_Cursor>>),
@@ -254,7 +246,6 @@ impl SdlNativeResult {
         }
     }
 
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     fn event_type(self) -> u32 {
         if let Self::EventType(ty) = self {
             ty
@@ -293,10 +284,6 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
         match action {
             SdlNativeAction::IsMainThread => SdlNativeResult::Success(SDL_IsMainThread()),
             SdlNativeAction::ModState => SdlNativeResult::ModState(SDL_GetModState()),
-            SdlNativeAction::DelayPrecise(nanoseconds) => {
-                sdl3_sys::timer::SDL_DelayPrecise(nanoseconds);
-                SdlNativeResult::Done
-            }
             SdlNativeAction::ScreenshotTimestamp => {
                 use sdl3_sys::time::{SDL_DateTime, SDL_GetCurrentTime, SDL_TimeToDateTime};
                 let mut ticks = 0;
@@ -313,7 +300,6 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
                 };
                 SdlNativeResult::ScreenshotTimestamp(stem)
             }
-            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             SdlNativeAction::RegisterUserEvent => SdlNativeResult::EventType(SDL_RegisterEvents(1)),
             SdlNativeAction::Shutdown => {
                 SDL_Quit();
@@ -576,7 +562,6 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
             SdlNativeAction::WaitEvent(timeout) => {
                 SdlNativeResult::Success(SDL_WaitEventTimeout(ptr::null_mut(), timeout))
             }
-            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             SdlNativeAction::PushUserEvent(event) => SdlNativeResult::Success(SDL_PushEvent(event)),
             #[cfg(target_os = "macos")]
             SdlNativeAction::PushMacosTouch(event) => {
@@ -908,11 +893,6 @@ pub fn indirect_touch_device(device: SDL_TouchID) -> bool {
         && sdl_native(SdlNativeAction::IndirectTouch(device)).succeeded()
 }
 
-/// Sleep with SDL's precise delay without exposing raw native calls to users.
-pub fn delay_precise(nanoseconds: u64) {
-    let _ = sdl_native(SdlNativeAction::DelayPrecise(nanoseconds));
-}
-
 /// Validate SDL-provided array counts before forming slices over foreign
 /// allocations. Real desktop and locale lists are far below these limits.
 fn bounded_sdl_count(count: i32, maximum: usize) -> Option<usize> {
@@ -970,7 +950,6 @@ pub fn system_theme() -> SDL_SystemTheme {
 }
 
 /// Reserve one user event type while the video subsystem is active.
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub fn register_user_event() -> u32 {
     if !is_main_thread() || !SDL_VIDEO_READY.load(std::sync::atomic::Ordering::Acquire) {
         return 0;
@@ -978,9 +957,7 @@ pub fn register_user_event() -> u32 {
     sdl_native(SdlNativeAction::RegisterUserEvent).event_type()
 }
 
-/// Only registered SDL user event types may be used to wake the portal
-/// monitor; safe callers can no longer enqueue an arbitrary SDL union.
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+/// Wake the SDL loop with a registered user event carrying no native data.
 pub fn push_user_event(ty: u32) -> bool {
     if !(SDL_EVENT_USER.0..SDL_EVENT_LAST.0).contains(&ty) {
         return false;
@@ -1668,18 +1645,14 @@ impl Window {
                         return Err("Toolbar window is too small for rounded corners".into());
                     }
                     let surface = OwnedSurface(
-                        NonNull::new(SDL_CreateSurface(width, height, SDL_PIXELFORMAT_RGBA32))
+                        NonNull::new(SDL_CreateSurface(width, height, SDL_PIXELFORMAT_ARGB32))
                             .ok_or_else(error)?,
                     );
                     let surface_handle = surface.as_non_null();
-                    let transparent = SDL_MapSurfaceRGBA(surface_handle.as_ptr(), 0, 0, 0, 0);
                     let opaque = SDL_MapSurfaceRGBA(surface_handle.as_ptr(), 255, 255, 255, 255);
-                    check(SDL_FillSurfaceRect(
-                        surface_handle.as_ptr(),
-                        ptr::null(),
-                        transparent,
-                    ))?;
 
+                    // SDL_CreateSurface zeroes the pixels, so only paint
+                    // the opaque interior and antialiased corner edges.
                     let middle = SDL_Rect {
                         x: 0,
                         y: radius,
@@ -1794,8 +1767,8 @@ impl Window {
         self.query_bool(WindowBooleanQuery::TextInputActive)
     }
 
-    pub fn set_text_input_area(&self, area: &SDL_Rect) {
-        let _ = self.run_command(WindowCommand::InputArea(area));
+    pub fn set_text_input_area(&self, area: &SDL_Rect) -> bool {
+        self.run_command(WindowCommand::InputArea(area)).is_ok()
     }
 
     pub fn sync_text_input(&self, enabled: bool) {
@@ -1959,19 +1932,28 @@ impl Window {
         let _ = self.run_command(WindowCommand::ToolbarSetup(size, &mut pixels));
     }
     /// Rebuild the native shape only after an actual pixel-size/DPI change.
-    /// It masks both the compositor output and pointer hit-testing region.
-    pub fn update_rounded_shape(&self, applied: &mut Option<[i32; 2]>) -> Result<(), String> {
+    pub fn update_rounded_shape(
+        &self,
+        applied: &mut Option<([i32; 2], i32)>,
+    ) -> Result<(), String> {
         let pixels = self.pixel_size();
-        if *applied == Some(pixels) {
-            return Ok(());
-        }
         // SDL's native hit-test uses physical pixels. UI layout uses
         // gui::window_units instead; these are deliberately different spaces.
         // The display scale already includes pixel density, so do not multiply
         // both a UI scale and pixel density here.
         let radius = (f32::from(crate::toolbar::OUTER_RADIUS) * self.scale()).round() as i32;
-        self.run_command(WindowCommand::RoundedCorners(pixels, radius.max(1)))?;
-        *applied = Some(pixels);
+        let key = (pixels, radius.max(1));
+        if *applied == Some(key) {
+            return Ok(());
+        }
+        *applied = Some(key);
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        if let Some(id) = self.x11_window_number() {
+            let size = self.query_size(false).ok_or("No X11 toolbar size")?;
+            let radius = (f32::from(crate::toolbar::OUTER_RADIUS) * self.ui_scale()).round() as i32;
+            return crate::x11::set_rounded_input(id, size, radius.max(1));
+        }
+        self.run_command(WindowCommand::RoundedCorners(key.0, key.1))?;
         Ok(())
     }
 
@@ -1994,7 +1976,11 @@ impl Window {
             w = w.min((available_width - 16).max(1));
             h = h.min((available_height - 16).max(1));
         }
-        self.run_command(WindowCommand::SetSize([w, h]))?;
+        let size = [w, h];
+        let resized = self.query_size(false) != Some(size);
+        if resized {
+            self.run_command(WindowCommand::SetSize(size))?;
+        }
         let video = driver();
         if let Some([left, top, available_width, available_height]) =
             bounds.filter(|_| video != "wayland")
@@ -2011,11 +1997,12 @@ impl Window {
             };
             let x = x.clamp(left, left + (available_width - w).max(0));
             let y = y.clamp(top, top + (available_height - h).max(0));
-            if current.is_none() || (x, y) != (current_x, current_y) {
+            let moved = current.is_none() || (x, y) != (current_x, current_y);
+            if moved {
                 self.run_command(WindowCommand::SetPosition([x, y]))?;
             }
             // X11 reports the actual geometry through ConfigureNotify.
-            if video != "x11" {
+            if video != "x11" && (resized || moved) {
                 self.run_command(WindowCommand::SyncWindow(false))?;
             }
         }
@@ -2099,12 +2086,6 @@ impl Window {
             .and_then(|tag| tag.try_into().ok())
     }
 
-    /// Borrow the native X11 Display for the lifetime of the SDL window.
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    pub fn x11_display(&self) -> Option<NativeWindowHandle<'_>> {
-        self.native_pointer_property(NativeWindowProperty::X11Display)
-    }
-
     /// Borrow the Wayland wl_surface from SDL for the lifetime of this window.
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     pub fn wayland_surface(&self) -> Option<NativeWindowHandle<'_>> {
@@ -2119,8 +2100,10 @@ impl Window {
 
     /// Return the X11 drawable ID associated with this window.
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    pub fn x11_window_number(&self) -> std::ffi::c_ulong {
-        self.query_number(WindowNumberQuery::X11Window) as std::ffi::c_ulong
+    pub fn x11_window_number(&self) -> Option<u32> {
+        u32::try_from(self.query_number(WindowNumberQuery::X11Window))
+            .ok()
+            .filter(|&id| id != 0)
     }
 
     pub fn icc_profile(&self) -> Option<Vec<u8>> {

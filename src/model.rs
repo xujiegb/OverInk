@@ -3,7 +3,6 @@
 use crate::color::InkColor;
 use serde::{Deserialize, Serialize};
 use std::{
-    borrow::Cow,
     cell::{Ref, RefCell},
     collections::{BTreeMap, VecDeque},
     sync::Arc,
@@ -67,6 +66,12 @@ pub struct Point {
 }
 impl Point {
     pub const MERGE_DISTANCE: f32 = 0.05;
+    pub const EMPTY: Self = Self {
+        x: 0.,
+        y: 0.,
+        pressure: 1.,
+        tilt: [0.; 2],
+    };
 
     pub fn new(x: f32, y: f32, pressure: f32, tilt: [f32; 2]) -> Self {
         Self {
@@ -212,6 +217,8 @@ pub struct Stroke {
     pub points: Vec<Point>,
 }
 impl Stroke {
+    pub const OUTLINE_POINTS: usize = 97;
+
     #[cfg(any(target_os = "macos", test))]
     pub fn has_wide_gamut_ink(&self) -> bool {
         !self.points.is_empty() && self.color.needs_wide_gamut()
@@ -234,34 +241,47 @@ impl Stroke {
         };
         self.width * scale * tilt * 0.5
     }
-    pub fn polyline(&self) -> Cow<'_, [Point]> {
-        let Some((a, b)) = self.points.first().zip(self.points.last()) else {
-            return Cow::Borrowed(&self.points);
+    pub fn polyline<'a>(&'a self, outline: &'a mut [Point; Self::OUTLINE_POINTS]) -> &'a [Point] {
+        let Some((&a, &b)) = self.points.first().zip(self.points.last()) else {
+            return &self.points;
         };
         let point = |x, y| Point::new(x, y, 1., [0.; 2]);
-        Cow::Owned(match self.tool {
-            Tool::Line | Tool::Arrow => vec![*a, *b],
-            Tool::Rectangle => vec![
-                point(a.x, a.y),
-                point(b.x, a.y),
-                point(b.x, b.y),
-                point(a.x, b.y),
-                point(a.x, a.y),
-            ],
+        let len = match self.tool {
+            Tool::Line | Tool::Arrow if self.points.len() == 2 => return &self.points,
+            Tool::Line | Tool::Arrow => {
+                outline[..2].copy_from_slice(&[a, b]);
+                2
+            }
+            Tool::Rectangle => {
+                outline[..5].copy_from_slice(&[
+                    point(a.x, a.y),
+                    point(b.x, a.y),
+                    point(b.x, b.y),
+                    point(a.x, b.y),
+                    point(a.x, a.y),
+                ]);
+                5
+            }
             Tool::Ellipse => {
                 let cx = (a.x + b.x) * 0.5;
                 let cy = (a.y + b.y) * 0.5;
                 let rx = (b.x - a.x).abs() * 0.5;
                 let ry = (b.y - a.y).abs() * 0.5;
-                (0..=96)
-                    .map(|i| {
-                        let t = i as f32 / 96. * std::f32::consts::TAU;
-                        point(cx + rx * t.cos(), cy + ry * t.sin())
-                    })
-                    .collect()
+                // Rotate by 2π/96 using f64 to keep the 96-step outline
+                // accurate, then close the loop with the exact start point.
+                const SIN: f64 = 0.065_403_129_230_143_06;
+                const COS: f64 = 0.997_858_923_238_603_5;
+                let (mut x, mut y) = (1.0, 0.0);
+                for vertex in outline.iter_mut() {
+                    *vertex = point(cx + rx * x as f32, cy + ry * y as f32);
+                    (x, y) = (x * COS - y * SIN, x * SIN + y * COS);
+                }
+                outline[Self::OUTLINE_POINTS - 1] = outline[0];
+                Self::OUTLINE_POINTS
             }
-            _ => return Cow::Borrowed(&self.points),
-        })
+            _ => return &self.points,
+        };
+        &outline[..len]
     }
     pub fn arrow_head(&self) -> Option<[Point; 3]> {
         let [a, .., b] = self.points.as_slice() else {
@@ -291,7 +311,8 @@ pub struct StrokeBounds {
 }
 impl StrokeBounds {
     fn new(stroke: &Stroke) -> Option<Self> {
-        let points = stroke.polyline();
+        let mut outline = [Point::EMPTY; Stroke::OUTLINE_POINTS];
+        let points = stroke.polyline(&mut outline);
         let mut bounds = Self::measure(points.iter().copied())?;
         if let Some([left, tip, right]) = stroke.arrow_head() {
             bounds.path = bounds
@@ -926,6 +947,22 @@ mod tests {
                 Point::new(100., 0., 1., [0.; 2]),
             ],
         }
+    }
+
+    #[test]
+    fn ellipse_outline_matches_trigonometric_positions_and_closes_exactly() {
+        let mut stroke = stroke();
+        stroke.tool = Tool::Ellipse;
+        stroke.points[0] = Point::new(40., 80., 1., [0.; 2]);
+        stroke.points[1] = Point::new(840., 580., 1., [0.; 2]);
+        let mut points = [Point::EMPTY; Stroke::OUTLINE_POINTS];
+        let points = stroke.polyline(&mut points);
+        for (i, point) in points.iter().enumerate() {
+            let (sin, cos) = (i as f32 * std::f32::consts::TAU / 96.).sin_cos();
+            assert!((point.x - (440. + 400. * cos)).abs() < 0.001);
+            assert!((point.y - (330. + 250. * sin)).abs() < 0.001);
+        }
+        assert_eq!(points[0].dist(points[96]), 0.);
     }
 
     #[test]

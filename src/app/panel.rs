@@ -16,7 +16,7 @@ impl App {
         ui: &mut Ui,
         canvas: &Canvas,
         video: &str,
-        freeze_unavailable: Option<Text>,
+        freeze_unavailable: impl FnOnce() -> Option<Text>,
         mark: egui::TextureId,
         dialog_open: bool,
     ) -> Commands {
@@ -30,26 +30,19 @@ impl App {
             .rect_filled(ui.max_rect(), f32::from(toolbar::OUTER_RADIUS), rail_color);
         let opened = self.panel.filter(|_| !self.picking);
         let shown = opened.or(self.panel_retiring);
-        // Animate each panel independently so switching fades in and the
-        // previous panel stays on screen while the toolbar closes.
-        let mut panel_alpha = 0.;
-        for panel in [
-            Panel::Shapes,
-            Panel::Brush,
-            Panel::Colors,
-            Panel::Background,
-            Panel::Settings,
-        ] {
-            let alpha = ui.ctx().animate_bool_with_time(
-                ui.scope_id().with(("panel-transition", panel)),
-                opened == Some(panel),
-                0.18,
-            );
-            if shown == Some(panel) {
-                panel_alpha = alpha;
-            }
+        // Only the on-screen panel can advance an animation. Seed a newly
+        // selected panel at zero so every tab still fades in from a fresh state.
+        let transition = ui.scope_id().with("panel-transition");
+        if opened.is_some() && opened != self.panel_retiring {
+            ui.ctx().animate_bool_with_time(transition, false, 0.);
         }
+        let panel_alpha = ui
+            .ctx()
+            .animate_bool_with_time(transition, opened.is_some(), 0.18);
         let visible = shown.filter(|_| panel_alpha > 0.005).or(opened);
+        if visible != self.panel_retiring {
+            ui.ctx().request_repaint();
+        }
         self.panel_retiring = visible;
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 0.;
@@ -103,7 +96,7 @@ impl App {
                                             Panel::Colors => self.palette(ui, &mut commands),
                                             Panel::Background => self.background_controls(
                                                 ui,
-                                                freeze_unavailable,
+                                                freeze_unavailable(),
                                                 &mut commands,
                                             ),
                                             Panel::Settings => self.settings(
@@ -623,21 +616,21 @@ impl App {
                     .hint_text(tr.text("Search fonts")),
             );
             let filter = self.font_search.to_lowercase();
-            let mut added = false;
             if let Some(catalog) = &self.font_catalog {
                 egui::ScrollArea::vertical()
                     .id_salt("installed-fonts")
                     .max_height(180.)
                     .show(ui, |ui| {
-                        for font in catalog.iter().filter(|font| font.matches_search(&filter)) {
-                            if ui.selectable_label(false, &font.name).clicked() {
-                                commands.font_path = Some(font.path.clone());
-                                added = true;
+                        for (index, font) in catalog.iter().enumerate() {
+                            if font.matches_search(&filter)
+                                && ui.selectable_label(false, &font.name).clicked()
+                            {
+                                commands.font_selection = Some(index);
                             }
                         }
                     });
             }
-            if added {
+            if commands.font_selection.is_some() {
                 self.adding_font = false;
                 self.font_search.clear();
             }
@@ -667,7 +660,7 @@ impl App {
                 if self.preferences.screenshot_folder.is_some()
                     && ui.button(tr.text("Use Downloads")).clicked()
                 {
-                    self.preferences.screenshot_folder = None;
+                    commands.reset_screenshot_folder = true;
                     commands.preferences = true;
                 }
             });
