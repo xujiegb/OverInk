@@ -460,10 +460,19 @@ impl App {
         if !editing && self.input.text.selected.is_none() {
             gui.clear_events();
         }
-        // Annotations use per-event menu hit tests and can enter and leave
-        // multiple controls in one SDL event batch. Unlike the independent
-        // main toolbar, the text canvas must keep those pointer transitions.
-        if ty == SDL_EVENT_MOUSE_MOTION {
+        // The embedded keyboard only needs the final hover position per
+        // native event batch. Preserve all press, drag, resize and text-menu
+        // transitions, but replace adjacent *unpressed* OSK hover positions
+        // instead of feeding dozens of obsolete pointer events into egui.
+        let osk_hover_motion = ty == SDL_EVENT_MOUSE_MOTION
+            && editing
+            && self.input.text.osk_visible()
+            && self.input.text.press.is_none()
+            && !gui.ctx.input(|input| input.pointer.any_down())
+            && !gui.raw.events.iter().any(|event| {
+                matches!(event, Event::PointerButton { pressed: true, .. })
+            });
+        if ty == SDL_EVENT_MOUSE_MOTION && !osk_hover_motion {
             gui.preserve_pointer_transitions();
         }
         let first = gui.raw.events.len();
@@ -541,7 +550,9 @@ impl App {
                 self.input.text.touch_press = false;
                 self.input.text.touch_origin = None;
             }
-            return changed || gui.raw.events.len() != first;
+            // When the previous pending mouse position was replaced, the
+            // event count is unchanged but its final hover position is new.
+            return changed || gui.raw.events.len() != first || osk_hover_motion;
         }
         let mut queued = first;
         gui.raw.events.retain(|event| {
