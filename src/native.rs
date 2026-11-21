@@ -218,20 +218,34 @@ pub fn keep_controller_above(canvas: &Window, controller: &Window, _native: &Pas
                 SetWindowPos,
             },
         };
-        if let Some(handle) = controller.win32_hwnd() {
-            // SAFETY: The HWND is owned by the live SDL controller. The typed
-            // Win32 API receives the documented topmost pseudo-handle and flags.
-            let _ = unsafe {
-                SetWindowPos(
-                    HWND(handle.as_non_null().as_ptr()),
+        if let (Some(surface), Some(control)) = (canvas.win32_hwnd(), controller.win32_hwnd()) {
+            // Restore the canvas first, then the controller. PowerPoint's slide
+            // show may itself be topmost: raising only the controller leaves
+            // the transparent drawing surface behind the presentation.
+            // SAFETY: Both HWNDs belong to live SDL windows. These two typed
+            // SetWindowPos calls use SWP_NOACTIVATE, so the slide show keeps
+            // foreground focus; no new native callbacks or pointer ownership.
+            unsafe {
+                let flags = SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
+                let _ = SetWindowPos(
+                    HWND(surface.as_non_null().as_ptr()),
                     Some(HWND_TOPMOST),
                     0,
                     0,
                     0,
                     0,
-                    SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
-                )
-            };
+                    flags,
+                );
+                let _ = SetWindowPos(
+                    HWND(control.as_non_null().as_ptr()),
+                    Some(HWND_TOPMOST),
+                    0,
+                    0,
+                    0,
+                    0,
+                    flags,
+                );
+            }
         }
     }
     #[cfg(target_os = "macos")]
@@ -247,6 +261,34 @@ pub fn keep_controller_above(canvas: &Window, controller: &Window, _native: &Pas
             unsafe {
                 let window = window.as_non_null().as_ptr().cast::<AnyObject>();
                 let under = under.as_non_null().as_ptr().cast::<AnyObject>();
+                // Keep both SDL windows in another application's full-screen
+                // Space (e.g. a PowerPoint slide show). Ordinary always-on-top
+                // windows alone don't join that Space. macOS 13+ understands
+                // CanJoinAllApplications; older releases retain the all-Spaces
+                // / full-screen auxiliary behavior.
+                const ALL_SPACES: usize = 1 << 0;
+                const MOVE_TO_ACTIVE_SPACE: usize = 1 << 1;
+                const FULLSCREEN_PRIMARY: usize = 1 << 7;
+                const FULLSCREEN_AUXILIARY: usize = 1 << 8;
+                const FULLSCREEN_NONE: usize = 1 << 9;
+                const STAGE_PRIMARY: usize = 1 << 16;
+                const STAGE_AUXILIARY: usize = 1 << 17;
+                const ALL_APPLICATIONS: usize = 1 << 18;
+                for native_window in [under, window] {
+                    let behavior: usize = msg_send![native_window, collectionBehavior];
+                    let expected = (behavior
+                        & !(MOVE_TO_ACTIVE_SPACE
+                            | FULLSCREEN_PRIMARY
+                            | FULLSCREEN_NONE
+                            | STAGE_PRIMARY
+                            | STAGE_AUXILIARY))
+                        | ALL_SPACES
+                        | FULLSCREEN_AUXILIARY
+                        | ALL_APPLICATIONS;
+                    if behavior != expected {
+                        let _: () = msg_send![native_window, setCollectionBehavior: expected];
+                    }
+                }
                 let canvas_level: isize = msg_send![under, level];
                 let level = canvas_level.saturating_add(1);
                 let current_level: isize = msg_send![window, level];
