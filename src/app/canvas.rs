@@ -259,7 +259,9 @@ impl Canvas {
     /// Pending egui input must be replayed before any stable-hover short circuit.
     /// Otherwise the final cursor coordinate in a rapid motion batch can be lost.
     pub fn pending_screenshot_input(&self) -> bool {
-        self.text.as_ref().is_some_and(|gui| !gui.raw.events.is_empty())
+        self.text
+            .as_ref()
+            .is_some_and(|gui| !gui.raw.events.is_empty())
     }
 
     pub fn screenshot_event(&mut self, event: &SDL_Event) -> bool {
