@@ -26,6 +26,40 @@ pub(super) struct CanvasPaintTimings {
     pub present: Duration,
 }
 
+/// A redraw is not necessarily a document change. Pointer hover, native
+/// surface changes and committed ink/text invalidate different GPU resources.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DirtyReason {
+    Overlay,
+    Content,
+    Surface,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct DirtyReasons(u8);
+
+impl DirtyReasons {
+    const OVERLAY: u8 = 1;
+    const CONTENT: u8 = 2;
+    const SURFACE: u8 = 4;
+
+    fn mark(&mut self, reason: DirtyReason) {
+        self.0 |= match reason {
+            DirtyReason::Overlay => Self::OVERLAY,
+            DirtyReason::Content => Self::CONTENT,
+            DirtyReason::Surface => Self::SURFACE,
+        };
+    }
+
+    fn any(self) -> bool {
+        self.0 != 0
+    }
+
+    fn clear(&mut self) {
+        self.0 = 0;
+    }
+}
+
 pub(super) struct Canvas {
     // SDL destroys textures with their renderer, and renderers with their window.
     pub background: Background,
@@ -45,7 +79,7 @@ pub(super) struct Canvas {
     bounds: Option<[i32; 4]>,
     pub protected: Option<Rect>,
     pub visible: bool,
-    pub dirty: bool,
+    dirty: DirtyReasons,
     pub guard_dirty: bool,
     animation: bool,
     mouse: bool,
@@ -104,13 +138,23 @@ impl Canvas {
             bounds: display.map(|d| d.bounds),
             protected: None,
             visible: false,
-            dirty: true,
+            dirty: DirtyReasons(DirtyReasons::SURFACE),
             guard_dirty: true,
             animation: false,
             mouse: false,
             #[cfg(target_os = "macos")]
             extended_unavailable: false,
         })
+    }
+
+    pub fn invalidate(&mut self, reason: DirtyReason) {
+        self.dirty.mark(reason);
+    }
+
+    pub fn invalidate_if(&mut self, changed: bool, reason: DirtyReason) {
+        if changed {
+            self.invalidate(reason);
+        }
     }
 
     fn attach(&mut self, display: Option<&Display>, toolbar: &Window) -> Result<(), String> {
@@ -150,7 +194,7 @@ impl Canvas {
             })?;
             self.visible = visible;
             self.guard_dirty = true;
-            self.dirty = true;
+            self.invalidate(DirtyReason::Surface);
             self.native.invalidate();
             if !visible && self.render.extended {
                 self.ink.invalidate_layer();
@@ -197,7 +241,7 @@ impl Canvas {
     pub fn surface_changed(&mut self) {
         self.color.refresh(&self.window, self.render.extended);
         self.background.invalidate_texture();
-        self.dirty = true;
+        self.invalidate(DirtyReason::Surface);
     }
 
     pub fn renderer_reset(&mut self) {
@@ -209,7 +253,7 @@ impl Canvas {
         self.text = None;
         self.text_style = None;
         self.background.invalidate_texture();
-        self.dirty = true;
+        self.invalidate(DirtyReason::Surface);
     }
 
     pub fn suspend_text_input(&mut self) {
@@ -308,7 +352,7 @@ impl Canvas {
         self.text
             .get_or_insert_with(Gui::new)
             .sync_text_input(&self.window, true);
-        self.dirty = true;
+        self.invalidate(DirtyReason::Overlay);
     }
 
     pub fn flush_text_events(&mut self, app: &mut App, theme: egui::Theme) -> Result<(), String> {
@@ -324,7 +368,7 @@ impl Canvas {
             output.shapes.clear();
             if let Some(gui) = self.text.as_mut() {
                 gui.paint(&self.render, &self.window, &self.color, output)?;
-                self.dirty = true;
+                self.invalidate(DirtyReason::Overlay);
             }
         }
         Ok(())
@@ -334,7 +378,7 @@ impl Canvas {
         self.flush_text_events(app, theme)?;
         app.input.text.finish(&mut app.history);
         self.suspend_text_input();
-        self.dirty = true;
+        self.invalidate(DirtyReason::Content);
         Ok(())
     }
 
@@ -349,7 +393,7 @@ impl Canvas {
             return false;
         }
         self.background.invalidate_texture();
-        self.dirty = true;
+        self.invalidate(DirtyReason::Surface);
         true
     }
 
@@ -361,7 +405,10 @@ impl Canvas {
             if shape_changed {
                 self.native.invalidate();
             }
-            self.dirty |= self.protected != protected || shape_changed || self.mouse != mouse;
+            self.invalidate_if(
+                self.protected != protected || shape_changed || self.mouse != mouse,
+                DirtyReason::Overlay,
+            );
             self.protected = protected;
             self.guard_dirty = false;
             self.mouse = mouse;
@@ -410,7 +457,7 @@ impl Canvas {
         mut timings: Option<&mut CanvasPaintTimings>,
     ) -> Result<bool, String> {
         let text_repaint = self.text_repaint_at.is_some_and(|at| Instant::now() >= at);
-        if !self.visible || !(options.smoke || self.dirty || self.animation || text_repaint) {
+        if !self.visible || !(options.smoke || self.dirty.any() || self.animation || text_repaint) {
             return Ok(false);
         }
         let on_output = self.on_output(options.smoke);
@@ -485,7 +532,7 @@ impl Canvas {
         } else {
             return Ok(false);
         }
-        self.dirty = false;
+        self.dirty.clear();
         Ok(true)
     }
 
