@@ -1680,8 +1680,8 @@ pub fn run(options: Options) -> Result<(), String> {
     with_autorelease_pool(|| run_inner(options))
 }
 
-const HOVER_FRAME_PERIOD: Duration = Duration::from_millis(22);
-const UI_FRAME_PERIOD: Duration = Duration::from_nanos(16_666_667);
+const HOVER_FRAME_PERIOD: Duration = Duration::from_nanos(1_000_000_000_u64.div_ceil(60));
+const UI_FRAME_PERIOD: Duration = Duration::from_nanos(1_000_000_000_u64.div_ceil(90));
 
 fn run_inner(options: Options) -> Result<(), String> {
     let base = state_dir();
@@ -3213,14 +3213,13 @@ fn run_inner(options: Options) -> Result<(), String> {
                 if pace_hover && saw_passive_mouse_motion {
                     next_hover_frame = Some(iteration_started + HOVER_FRAME_PERIOD);
                 } else {
-                    // Active strokes keep their requested frame rate. UI
-                    // animation and fading trails need at most 60 Hz.
+                    // Active strokes use the configured rate. Cap UI
+                    // animation and fading trails at 90 Hz.
                     let delay = if options.smoke || app.has_contacts() {
                         delay
                     } else {
-                        delay.max(
-                            (iteration_started + UI_FRAME_PERIOD).saturating_duration_since(now),
-                        )
+                        let period = pacer.period.max(UI_FRAME_PERIOD);
+                        delay.max((iteration_started + period).saturating_duration_since(now))
                     };
                     if let Some(monitor) = &mut performance {
                         monitor.counts.frame_sleeps += 1;
