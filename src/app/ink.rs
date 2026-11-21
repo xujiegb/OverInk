@@ -27,6 +27,9 @@ const EXTENDED_CACHE_POINTS: usize = 8192;
 // hover/overlay frames make their per-frame history tessellation expensive.
 const EXTENDED_HOT_FRAMES: u8 = 3;
 const EXTENDED_HOT_WINDOW: Duration = Duration::from_millis(900);
+// Cache a small FP16 document only if direct history replay actually costs
+// enough CPU to justify retaining a full-screen HDR render target.
+const EXTENDED_REPLAY_CACHE_THRESHOLD: Duration = Duration::from_micros(500);
 const EXTENDED_IDLE_EXPIRY: Duration = Duration::from_secs(20);
 
 use crate::sdl::InkTexture as Texture;
@@ -74,21 +77,37 @@ impl Ink {
         self.unavailable_at = None;
     }
 
-    fn observe_extended_paint(&mut self, now: Instant) {
-        self.consecutive_extended_paints = match self.last_extended_paint {
-            Some(previous) if now.duration_since(previous) <= EXTENDED_HOT_WINDOW => {
-                self.consecutive_extended_paints.saturating_add(1)
-            }
-            _ => 1,
-        };
-        if self
+    fn observe_extended_paint(&mut self, now: Instant, history_cost: Duration) {
+        let frequent = self
             .last_extended_paint
-            .is_some_and(|last| now.duration_since(last) >= EXTENDED_IDLE_EXPIRY)
+            .is_some_and(|previous| now.duration_since(previous) <= EXTENDED_HOT_WINDOW);
+        self.consecutive_extended_paints =
+            if frequent && history_cost >= EXTENDED_REPLAY_CACHE_THRESHOLD {
+                self.consecutive_extended_paints.saturating_add(1)
+            } else if history_cost >= EXTENDED_REPLAY_CACHE_THRESHOLD {
+                1
+            } else {
+                0
+            };
+        self.hot_extended_cache = self.consecutive_extended_paints >= EXTENDED_HOT_FRAMES;
+        self.last_extended_paint = Some(now);
+    }
+
+    /// The event loop wakes even without painting. Release an adaptive
+    /// full-screen FP16 layer after inactivity instead of retaining it until
+    /// the next mouse movement. Large documents keep their normal cache.
+    pub fn release_idle_extended_layer(&mut self) {
+        if self.hot_extended_cache
+            && self
+                .last_extended_paint
+                .is_some_and(|last| last.elapsed() >= EXTENDED_IDLE_EXPIRY)
         {
             self.hot_extended_cache = false;
+            self.consecutive_extended_paints = 0;
+            if self.extended_bytes() != 0 {
+                self.invalidate_layer();
+            }
         }
-        self.hot_extended_cache |= self.consecutive_extended_paints >= EXTENDED_HOT_FRAMES;
-        self.last_extended_paint = Some(now);
     }
 
     pub fn reset_textures(&mut self) {
@@ -135,8 +154,8 @@ impl Ink {
             extended_budget,
         };
         self.painter.queued = 0;
-        if renderer.extended && !app.has_contacts() && !app.history.strokes().is_empty() {
-            self.observe_extended_paint(Instant::now());
+        if renderer.extended && self.hot_extended_cache && !app.has_contacts() {
+            self.last_extended_paint = Some(Instant::now());
         }
         if background.frozen
             && !app.pass
@@ -254,7 +273,12 @@ impl Ink {
                 || (self.layer.is_none() && !extended_cache_needed(app, self.hot_extended_cache)))
         {
             self.invalidate_layer();
-            return self.painter.history(frame, app, 0, None, 1.);
+            let started = Instant::now();
+            let result = self.painter.history(frame, app, 0, None, 1.);
+            if result.is_ok() && renderer.extended && !app.has_contacts() {
+                self.observe_extended_paint(Instant::now(), started.elapsed());
+            }
+            return result;
         }
 
         if self
@@ -1059,13 +1083,18 @@ mod tests {
     fn repeated_hover_frames_warm_small_fp16_document_cache() {
         let mut ink = Ink::default();
         let now = Instant::now();
-        ink.observe_extended_paint(now);
+        ink.observe_extended_paint(now, Duration::from_micros(20));
         assert!(!ink.hot_extended_cache);
-        ink.observe_extended_paint(now + Duration::from_millis(10));
+        ink.observe_extended_paint(now + Duration::from_millis(10), Duration::from_millis(1));
         assert!(!ink.hot_extended_cache);
-        ink.observe_extended_paint(now + Duration::from_millis(20));
+        ink.observe_extended_paint(now + Duration::from_millis(20), Duration::from_millis(1));
+        assert!(!ink.hot_extended_cache);
+        ink.observe_extended_paint(now + Duration::from_millis(30), Duration::from_millis(1));
         assert!(ink.hot_extended_cache);
-        ink.observe_extended_paint(now + EXTENDED_IDLE_EXPIRY + Duration::from_secs(1));
+        ink.observe_extended_paint(
+            now + EXTENDED_IDLE_EXPIRY + Duration::from_secs(1),
+            Duration::from_micros(10),
+        );
         assert!(!ink.hot_extended_cache);
     }
 
