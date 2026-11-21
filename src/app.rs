@@ -1682,6 +1682,8 @@ fn run_inner(options: Options) -> Result<(), String> {
     let _runtime =
         with_autorelease_pool(|| Runtime::new(options.x11, preferences.wayland, options.smoke))?;
     let video = crate::sdl::driver();
+    #[cfg(target_os = "windows")]
+    let overlay_order = (!options.smoke).then(crate::native::OverlayOrderMonitor::start);
     let wayland = video == "wayland";
     let window =
         with_autorelease_pool(|| Window::new("OverInk - canvas", 1100, 720, !options.smoke))?;
@@ -1798,16 +1800,23 @@ fn run_inner(options: Options) -> Result<(), String> {
             let mut controller_scale_changed = false;
             let mut controller_moved = false;
             let mut controller_bounds_changed = false;
-            // A slideshow may become foreground after OverInk is already
-            // running. Losing focus must restore the canvas too, not only the
-            // controller (and not only after choosing a drawing tool).
-            let mut overlay_order_lost = false;
             let mut mode_changed = false;
+            #[cfg(target_os = "windows")]
+            let mut overlay_order_lost = false;
             // Keep the rest of this event batch modal even if Escape ends the screenshot.
             let screenshot_owns_input = app.screenshot.active();
             let mut event = SDL_Event::default();
             while poll_event(&mut event) {
                 let ty = event_type(&event);
+                #[cfg(target_os = "windows")]
+                if overlay_order
+                    .as_ref()
+                    .is_some_and(|monitor| monitor.changed(ty))
+                {
+                    overlay_order_lost = true;
+                    only_mouse_motion = false;
+                    continue;
+                }
                 if real_mouse_motion(&event).is_some_and(|motion| motion.state.0 == 0) {
                     saw_passive_mouse_motion = true;
                 } else {
@@ -1873,14 +1882,15 @@ fn run_inner(options: Options) -> Result<(), String> {
                         controller_scale_changed |= ty == SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED;
                         topology_dirty |= !options.smoke && (moved || controller_scale_changed);
                         toolbar_dirty |= redraw;
-                        // External full-screen windows can enter the topmost
-                        // band after our windows have been created.
-                        overlay_order_lost |= matches!(
-                            ty,
-                            SDL_EVENT_WINDOW_FOCUS_LOST
-                                | SDL_EVENT_WINDOW_SHOWN
-                                | SDL_EVENT_WINDOW_RESTORED
-                        );
+                        #[cfg(target_os = "windows")]
+                        {
+                            overlay_order_lost |= matches!(
+                                ty,
+                                SDL_EVENT_WINDOW_FOCUS_LOST
+                                    | SDL_EVENT_WINDOW_SHOWN
+                                    | SDL_EVENT_WINDOW_RESTORED
+                            );
+                        }
                         if matches!(
                             ty,
                             SDL_EVENT_WINDOW_FOCUS_GAINED | SDL_EVENT_WINDOW_FOCUS_LOST
@@ -1900,14 +1910,19 @@ fn run_inner(options: Options) -> Result<(), String> {
                             canvas.surface_changed();
                             toolbar_dirty = true;
                         }
-                        if matches!(
-                            ty,
-                            SDL_EVENT_WINDOW_SHOWN
-                                | SDL_EVENT_WINDOW_FOCUS_GAINED
-                                | SDL_EVENT_WINDOW_FOCUS_LOST
-                                | SDL_EVENT_WINDOW_RESTORED
-                        ) {
-                            overlay_order_lost = true;
+                        #[cfg(target_os = "windows")]
+                        {
+                            overlay_order_lost |= matches!(
+                                ty,
+                                SDL_EVENT_WINDOW_FOCUS_LOST
+                                    | SDL_EVENT_WINDOW_FOCUS_GAINED
+                                    | SDL_EVENT_WINDOW_SHOWN
+                                    | SDL_EVENT_WINDOW_RESTORED
+                            );
+                        }
+                        #[cfg(not(target_os = "windows"))]
+                        if matches!(ty, SDL_EVENT_WINDOW_SHOWN | SDL_EVENT_WINDOW_FOCUS_GAINED) {
+                            canvas.keep_toolbar_above(&toolbar);
                         }
                         if ty == SDL_EVENT_WINDOW_CLOSE_REQUESTED {
                             if app.screenshot.active() {
@@ -2301,7 +2316,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                                 Err(error) => app.screenshot.show_error(error),
                             }
                             if canvas.visible {
-                                canvas.window.raise();
+                                canvas.window.focus_keyboard();
                             }
                         }
                     }
@@ -2443,7 +2458,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 {
                     canvas.invalidate(DirtyReason::Overlay);
                     match result {
-                        Ok(true) => canvas.window.raise(),
+                        Ok(true) => canvas.window.focus_keyboard(),
                         Ok(false) => {
                             toolbar_dirty = true;
                             restore_toolbar_focus = true;
@@ -2916,6 +2931,10 @@ fn run_inner(options: Options) -> Result<(), String> {
                 || app.input.text.screen_keyboard_session();
             let mouse = !picker.choosing() && app.mouse_ready();
             let mut unsafe_layer = false;
+            #[cfg(target_os = "windows")]
+            let refresh_stack = !options.smoke
+                && !file_dialog.pending()
+                && (overlay_order_lost || mode_changed || controller_bounds_changed);
             let mut extended_ink_bytes: usize = canvases
                 .iter()
                 .map(canvas::Canvas::extended_ink_bytes)
@@ -2945,7 +2964,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                     visible && screenshot && (cmd.screenshot || !canvas.visible);
                 canvas.show(&toolbar, visible)?;
                 if raise_for_screenshot {
-                    canvas.window.raise();
+                    canvas.window.focus_keyboard();
                 }
                 if visible {
                     if index == active && restore_text_focus && app.input.text.editing() {
@@ -2958,6 +2977,19 @@ fn run_inner(options: Options) -> Result<(), String> {
                         app.status = canvas::failure(error);
                         unsafe_layer = true;
                         break;
+                    }
+                    #[cfg(target_os = "windows")]
+                    if !options.smoke {
+                        // Restore the interactive frame before D3D presents.
+                        if let Err(error) = canvas.apply_input(mouse) {
+                            app.status = canvas::failure(error);
+                            unsafe_layer = true;
+                            break;
+                        }
+                        if refresh_stack {
+                            canvas.window.raise();
+                            canvas.invalidate_if(overlay_order_lost, DirtyReason::Overlay);
+                        }
                     }
                     let frozen = canvas.background.frozen;
                     let history_before = app.history_buttons();
@@ -2994,31 +3026,13 @@ fn run_inner(options: Options) -> Result<(), String> {
                     toolbar_dirty |= frozen != canvas.background.frozen;
                     toolbar_dirty |= history_before != app.history_buttons();
                     toolbar_dirty |= selection_before != app.input.text.selected;
+                    #[cfg(not(target_os = "windows"))]
                     if !options.smoke
                         && let Err(error) = canvas.apply_input(mouse)
                     {
                         app.status = canvas::failure(error);
                         unsafe_layer = true;
                         break;
-                    }
-                }
-            }
-            if !unsafe_layer
-                && overlay_order_lost
-                && !mode_changed
-                && !toolbar_hidden
-                && !app.hidden
-                && !app.suspended
-                && !picker.active()
-                && !app.screenshot.active()
-                && !file_dialog.pending()
-            {
-                // Reassert both native windows after a focus/visibility change.
-                // Avoid doing it per-frame or on mouse motion; Windows uses
-                // SWP_NOACTIVATE so PowerPoint keeps accepting slide controls.
-                for canvas in &canvases {
-                    if canvas.visible {
-                        canvas.keep_toolbar_above(&toolbar);
                     }
                 }
             }
@@ -3030,13 +3044,20 @@ fn run_inner(options: Options) -> Result<(), String> {
                 for canvas in &mut canvases {
                     canvas.show(&toolbar, false)?;
                 }
-            } else if mode_changed || controller_bounds_changed || picker.choosing() {
-                let toolbar_display = toolbar.display_id();
-                if let Some(canvas) = canvases
-                    .iter()
-                    .find(|canvas| canvas.visible && (wayland || canvas.output == toolbar_display))
-                {
-                    canvas.keep_toolbar_above(&toolbar);
+            } else {
+                #[cfg(target_os = "windows")]
+                if refresh_stack && !toolbar_hidden {
+                    // Raise the toolbar last, above all visible canvases.
+                    toolbar.raise();
+                }
+                #[cfg(not(target_os = "windows"))]
+                if mode_changed || controller_bounds_changed || picker.choosing() {
+                    let toolbar_display = toolbar.display_id();
+                    if let Some(canvas) = canvases.iter().find(|canvas| {
+                        canvas.visible && (wayland || canvas.output == toolbar_display)
+                    }) {
+                        canvas.keep_toolbar_above(&toolbar);
+                    }
                 }
             }
             // Only a direct-finger re-tap or the annotation keyboard button

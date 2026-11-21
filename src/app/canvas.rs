@@ -385,13 +385,7 @@ impl Canvas {
         if toolbar.hidden() {
             return;
         }
-        // Win32 topmost ordering is desktop-wide, not per-monitor. A slide
-        // show on a second display must not cover that display's canvas even
-        // when the controller is parked on the primary display.
-        if cfg!(target_os = "windows")
-            || self.output == toolbar.display_id()
-            || driver() == "wayland"
-        {
+        if self.output == toolbar.display_id() || driver() == "wayland" {
             native::keep_controller_above(&self.window, toolbar, &self.native);
         }
     }
@@ -505,7 +499,7 @@ impl Canvas {
 
     pub fn focus_text_editor(&mut self) {
         if !self.window.input_focused() {
-            self.window.raise();
+            self.window.focus_keyboard();
         }
         self.text
             .get_or_insert_with(Gui::new)

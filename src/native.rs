@@ -14,6 +14,8 @@ pub use unix::Passthrough;
 #[derive(Default)]
 pub struct Passthrough {
     applied: Option<(SDL_WindowID, bool)>,
+    #[cfg(target_os = "windows")]
+    layered_for_passthrough: bool,
 }
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 impl Passthrough {
@@ -118,11 +120,13 @@ impl Passthrough {
             if style == 0 && GetLastError() != ERROR_SUCCESS {
                 return Err(std::io::Error::last_os_error().to_string());
             }
-            let desired = if pass {
-                style | WS_EX_TRANSPARENT.0 as isize | WS_EX_LAYERED.0 as isize
-            } else {
-                style & !(WS_EX_TRANSPARENT.0 as isize)
-            };
+            let (desired, layered_for_passthrough) = passthrough_style(
+                style,
+                pass,
+                self.layered_for_passthrough,
+                WS_EX_TRANSPARENT.0 as isize,
+                WS_EX_LAYERED.0 as isize,
+            );
             if desired != style {
                 SetLastError(ERROR_SUCCESS);
                 #[cfg(target_pointer_width = "64")]
@@ -133,7 +137,10 @@ impl Passthrough {
                     return Err(std::io::Error::last_os_error().to_string());
                 }
             }
-            // Refresh the style without raising the canvas over the toolbar.
+            // Track ownership as soon as the style changes, even if the next
+            // native call fails and we retry the input transition.
+            self.layered_for_passthrough = layered_for_passthrough;
+            // Changing a frame must not steal focus from a slideshow.
             SetWindowPos(
                 hwnd,
                 None,
@@ -149,6 +156,25 @@ impl Passthrough {
         Ok(())
     }
 }
+#[cfg(any(target_os = "windows", test))]
+fn passthrough_style(
+    style: isize,
+    pass: bool,
+    added_layered: bool,
+    transparent: isize,
+    layered: isize,
+) -> (isize, bool) {
+    if pass {
+        (
+            style | transparent | layered,
+            added_layered || style & layered == 0,
+        )
+    } else {
+        let remove = transparent | if added_layered { layered } else { 0 };
+        (style & !remove, false)
+    }
+}
+
 #[cfg(target_os = "macos")]
 #[deny(clippy::undocumented_unsafe_blocks)]
 impl Passthrough {
@@ -211,97 +237,185 @@ pub fn keep_controller_above(canvas: &Window, controller: &Window, _native: &Pas
     let _ = canvas;
     #[cfg(target_os = "windows")]
     {
-        use windows::Win32::{
-            Foundation::HWND,
-            UI::WindowsAndMessaging::{
-                HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
-                SetWindowPos,
-            },
-        };
-        if let (Some(surface), Some(control)) = (canvas.win32_hwnd(), controller.win32_hwnd()) {
-            // Restore the canvas first, then the controller. PowerPoint's slide
-            // show may itself be topmost: raising only the controller leaves
-            // the transparent drawing surface behind the presentation.
-            // SAFETY: Both HWNDs belong to live SDL windows. These two typed
-            // SetWindowPos calls use SWP_NOACTIVATE, so the slide show keeps
-            // foreground focus; no new native callbacks or pointer ownership.
-            unsafe {
-                let flags = SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
-                let _ = SetWindowPos(
-                    HWND(surface.as_non_null().as_ptr()),
-                    Some(HWND_TOPMOST),
-                    0,
-                    0,
-                    0,
-                    0,
-                    flags,
-                );
-                let _ = SetWindowPos(
-                    HWND(control.as_non_null().as_ptr()),
-                    Some(HWND_TOPMOST),
-                    0,
-                    0,
-                    0,
-                    0,
-                    flags,
-                );
-            }
-        }
+        let _ = raise_win32_overlay(controller);
     }
     #[cfg(target_os = "macos")]
-    {
-        use objc2::{msg_send, runtime::AnyObject};
+    macos::overink_macos_order_toolbar(canvas.id.0, controller.id.0);
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    _native.raise_controller(controller);
+}
 
-        let window = controller.cocoa_window();
-        let under = canvas.cocoa_window();
-        if let (Some(window), Some(under)) = (window, under) {
-            // SAFETY: Both pointers are SDL-owned live Cocoa NSWindows. The
-            // selectors have these NSInteger/void signatures on macOS.
-            // objc2 performs typed sends, avoiding untyped objc_msgSend casts.
-            unsafe {
-                let window = window.as_non_null().as_ptr().cast::<AnyObject>();
-                let under = under.as_non_null().as_ptr().cast::<AnyObject>();
-                // Keep both SDL windows in another application's full-screen
-                // Space (e.g. a PowerPoint slide show). Ordinary always-on-top
-                // windows alone don't join that Space. macOS 13+ understands
-                // CanJoinAllApplications; older releases retain the all-Spaces
-                // / full-screen auxiliary behavior.
-                const ALL_SPACES: usize = 1 << 0;
-                const MOVE_TO_ACTIVE_SPACE: usize = 1 << 1;
-                const FULLSCREEN_PRIMARY: usize = 1 << 7;
-                const FULLSCREEN_AUXILIARY: usize = 1 << 8;
-                const FULLSCREEN_NONE: usize = 1 << 9;
-                const STAGE_PRIMARY: usize = 1 << 16;
-                const STAGE_AUXILIARY: usize = 1 << 17;
-                const ALL_APPLICATIONS: usize = 1 << 18;
-                for native_window in [under, window] {
-                    let behavior: usize = msg_send![native_window, collectionBehavior];
-                    let expected = (behavior
-                        & !(MOVE_TO_ACTIVE_SPACE
-                            | FULLSCREEN_PRIMARY
-                            | FULLSCREEN_NONE
-                            | STAGE_PRIMARY
-                            | STAGE_AUXILIARY))
-                        | ALL_SPACES
-                        | FULLSCREEN_AUXILIARY
-                        | ALL_APPLICATIONS;
-                    if behavior != expected {
-                        let _: () = msg_send![native_window, setCollectionBehavior: expected];
+#[cfg(target_os = "windows")]
+type WinEventHook = windows::core::Owned<windows::Win32::UI::Accessibility::HWINEVENTHOOK>;
+
+#[cfg(target_os = "windows")]
+static OVERLAY_ORDER_EVENT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+#[cfg(target_os = "windows")]
+pub struct OverlayOrderMonitor {
+    _hooks: [Option<WinEventHook>; 2],
+    event: u32,
+    _main_thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+#[cfg(target_os = "windows")]
+impl OverlayOrderMonitor {
+    pub fn start() -> Self {
+        let event = register_user_event();
+        let mut hooks = [None, None];
+        if event != 0 {
+            OVERLAY_ORDER_EVENT.store(event, std::sync::atomic::Ordering::Relaxed);
+            let _ = win32_overlay(Win32Overlay::Watch(&mut hooks));
+        }
+        Self {
+            _hooks: hooks,
+            event,
+            _main_thread: std::marker::PhantomData,
+        }
+    }
+
+    pub fn changed(&self, ty: SDL_EventType) -> bool {
+        self.event != 0 && ty.0 == self.event
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for OverlayOrderMonitor {
+    fn drop(&mut self) {
+        OVERLAY_ORDER_EVENT.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn notify_overlay_order_changed() {
+    let event = OVERLAY_ORDER_EVENT.load(std::sync::atomic::Ordering::Relaxed);
+    if event != 0 {
+        push_user_event(event);
+    }
+}
+
+#[cfg(target_os = "windows")]
+extern "system" fn win32_window_event(
+    _hook: windows::Win32::UI::Accessibility::HWINEVENTHOOK,
+    event: u32,
+    window: windows::Win32::Foundation::HWND,
+    object: i32,
+    child: i32,
+    _thread: u32,
+    _time: u32,
+) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CHILDID_SELF, EVENT_OBJECT_SHOW, EVENT_SYSTEM_FOREGROUND, OBJID_WINDOW,
+    };
+    if window.is_invalid() || object != OBJID_WINDOW.0 || child != CHILDID_SELF as i32 {
+        return;
+    }
+    // Only the SDL event loop changes window order. The native callback
+    // checks whether a newly shown window can cover the overlay.
+    match event {
+        EVENT_SYSTEM_FOREGROUND => notify_overlay_order_changed(),
+        EVENT_OBJECT_SHOW => {
+            let _ = win32_overlay(Win32Overlay::WindowShown(window));
+        }
+        _ => {}
+    }
+}
+
+#[cfg(target_os = "windows")]
+enum Win32Overlay<'a> {
+    Raise(&'a Window),
+    Watch(&'a mut [Option<WinEventHook>; 2]),
+    WindowShown(windows::Win32::Foundation::HWND),
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn raise_win32_overlay(window: &Window) -> Result<(), String> {
+    win32_overlay(Win32Overlay::Raise(window))
+}
+
+#[cfg(target_os = "windows")]
+#[deny(clippy::undocumented_unsafe_blocks)]
+fn win32_overlay(command: Win32Overlay<'_>) -> Result<(), String> {
+    use windows::Win32::{
+        Foundation::{HWND, RECT},
+        Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONULL, MONITORINFO, MonitorFromWindow},
+        UI::{
+            Accessibility::SetWinEventHook,
+            WindowsAndMessaging::{
+                EVENT_OBJECT_SHOW, EVENT_SYSTEM_FOREGROUND, GA_ROOT, GWL_EXSTYLE, GetAncestor,
+                GetWindowLongW, GetWindowRect, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE,
+                SWP_NOOWNERZORDER, SWP_NOSIZE, SetWindowPos, WINEVENT_OUTOFCONTEXT,
+                WINEVENT_SKIPOWNPROCESS, WS_EX_TOPMOST,
+            },
+        },
+    };
+    // SAFETY: Raise borrows a live SDL-owned HWND. Watch uses a static
+    // out-of-context callback and unhooks on the installing thread.
+    // WindowShown queries a WinEvent HWND through checked Win32 APIs; both
+    // output structures are initialized and remain live for the queries.
+    unsafe {
+        match command {
+            Win32Overlay::Raise(window) => {
+                let handle = window.win32_hwnd().ok_or("No Win32 window handle")?;
+                SetWindowPos(
+                    HWND(handle.as_non_null().as_ptr()),
+                    Some(HWND_TOPMOST),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+                )
+                .map_err(|error| error.to_string())
+            }
+            Win32Overlay::Watch(owners) => {
+                for (owner, event) in owners
+                    .iter_mut()
+                    .zip([EVENT_SYSTEM_FOREGROUND, EVENT_OBJECT_SHOW])
+                {
+                    let hook = SetWinEventHook(
+                        event,
+                        event,
+                        None,
+                        Some(win32_window_event),
+                        0,
+                        0,
+                        WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+                    );
+                    if !hook.is_invalid() {
+                        *owner = Some(windows::core::Owned::new(hook));
                     }
                 }
-                let canvas_level: isize = msg_send![under, level];
-                let level = canvas_level.saturating_add(1);
-                let current_level: isize = msg_send![window, level];
-                if current_level != level {
-                    let _: () = msg_send![window, setLevel: level];
+                Ok(())
+            }
+            Win32Overlay::WindowShown(window) => {
+                // Ignore child objects, ordinary dialogs and floating tools.
+                // A topmost slide window can appear without taking foreground.
+                if GetWindowLongW(window, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0 == 0
+                    || GetAncestor(window, GA_ROOT) != window
+                {
+                    return Ok(());
                 }
-                let number: isize = msg_send![under, windowNumber];
-                let _: () = msg_send![window, orderWindow: 1isize, relativeTo: number];
+                let display = MonitorFromWindow(window, MONITOR_DEFAULTTONULL);
+                let mut monitor = MONITORINFO {
+                    cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                    ..Default::default()
+                };
+                let mut bounds = RECT::default();
+                if !display.is_invalid()
+                    && GetMonitorInfoW(display, &mut monitor).as_bool()
+                    && GetWindowRect(window, &mut bounds).is_ok()
+                    && bounds.left <= monitor.rcMonitor.left
+                    && bounds.top <= monitor.rcMonitor.top
+                    && bounds.right >= monitor.rcMonitor.right
+                    && bounds.bottom >= monitor.rcMonitor.bottom
+                {
+                    notify_overlay_order_changed();
+                }
+                Ok(())
             }
         }
     }
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    _native.raise_controller(controller);
 }
 
 pub fn show_canvas(canvas: &Window, controller: &Window, shown: bool) -> Result<(), String> {
@@ -383,7 +497,24 @@ pub fn controller_bounds(canvas: &Window, controller: &Window) -> Option<[f32; 4
 
 #[cfg(test)]
 mod tests {
-    use super::checked_native_rect_size;
+    use super::{checked_native_rect_size, passthrough_style};
+
+    #[test]
+    fn switching_back_to_ink_restores_the_original_win32_layered_style() {
+        let transparent = 0x20;
+        let layered = 0x80000;
+        let topmost = 0x8;
+        for original in [topmost, topmost | layered] {
+            let (pass, added) = passthrough_style(original, true, false, transparent, layered);
+            assert_eq!(pass, topmost | transparent | layered);
+            let (retry, added) = passthrough_style(pass, true, added, transparent, layered);
+            assert_eq!(retry, pass);
+            assert_eq!(
+                passthrough_style(retry, false, added, transparent, layered),
+                (original, false)
+            );
+        }
+    }
 
     #[test]
     fn win32_rectangle_dimensions_are_checked_without_overflow() {

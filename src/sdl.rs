@@ -87,7 +87,7 @@ enum SdlNativeAction<'a> {
     ModState,
     DelayPrecise(u64),
     ScreenshotTimestamp,
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
     RegisterUserEvent,
     Shutdown,
     FreeAllocation(NonNull<c_void>),
@@ -129,7 +129,7 @@ enum SdlNativeAction<'a> {
     MouseButtonsReleased,
     PollEvent(&'a mut SDL_Event),
     WaitEvent(i32),
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
     PushUserEvent(&'a mut SDL_Event),
     #[cfg(target_os = "macos")]
     PushMacosTouch(&'a mut SDL_Event),
@@ -141,7 +141,7 @@ enum SdlNativeResult {
     Done,
     ModState(SDL_Keymod),
     ScreenshotTimestamp(String),
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
     EventType(u32),
     Properties(SDL_PropertiesID),
     Cursor(Option<NonNull<SDL_Cursor>>),
@@ -254,7 +254,7 @@ impl SdlNativeResult {
         }
     }
 
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
     fn event_type(self) -> u32 {
         if let Self::EventType(ty) = self {
             ty
@@ -313,7 +313,7 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
                 };
                 SdlNativeResult::ScreenshotTimestamp(stem)
             }
-            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
             SdlNativeAction::RegisterUserEvent => SdlNativeResult::EventType(SDL_RegisterEvents(1)),
             SdlNativeAction::Shutdown => {
                 SDL_Quit();
@@ -360,6 +360,10 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
             }
             SdlNativeAction::DestroyWindow(id, window) => {
                 if SDL_GetWindowFromID(id) == window.as_ptr() {
+                    #[cfg(target_os = "macos")]
+                    if crate::native::macos::overink_macos_destroy_overlay(id.0) {
+                        return SdlNativeResult::Done;
+                    }
                     SDL_DestroyWindow(window.as_ptr());
                 }
                 SdlNativeResult::Done
@@ -576,7 +580,7 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
             SdlNativeAction::WaitEvent(timeout) => {
                 SdlNativeResult::Success(SDL_WaitEventTimeout(ptr::null_mut(), timeout))
             }
-            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
             SdlNativeAction::PushUserEvent(event) => SdlNativeResult::Success(SDL_PushEvent(event)),
             #[cfg(target_os = "macos")]
             SdlNativeAction::PushMacosTouch(event) => {
@@ -689,6 +693,8 @@ impl Runtime {
             SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, c"1".as_ptr());
             // A canvas drag must release on entering the separate controller.
             SDL_SetHint(SDL_HINT_MOUSE_AUTO_CAPTURE, c"0".as_ptr());
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, c"0".as_ptr());
             SDL_SetHint(SDL_HINT_IME_IMPLEMENTED_UI, c"composition".as_ptr());
             let version = cstring(crate::VERSION);
             SDL_SetAppMetadata(
@@ -970,7 +976,7 @@ pub fn system_theme() -> SDL_SystemTheme {
 }
 
 /// Reserve one user event type while the video subsystem is active.
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
 pub fn register_user_event() -> u32 {
     if !is_main_thread() || !SDL_VIDEO_READY.load(std::sync::atomic::Ordering::Acquire) {
         return 0;
@@ -978,9 +984,8 @@ pub fn register_user_event() -> u32 {
     sdl_native(SdlNativeAction::RegisterUserEvent).event_type()
 }
 
-/// Only registered SDL user event types may be used to wake the portal
-/// monitor; safe callers can no longer enqueue an arbitrary SDL union.
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+/// Only registered user event types may wake the main SDL loop; safe callers can no longer enqueue an arbitrary SDL union.
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
 pub fn push_user_event(ty: u32) -> bool {
     if !(SDL_EVENT_USER.0..SDL_EVENT_LAST.0).contains(&ty) {
         return false;
@@ -1252,6 +1257,8 @@ impl SystemCursor {
             let _ = sdl_native(SdlNativeAction::DestroyCursor(cursor));
             return None;
         }
+        #[cfg(target_os = "macos")]
+        crate::native::macos::overink_macos_overlay_crosshair(true);
         Some(Self(cursor))
     }
 }
@@ -1263,6 +1270,8 @@ impl Drop for SystemCursor {
         if sdl_native(SdlNativeAction::CurrentCursor).cursor() == Some(self.0) {
             let default = sdl_native(SdlNativeAction::DefaultCursor).cursor();
             let _ = sdl_native(SdlNativeAction::SetCursor(default));
+            #[cfg(target_os = "macos")]
+            crate::native::macos::overink_macos_overlay_crosshair(false);
         }
         let _ = sdl_native(SdlNativeAction::DestroyCursor(self.0));
     }
@@ -1377,7 +1386,9 @@ enum WindowCommand<'a> {
         h: i32,
     },
     AlwaysOnTop(bool),
-    RaiseIfCurrent,
+    RaiseIfCurrent {
+        keyboard: bool,
+    },
     Show(bool),
     SetParent(Option<&'a Window>),
     ToolbarSetup([i32; 2], &'a mut [u8]),
@@ -1602,9 +1613,18 @@ impl Window {
                     let _ = SDL_SetWindowAlwaysOnTop(self.raw.as_ptr(), enabled);
                     Ok(())
                 }
-                WindowCommand::RaiseIfCurrent => {
+                WindowCommand::RaiseIfCurrent { keyboard } => {
                     let window = SDL_GetWindowFromID(self.id);
                     if !window.is_null() && window == self.raw.as_ptr() {
+                        #[cfg(target_os = "macos")]
+                        if crate::native::macos::overink_macos_raise_overlay(self.id.0, keyboard) {
+                            return Ok(());
+                        }
+                        #[cfg(target_os = "windows")]
+                        if !keyboard && !self.hidden() && self.win32_hwnd().is_some() {
+                            return crate::native::raise_win32_overlay(self);
+                        }
+                        let _ = keyboard;
                         SDL_RaiseWindow(window);
                     }
                     Ok(())
@@ -1615,7 +1635,12 @@ impl Window {
                         SDL_ShowWindow(self.raw.as_ptr())
                     } else {
                         SDL_HideWindow(self.raw.as_ptr())
-                    })
+                    })?;
+                    #[cfg(target_os = "macos")]
+                    if show {
+                        crate::native::macos::overink_macos_raise_overlay(self.id.0, false);
+                    }
+                    Ok(())
                 }
                 WindowCommand::SetParent(parent) => {
                     let raw = parent.map_or(ptr::null_mut(), |window| window.raw.as_ptr());
@@ -1833,7 +1858,11 @@ impl Window {
     }
 
     pub fn raise(&self) {
-        let _ = self.run_command(WindowCommand::RaiseIfCurrent);
+        let _ = self.run_command(WindowCommand::RaiseIfCurrent { keyboard: false });
+    }
+
+    pub fn focus_keyboard(&self) {
+        let _ = self.run_command(WindowCommand::RaiseIfCurrent { keyboard: true });
     }
 
     pub fn input_focused(&self) -> bool {
@@ -1877,6 +1906,26 @@ impl Window {
                         flags |= SDL_WINDOW_BORDERLESS | SDL_WINDOW_TRANSPARENT;
                     }
                     SDL_ClearError();
+                    #[cfg(target_os = "macos")]
+                    if *overlay && driver() == "cocoa" {
+                        let id =
+                            crate::native::macos::overink_macos_create_overlay(*w, *h, flags.0);
+                        if id == 0 {
+                            return Err(format!(
+                                "Creating the nonactivating {} panel failed ({})",
+                                title.to_string_lossy(),
+                                error()
+                            ));
+                        }
+                        let id = SDL_WindowID(id);
+                        let raw = NonNull::new(SDL_GetWindowFromID(id))
+                            .ok_or("SDL could not find the Cocoa panel it just created")?;
+                        // SDL's Cocoa wrapper infers the border flag from the
+                        // style mask, which now also has NonactivatingPanel.
+                        SDL_SetWindowBordered(raw.as_ptr(), false);
+                        SDL_SetWindowTitle(raw.as_ptr(), title.as_ptr());
+                        return Ok(Self { raw, id });
+                    }
                     SDL_CreateWindow(title.as_ptr(), *w, *h, flags)
                 }
                 WindowCreation::Tooltip(parent, [x, y, w, h]) => SDL_CreatePopupWindow(
