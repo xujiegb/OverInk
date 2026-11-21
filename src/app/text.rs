@@ -124,6 +124,9 @@ pub(super) struct TextInput {
     touch_press: bool,
     touch_origin: Option<Pos2>,
     menu_pointer: MenuPointer,
+    // The last highlighted annotation action, in canvas coordinates.
+    // Cross-button motion still repaints; motion inside it need not.
+    hovered_control: Option<Rect>,
     context_menu: Option<Pos2>,
     color_wheel: Option<ColorWheel>,
     screen_pick_requested: bool,
@@ -422,22 +425,29 @@ impl App {
 
         let ty = event_type(event);
         let editing = self.input.text.editing();
-        // The keyboard's hover highlight changes only at key boundaries.
-        // Reprocessing motion *within* one key would unnecessarily redraw
-        // the whole transparent canvas and re-layout every text box.
-        // Never suppress a drag, pen/touch input, or the Emoji pager's
-        // position-dependent hover/scrubbing interactions.
-        if editing
-            && ty == SDL_EVENT_MOUSE_MOTION
+        // A highlighted key or annotation action remains visually unchanged
+        // while the pointer is inside its rect. Preserve pointer drags,
+        // press/release sequences, and emoji paging/scrubbing.
+        if ty == SDL_EVENT_MOUSE_MOTION
             && let Some(motion) = mouse_motion_event(event)
             && motion.windowID == window
             && motion.which != SDL_TOUCH_MOUSEID
             && motion.which != SDL_PEN_MOUSEID
-            && self
-                .input
-                .text
-                .osk
-                .motion_inside_hovered_key(pos2(motion.x, motion.y))
+            && self.input.text.press.is_none()
+            && (editing
+                && self
+                    .input
+                    .text
+                    .osk
+                    .motion_inside_hovered_key(pos2(motion.x, motion.y))
+                || self
+                    .input
+                    .text
+                    .hovered_control
+                    .is_some_and(|rect| rect.contains(pos2(motion.x, motion.y))))
+            // A prior move in this SDL batch can target another control.
+            // Keep the final position instead of reusing stale hover geometry.
+            && !gui.raw.events.iter().any(|event| matches!(event, Event::PointerMoved(_)))
             && !gui.ctx.input(|input| input.pointer.any_down())
             && !gui
                 .raw
@@ -449,6 +459,12 @@ impl App {
         }
         if !editing && self.input.text.selected.is_none() {
             gui.clear_events();
+        }
+        // Annotations use per-event menu hit tests and can enter and leave
+        // multiple controls in one SDL event batch. Unlike the independent
+        // main toolbar, the text canvas must keep those pointer transitions.
+        if ty == SDL_EVENT_MOUSE_MOTION {
+            gui.preserve_pointer_transitions();
         }
         let first = gui.raw.events.len();
         let mut changed = false;
@@ -1065,7 +1081,7 @@ impl App {
         menu.spacing_mut().item_spacing.x = MENU_GAP * scale;
         menu.spacing_mut().button_padding = vec2(5., 4.) * scale;
         let mut acted = false;
-        if annotation_icon_button(
+        let delete = annotation_icon_button(
             &mut menu,
             button,
             ActionIcon::Delete,
@@ -1073,9 +1089,11 @@ impl App {
         )
         .on_hover_text(
             egui::RichText::new(tr.text("Delete text box")).size(toolbar::MENU_FONT_SIZE * scale),
-        )
-        .clicked()
-        {
+        );
+        if delete.hovered() {
+            self.input.text.hovered_control = Some(delete.rect);
+        }
+        if delete.clicked() {
             acted = self.delete_text_box();
         }
         for (icon, hint, step, enabled) in [
@@ -1092,12 +1110,14 @@ impl App {
                 font_size > *TextBox::FONT_SIZE.start(),
             ),
         ] {
-            if menu
+            let response = menu
                 .add_enabled_ui(enabled, |ui| annotation_icon_button(ui, button, icon, hint))
                 .inner
-                .on_hover_text(egui::RichText::new(hint).size(toolbar::MENU_FONT_SIZE * scale))
-                .clicked()
-            {
+                .on_hover_text(egui::RichText::new(hint).size(toolbar::MENU_FONT_SIZE * scale));
+            if response.hovered() {
+                self.input.text.hovered_control = Some(response.rect);
+            }
+            if response.clicked() {
                 self.resize_text_font(step);
                 acted = true;
             }
@@ -1105,10 +1125,15 @@ impl App {
         for rgb in PRESETS {
             let preset = InkColor::from_rgb8(rgb);
             let label = format!("{} {}", tr.text("Text color"), preset.hex());
-            if toolbar::swatch_button(&mut menu, button, rgb, &label, color.srgb8() == rgb)
-                .on_hover_text(egui::RichText::new(label).size(toolbar::MENU_FONT_SIZE * scale))
-                .clicked()
-            {
+            let response =
+                toolbar::swatch_button(&mut menu, button, rgb, &label, color.srgb8() == rgb)
+                    .on_hover_text(
+                        egui::RichText::new(label).size(toolbar::MENU_FONT_SIZE * scale),
+                    );
+            if response.hovered() {
+                self.input.text.hovered_control = Some(response.rect);
+            }
+            if response.clicked() {
                 acted |= self.recolor_text(preset.converted(color.space));
                 self.input.text.color_wheel = None;
             }
@@ -1119,6 +1144,9 @@ impl App {
         keyboard_response.widget_info(|| {
             egui::WidgetInfo::labeled(egui::Role::Button, menu.is_enabled(), keyboard_label)
         });
+        if keyboard_response.hovered() {
+            self.input.text.hovered_control = Some(keyboard_response.rect);
+        }
         if keyboard_response.hovered() || keyboard_response.has_focus() {
             menu.painter().rect_filled(
                 icon_rect,
@@ -1157,6 +1185,9 @@ impl App {
         response.widget_info(|| {
             egui::WidgetInfo::selected(egui::Role::Button, menu.is_enabled(), wheel_open, label)
         });
+        if response.hovered() {
+            self.input.text.hovered_control = Some(response.rect);
+        }
         if wheel_open || response.hovered() || response.has_focus() {
             menu.painter()
                 .rect_filled(icon, 6. * scale, menu.visuals().widgets.hovered.bg_fill);
@@ -1269,6 +1300,7 @@ impl App {
         composing: bool,
         keep_editor_open: bool,
     ) {
+        self.input.text.hovered_control = None;
         let selected = self.input.text.selected;
         let draft = self.input.text.draft.as_ref();
         let preview = self
@@ -2873,6 +2905,48 @@ mod tests {
         menu_click(&mut app, 0.);
         assert!(!app.input.text.editing());
         assert!(app.history.text_boxes().is_empty());
+    }
+
+    #[test]
+    fn same_annotation_action_hover_is_inert_but_click_is_not() {
+        let mut app = app();
+        let mut gui = Gui::new();
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::from(SIZE));
+        let mut item = TextBox::new(pos2(350., 100.), screen, InkColor::default(), 1.);
+        item.text = "Annotation".into();
+        app.input.text.selected = app.history.set_text_box(None, item);
+        let Some(menus) = app.text_menus(screen) else {
+            panic!("expected selected annotation action menu");
+        };
+        let area = Rect::from_min_size(
+            menus.actions.min + vec2(MENU_PADDING, MENU_PADDING) * menus.scale,
+            MENU_BUTTON * menus.scale,
+        );
+        app.input.text.hovered_control = Some(area);
+        let window = SDL_WindowID(1);
+        let motion = SDL_Event {
+            motion: SDL_MouseMotionEvent {
+                r#type: SDL_EVENT_MOUSE_MOTION,
+                windowID: window,
+                x: area.center().x,
+                y: area.center().y,
+                ..Default::default()
+            },
+        };
+        assert!(!app.text_event(&mut gui, &motion, window, SIZE));
+        assert!(gui.raw.events.is_empty());
+        let pressed = SDL_Event {
+            button: SDL_MouseButtonEvent {
+                r#type: SDL_EVENT_MOUSE_BUTTON_DOWN,
+                windowID: window,
+                button: SDL_BUTTON_LEFT as u8,
+                x: area.center().x,
+                y: area.center().y,
+                down: true,
+                ..Default::default()
+            },
+        };
+        assert!(app.text_event(&mut gui, &pressed, window, SIZE));
     }
 
     #[test]

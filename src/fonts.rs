@@ -46,6 +46,14 @@ struct CustomFont {
 pub struct SystemFont {
     pub name: String,
     pub path: PathBuf,
+    // Avoid allocating a lowercase copy for every row on every hover frame.
+    search_name: String,
+}
+
+impl SystemFont {
+    pub fn matches_search(&self, lower_query: &str) -> bool {
+        self.search_name.contains(lower_query)
+    }
 }
 
 struct FontFace {
@@ -596,7 +604,11 @@ pub fn installed_system_fonts() -> Vec<SystemFont> {
     }
     available
         .into_iter()
-        .map(|(name, path)| SystemFont { name, path })
+        .map(|(name, path)| SystemFont {
+            search_name: name.to_lowercase(),
+            name,
+            path,
+        })
         .collect()
 }
 

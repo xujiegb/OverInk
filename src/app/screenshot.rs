@@ -233,6 +233,9 @@ pub struct Screenshot {
     cancel_blocked: bool,
     replace: Option<PathBuf>,
     save_dialog: bool,
+    // Captured from egui's actual layout instead of estimating localized button widths.
+    menu_rect: Option<Rect>,
+    hovered_button: Option<Rect>,
 }
 
 impl Screenshot {
@@ -246,6 +249,8 @@ impl Screenshot {
             1.
         };
         self.stage = Stage::Selecting(None);
+        self.menu_rect = None;
+        self.hovered_button = None;
         // Release the old cursor before creating its replacement: the old
         // guard's Drop must not reset the newly selected crosshair.
         self.cursor = None;
@@ -323,6 +328,27 @@ impl Screenshot {
         self.cancel_blocked = false;
         self.replace = None;
         self.save_dialog = false;
+        self.menu_rect = None;
+        self.hovered_button = None;
+    }
+
+    // Keep mouse hover feedback, but don't re-render the fullscreen screenshot
+    // for movement within one highlighted button or an inert screen region.
+    // Button-down/drag motion must continue reaching egui for click cancellation.
+    pub fn ignores_hover_motion(&self, event: &SDL_Event, buttons_released: bool) -> bool {
+        if !self.ready() || !buttons_released {
+            return false;
+        }
+        let Some(motion) = mouse_motion_event(event) else {
+            return false;
+        };
+        if motion.which == SDL_TOUCH_MOUSEID || motion.which == SDL_PEN_MOUSEID {
+            return false;
+        }
+        let point = pos2(motion.x, motion.y);
+        self.hovered_button.is_some_and(|rect| rect.contains(point))
+            || (self.hovered_button.is_none()
+                && self.menu_rect.is_some_and(|rect| !rect.contains(point)))
     }
 
     pub fn event(&mut self, event: &SDL_Event, window: &Window, touch_enabled: bool) -> bool {
@@ -470,6 +496,8 @@ impl Screenshot {
     }
 
     pub fn ui(&mut self, ui: &mut Ui, tr: Language, units: f32) {
+        self.hovered_button = None;
+        self.menu_rect = None;
         let screen = ui.clip_rect();
         let region = match self.stage {
             Stage::Selecting(drag) => {
@@ -496,6 +524,7 @@ impl Screenshot {
         let size = MENU_SIZE + vec2(0., if detail.is_some() { 26. } else { 0. });
         let scale = toolbar::menu_scale(screen, size, units);
         let rect = toolbar::context_menu_rect(region, screen, size * scale, None, scale);
+        self.menu_rect = Some(rect);
         ui.painter().rect(
             rect,
             8. * scale,
@@ -524,13 +553,14 @@ impl Screenshot {
             ] {
                 let enabled =
                     !self.save_dialog && (!saving || matches!(action, MenuAction::Cancel));
-                if ui
-                    .add_enabled(
-                        enabled,
-                        toolbar::menu_button(label, scale).min_size(MENU_BUTTON * scale),
-                    )
-                    .clicked()
-                {
+                let response = ui.add_enabled(
+                    enabled,
+                    toolbar::menu_button(label, scale).min_size(MENU_BUTTON * scale),
+                );
+                if response.hovered() {
+                    self.hovered_button = Some(response.rect);
+                }
+                if response.clicked() {
                     self.action = Some(action);
                 }
             }
@@ -885,6 +915,38 @@ mod tests {
             }]);
         }
         assert!(matches!(screenshot.action(), Some(MenuAction::SaveAs)));
+        Ok(())
+    }
+
+    #[test]
+    fn screenshot_hover_filters_only_stable_hit_regions() -> TestResult {
+        let mut screenshot = Screenshot {
+            stage: Stage::Ready(
+                Rect::from_min_size(Pos2::ZERO, vec2(200., 100.)),
+                Arc::new(Image::buffer(1, 1)?),
+            ),
+            menu_rect: Some(Rect::from_min_size(pos2(20., 20.), vec2(150., 40.))),
+            hovered_button: Some(Rect::from_min_size(pos2(25., 25.), vec2(40., 30.))),
+            ..Default::default()
+        };
+        let motion = |x, y| SDL_Event {
+            motion: SDL_MouseMotionEvent {
+                r#type: SDL_EVENT_MOUSE_MOTION,
+                windowID: SDL_WindowID(1),
+                x,
+                y,
+                ..Default::default()
+            },
+        };
+        // The UI has already highlighted the same button.
+        assert!(screenshot.ignores_hover_motion(&motion(40., 35.), true));
+        // A different button needs a new hover frame.
+        assert!(!screenshot.ignores_hover_motion(&motion(85., 35.), true));
+        // Leaving the last highlighted button must clear its visual state.
+        assert!(!screenshot.ignores_hover_motion(&motion(180., 80.), true));
+        screenshot.hovered_button = None;
+        assert!(screenshot.ignores_hover_motion(&motion(180., 80.), true));
+        assert!(!screenshot.ignores_hover_motion(&motion(85., 35.), true));
         Ok(())
     }
 

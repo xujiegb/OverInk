@@ -21,7 +21,7 @@ env:
 
 jobs:
   prepare:
-    name: Validate release version
+    name: Validate version and Rust formatting
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -40,6 +40,15 @@ jobs:
             exit 1
           fi
           printf 'version=%s\ntag=v%s\n' "$version" "$version" >> "$GITHUB_OUTPUT"
+      # All build jobs already depend on prepare. A single format failure must
+      # not start the entire cross-platform matrix and waste every runner.
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt
+      - name: Check Rust formatting before matrix builds
+        run: cargo fmt --all -- --check
 
   desktop:
     needs: prepare

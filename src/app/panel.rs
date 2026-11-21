@@ -629,10 +629,7 @@ impl App {
                     .id_salt("installed-fonts")
                     .max_height(180.)
                     .show(ui, |ui| {
-                        for font in catalog
-                            .iter()
-                            .filter(|font| font.name.to_lowercase().contains(&filter))
-                        {
+                        for font in catalog.iter().filter(|font| font.matches_search(&filter)) {
                             if ui.selectable_label(false, &font.name).clicked() {
                                 commands.font_path = Some(font.path.clone());
                                 added = true;

@@ -4,7 +4,7 @@ use crate::{appearance::Language, model::Tool};
 use egui::{Color32, Pos2, Rect, Response, Sense, Stroke, Ui, Vec2, vec2};
 
 mod tooltip;
-pub use tooltip::{Tooltips, hint};
+pub use tooltip::{Tooltips, clear_hover, hint, hovered_rect};
 
 pub const WIDTH: f32 = 56.;
 pub const HEIGHT: f32 = 610.;
