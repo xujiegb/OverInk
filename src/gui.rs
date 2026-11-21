@@ -181,8 +181,12 @@ impl Gui {
     // egui consumes the final hover position per UI frame. SDL can queue
     // hundreds of motion samples between paints; preserve clicks, wheel and
     // touch events, but replace an adjacent stale mouse position in place.
+    pub fn can_merge_mouse_position(&self) -> bool {
+        self.last_mouse_motion && matches!(self.raw.events.last(), Some(Event::PointerMoved(_)))
+    }
+
     fn queue_mouse_position(&mut self, pos: egui::Pos2) {
-        if self.last_mouse_motion
+        if self.can_merge_mouse_position()
             && let Some(Event::PointerMoved(last)) = self.raw.events.last_mut()
         {
             *last = pos;
