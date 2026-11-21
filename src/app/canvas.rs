@@ -544,22 +544,20 @@ impl Canvas {
                 && layer.selected == selected
                 && layer.gui.ctx.theme() == theme
         });
-        if use_existing {
-            if let Some(layer) = self.static_text.as_ref() {
-                let [x, y, w, h] = layer.region;
-                let scale = [
-                    full_pixels[0] as f32 / logical_size[0],
-                    full_pixels[1] as f32 / logical_size[1],
-                ];
-                let destination = SDL_FRect {
-                    x: x as f32 / scale[0],
-                    y: y as f32 / scale[1],
-                    w: w as f32 / scale[0],
-                    h: h as f32 / scale[1],
-                };
-                layer.texture.draw(&self.render, None, Some(&destination))?;
-                return Ok(true);
-            }
+        if use_existing && let Some(layer) = self.static_text.as_ref() {
+            let [x, y, w, h] = layer.region;
+            let scale = [
+                full_pixels[0] as f32 / logical_size[0],
+                full_pixels[1] as f32 / logical_size[1],
+            ];
+            let destination = SDL_FRect {
+                x: x as f32 / scale[0],
+                y: y as f32 / scale[1],
+                w: w as f32 / scale[0],
+                h: h as f32 / scale[1],
+            };
+            layer.texture.draw(&self.render, None, Some(&destination))?;
+            return Ok(true);
         }
         let region = static_text_region(
             app.history
