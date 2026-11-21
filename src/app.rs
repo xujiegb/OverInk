@@ -1880,7 +1880,6 @@ fn run_inner(options: Options) -> Result<(), String> {
                             SDL_EVENT_WINDOW_FOCUS_LOST
                                 | SDL_EVENT_WINDOW_SHOWN
                                 | SDL_EVENT_WINDOW_RESTORED
-                                | SDL_EVENT_WINDOW_EXPOSED
                         );
                         if matches!(
                             ty,
@@ -1907,7 +1906,6 @@ fn run_inner(options: Options) -> Result<(), String> {
                                 | SDL_EVENT_WINDOW_FOCUS_GAINED
                                 | SDL_EVENT_WINDOW_FOCUS_LOST
                                 | SDL_EVENT_WINDOW_RESTORED
-                                | SDL_EVENT_WINDOW_EXPOSED
                         ) {
                             overlay_order_lost = true;
                         }
