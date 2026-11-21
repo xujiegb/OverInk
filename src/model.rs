@@ -380,6 +380,9 @@ pub struct History {
     append_revision: u64,
     erase_revision: u64,
     ink_revision: u64,
+    // Committed text is independent of ink and of a live editor draft.
+    // A renderer can keep static text until this revision changes.
+    text_revision: u64,
     pub changed: bool,
 }
 impl History {
@@ -409,6 +412,10 @@ impl History {
 
     pub fn ink_revision(&self) -> u64 {
         self.ink_revision
+    }
+
+    pub fn text_revision(&self) -> u64 {
+        self.text_revision
     }
 
     pub fn point_count(&self) -> usize {
@@ -524,6 +531,7 @@ impl History {
                     self.snapshot();
                 }
                 self.doc.text_boxes[index] = Arc::new(value);
+                self.text_revision = self.text_revision.wrapping_add(1);
             }
             return Some(index);
         }
@@ -535,6 +543,7 @@ impl History {
             self.snapshot();
         }
         self.doc.text_boxes.push(Arc::new(value));
+        self.text_revision = self.text_revision.wrapping_add(1);
         Some(index)
     }
 
@@ -544,12 +553,21 @@ impl History {
         }
         self.snapshot();
         self.doc.text_boxes.remove(index);
+        self.text_revision = self.text_revision.wrapping_add(1);
         true
     }
 
     fn apply_step(&mut self, step: HistoryStep) -> HistoryStep {
         let strokes = std::mem::replace(&mut self.doc.strokes, step.strokes);
         let text_boxes = std::mem::replace(&mut self.doc.text_boxes, step.text_boxes);
+        if text_boxes.len() != self.doc.text_boxes.len()
+            || text_boxes
+                .iter()
+                .zip(&self.doc.text_boxes)
+                .any(|(a, b)| !Arc::ptr_eq(a, b))
+        {
+            self.text_revision = self.text_revision.wrapping_add(1);
+        }
         let point_count = std::mem::replace(&mut self.point_count, step.point_count);
         if strokes.len() != self.doc.strokes.len()
             || strokes
@@ -597,6 +615,9 @@ impl History {
             } else {
                 self.snapshot_replacement();
             }
+            if !self.doc.text_boxes.is_empty() {
+                self.text_revision = self.text_revision.wrapping_add(1);
+            }
             self.doc.strokes = Vec::new();
             self.doc.text_boxes = Vec::new();
             self.point_count = 0;
@@ -609,11 +630,13 @@ impl History {
                 doc,
                 point_count,
                 ink_revision: self.ink_revision.wrapping_add(1),
+                text_revision: self.text_revision.wrapping_add(1),
                 ..Self::default()
             };
         } else {
             self.snapshot_replacement();
             self.doc = doc;
+            self.text_revision = self.text_revision.wrapping_add(1);
             self.point_count = point_count;
             self.active = None;
         }
