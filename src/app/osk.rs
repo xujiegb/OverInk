@@ -336,7 +336,7 @@ impl Keyboard {
     /// Use the main toolbar's exact window-fit scale, with canvas_units as
     /// the sole HiDPI source on every operating system.
     pub fn layout_scale(screen: Rect, units: f32) -> f32 {
-        crate::toolbar::menu_scale(Self::safe_area(screen), vec2(900., 370.), units)
+        crate::toolbar::menu_scale(Self::safe_area(screen), vec2(600., 247.), units)
     }
 
     /// Geometry uses the canvas's single UI scale; never branch by platform
@@ -352,10 +352,7 @@ impl Keyboard {
             return None;
         }
         let scale = Self::layout_scale(screen, units);
-        let design = vec2(900., 370.);
-        let size = (design * scale)
-            .max(self.minimum_size(safe.size(), units))
-            .min(safe.size());
+        let size = (vec2(600., 247.) * scale).min(safe.size());
         let width = size.x;
         let height = size.y;
         let gap = (height * 0.035).max(5. * scale);
@@ -389,10 +386,8 @@ impl Keyboard {
     }
 
     pub fn minimum_size(&self, available: egui::Vec2, units: f32) -> egui::Vec2 {
-        // The five-row keyboard cannot be shrunk to a fixed 210 points at
-        // 150%/200% UI scale: keys would become smaller than main UI buttons.
-        // Reuse the canvas's single main-UI scale, bounded by safe area.
-        (vec2(280., 210.) * units).min(available)
+        // Preserve compact-keyboard resizing limits and the shared UI scale.
+        (vec2(187., 140.) * units).min(available)
     }
 
     pub fn ui(&mut self, ui: &mut Ui, rect: Rect, scale: f32) -> Option<Action> {
@@ -1254,8 +1249,8 @@ mod tests {
         let Some(scaled) = keyboard.rect_near(screen, None, 2.) else {
             panic!("Expected HiDPI keyboard layout");
         };
-        assert_eq!(normal.size(), vec2(900., 370.));
-        assert_eq!(scaled.size(), vec2(1800., 740.));
+        assert_eq!(normal.size(), vec2(600., 247.));
+        assert_eq!(scaled.size(), vec2(1200., 494.));
         assert_eq!(Keyboard::layout_scale(screen, 1.), 1.);
         assert_eq!(Keyboard::layout_scale(screen, 2.), 2.);
         assert!(Keyboard::safe_area(screen).contains_rect(scaled));
@@ -1265,8 +1260,8 @@ mod tests {
     fn keyboard_minimum_tracks_shared_ui_scale_and_safe_area() {
         let keyboard = Keyboard::default();
         let available = vec2(1200., 800.);
-        assert_eq!(keyboard.minimum_size(available, 1.), vec2(280., 210.));
-        assert_eq!(keyboard.minimum_size(available, 2.), vec2(560., 420.));
+        assert_eq!(keyboard.minimum_size(available, 1.), vec2(187., 140.));
+        assert_eq!(keyboard.minimum_size(available, 2.), vec2(374., 280.));
         assert_eq!(
             keyboard.minimum_size(vec2(300., 200.), 2.),
             vec2(300., 200.)
