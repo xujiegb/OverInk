@@ -164,11 +164,11 @@ def render(scale):
     label(806.5, 47, 'v'+version, 14, navy, anchor='center')
     d.line(xy((47, 110, 853, 110)), fill='#dce8ed', width=S)
 
-    # Three languages have the same visual emphasis and predictable leading.
-    rounded((49, 137, 54, 224), 2, aqua)
-    label(75, 131, '将 OverInk 拖入「应用程序」文件夹', 21, navy, 'bold')
-    label(75, 165, 'Drag OverInk to the Applications folder', 20, navy)
-    label(75, 198, "Glissez OverInk dans le dossier Applications", 20, navy)
+    # Clear hierarchy: prominent Chinese instruction, smaller readable EN/FR.
+    rounded((49, 137, 54, 233), 2, aqua)
+    label(76, 131, '将 OverInk 拖入「应用程序」文件夹', 30, navy, 'bold')
+    label(78, 182, 'Drag OverInk to the Applications folder', 17, '#526d7d')
+    label(78, 212, "Glissez OverInk dans le dossier Applications", 17, '#526d7d')
 
     # Real Finder icons and names are placed by dmgbuild at (210, 374)
     # and (690, 374). The background only frames the drop targets.
@@ -183,16 +183,17 @@ def render(scale):
     label(454, 417, '拖动  ·  Drag  ·  Glisser', 15, '#436778',
           anchor='center')
 
-    # Keep Gatekeeper advice visible but subordinate to installation.
-    rounded((47, 513, 853, 626), 18, '#ffffff', '#dce8ed')
-    rounded((66, 532, 71, 606), 2, amber)
-    label(91, 524, "无法打开？  ·  Can't open it?  ·  Impossible de l'ouvrir ?",
-          16, navy, 'bold')
-    label(91, 559, '请仅在确认来源可信时使用以下命令。', 13, '#526b7a')
-    label(91, 580, 'Only if you trust the source.', 13, '#526b7a')
-    label(91, 601, 'Seulement si la source est fiable.', 13, '#526b7a')
-    rounded((480, 561, 830, 605), 11, '#edf6f8', '#d5e7ed')
-    label(655, 574, 'xattr -cr /Applications/OverInk.app', 12,
+    # Troubleshooting follows the same hierarchy, without a cramped
+    # trilingual heading or overlap with the command.
+    rounded((47, 509, 853, 632), 18, '#ffffff', '#dce8ed')
+    rounded((66, 527, 71, 613), 2, amber)
+    label(91, 520, '无法打开？', 21, navy, 'bold')
+    label(91, 553, "Can't open it?", 13, '#526b7a')
+    label(91, 574, "Impossible de l'ouvrir ?", 13, '#526b7a')
+    label(91, 598, '仅在信任来源时执行右侧命令。', 11, '#677f8b')
+    label(91, 614, 'Trusted source only · Source fiable uniquement', 10, '#677f8b')
+    rounded((457, 557, 831, 606), 11, '#edf6f8', '#d5e7ed')
+    label(644, 573, 'xattr -cr /Applications/OverInk.app', 12,
           '#254d60', 'mono', 'center')
 
     return image
