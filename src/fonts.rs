@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use egui::{
-    Color32, FontData, FontDefinitions, FontFamily, FontId, Ui,
+    Color32, FontData, FontDefinitions, FontFamily, FontId, Id, Ui,
     text::{Galley, LayoutJob, TextFormat},
 };
 use skrifa::{FontRef, GlyphId, MetadataProvider, string::StringId};
@@ -19,6 +19,40 @@ const COLOR: &str = "OpenMoji Color";
 const MONO: &str = "OpenMoji Black";
 const ANNOTATION: &str = "Annotations";
 const MAX_FONT_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_CACHED_LAYOUTS: usize = 48;
+const MAX_CACHED_TEXT_BYTES: usize = 8192;
+
+// Galleys contain font-atlas UVs: never share one across egui Contexts, and
+// invalidate on font revision or pixels-per-point changes. Keep the cache in
+// the owning Context rather than in the cross-display TextFonts model.
+#[derive(Clone)]
+struct LayoutEntry {
+    text: String,
+    revision: u64,
+    font_size: u32,
+    wrap_width: u32,
+    pixels_per_point: u32,
+    color: Color32,
+    galley: Arc<Galley>,
+}
+
+#[derive(Clone, Default)]
+struct LayoutCache {
+    entries: Vec<LayoutEntry>,
+}
+
+fn layout_cache_id() -> Id {
+    Id::unique("overink-annotation-layout-cache")
+}
+
+pub fn clear_layout_cache(ctx: &egui::Context) {
+    ctx.data_mut(|data| {
+        data.get_temp_mut_or_default::<LayoutCache>(layout_cache_id())
+            .entries
+            .clear();
+    });
+}
+
 
 pub struct TextFonts {
     custom: Vec<CustomFont>,
@@ -462,6 +496,61 @@ impl TextFonts {
         monochrome_fallback.unwrap_or(ANNOTATION)
     }
 
+    /// Reuse static annotation galleys while the pointer only changes hover.
+    /// Draft text and resize previews still use uncached layout so that every
+    /// caret/IME update and geometry change reflects the latest input.
+    pub fn layout_cached(
+        &self,
+        ui: &Ui,
+        text: &str,
+        size: f32,
+        color: Color32,
+        width: f32,
+    ) -> Arc<Galley> {
+        if text.len() > MAX_CACHED_TEXT_BYTES {
+            return self.layout(ui, text, size, color, width);
+        }
+        let font_size = size.to_bits();
+        let wrap_width = width.to_bits();
+        let pixels_per_point = ui.ctx().pixels_per_point().to_bits();
+        let found = ui.ctx().data_mut(|data| {
+            data.get_temp_mut_or_default::<LayoutCache>(layout_cache_id())
+                .entries
+                .iter()
+                .rev()
+                .find(|entry| {
+                    entry.text == text
+                        && entry.revision == self.revision
+                        && entry.font_size == font_size
+                        && entry.wrap_width == wrap_width
+                        && entry.pixels_per_point == pixels_per_point
+                        && entry.color == color
+                })
+                .map(|entry| Arc::clone(&entry.galley))
+        });
+        if let Some(galley) = found {
+            return galley;
+        }
+        let galley = self.layout(ui, text, size, color, width);
+        ui.ctx().data_mut(|data| {
+            let cache = data.get_temp_mut_or_default::<LayoutCache>(layout_cache_id());
+            cache.entries.retain(|entry| entry.revision == self.revision);
+            if cache.entries.len() >= MAX_CACHED_LAYOUTS {
+                cache.entries.remove(0);
+            }
+            cache.entries.push(LayoutEntry {
+                text: text.to_owned(),
+                revision: self.revision,
+                font_size,
+                wrap_width,
+                pixels_per_point,
+                color,
+                galley: Arc::clone(&galley),
+            });
+        });
+        galley
+    }
+
     pub fn layout(
         &self,
         ui: &Ui,
@@ -632,6 +721,30 @@ mod tests {
         });
         frame.drop_without_applying_deltas();
         glyphs
+    }
+
+    #[test]
+    fn cached_annotation_layout_is_context_local_and_revision_aware() {
+        let mut fonts = TextFonts::default();
+        let ctx = egui::Context::default();
+        ctx.set_fonts(fonts.definitions());
+        let mut first = None;
+        let frame = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let a = fonts.layout_cached(ui, "Text 👩🏽‍🎨 中文", 28., Color32::WHITE, 400.);
+            let b = fonts.layout_cached(ui, "Text 👩🏽‍🎨 中文", 28., Color32::WHITE, 400.);
+            assert!(Arc::ptr_eq(&a, &b));
+            let narrower = fonts.layout_cached(ui, "Text 👩🏽‍🎨 中文", 28., Color32::WHITE, 240.);
+            assert!(!Arc::ptr_eq(&a, &narrower));
+            first = Some(a);
+        });
+        frame.drop_without_applying_deltas();
+
+        fonts.revision += 1;
+        let frame = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let changed = fonts.layout_cached(ui, "Text 👩🏽‍🎨 中文", 28., Color32::WHITE, 400.);
+            assert!(!Arc::ptr_eq(first.as_ref().expect("first layout"), &changed));
+        });
+        frame.drop_without_applying_deltas();
     }
 
     #[test]
