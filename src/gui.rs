@@ -37,11 +37,15 @@ pub struct Gui {
 }
 impl Gui {
     pub fn new() -> Self {
+        Self::with_fonts(crate::fonts::ui_definitions())
+    }
+
+    pub fn with_fonts(fonts: egui::FontDefinitions) -> Self {
         let ctx = Context::default();
         // Apply input actions once per native frame, including mode toggles.
         ctx.options_mut(|options| options.max_passes = std::num::NonZeroUsize::MIN);
         ctx.set_theme(egui::Theme::Light);
-        ctx.set_fonts(crate::fonts::ui_definitions());
+        ctx.set_fonts(fonts);
         ctx.all_styles_mut(|s| {
             let colors = crate::toolbar::colors(s.visuals.dark_mode);
             s.visuals.panel_fill = colors.rail;
@@ -84,16 +88,20 @@ impl Gui {
 
     pub fn suspend_input(&mut self, window: &Window) {
         self.sync_text_input(window, false);
+        self.suspend_pointer_input();
+    }
+
+    fn suspend_pointer_input(&mut self) {
         self.cancel_touches();
-        self.raw.events.push(Event::PointerGone);
-        self.raw.events.retain(|event| {
-            matches!(
-                event,
-                Event::PointerGone
-                    | Event::PointerMoved(_)
-                    | Event::PointerButton { pressed: false, .. }
-            )
-        });
+        self.raw
+            .events
+            .retain(|event| matches!(event, Event::PointerButton { pressed: false, .. }));
+        // An unsolicited PointerGone makes egui request another frame. Only
+        // send it when there is a pointer or a queued release can restore one.
+        if !self.raw.events.is_empty() || self.ctx.input(|input| input.pointer.has_pointer()) {
+            self.raw.events.push(Event::PointerGone);
+        }
+        self.last_mouse_motion = false;
         self.ctx.stop_dragging();
     }
 
@@ -207,10 +215,9 @@ impl Gui {
     /// Other egui instances (text canvas, screenshot, OSK) must always receive
     /// pointer motion; avoid an unnecessary egui temporary-map lookup there.
     pub fn toolbar_event(&mut self, e: &SDL_Event, id: SDL_WindowID, size: [f32; 2]) {
-        if let Some(motion) = mouse_motion_event(e)
+        if let Some(motion) = real_mouse_motion(e)
             && motion.windowID == id
-            && motion.which != SDL_TOUCH_MOUSEID
-            && motion.which != SDL_PEN_MOUSEID
+            && motion.state.0 == 0
             && self.raw.events.is_empty()
             && crate::toolbar::hovered_rect(&self.ctx).is_some_and(|rect| {
                 rect.contains(egui::pos2(motion.x / self.units, motion.y / self.units))
@@ -231,10 +238,8 @@ impl Gui {
         }
         match ty {
             SDL_EVENT_MOUSE_MOTION => {
-                if let Some(m) = mouse_motion_event(e)
+                if let Some(m) = real_mouse_motion(e)
                     && m.windowID == id
-                    && m.which != SDL_TOUCH_MOUSEID
-                    && m.which != SDL_PEN_MOUSEID
                 {
                     self.queue_mouse_position(egui::pos2(m.x / scale, m.y / scale));
                 }
@@ -511,7 +516,23 @@ impl Gui {
         r: &Renderer,
         window: &Window,
         color: &ColorManager,
+        output: egui::FullOutput,
+    ) -> Result<(), String> {
+        let [width, height] = window.pixel_size();
+        self.paint_region(r, window, color, output, [0, 0, width, height])
+    }
+
+    /// Paint in a smaller render target without changing the egui layout or
+    /// glyph atlas coordinates. All positions are still window-logical;
+    /// only the GPU clip and vertex positions shift to the texture origin.
+    /// The caller restores the window render target after this call.
+    pub fn paint_region(
+        &mut self,
+        r: &Renderer,
+        window: &Window,
+        color: &ColorManager,
         mut output: egui::FullOutput,
+        region: [i32; 4],
     ) -> Result<(), String> {
         if let Some(ime) = output.platform_output.ime {
             let cursor = ime.cursor_rect;
@@ -526,6 +547,7 @@ impl Gui {
                 self.clear_composition(window);
             }
         }
+        let free = std::mem::take(&mut output.textures_delta.free);
         for (id, deltas) in output.textures_delta.set.drain() {
             for delta in deltas {
                 let egui::ImageData::Color(image) = delta.image;
@@ -569,55 +591,92 @@ impl Gui {
                 texture.update([w, h], &self.pixels, rect.as_ref())?;
             }
         }
-        let px = window.pixel_size();
-        let logical = window.size();
-        let scale = [px[0] as f32 / logical[0], px[1] as f32 / logical[1]];
-        for p in self.ctx.tessellate(output.shapes, output.pixels_per_point) {
-            let egui::epaint::Primitive::Mesh(mesh) = p.primitive else {
+        if self.pixels.capacity() > 256 * 1024 {
+            self.pixels = Vec::new();
+        }
+        if !output.shapes.is_empty() {
+            let logical = window.size();
+            let pixels = window.pixel_size();
+            let scale = [pixels[0] as f32 / logical[0], pixels[1] as f32 / logical[1]];
+            let shapes = self.ctx.tessellate(output.shapes, output.pixels_per_point);
+            r.set_render_scale([1.; 2])?;
+            let drawn = self.paint_meshes(r, color, shapes, region, scale);
+            let clip = r.try_set_clip_rect(None);
+            let restored = r.set_render_scale(scale);
+            drawn.and(clip).and(restored)?;
+        }
+        for id in free {
+            self.textures.remove(&id);
+        }
+        for command in output.platform_output.commands {
+            if let egui::OutputCommand::CopyText(text) = command {
+                set_clipboard_text(&text);
+            }
+        }
+        Ok(())
+    }
+
+    fn paint_meshes(
+        &mut self,
+        r: &Renderer,
+        color: &ColorManager,
+        shapes: Vec<egui::epaint::ClippedPrimitive>,
+        [left, top, width, height]: [i32; 4],
+        scale: [f32; 2],
+    ) -> Result<(), String> {
+        let units = self.units;
+        let local_pixels = |point: egui::Pos2| {
+            [
+                point.x * units * scale[0] - left as f32,
+                point.y * units * scale[1] - top as f32,
+            ]
+        };
+        let mut last_color = None;
+        for shape in shapes {
+            let egui::epaint::Primitive::Mesh(mesh) = shape.primitive else {
                 continue;
             };
             let Some(texture) = self.textures.get(&mesh.texture_id) else {
                 continue;
             };
-            let rect = p.clip_rect;
-            let x = (rect.min.x * self.units * scale[0])
-                .floor()
-                .clamp(0., px[0] as f32) as i32;
-            let y = (rect.min.y * self.units * scale[1])
-                .floor()
-                .clamp(0., px[1] as f32) as i32;
-            let x2 = (rect.max.x * self.units * scale[0])
-                .ceil()
-                .clamp(0., px[0] as f32) as i32;
-            let y2 = (rect.max.y * self.units * scale[1])
-                .ceil()
-                .clamp(0., px[1] as f32) as i32;
-            if x2 <= x || y2 <= y {
+            let [x, y] = local_pixels(shape.clip_rect.min);
+            let [right, bottom] = local_pixels(shape.clip_rect.max);
+            let x = x.floor().clamp(0., width as f32) as i32;
+            let y = y.floor().clamp(0., height as f32) as i32;
+            let right = right.ceil().clamp(0., width as f32) as i32;
+            let bottom = bottom.ceil().clamp(0., height as f32) as i32;
+            if right <= x || bottom <= y {
                 continue;
             }
-            // SDL clip rectangles are in renderer logical units, before RenderScale.
-            let clip = SDL_Rect {
-                x: (x as f32 / scale[0]).floor() as i32,
-                y: (y as f32 / scale[1]).floor() as i32,
-                w: ((x2 - x) as f32 / scale[0]).ceil() as i32,
-                h: ((y2 - y) as f32 / scale[1]).ceil() as i32,
-            };
-            r.set_clip_rect(Some(&clip));
+            // Use physical pixels for both the vertices and scissor so a
+            // fractional HiDPI scale does not shift the clip of a cropped label.
+            r.try_set_clip_rect(Some(&SDL_Rect {
+                x,
+                y,
+                w: right - x,
+                h: bottom - y,
+            }))?;
             self.vertices.clear();
             self.vertices.extend(mesh.vertices.iter().map(|v| {
-                let [red, green, blue, alpha] = v.color.to_srgba_unmultiplied();
-                let c = color.map([red as f32 / 255., green as f32 / 255., blue as f32 / 255.]);
+                let vertex_color = match last_color {
+                    Some((previous, converted)) if previous == v.color => converted,
+                    _ => {
+                        let [red, green, blue, alpha] = v.color.to_srgba_unmultiplied();
+                        let [r, g, b] = color.map([red, green, blue].map(|v| f32::from(v) / 255.));
+                        let converted = SDL_FColor {
+                            r,
+                            g,
+                            b,
+                            a: f32::from(alpha) / 255.,
+                        };
+                        last_color = Some((v.color, converted));
+                        converted
+                    }
+                };
+                let [x, y] = local_pixels(v.pos);
                 SDL_Vertex {
-                    position: SDL_FPoint {
-                        x: v.pos.x * self.units,
-                        y: v.pos.y * self.units,
-                    },
-                    color: SDL_FColor {
-                        r: c[0],
-                        g: c[1],
-                        b: c[2],
-                        a: alpha as f32 / 255.,
-                    },
+                    position: SDL_FPoint { x, y },
+                    color: vertex_color,
                     tex_coord: SDL_FPoint {
                         x: v.uv.x,
                         y: v.uv.y,
@@ -625,15 +684,6 @@ impl Gui {
                 }
             }));
             texture.geometry(r, &self.vertices, &mesh.indices)?;
-        }
-        r.set_clip_rect(None);
-        for id in output.textures_delta.free.drain() {
-            self.textures.remove(&id);
-        }
-        for command in output.platform_output.commands {
-            if let egui::OutputCommand::CopyText(text) = command {
-                set_clipboard_text(&text);
-            }
         }
         Ok(())
     }
@@ -715,6 +765,70 @@ pub fn key(k: SDL_Keycode) -> Option<Key> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn suspended_pointer_state_stops_scheduling_repaints() {
+        let mut gui = Gui::new();
+        gui.queue_mouse_position(egui::pos2(10., 10.));
+        gui.ctx
+            .run_ui(gui.raw.take(), |_| {})
+            .textures_delta
+            .clear();
+        gui.suspend_pointer_input();
+        assert!(matches!(gui.raw.events.as_slice(), [Event::PointerGone]));
+        gui.ctx
+            .run_ui(gui.raw.take(), |_| {})
+            .textures_delta
+            .clear();
+        gui.suspend_pointer_input();
+        assert!(gui.raw.events.is_empty());
+    }
+
+    #[test]
+    fn fractional_scale_cropped_gui_matches_full_canvas_scissor() -> Result<(), String> {
+        use egui::{Color32, Rect, epaint, pos2};
+
+        let renderer = TestSurface::new([320, 180])?.software_renderer()?;
+        let mut gui = Gui::new();
+        let texture = GuiTexture::new(&renderer, 1, 1)?;
+        texture.update([1, 1], &[255; 4], None)?;
+        gui.textures.insert(TextureId::default(), texture);
+        let layout = || {
+            let mut mesh = epaint::Mesh::default();
+            mesh.add_colored_rect(
+                Rect::from_min_max(pos2(45., 25.), pos2(130., 80.)),
+                Color32::WHITE,
+            );
+            vec![epaint::ClippedPrimitive {
+                clip_rect: Rect::from_min_max(pos2(62.5, 31.3), pos2(97.4, 64.6)),
+                primitive: epaint::Primitive::Mesh(mesh),
+            }]
+        };
+        let color = ColorManager::default();
+        let scale = [1.5, 1.5];
+        renderer.clear([0.; 4])?;
+        gui.paint_meshes(&renderer, &color, layout(), [0, 0, 320, 180], scale)?;
+        let full = TestSurface::pixels(&renderer)?;
+        assert!(full.iter().any(|pixel| pixel[3] > 0));
+
+        let crop = [93, 46, 54, 51];
+        let cropped = InkTexture::new(
+            &renderer,
+            [crop[2], crop[3]],
+            SDL_TEXTUREACCESS_TARGET,
+            SDL_BLENDMODE_BLEND_PREMULTIPLIED,
+        )?;
+        renderer.try_set_clip_rect(None)?;
+        renderer.clear([0.; 4])?;
+        renderer.with_target(&cropped, || {
+            renderer.clear([0.; 4])?;
+            gui.paint_meshes(&renderer, &color, layout(), crop, scale)
+        })?;
+        let [x, y, w, h] = crop.map(|coordinate| coordinate as f32);
+        cropped.draw(&renderer, None, Some(&SDL_FRect { x, y, w, h }))?;
+        assert_eq!(TestSurface::pixels(&renderer)?, full);
+        Ok(())
+    }
 
     #[test]
     fn included_ui_font_covers_both_chinese_scripts() {

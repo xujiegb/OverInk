@@ -5,12 +5,13 @@ use super::{
 use libloading::Library;
 use objc2::{
     msg_send,
-    rc::{Retained, autoreleasepool},
+    rc::{Allocated, Retained, autoreleasepool},
     runtime::{AnyClass, AnyObject},
     sel,
 };
+use objc2_foundation::{NSArray, NSError};
 use std::{
-    ffi::{CStr, c_char, c_void},
+    ffi::c_void,
     ptr::{self, NonNull},
     sync::{
         OnceLock,
@@ -241,20 +242,21 @@ fn screen_capture(
     autoreleasepool(|_| -> Result<(), String> {
         let shareable =
             AnyClass::get(c"SCShareableContent").ok_or("ScreenCaptureKit is unavailable")?;
-        let completion =
-            block2::RcBlock::new(move |content: *mut AnyObject, error: *mut AnyObject| {
+        let completion = block2::RcBlock::new(
+            move |content: Option<&AnyObject>, error: Option<&NSError>| {
                 autoreleasepool(|_| {
-                    if let Some(content) = NonNull::new(content) {
+                    if let Some(content) = content {
                         if let Err(error) =
                             begin_screenshot(content, id, pixels, hdr, sender.clone())
                         {
                             let _ = sender.send(Err(error));
                         }
                     } else {
-                        let _ = sender.send(Err(capture_error(NonNull::new(error), hdr)));
+                        let _ = sender.send(Err(capture_error(error, hdr)));
                     }
                 });
-            });
+            },
+        );
         unsafe {
             let _: () = msg_send![shareable, getShareableContentExcludingDesktopWindows: false,
                 onScreenWindowsOnly: true, completionHandler: &*completion];
@@ -277,29 +279,17 @@ fn screen_capture(
     Ok(None)
 }
 
-fn capture_error(error: Option<NonNull<AnyObject>>, hdr: bool) -> String {
+fn capture_error(error: Option<&NSError>, hdr: bool) -> String {
     let Some(error) = error else {
         return "macOS screenshot returned no image or error".into();
     };
-    let description = unsafe {
-        let message: Option<NonNull<AnyObject>> =
-            NonNull::new(msg_send![error.as_ptr(), localizedDescription]);
-        let Some(message) = message else {
-            return "macOS screenshot returned an error without a description".into();
-        };
-        let text: Option<NonNull<c_char>> = NonNull::new(msg_send![message.as_ptr(), UTF8String]);
-        if let Some(text) = text {
-            CStr::from_ptr(text.as_ptr()).to_string_lossy()
-        } else {
-            "No image returned".into()
-        }
-    };
+    let description = error.localizedDescription();
     let mode = if hdr { "HDR" } else { "SDR" };
     format!("macOS {mode} screenshot: {description}. Check Screen Recording permission.")
 }
 
 fn begin_screenshot(
-    content: NonNull<AnyObject>,
+    content: &AnyObject,
     id: u32,
     [width, height]: [i32; 2],
     hdr: bool,
@@ -310,58 +300,32 @@ fn begin_screenshot(
     let configuration =
         AnyClass::get(c"SCStreamConfiguration").ok_or("ScreenCaptureKit is unavailable")?;
     let manager = AnyClass::get(c"SCScreenshotManager").ok_or("ScreenCaptureKit is unavailable")?;
-    let array = AnyClass::get(c"NSArray").ok_or("NSArray is unavailable")?;
     if width <= 0 || height <= 0 {
         return Err("Invalid macOS screenshot dimensions".into());
     }
     unsafe {
-        let displays: Option<NonNull<AnyObject>> =
-            NonNull::new(msg_send![content.as_ptr(), displays]);
+        let displays: Option<Retained<NSArray<AnyObject>>> = msg_send![content, displays];
         let displays = displays.ok_or("ScreenCaptureKit returned no display list")?;
-        let count: usize = msg_send![displays.as_ptr(), count];
-        let mut selected = None;
-        for index in 0..count {
-            let item: Option<NonNull<AnyObject>> =
-                NonNull::new(msg_send![displays.as_ptr(), objectAtIndex: index]);
-            let Some(item) = item else {
-                continue;
-            };
-            let display_id: u32 = msg_send![item.as_ptr(), displayID];
-            if display_id == id {
-                selected = Some(item);
-                break;
-            }
-        }
-        let display = selected.ok_or("ScreenCaptureKit did not return the selected display")?;
-        let empty: Option<NonNull<AnyObject>> = NonNull::new(msg_send![array, array]);
-        let filter: Option<NonNull<AnyObject>> = NonNull::new(msg_send![filter_class, alloc]);
-        let filter = filter.ok_or("Cannot allocate the selected display filter")?;
-        let filter: Option<NonNull<AnyObject>> = NonNull::new(msg_send![
-            filter.as_ptr(),
-            initWithDisplay: display.as_ptr(),
-            excludingWindows: empty.map_or(ptr::null_mut(), NonNull::as_ptr)
-        ]);
-        let filter = filter
-            .and_then(|filter| Retained::from_raw(filter.as_ptr()))
-            .ok_or("Cannot configure the selected display")?;
-        // The HDR preset is available on supported Apple silicon systems.
-        // Ordinary SDR captures use the standard configuration on macOS 14+.
-        // The HDR preset is autoreleased (+0); +new returns an owned (+1)
-        // object. Retained balances both cases, including early returns.
-        let config: Option<NonNull<AnyObject>> = NonNull::new(if hdr {
+        let display = (0..displays.count())
+            .map(|index| displays.objectAtIndex(index))
+            .find(|item| {
+                let display_id: u32 = msg_send![&**item, displayID];
+                display_id == id
+            })
+            .ok_or("ScreenCaptureKit did not return the selected display")?;
+        let empty = NSArray::<AnyObject>::new();
+        let filter: Allocated<AnyObject> = msg_send![filter_class, alloc];
+        let filter: Option<Retained<AnyObject>> =
+            msg_send![filter, initWithDisplay: &*display, excludingWindows: &*empty];
+        let filter = filter.ok_or("Cannot configure the selected display")?;
+        // objc2 follows the selector's ownership convention for both the
+        // autoreleased preset and the +1 object returned by new.
+        let config: Option<Retained<AnyObject>> = if hdr {
             msg_send![configuration, streamConfigurationWithPreset: 2_isize]
         } else {
             msg_send![configuration, new]
-        });
-        let config = config
-            .and_then(|config| {
-                if hdr {
-                    Retained::retain(config.as_ptr())
-                } else {
-                    Retained::from_raw(config.as_ptr())
-                }
-            })
-            .ok_or("Cannot configure the macOS screenshot")?;
+        };
+        let config = config.ok_or("Cannot configure the macOS screenshot")?;
         let _: () = msg_send![&*config, setWidth: width as usize];
         let _: () = msg_send![&*config, setHeight: height as usize];
         let _: () = msg_send![&*config, setShowsCursor: false];
@@ -376,21 +340,22 @@ fn begin_screenshot(
             let space = kCGColorSpaceSRGB.map_or(ptr::null(), |name| name.as_ptr().cast_const());
             let _: () = msg_send![&*config, setColorSpaceName: space];
         }
-        let completion =
-            block2::RcBlock::new(move |image: *const c_void, error: *mut AnyObject| {
+        let completion = block2::RcBlock::new(
+            move |image: Option<NonNull<c_void>>, error: Option<&NSError>| {
                 autoreleasepool(|_| {
-                    let result = if let Some(image) = NonNull::new(image.cast_mut()) {
+                    let result = if let Some(image) = image {
                         if hdr {
                             copy_screenshot(image).map(Some)
                         } else {
                             copy_sdr_screenshot(image).map(Some)
                         }
                     } else {
-                        Err(capture_error(NonNull::new(error), hdr))
+                        Err(capture_error(error, hdr))
                     };
                     let _ = sender.send(result);
                 });
-            });
+            },
+        );
         let _: () = msg_send![manager, captureImageWithFilter: &*filter, configuration: &*config,
             completionHandler: &*completion];
     }

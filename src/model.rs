@@ -212,6 +212,11 @@ pub struct Stroke {
     pub points: Vec<Point>,
 }
 impl Stroke {
+    #[cfg(any(target_os = "macos", test))]
+    pub fn has_wide_gamut_ink(&self) -> bool {
+        !self.points.is_empty() && self.color.needs_wide_gamut()
+    }
+
     pub fn max_radius(&self) -> f32 {
         self.width * if self.tool == Tool::Pencil { 1.25 } else { 0.5 }
     }
@@ -380,6 +385,8 @@ pub struct History {
     append_revision: u64,
     erase_revision: u64,
     ink_revision: u64,
+    #[cfg(any(target_os = "macos", test))]
+    wide_gamut_ink: std::cell::Cell<Option<([u64; 3], bool)>>,
     // Committed text is independent of ink and of a live editor draft.
     // A renderer can keep static text until this revision changes.
     text_revision: u64,
@@ -412,6 +419,22 @@ impl History {
 
     pub fn ink_revision(&self) -> u64 {
         self.ink_revision
+    }
+
+    #[cfg(any(target_os = "macos", test))]
+    pub fn has_wide_gamut_ink(&self) -> bool {
+        let revision = [self.ink_revision, self.append_revision, self.erase_revision];
+        if let Some((cached_revision, has_wide_gamut)) = self.wide_gamut_ink.get()
+            && cached_revision == revision
+        {
+            return has_wide_gamut;
+        }
+        let has_wide_gamut = self
+            .strokes()
+            .iter()
+            .any(|stroke| stroke.has_wide_gamut_ink());
+        self.wide_gamut_ink.set(Some((revision, has_wide_gamut)));
+        has_wide_gamut
     }
 
     pub fn text_revision(&self) -> u64 {

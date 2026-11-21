@@ -17,7 +17,14 @@ pub(crate) fn convert_rgba8_to_srgb(pixels: &mut [u8], profile: &[u8]) {
     crate::icc_native::convert_rgba8_to_srgb(pixels, profile);
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DisplayColor {
+    System { extended: bool },
+    X11(Option<u64>),
+}
+
 pub struct ColorManager {
+    source: Option<DisplayColor>,
     transform: Option<Transform>,
     pub status: Text,
     pub revision: u64,
@@ -28,6 +35,7 @@ const SYSTEM_SRGB: Text = text("sRGB surface / system compositor");
 impl Default for ColorManager {
     fn default() -> Self {
         Self {
+            source: None,
             transform: None,
             status: SYSTEM_SRGB,
             revision: 0,
@@ -37,26 +45,33 @@ impl Default for ColorManager {
 
 impl ColorManager {
     pub fn refresh(&mut self, window: &crate::sdl::Window, extended: bool) {
-        self.revision = if extended { 1 } else { 2 };
-        // Dropping the previous native transform is handled by RAII, including
-        // when the current output no longer needs an application ICC transform.
-        self.transform = None;
-        self.status = if extended {
-            text("Extended linear sRGB / system display mapping")
+        let x11 = crate::sdl::driver() == "x11";
+        let profile = x11.then(|| window.icc_profile()).flatten();
+        let source = if x11 {
+            DisplayColor::X11(profile.as_ref().map(|profile| {
+                let mut hash = std::collections::hash_map::DefaultHasher::new();
+                profile.hash(&mut hash);
+                hash.finish()
+            }))
         } else {
-            SYSTEM_SRGB
+            DisplayColor::System { extended }
         };
-        if crate::sdl::driver() != "x11" {
+        if self.source == Some(source) {
             return;
         }
-        let Some(profile) = window.icc_profile() else {
-            self.status = text("X11 uses sRGB when an ICC profile is unavailable");
+        self.source = Some(source);
+        self.revision = self.revision.wrapping_add(1);
+        self.transform = None;
+        let Some(profile) = profile else {
+            self.status = match source {
+                DisplayColor::System { extended: true } => {
+                    text("Extended linear sRGB / system display mapping")
+                }
+                DisplayColor::System { extended: false } => SYSTEM_SRGB,
+                DisplayColor::X11(_) => text("X11 uses sRGB when an ICC profile is unavailable"),
+            };
             return;
         };
-        let mut hash = std::collections::hash_map::DefaultHasher::new();
-        profile.hash(&mut hash);
-        self.revision = hash.finish();
-
         match Transform::from_srgb_to_display(&profile) {
             Ok(transform) => {
                 self.transform = Some(transform);
@@ -136,6 +151,7 @@ mod tests {
         let transform =
             Transform::from_srgb_to_display(&profile).map_err(|error| format!("{error:?}"))?;
         let manager = ColorManager {
+            source: None,
             transform: Some(transform),
             status: SYSTEM_SRGB,
             revision: 0,

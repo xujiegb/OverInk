@@ -129,7 +129,7 @@ impl FontFace {
 const FALLBACK: [&str; 3] = [INCLUDED_FONT, COLOR, MONO];
 
 struct BundledFonts {
-    faces: [FontFace; 3],
+    faces: [Option<FontFace>; 3],
     definitions: FontDefinitions,
 }
 
@@ -145,25 +145,36 @@ fn bundled() -> &'static BundledFonts {
             )),
             FontData::from_static(include_bytes!("../assets/fonts/OpenMoji-black-glyf.ttf")),
         ]
-        .map(|data| FontFace::new(data).expect("valid bundled annotation font"));
+        .map(|data| FontFace::new(data).ok());
         let mut definitions = FontDefinitions::default();
-        for (name, face) in FALLBACK.into_iter().zip(&faces) {
-            definitions.font_data.insert(name.into(), face.data.clone());
-            definitions
-                .families
-                .insert(FontFamily::Name(name.into()), vec![name.into()]);
-        }
-        definitions.families.insert(
-            FontFamily::Name(ANNOTATION.into()),
-            FALLBACK.map(str::to_owned).to_vec(),
-        );
+        let mut available: Vec<_> = FALLBACK
+            .into_iter()
+            .zip(&faces)
+            .filter_map(|(name, face)| {
+                definitions
+                    .font_data
+                    .insert(name.into(), Arc::clone(&face.as_ref()?.data));
+                definitions
+                    .families
+                    .insert(FontFamily::Name(name.into()), vec![name.into()]);
+                Some(name.to_owned())
+            })
+            .collect();
         for family in [FontFamily::Proportional, FontFamily::Monospace] {
             definitions
                 .families
                 .entry(family)
                 .or_default()
-                .splice(..0, FALLBACK.map(str::to_owned));
+                .splice(..0, available.iter().cloned());
         }
+        if available.is_empty()
+            && let Some(fallback) = definitions.families.get(&FontFamily::Proportional)
+        {
+            available.extend(fallback.iter().cloned());
+        }
+        definitions
+            .families
+            .insert(FontFamily::Name(ANNOTATION.into()), available);
         BundledFonts { faces, definitions }
     })
 }
@@ -414,9 +425,17 @@ impl TextFonts {
                 vec![font.id.as_str().into()],
             );
         }
-        definitions
-            .families
-            .insert(FontFamily::Name(ANNOTATION.into()), self.order.to_vec());
+        let order: Vec<_> = self
+            .order
+            .iter()
+            .filter(|id| definitions.font_data.contains_key(id.as_str()))
+            .cloned()
+            .collect();
+        if !order.is_empty() {
+            definitions
+                .families
+                .insert(FontFamily::Name(ANNOTATION.into()), order);
+        }
         definitions
     }
 
@@ -442,7 +461,10 @@ impl TextFonts {
         let mut monochrome_fallback = None;
         for id in &self.order {
             let face = if let Some(index) = FALLBACK.iter().position(|name| *name == id) {
-                &bundled().faces[index]
+                let Some(face) = &bundled().faces[index] else {
+                    continue;
+                };
+                face
             } else if let Some(font) = self.custom.iter().find(|font| font.id == *id) {
                 &font.face
             } else {
