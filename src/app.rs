@@ -2658,6 +2658,12 @@ fn run_inner(options: Options) -> Result<(), String> {
                 return Ok(());
             }
             mode_changed |= cmd.mode;
+            // A tool selection is delivered to the controller, not the canvas.
+            // Restore the drawing surface's native Z-order at that transition,
+            // before waiting for pen input (which cannot arrive if PPT covers it).
+            if mode_changed && !app.pass && !toolbar_hidden {
+                canvases[active].keep_toolbar_above(&toolbar);
+            }
             if cmd.screenshot_folder && !file_dialog.pending() {
                 app.finish_all_contacts();
                 tooltips.clear();
