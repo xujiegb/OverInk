@@ -212,9 +212,9 @@ impl Gui {
                 {
                     let pos = egui::pos2(m.x / scale, m.y / scale);
                     let unchanged = self.raw.events.is_empty()
-                        && !self.ctx.input(|input| input.pointer.any_down())
                         && crate::toolbar::hovered_rect(&self.ctx)
-                            .is_some_and(|rect| rect.contains(pos));
+                            .is_some_and(|rect| rect.contains(pos))
+                        && !self.ctx.input(|input| input.pointer.any_down());
                     if !unchanged {
                         self.queue_mouse_position(pos);
                     }
