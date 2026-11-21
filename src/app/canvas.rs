@@ -69,12 +69,41 @@ impl DirtyReasons {
 // The old ink layer is already retained by Ink. Committed text gets a
 // separate transparent GPU texture; live editors, menus, IME and OSK remain
 // immediate-mode and are composited on top. The GUI owns its glyph atlas.
-const MAX_STATIC_TEXT_TEXTURE_BYTES: usize = 64 * 1024 * 1024;
+// Full-screen text targets waste tens of MiB for a few labels. Keep only
+// the text's clipped pixel bounds, capped to 8 MiB per visible canvas.
+const MAX_STATIC_TEXT_TEXTURE_BYTES: usize = 8 * 1024 * 1024;
+
+/// The union of committed label rectangles, expressed as pixel-aligned
+/// [x, y, width, height] in the original canvas. Empty/outside labels
+/// don't allocate a render target.
+fn static_text_region(
+    rects: impl Iterator<Item = egui::Rect>,
+    logical: [f32; 2],
+    pixels: [i32; 2],
+) -> Option<[i32; 4]> {
+    if logical.iter().any(|v| !v.is_finite() || *v <= 0.)
+        || pixels.iter().any(|v| *v <= 0)
+    {
+        return None;
+    }
+    let frame = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::from(logical));
+    let union = rects
+        .map(|rect| rect.intersect(frame))
+        .filter(|rect| rect.width() > 0. && rect.height() > 0.)
+        .reduce(|a, b| a.union(b))?;
+    let scale = [pixels[0] as f32 / logical[0], pixels[1] as f32 / logical[1]];
+    let x = (union.min.x * scale[0]).floor().clamp(0., pixels[0] as f32) as i32;
+    let y = (union.min.y * scale[1]).floor().clamp(0., pixels[1] as f32) as i32;
+    let right = (union.max.x * scale[0]).ceil().clamp(0., pixels[0] as f32) as i32;
+    let bottom = (union.max.y * scale[1]).ceil().clamp(0., pixels[1] as f32) as i32;
+    (right > x && bottom > y).then_some([x, y, right - x, bottom - y])
+}
 
 struct StaticTextLayer {
     gui: Gui,
     texture: InkTexture,
-    pixels: [i32; 2],
+    region: [i32; 4],
+    full_pixels: [i32; 2],
     logical_size: [f32; 2],
     format: SDL_PixelFormat,
     text_revision: u64,
@@ -89,7 +118,7 @@ pub(super) struct Canvas {
     text: Option<Gui>,
     text_style: Option<(u64, u64)>,
     static_text: Option<StaticTextLayer>,
-    static_text_unavailable: Option<([i32; 2], SDL_PixelFormat)>,
+    static_text_unavailable: Option<([i32; 4], SDL_PixelFormat)>,
     pub text_repaint_at: Option<Instant>,
     pub render: Renderer,
     native: Passthrough,
@@ -494,36 +523,86 @@ impl Canvas {
             self.static_text = None;
             return Ok(false);
         }
-        let pixels = self.window.pixel_size();
+        let full_pixels = self.window.pixel_size();
         let logical_size = self.window.size();
         let format = if self.render.extended {
             SDL_PIXELFORMAT_RGBA64_FLOAT
         } else {
             SDL_PIXELFORMAT_RGBA32
         };
+        let style = (app.text_fonts.revision, self.color.revision);
+        let revision = app.history.text_revision();
+        let use_existing = self.static_text.as_ref().is_some_and(|layer| {
+            layer.full_pixels == full_pixels
+                && layer.logical_size == logical_size
+                && layer.format == format
+                && layer.style == Some(style)
+                && layer.text_revision == revision
+                && layer.selected == selected
+                && layer.gui.ctx.theme() == theme
+        });
+        if use_existing {
+            if let Some(layer) = self.static_text.as_ref() {
+                let [x, y, w, h] = layer.region;
+                let scale = [
+                    full_pixels[0] as f32 / logical_size[0],
+                    full_pixels[1] as f32 / logical_size[1],
+                ];
+                let destination = SDL_FRect {
+                    x: x as f32 / scale[0],
+                    y: y as f32 / scale[1],
+                    w: w as f32 / scale[0],
+                    h: h as f32 / scale[1],
+                };
+                layer.texture.draw(&self.render, None, Some(&destination))?;
+                return Ok(true);
+            }
+        }
+        let region = static_text_region(
+            app.history
+                .text_boxes()
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| Some(*index) != selected)
+                .map(|(_, item)| item.text_rect()),
+            logical_size,
+            full_pixels,
+        );
+        let Some(region) = region else {
+            self.static_text = None;
+            return Ok(false);
+        };
+        let [x, y, width, height] = region;
         let bytes_per_pixel = if self.render.extended { 8 } else { 4 };
-        let bytes = usize::try_from(pixels[0])
+        let bytes = usize::try_from(width)
             .ok()
-            .zip(usize::try_from(pixels[1]).ok())
+            .zip(usize::try_from(height).ok())
             .and_then(|(w, h)| w.checked_mul(h))
             .and_then(|area| area.checked_mul(bytes_per_pixel));
-        if !bytes.is_some_and(|bytes| bytes <= MAX_STATIC_TEXT_TEXTURE_BYTES) {
+        if !bytes.is_some_and(|size| size <= MAX_STATIC_TEXT_TEXTURE_BYTES) {
             self.static_text = None;
             return Ok(false);
         }
-        let key = (pixels, format);
-        if self.static_text.as_ref().is_some_and(|layer| {
-            layer.pixels != pixels || layer.logical_size != logical_size || layer.format != format
-        }) {
+        if self
+            .static_text
+            .as_ref()
+            .is_some_and(|layer| {
+                layer.region != region
+                    || layer.full_pixels != full_pixels
+                    || layer.logical_size != logical_size
+                    || layer.format != format
+            })
+        {
             self.static_text = None;
         }
+        let key = (region, format);
         if self.static_text.is_none() {
             if self.static_text_unavailable == Some(key) {
                 return Ok(false);
             }
             let Ok(texture) = InkTexture::with_format(
                 &self.render,
-                pixels,
+                [width, height],
                 SDL_TEXTUREACCESS_TARGET,
                 SDL_BLENDMODE_BLEND_PREMULTIPLIED,
                 format,
@@ -534,7 +613,8 @@ impl Canvas {
             self.static_text = Some(StaticTextLayer {
                 gui: Gui::new(),
                 texture,
-                pixels,
+                region,
+                full_pixels,
                 logical_size,
                 format,
                 text_revision: u64::MAX,
@@ -545,7 +625,6 @@ impl Canvas {
         let Some(layer) = self.static_text.as_mut() else {
             return Ok(false);
         };
-        let style = (app.text_fonts.revision, self.color.revision);
         if layer.style != Some(style) {
             layer.gui.ctx.set_fonts(app.text_fonts.definitions());
             layer.style = Some(style);
@@ -555,27 +634,49 @@ impl Canvas {
             layer.gui.ctx.set_theme(theme);
             layer.text_revision = u64::MAX;
         }
-        if layer.text_revision != app.history.text_revision() || layer.selected != selected {
+        if layer.text_revision != revision || layer.selected != selected {
             let input = layer.gui.canvas_input(&self.window);
             let output = layer
                 .gui
                 .ctx
                 .run_ui(input, |ui| app.static_text_ui(ui, selected));
+            let scale = [
+                full_pixels[0] as f32 / logical_size[0],
+                full_pixels[1] as f32 / logical_size[1],
+            ];
+            let origin = [x as f32 / scale[0], y as f32 / scale[1]];
             let paint = self.render.with_target(&layer.texture, || {
-                self.render.begin(&self.window, [0.; 4])?;
-                layer
-                    .gui
-                    .paint(&self.render, &self.window, &self.color, output)
+                self.render.set_render_scale(scale)?;
+                self.render.try_set_clip_rect(None)?;
+                self.render.clear([0.; 4])?;
+                layer.gui.paint_region(
+                    &self.render,
+                    &self.window,
+                    &self.color,
+                    output,
+                    origin,
+                    [width, height],
+                )
             });
             if paint.is_err() {
                 self.static_text = None;
                 self.static_text_unavailable = Some(key);
                 return Ok(false);
             }
-            layer.text_revision = app.history.text_revision();
+            layer.text_revision = revision;
             layer.selected = selected;
         }
-        layer.texture.draw(&self.render, None, None)?;
+        let scale = [
+            full_pixels[0] as f32 / logical_size[0],
+            full_pixels[1] as f32 / logical_size[1],
+        ];
+        let destination = SDL_FRect {
+            x: x as f32 / scale[0],
+            y: y as f32 / scale[1],
+            w: width as f32 / scale[0],
+            h: height as f32 / scale[1],
+        };
+        layer.texture.draw(&self.render, None, Some(&destination))?;
         Ok(true)
     }
 
