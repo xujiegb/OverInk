@@ -1370,7 +1370,7 @@ enum WindowFloatQuery {
 enum WindowCommand<'a> {
     InputArea(&'a SDL_Rect),
     SyncInput(bool),
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[cfg(target_os = "linux")]
     RequestScreenKeyboard,
     ClearComposition,
     SyncAndPumpEvents,
@@ -1564,7 +1564,7 @@ impl Window {
                         Ok(())
                     }
                 }
-                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                #[cfg(target_os = "linux")]
                 WindowCommand::RequestScreenKeyboard => {
                     // SDL's hint must be set before StartTextInput. Restart
                     // just this editor's input method, then restore the normal
@@ -1811,7 +1811,7 @@ impl Window {
         let _ = self.run_command(WindowCommand::SyncInput(enabled));
     }
 
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[cfg(target_os = "linux")]
     pub fn request_screen_keyboard(&self) -> Result<(), String> {
         self.run_command(WindowCommand::RequestScreenKeyboard)
     }
