@@ -1967,7 +1967,7 @@ mod tests {
         gui.preserve_embedded_keyboard_focus(app.input.text.osk_visible());
         let input = gui.raw.take();
         let output = gui.ctx.run_ui(input, |ui| {
-            app.text_ui(ui, true, composing, toolbar_focused)
+            app.text_ui(ui, true, composing, toolbar_focused, false)
         });
         output.drop_without_applying_deltas();
     }
