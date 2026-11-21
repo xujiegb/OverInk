@@ -385,7 +385,13 @@ impl Canvas {
         if toolbar.hidden() {
             return;
         }
-        if self.output == toolbar.display_id() || driver() == "wayland" {
+        // Win32 topmost ordering is desktop-wide, not per-monitor. A slide
+        // show on a second display must not cover that display's canvas even
+        // when the controller is parked on the primary display.
+        if cfg!(target_os = "windows")
+            || self.output == toolbar.display_id()
+            || driver() == "wayland"
+        {
             native::keep_controller_above(&self.window, toolbar, &self.native);
         }
     }
