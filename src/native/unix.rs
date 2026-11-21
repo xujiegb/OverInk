@@ -9,10 +9,9 @@ use std::{
 /// The only native desktop libraries the application may load.
 /// Callers cannot construct dynamic paths or select an arbitrary soname.
 #[derive(Clone, Copy)]
-pub(crate) enum NativeLibrary {
+enum NativeLibrary {
     X11,
     Xext,
-    Xrandr,
     Wayland,
 }
 
@@ -21,14 +20,13 @@ impl NativeLibrary {
         match self {
             Self::X11 => &["libX11.so.6", "libX11.so"],
             Self::Xext => &["libXext.so.6", "libXext.so"],
-            Self::Xrandr => &["libXrandr.so.2", "libXrandr.so"],
             Self::Wayland => &["libwayland-client.so.0", "libwayland-client.so"],
         }
     }
 }
 
 /// Load only known native desktop ABIs; keep the original soname fallback.
-pub(crate) fn library(which: NativeLibrary) -> Result<Library, String> {
+fn library(which: NativeLibrary) -> Result<Library, String> {
     let names = which.sonames();
     for &name in names {
         // SAFETY: The sealed enum fixes the only allowable shared-library

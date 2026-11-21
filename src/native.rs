@@ -9,8 +9,6 @@ mod unix;
 pub mod windows_keyboard;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub use unix::Passthrough;
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
-pub(crate) use unix::{NativeLibrary, library as native_library};
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 #[derive(Default)]
@@ -99,13 +97,13 @@ impl Passthrough {
             },
         };
 
+        if self.applied == Some((window.id, pass)) {
+            return Ok(());
+        }
         let identity = window
             .win32_hwnd()
             .ok_or("No Win32 window handle")?
             .as_non_null();
-        if self.applied == Some((window.id, pass)) {
-            return Ok(());
-        }
         self.invalidate();
         let hwnd = HWND(identity.as_ptr());
         // SAFETY: The HWND is borrowed from the live SDL window; the typed

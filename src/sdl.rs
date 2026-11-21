@@ -103,9 +103,8 @@ enum SdlNativeAction<'a> {
     DestroyRenderer(NonNull<SDL_Renderer>),
     DestroyWindow(SDL_WindowID, NonNull<SDL_Window>),
     SaveBmp(&'a OwnedSurface, &'a CStr),
-    InkTextureUpload(&'a OwnedTexture, &'a [u8], i32),
     TextureModulation(&'a OwnedTexture, [f32; 3], f32),
-    GuiTextureUpload(&'a OwnedTexture, Option<&'a SDL_Rect>, &'a [u8], i32),
+    TextureUpload(&'a OwnedTexture, Option<&'a SDL_Rect>, &'a [u8], i32),
     RendererColorProperty(&'a Renderer, RendererPropertyQuery),
     RenderOwnedTexture(
         &'a Renderer,
@@ -368,14 +367,6 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
             SdlNativeAction::SaveBmp(surface, name) => {
                 SdlNativeResult::Success(SDL_SaveBMP(surface.as_non_null().as_ptr(), name.as_ptr()))
             }
-            SdlNativeAction::InkTextureUpload(texture, pixels, pitch) => {
-                SdlNativeResult::Success(SDL_UpdateTexture(
-                    texture.as_non_null().as_ptr(),
-                    ptr::null(),
-                    pixels.as_ptr().cast(),
-                    pitch,
-                ))
-            }
             SdlNativeAction::TextureModulation(texture, rgb, alpha) => {
                 let raw = texture.as_non_null().as_ptr();
                 SdlNativeResult::Success(
@@ -383,7 +374,7 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
                         && SDL_SetTextureAlphaModFloat(raw, alpha),
                 )
             }
-            SdlNativeAction::GuiTextureUpload(texture, rect, rgba, pitch) => {
+            SdlNativeAction::TextureUpload(texture, rect, rgba, pitch) => {
                 SdlNativeResult::Success(SDL_UpdateTexture(
                     texture.as_non_null().as_ptr(),
                     rect.map_or(ptr::null(), |area| area),
@@ -2373,6 +2364,10 @@ impl InkTexture {
         })
     }
 
+    pub fn dimensions(&self) -> [i32; 2] {
+        self.dimensions
+    }
+
     pub fn update_rgba8(&self, pixels: &[u8]) -> Result<(), String> {
         let [width, height] = self.dimensions;
         let pitch = usize::try_from(width)
@@ -2389,7 +2384,12 @@ impl InkTexture {
         }
         // The dimensions, pitch, and byte count were validated above; the
         // native dispatcher synchronously borrows the owned texture and pixels.
-        check(sdl_native(SdlNativeAction::InkTextureUpload(&self.raw, pixels, pitch)).succeeded())
+        check(
+            sdl_native(SdlNativeAction::TextureUpload(
+                &self.raw, None, pixels, pitch,
+            ))
+            .succeeded(),
+        )
     }
 
     pub fn set_modulation(&self, rgb: [f32; 3], alpha: f32) -> Result<(), String> {
@@ -2409,15 +2409,15 @@ impl InkTexture {
 }
 
 /// Owned background snapshot texture, including HDR linear-sRGB textures.
-pub struct SnapshotTexture(OwnedTexture);
+pub struct SnapshotTexture {
+    raw: OwnedTexture,
+    size: [i32; 2],
+    pitch: i32,
+    linear: bool,
+}
 
 impl SnapshotTexture {
-    pub fn new(
-        renderer: &Renderer,
-        dimensions: [u32; 2],
-        linear: bool,
-        pixels: &[u8],
-    ) -> Result<Self, String> {
+    pub fn new(renderer: &Renderer, dimensions: [u32; 2], linear: bool) -> Result<Self, String> {
         let [width, height] = dimensions;
         let w = i32::try_from(width).map_err(|_| "Snapshot width is too large")?;
         let h = i32::try_from(height).map_err(|_| "Snapshot height is too large")?;
@@ -2426,88 +2426,114 @@ impl SnapshotTexture {
             .checked_mul(bytes_per_pixel)
             .ok_or("Snapshot row is too wide")?;
         let pitch = i32::try_from(row_bytes).map_err(|_| "Snapshot row is too wide")?;
-        let len = row_bytes
-            .checked_mul(height as usize)
-            .ok_or("Snapshot image is too large")?;
-        if w <= 0 || h <= 0 || pixels.len() != len {
-            return Err("Invalid snapshot image dimensions or pixel buffer".into());
+        if w <= 0 || h <= 0 {
+            return Err("Invalid snapshot image dimensions".into());
         }
-        if linear && !renderer.extended {
+        let size = [w, h];
+        if !linear {
+            let raw = OwnedTexture::create(
+                renderer,
+                SDL_PIXELFORMAT_RGBA32,
+                SDL_TEXTUREACCESS_STATIC,
+                size,
+                SDL_BLENDMODE_NONE,
+                SDL_SCALEMODE_LINEAR,
+            )?;
+            return Ok(Self {
+                raw,
+                size,
+                pitch,
+                linear,
+            });
+        }
+        if !renderer.extended {
             return Err("The renderer cannot display the captured HDR range".into());
         }
         let renderer = renderer.raw.ok_or("Renderer has been destroyed")?;
-        // SAFETY: The renderer is live. The properties guard and owned
-        // texture retain single ownership until native configuration ends.
+        // SAFETY: The live renderer, properties and texture each have
+        // one Rust owner through native configuration.
         unsafe {
-            let raw = if linear {
-                let props = OwnedProperties::new()?;
-                check(SDL_SetNumberProperty(
-                    props.id(),
-                    SDL_PROP_TEXTURE_CREATE_FORMAT_NUMBER,
-                    SDL_PIXELFORMAT_RGBA64_FLOAT.0 as i64,
-                ))?;
-                check(SDL_SetNumberProperty(
-                    props.id(),
-                    SDL_PROP_TEXTURE_CREATE_COLORSPACE_NUMBER,
-                    SDL_COLORSPACE_SRGB_LINEAR.0 as i64,
-                ))?;
-                check(SDL_SetNumberProperty(
-                    props.id(),
-                    SDL_PROP_TEXTURE_CREATE_WIDTH_NUMBER,
-                    width as i64,
-                ))?;
-                check(SDL_SetNumberProperty(
-                    props.id(),
-                    SDL_PROP_TEXTURE_CREATE_HEIGHT_NUMBER,
-                    height as i64,
-                ))?;
-                // A display snapshot is already mapped. Do not tone-map it again.
-                check(SDL_SetFloatProperty(
-                    props.id(),
-                    SDL_PROP_TEXTURE_CREATE_HDR_HEADROOM_FLOAT,
-                    0.,
-                ))?;
-                SDL_CreateTextureWithProperties(renderer.as_ptr(), props.id())
-            } else {
-                SDL_CreateTexture(
-                    renderer.as_ptr(),
-                    SDL_PIXELFORMAT_RGBA32,
-                    SDL_TEXTUREACCESS_STATIC,
-                    w,
-                    h,
-                )
-            };
-            // SAFETY: Both branches create a new caller-owned SDL texture,
-            // and this guard uniquely releases it on any later error.
-            let texture = Self(OwnedTexture(NonNull::new(raw).ok_or_else(error)?));
-            check(SDL_UpdateTexture(
-                texture.0.as_non_null().as_ptr(),
-                ptr::null(),
-                pixels.as_ptr().cast(),
-                pitch,
+            let props = OwnedProperties::new()?;
+            check(SDL_SetNumberProperty(
+                props.id(),
+                SDL_PROP_TEXTURE_CREATE_FORMAT_NUMBER,
+                SDL_PIXELFORMAT_RGBA64_FLOAT.0 as i64,
             ))?;
+            check(SDL_SetNumberProperty(
+                props.id(),
+                SDL_PROP_TEXTURE_CREATE_COLORSPACE_NUMBER,
+                SDL_COLORSPACE_SRGB_LINEAR.0 as i64,
+            ))?;
+            check(SDL_SetNumberProperty(
+                props.id(),
+                SDL_PROP_TEXTURE_CREATE_WIDTH_NUMBER,
+                width as i64,
+            ))?;
+            check(SDL_SetNumberProperty(
+                props.id(),
+                SDL_PROP_TEXTURE_CREATE_HEIGHT_NUMBER,
+                height as i64,
+            ))?;
+            // A display snapshot is already mapped. Do not tone-map it again.
+            check(SDL_SetFloatProperty(
+                props.id(),
+                SDL_PROP_TEXTURE_CREATE_HDR_HEADROOM_FLOAT,
+                0.,
+            ))?;
+            let raw = SDL_CreateTextureWithProperties(renderer.as_ptr(), props.id());
+            let texture = OwnedTexture(NonNull::new(raw).ok_or_else(error)?);
             check(SDL_SetTextureBlendMode(
-                texture.0.as_non_null().as_ptr(),
+                texture.as_non_null().as_ptr(),
                 SDL_BLENDMODE_NONE,
             ))?;
             check(SDL_SetTextureScaleMode(
-                texture.0.as_non_null().as_ptr(),
+                texture.as_non_null().as_ptr(),
                 SDL_SCALEMODE_LINEAR,
             ))?;
-            Ok(texture)
+            Ok(Self {
+                raw: texture,
+                size,
+                pitch,
+                linear,
+            })
         }
     }
 
-    pub fn draw(
-        &self,
-        renderer: &Renderer,
-        destination: &SDL_FRect,
-        linear: bool,
-    ) -> Result<(), String> {
+    pub fn update_rows(&self, first: usize, pixels: &[u8]) -> Result<(), String> {
+        let pitch = self.pitch as usize;
+        let height = i32::try_from(pixels.len() / pitch).map_err(|_| "Too many snapshot rows")?;
+        let first = i32::try_from(first).map_err(|_| "Invalid snapshot row offset")?;
+        if height == 0
+            || !pixels.len().is_multiple_of(pitch)
+            || first
+                .checked_add(height)
+                .is_none_or(|end| end > self.size[1])
+        {
+            return Err("Invalid snapshot upload rows".into());
+        }
+        let rect = SDL_Rect {
+            x: 0,
+            y: first,
+            w: self.size[0],
+            h: height,
+        };
+        let partial = first != 0 || height != self.size[1];
+        check(
+            sdl_native(SdlNativeAction::TextureUpload(
+                &self.raw,
+                partial.then_some(&rect),
+                pixels,
+                self.pitch,
+            ))
+            .succeeded(),
+        )
+    }
+
+    pub fn draw(&self, renderer: &Renderer, destination: &SDL_FRect) -> Result<(), String> {
         let draw = || {
             renderer.draw_owned_texture(OwnedTextureRef::Snapshot(self), None, Some(destination))
         };
-        if !linear {
+        if !self.linear {
             return draw();
         }
         let white = renderer.sdr_white_point();
@@ -2597,12 +2623,7 @@ impl GuiTexture {
         }
         // SDL receives only the checked borrowed region and the exact RGBA
         // payload through the existing native operation dispatcher.
-        check(
-            sdl_native(SdlNativeAction::GuiTextureUpload(
-                &self.raw, rect, rgba, pitch,
-            ))
-            .succeeded(),
-        )
+        check(sdl_native(SdlNativeAction::TextureUpload(&self.raw, rect, rgba, pitch)).succeeded())
     }
 
     pub fn geometry(
@@ -2669,7 +2690,7 @@ impl OwnedTextureRef<'_> {
     fn raw(&self) -> NonNull<SDL_Texture> {
         match self {
             Self::Ink(texture) => texture.raw.0,
-            Self::Snapshot(texture) => texture.0.0,
+            Self::Snapshot(texture) => texture.raw.0,
         }
     }
 }
@@ -2987,6 +3008,25 @@ impl Renderer {
         self.run_command(RenderCommand::Scale(scale))
     }
 
+    /// Draw pixel-aligned cached content without a logical-coordinate round trip.
+    pub fn with_pixel_scale(
+        &self,
+        previous: [f32; 2],
+        draw: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        if previous == [1.; 2] {
+            return draw();
+        }
+        self.set_render_scale([1.; 2])?;
+        let mut unwind_restore = RestoreOnDrop::new(|| {
+            let _ = self.set_render_scale(previous);
+        });
+        let result = draw();
+        let restore = self.set_render_scale(previous);
+        unwind_restore.disarm();
+        result.and(restore)
+    }
+
     /// Set a clip region and return failures (unlike the UI's best-effort clip).
     pub fn try_set_clip_rect(&self, clip: Option<&SDL_Rect>) -> Result<(), String> {
         self.run_command(RenderCommand::Clip(clip))
@@ -3217,6 +3257,30 @@ mod tests {
         assert_eq!(bounded_sdl_count(-1, 256), None);
         assert_eq!(bounded_sdl_count(257, 256), None);
         assert_eq!(bounded_sdl_count(i32::MAX, 256), None);
+    }
+
+    #[test]
+    fn snapshot_upload_rejects_invalid_ranges_and_draws_rows_in_order() -> Result<(), String> {
+        let renderer = TestSurface::new([2, 3])?.software_renderer()?;
+        let texture = SnapshotTexture::new(&renderer, [2, 3], false)?;
+        assert!(texture.update_rows(0, &[]).is_err());
+        assert!(texture.update_rows(1, &[0; 7]).is_err());
+        assert!(texture.update_rows(2, &[0; 16]).is_err());
+        assert!(texture.update_rows(usize::MAX, &[0; 8]).is_err());
+        texture.update_rows(0, &[21, 35, 53, 255].repeat(2))?;
+        texture.update_rows(1, &[38, 61, 80, 255].repeat(4))?;
+        texture.draw(
+            &renderer,
+            &SDL_FRect {
+                x: 0.,
+                y: 0.,
+                w: 2.,
+                h: 3.,
+            },
+        )?;
+        assert_eq!(TestSurface::pixel(&renderer, 1, 0)?, [21, 35, 53, 255]);
+        assert_eq!(TestSurface::pixel(&renderer, 0, 2)?, [38, 61, 80, 255]);
+        Ok(())
     }
 
     #[test]

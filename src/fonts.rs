@@ -2,12 +2,13 @@
 
 use egui::{
     Color32, FontData, FontDefinitions, FontFamily, FontId, Ui,
-    text::{Galley, LayoutJob, TextFormat},
+    text::{ByteIndex, Galley, LayoutJob, LayoutSection, TextFormat, TextWrapping},
 };
 use skrifa::{FontRef, GlyphId, MetadataProvider, string::StringId};
 use std::{
     fs::{self, File},
     io::{self, Read, Write},
+    ops::Range,
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
@@ -492,15 +493,17 @@ impl TextFonts {
         color: Color32,
         width: f32,
     ) -> Arc<Galley> {
-        let mut job = LayoutJob::default();
-        job.wrap.max_width = width;
-        job.keep_trailing_whitespace = true;
+        let mut job = layout_job(text, width);
+        self.fallback_runs(text, |range, family| {
+            job.sections
+                .push(layout_section(range, Arc::from(family), size, color));
+        });
+        ui.fonts_mut(|fonts| fonts.layout_job(job))
+    }
+
+    fn fallback_runs(&self, text: &str, mut append: impl FnMut(Range<usize>, &str)) {
         let mut current = ANNOTATION;
         let mut start = 0;
-        let mut append = |range, name| {
-            let font = FontId::new(size, FontFamily::Name(Arc::from(name)));
-            job.append(&text[range], 0., TextFormat::simple(font, color));
-        };
         for (index, cluster) in text.grapheme_indices(true) {
             let next = self.family_for_cluster(cluster);
             if next != current {
@@ -512,11 +515,75 @@ impl TextFonts {
             }
         }
         append(start..text.len(), current);
-        ui.fonts_mut(|fonts| fonts.layout_job(job))
     }
 
     pub fn font_id(size: f32) -> FontId {
         FontId::new(size, FontFamily::Name(ANNOTATION.into()))
+    }
+}
+
+/// One editor's fallback decisions. Galleys belong to egui's current glyph
+/// atlas. Keep only the source and its family runs across passes.
+#[derive(Default)]
+pub(crate) struct LayoutRuns {
+    revision: u64,
+    text: String,
+    runs: Vec<(usize, Arc<str>)>,
+}
+
+impl LayoutRuns {
+    pub fn layout(
+        &mut self,
+        fonts: &TextFonts,
+        ui: &Ui,
+        text: &str,
+        size: f32,
+        color: Color32,
+        width: f32,
+    ) -> Arc<Galley> {
+        if self.revision != fonts.revision || self.text != text || self.runs.is_empty() {
+            self.revision = fonts.revision;
+            self.text.clear();
+            self.text.push_str(text);
+            self.runs.clear();
+            fonts.fallback_runs(text, |range, family| {
+                self.runs.push((range.end, Arc::from(family)));
+            });
+        }
+        let mut job = layout_job(text, width);
+        job.sections.reserve(self.runs.len());
+        let mut start = 0;
+        for (end, family) in &self.runs {
+            job.sections
+                .push(layout_section(start..*end, Arc::clone(family), size, color));
+            start = *end;
+        }
+        ui.fonts_mut(|fonts| fonts.layout_job(job))
+    }
+}
+
+fn layout_job(text: &str, width: f32) -> LayoutJob {
+    LayoutJob {
+        text: text.to_owned(),
+        wrap: TextWrapping {
+            max_width: width,
+            ..TextWrapping::default()
+        },
+        keep_trailing_whitespace: true,
+        ..LayoutJob::default()
+    }
+}
+
+fn layout_section(
+    byte_range: Range<usize>,
+    family: Arc<str>,
+    size: f32,
+    color: Color32,
+) -> LayoutSection {
+    LayoutSection {
+        leading_space: 0.,
+        byte_range: ByteIndex(byte_range.start)..ByteIndex(byte_range.end),
+        format: TextFormat::simple(FontId::new(size, FontFamily::Name(family)), color),
     }
 }
 
@@ -654,6 +721,30 @@ mod tests {
         });
         frame.drop_without_applying_deltas();
         glyphs
+    }
+
+    #[test]
+    fn editor_fallback_runs_follow_text_and_font_revision() {
+        let mut fonts = TextFonts::default();
+        let mut runs = LayoutRuns::default();
+        let context = egui::Context::default();
+        for (revision, text, width) in [
+            (0, "标注 👩🏽‍🎨 🇨🇳 ⚽️ 1️⃣", 300.),
+            (0, "标注 👩🏽‍🎨 🇨🇳 ⚽️ 1️⃣", 110.),
+            (0, "预编辑 🇨🇳", 110.),
+            (1, "预编辑 🇨🇳", 110.),
+        ] {
+            fonts.revision = revision;
+            context.set_fonts(fonts.definitions());
+            let output = context.run_ui(Default::default(), |ui| {
+                let cached = runs.layout(&fonts, ui, text, 26., Color32::WHITE, width);
+                let fresh = fonts.layout(ui, text, 26., Color32::WHITE, width);
+                assert_eq!(cached.job, fresh.job);
+            });
+            output.drop_without_applying_deltas();
+            assert_eq!(runs.revision, revision);
+            assert_eq!(runs.text, text);
+        }
     }
 
     #[test]

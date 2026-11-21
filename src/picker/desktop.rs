@@ -1,30 +1,46 @@
-#![deny(clippy::undocumented_unsafe_blocks)]
+#![forbid(unsafe_code)]
 
-use crate::{color::InkColor, sdl::*};
+use crate::{background::Image, color::InkColor, sdl::Window};
+use x11rb::{
+    connection::Connection,
+    protocol::xproto::{
+        ConnectionExt as _, Format, ImageFormat, ImageOrder, VisualClass, Visualtype,
+    },
+    rust_connection::RustConnection,
+};
 
 #[derive(Clone, Copy, Debug)]
 pub struct ScreenPoint {
-    pub x: i32,
-    pub y: i32,
-    pub root: std::ffi::c_ulong,
+    root: u32,
+    pixels: [i16; 2],
 }
 
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
-fn local_pixels(window: &Window, local: [f32; 2]) -> Result<[i32; 2], String> {
-    let (logical, physical) = window
-        .capture_coordinate_sizes()
-        .ok_or("Cannot pick from a zero-sized or unavailable window")?;
-    scaled_pixels(local, logical, physical)
+fn connect() -> Result<RustConnection, String> {
+    RustConnection::connect(None)
+        .map(|(connection, _)| connection)
+        .map_err(|error| format!("Cannot connect to the X11 display: {error}"))
 }
 
-/// Reject zero-sized/minimized windows and out-of-range coordinates before
-/// narrowing into the 32-bit pixel coordinates required by Win32 and X11.
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+pub fn is_xwayland() -> bool {
+    if std::env::var_os("WAYLAND_DISPLAY").is_some_and(|value| !value.is_empty())
+        || std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland")
+    {
+        return true;
+    }
+    connect().is_ok_and(|connection| {
+        connection
+            .query_extension(b"XWAYLAND")
+            .ok()
+            .and_then(|request| request.reply().ok())
+            .is_some_and(|reply| reply.present)
+    })
+}
+
 fn scaled_pixels(
     local: [f32; 2],
     logical: [f32; 2],
     physical: [i32; 2],
-) -> Result<[i32; 2], String> {
+) -> Result<[i16; 2], String> {
     let mut pixels = [0; 2];
     for i in 0..2 {
         if !local[i].is_finite() || !logical[i].is_finite() || logical[i] <= 0. || physical[i] <= 0
@@ -32,395 +48,284 @@ fn scaled_pixels(
             return Err("Invalid screen coordinate or window size".into());
         }
         let coordinate = (local[i] * physical[i] as f32 / logical[i]).floor();
-        if !coordinate.is_finite() || !(i32::MIN as f32..2_147_483_648.).contains(&coordinate) {
-            return Err("Screen coordinate is out of range".into());
+        if !(f32::from(i16::MIN)..=f32::from(i16::MAX)).contains(&coordinate) {
+            return Err("Screen coordinate is out of X11 range".into());
         }
-        pixels[i] = coordinate as i32;
+        pixels[i] = coordinate as i16;
     }
     Ok(pixels)
 }
 
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
-mod x11 {
-    use super::*;
-    use libloading::{Library, Symbol};
-    use std::ffi::{c_char, c_int, c_ulong, c_void};
-    use std::ptr::NonNull;
-    fn library() -> Result<Library, String> {
-        crate::native::native_library(crate::native::NativeLibrary::X11)
-            .map_err(|_| "X11 screen capture is unavailable".into())
+fn translate(
+    connection: &RustConnection,
+    window: &Window,
+    local: [f32; 2],
+) -> Result<ScreenPoint, String> {
+    let (logical, physical) = window
+        .capture_coordinate_sizes()
+        .ok_or("Cannot pick from a zero-sized or unavailable window")?;
+    let [x, y] = scaled_pixels(local, logical, physical)?;
+    let id = u32::try_from(window.x11_window_number()).map_err(|_| "Invalid X11 window ID")?;
+    let root = connection
+        .get_geometry(id)
+        .map_err(|error| error.to_string())?
+        .reply()
+        .map_err(|error| format!("Cannot locate the canvas on the display: {error}"))?
+        .root;
+    let reply = connection
+        .translate_coordinates(id, root, x, y)
+        .map_err(|error| error.to_string())?
+        .reply()
+        .map_err(|error| format!("Cannot convert the selected screen coordinate: {error}"))?;
+    if !reply.same_screen {
+        return Err("The selected position is on a different X11 screen".into());
     }
-    fn display(window: &Window) -> Result<NativeWindowHandle<'_>, String> {
-        window
-            .x11_display()
-            .ok_or_else(|| "No X11 display for screen picking".into())
-    }
-    pub fn is_xwayland(window: &Window) -> bool {
-        if std::env::var_os("WAYLAND_DISPLAY").is_some_and(|value| !value.is_empty())
-            || std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland")
-        {
-            return true;
-        }
-        // SAFETY: SDL owns the active X11 Display. The XQueryExtension symbol
-        // is borrowed from a Library that remains live for this call, and
-        // all of its output pointers refer to initialized local integers.
-        unsafe {
-            let Ok(lib) = library() else { return false };
-            let Ok(display) = display(window) else {
-                return false;
-            };
-            let query = lib.get::<unsafe extern "C" fn(
-                NonNull<c_void>,
-                NonNull<c_char>,
-                &mut c_int,
-                &mut c_int,
-                &mut c_int,
-            ) -> c_int>(b"XQueryExtension\0");
-            let (mut opcode, mut event, mut error) = (0, 0, 0);
-            let Some(extension) = NonNull::new(c"XWAYLAND".as_ptr().cast_mut()) else {
-                return false;
-            };
-            query.is_ok_and(|query| {
-                query(
-                    display.as_non_null(),
-                    extension,
-                    &mut opcode,
-                    &mut event,
-                    &mut error,
-                ) != 0
-            })
-        }
-    }
-    pub fn position(window: &Window, local: [f32; 2]) -> Result<ScreenPoint, String> {
-        // SAFETY: SDL owns the live Display and drawable, and the Xlib
-        // geometry/translation symbol signatures match their C declarations.
-        // All writable output pointers refer to initialized local variables,
-        // and the dynamic Library outlives every borrowed Symbol.
-        unsafe {
-            let lib = library()?;
-            let d = display(window)?;
-            let id = window.x11_window_number();
-            let geometry: Symbol<
-                unsafe extern "C" fn(
-                    NonNull<c_void>,
-                    c_ulong,
-                    &mut c_ulong,
-                    &mut c_int,
-                    &mut c_int,
-                    &mut u32,
-                    &mut u32,
-                    &mut u32,
-                    &mut u32,
-                ) -> c_int,
-            > = lib.get(b"XGetGeometry\0").map_err(|e| e.to_string())?;
-            let (mut root, mut x, mut y, mut width, mut height, mut border, mut depth) =
-                (0, 0, 0, 0, 0, 0, 0);
-            if geometry(
-                d.as_non_null(),
-                id,
-                &mut root,
-                &mut x,
-                &mut y,
-                &mut width,
-                &mut height,
-                &mut border,
-                &mut depth,
-            ) == 0
-            {
-                return Err("Cannot locate the canvas on the display".into());
-            }
-            let translate: Symbol<
-                unsafe extern "C" fn(
-                    NonNull<c_void>,
-                    c_ulong,
-                    c_ulong,
-                    c_int,
-                    c_int,
-                    &mut c_int,
-                    &mut c_int,
-                    &mut c_ulong,
-                ) -> c_int,
-            > = lib
-                .get(b"XTranslateCoordinates\0")
-                .map_err(|e| e.to_string())?;
-            let [px, py] = local_pixels(window, local)?;
-            let mut child = 0;
-            if translate(
-                d.as_non_null(),
-                id,
-                root,
-                px,
-                py,
-                &mut x,
-                &mut y,
-                &mut child,
-            ) == 0
-            {
-                return Err("Cannot convert the selected screen coordinate".into());
-            }
-            Ok(ScreenPoint { x, y, root })
-        }
-    }
-    #[repr(C)]
-    struct Image {
-        width: c_int,
-        height: c_int,
-        xoffset: c_int,
-        format: c_int,
-        data: Option<NonNull<c_char>>,
-        byte_order: c_int,
-        bitmap_unit: c_int,
-        bitmap_bit_order: c_int,
-        bitmap_pad: c_int,
-        depth: c_int,
-        bytes_per_line: c_int,
-        bits_per_pixel: c_int,
-        red_mask: c_ulong,
-        green_mask: c_ulong,
-        blue_mask: c_ulong,
-    }
-    // Validate XImage's row stride before passing image coordinates to
-    // XGetPixel. Foreign metadata may not describe enough storage for a row.
-    fn valid_row_stride(width: i32, xoffset: i32, bits_per_pixel: i32, stride: i32) -> bool {
-        if width <= 0 || xoffset < 0 || !(1..=64).contains(&bits_per_pixel) || stride <= 0 {
-            return false;
-        }
-        let Some(required_bits) = i64::from(width)
-            .checked_add(i64::from(xoffset))
-            .and_then(|pixels| pixels.checked_mul(i64::from(bits_per_pixel)))
-            .and_then(|bits| bits.checked_add(7))
-        else {
-            return false;
-        };
-        required_bits / 8 <= i64::from(stride)
-    }
+    Ok(ScreenPoint {
+        root,
+        pixels: [reply.dst_x, reply.dst_y],
+    })
+}
 
-    // The Xlib image constructor takes an exact fixed C ABI. Keeping the
-    // symbol signature named prevents large inferred types in capture paths.
-    type GetXImage = unsafe extern "C" fn(
-        NonNull<c_void>,
-        c_ulong,
-        c_int,
-        c_int,
-        u32,
-        u32,
-        c_ulong,
-        c_int,
-    ) -> Option<NonNull<Image>>;
+pub fn position(window: &Window, local: [f32; 2]) -> Result<ScreenPoint, String> {
+    translate(&connect()?, window, local)
+}
 
-    /// Own an XGetImage result while retaining the library that supplied its
-    /// XDestroyImage function. Every early return now releases the XImage.
-    struct OwnedImage<'lib> {
-        raw: NonNull<Image>,
-        destroy: Symbol<'lib, unsafe extern "C" fn(NonNull<Image>) -> c_int>,
-    }
+#[derive(Clone, Copy)]
+struct Channel {
+    mask: u32,
+    shift: u32,
+    max: u32,
+}
 
-    impl Drop for OwnedImage<'_> {
-        fn drop(&mut self) {
-            // SAFETY: This non-null XImage is owned exclusively by the guard.
-            // The borrowed Symbol also keeps the X11 library loaded.
-            unsafe {
-                (self.destroy)(self.raw);
-            }
-        }
-    }
-
-    /// Shared X11 image readback for both the color picker and screenshots.
-    /// Exactly one native call boundary owns the XGetImage result and its
-    /// dynamically loaded X11 destructor.
-    fn read_pixels(
-        window: &Window,
-        root: c_ulong,
-        origin: [i32; 2],
-        dimensions: [i32; 2],
-        errors: [&'static str; 3],
-        mut consume: impl FnMut(i32, i32, c_ulong, [c_ulong; 3]) -> Result<(), String>,
-    ) -> Result<(), String> {
-        let [bounds_error, image_error, visual_error] = errors;
-        let [x, y] = origin;
-        let [width, height] = dimensions;
-        if width <= 0 || height <= 0 {
-            return Err(bounds_error.into());
-        }
-        // SAFETY: SDL owns the live X11 Display. Symbol types match the Xlib
-        // C signatures and all output parameters are writable stack values.
-        // The root geometry is checked before requesting an image. OwnedImage
-        // retains the XDestroyImage symbol and frees the image on every exit.
-        unsafe {
-            let lib = library()?;
-            let display = display(window)?;
-            let geometry: Symbol<
-                unsafe extern "C" fn(
-                    NonNull<c_void>,
-                    c_ulong,
-                    &mut c_ulong,
-                    &mut c_int,
-                    &mut c_int,
-                    &mut u32,
-                    &mut u32,
-                    &mut u32,
-                    &mut u32,
-                ) -> c_int,
-            > = lib.get(b"XGetGeometry\0").map_err(|e| e.to_string())?;
-            let (mut returned_root, mut rx, mut ry, mut rw, mut rh, mut border, mut depth) =
-                (0, 0, 0, 0, 0, 0, 0);
-            if geometry(
-                display.as_non_null(),
-                root,
-                &mut returned_root,
-                &mut rx,
-                &mut ry,
-                &mut rw,
-                &mut rh,
-                &mut border,
-                &mut depth,
-            ) == 0
-                || x < 0
-                || y < 0
-                || x as i64 + width as i64 > rw as i64
-                || y as i64 + height as i64 > rh as i64
-            {
-                return Err(bounds_error.into());
-            }
-            let get: Symbol<GetXImage> = lib.get(b"XGetImage\0").map_err(|e| e.to_string())?;
-            let pixel: Symbol<unsafe extern "C" fn(NonNull<Image>, c_int, c_int) -> c_ulong> =
-                lib.get(b"XGetPixel\0").map_err(|e| e.to_string())?;
-            let destroy: Symbol<unsafe extern "C" fn(NonNull<Image>) -> c_int> =
-                lib.get(b"XDestroyImage\0").map_err(|e| e.to_string())?;
-            let raw = get(
-                display.as_non_null(),
-                root,
-                x,
-                y,
-                width as u32,
-                height as u32,
-                c_ulong::MAX,
-                2,
-            )
-            .ok_or(image_error)?;
-            let image = OwnedImage { raw, destroy };
-            // SAFETY: XGetImage returned a non-null, owned image that stays
-            // alive through the OwnedImage guard. Reject malformed metadata
-            // before asking XGetPixel to address its native pixel buffer.
-            let header = image.raw.as_ref();
-            if header.width != width
-                || header.height != height
-                || header.format != 2 // XGetImage requested ZPixmap
-                || header.data.is_none()
-                || !valid_row_stride(
-                    header.width,
-                    header.xoffset,
-                    header.bits_per_pixel,
-                    header.bytes_per_line,
-                )
-            {
-                return Err(image_error.into());
-            }
-            let masks = [header.red_mask, header.green_mask, header.blue_mask];
-            if masks.contains(&0) {
-                return Err(visual_error.into());
-            }
-            for y in 0..height {
-                for x in 0..width {
-                    consume(x, y, pixel(image.raw, x, y), masks)?;
-                }
-            }
-            Ok(())
-        }
-    }
-
-    pub fn sample(window: &Window, point: ScreenPoint) -> Result<InkColor, String> {
-        let mut rgb = [0.; 3];
-        read_pixels(
-            window,
-            point.root,
-            [point.x, point.y],
-            [1, 1],
-            [
-                "Screen coordinate is out of bounds",
-                "Cannot read the selected desktop pixel",
-                "Screen picking requires a TrueColor visual",
-            ],
-            |_, _, value, masks| {
-                for (i, mask) in masks.into_iter().enumerate() {
-                    rgb[i] = channel(value, mask)?;
-                }
-                Ok(())
-            },
-        )?;
-        Ok(crate::icc::display_sample_to_srgb(window, rgb))
-    }
-    fn channel(pixel: c_ulong, mask: c_ulong) -> Result<f32, String> {
-        if mask == 0 {
-            return Err("Screen picking requires a TrueColor visual".into());
-        }
+impl Channel {
+    fn new(mask: u32) -> Self {
         let shift = mask.trailing_zeros();
-        let max = mask >> shift;
-        Ok(((pixel & mask) >> shift) as f32 / max as f32)
+        Self {
+            mask,
+            shift,
+            max: mask >> shift,
+        }
     }
-    pub fn capture(window: &Window) -> Result<crate::background::Image, String> {
-        let origin = position(window, [0.; 2])?;
-        let [w, h] = window.pixel_size();
-        if w <= 0 || h <= 0 {
-            return Err("Invalid desktop capture dimensions".into());
-        }
-        let mut out = crate::background::Image::buffer(w as u32, h as u32)?;
-        read_pixels(
-            window,
-            origin.root,
-            [origin.x, origin.y],
-            [w, h],
-            [
-                "Capture is outside the connected display bounds",
-                "Cannot capture the desktop",
-                "Desktop capture requires a TrueColor visual",
-            ],
-            |x, y, value, masks| {
-                let offset = (y as usize * w as usize + x as usize) * 4;
-                for (i, mask) in masks.into_iter().enumerate() {
-                    out.rgba[offset + i] = (channel(value, mask)? * 255.).round() as u8;
-                }
-                out.rgba[offset + 3] = 255;
-                Ok(())
-            },
-        )?;
-        // SDL owns its ICC profile allocation; Window copies and frees it.
-        if let Some(profile) = window.icc_profile() {
-            out.convert_to_srgb(&profile);
-        }
-        Ok(out)
-    }
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-        #[test]
-        fn rejects_truncated_ximage_rows_before_native_pixel_reads() {
-            assert!(valid_row_stride(10, 0, 32, 40));
-            assert!(!valid_row_stride(10, 0, 32, 39));
-            assert!(valid_row_stride(9, 1, 24, 32));
-            assert!(!valid_row_stride(9, 1, 24, 29));
-            assert!(valid_row_stride(5, 0, 1, 1));
-            assert!(!valid_row_stride(5, 0, 0, 1));
-            assert!(!valid_row_stride(5, -1, 32, 32));
-            assert!(!valid_row_stride(i32::MAX, 0, 32, i32::MAX));
-        }
 
-        #[test]
-        fn decodes_eight_ten_and_sixteen_bit_visuals() {
-            assert_eq!(channel(0x12abef, 0xff0000), Ok(18. / 255.));
-            assert_eq!(channel(0x12abef, 0xff00), Ok(171. / 255.));
-            assert_eq!(channel(0xffff, 0xf800), Ok(1.));
-            assert_eq!(channel(0x3ff00000, 0x3ff00000), Ok(1.));
-            assert!(channel(0, 0).is_err());
-        }
+    fn normalized(self, pixel: u32) -> f32 {
+        ((pixel & self.mask) >> self.shift) as f32 / self.max as f32
+    }
+
+    fn byte(self, pixel: u32) -> u8 {
+        let value = u64::from((pixel & self.mask) >> self.shift);
+        ((value * 255 + u64::from(self.max / 2)) / u64::from(self.max)) as u8
     }
 }
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
-pub use x11::{capture, is_xwayland, position, sample};
 
-#[cfg(all(test, any(target_os = "linux", target_os = "freebsd")))]
-mod coordinate_tests {
-    use super::scaled_pixels;
+struct PixelLayout {
+    pixel_bytes: usize,
+    stride: usize,
+    order: ImageOrder,
+    channels: [Channel; 3],
+}
+
+impl PixelLayout {
+    fn new(
+        width: u16,
+        format: &Format,
+        order: ImageOrder,
+        visual: &Visualtype,
+    ) -> Result<Self, String> {
+        let bits = format.bits_per_pixel;
+        let pad = format.scanline_pad;
+        if !matches!(bits, 8 | 16 | 24 | 32)
+            || !matches!(pad, 8 | 16 | 32)
+            || !matches!(order, ImageOrder::LSB_FIRST | ImageOrder::MSB_FIRST)
+        {
+            return Err("Unsupported X11 pixel format".into());
+        }
+        let masks = [visual.red_mask, visual.green_mask, visual.blue_mask];
+        let [red, green, blue] = masks;
+        let used = red | green | blue;
+        if !matches!(
+            visual.class,
+            VisualClass::TRUE_COLOR | VisualClass::DIRECT_COLOR
+        ) || masks.contains(&0)
+            || (red & green) | (red & blue) | (green & blue) != 0
+            || used.leading_zeros() < u32::from(32 - bits)
+        {
+            return Err("Screen capture requires an RGB X11 visual".into());
+        }
+        let channels = masks.map(Channel::new);
+        if channels
+            .iter()
+            .any(|channel| !channel.max.wrapping_add(1).is_power_of_two())
+        {
+            return Err("Invalid X11 color masks".into());
+        }
+        let scanline_bits = usize::from(width) * usize::from(bits);
+        let align = usize::from(pad);
+        Ok(Self {
+            pixel_bytes: usize::from(bits / 8),
+            stride: scanline_bits.div_ceil(align) * align / 8,
+            order,
+            channels,
+        })
+    }
+
+    fn pixel(&self, bytes: &[u8]) -> u32 {
+        let mut native = [0; 4];
+        if self.order == ImageOrder::LSB_FIRST {
+            native[..bytes.len()].copy_from_slice(bytes);
+            u32::from_le_bytes(native)
+        } else {
+            native[4 - bytes.len()..].copy_from_slice(bytes);
+            u32::from_be_bytes(native)
+        }
+    }
+
+    fn rgba(&self, bytes: &[u8]) -> [u8; 4] {
+        let value = self.pixel(bytes);
+        let [red, green, blue] = self.channels.map(|channel| channel.byte(value));
+        [red, green, blue, 255]
+    }
+
+    fn image(&self, [width, height]: [u16; 2], mut data: Vec<u8>) -> Result<Image, String> {
+        let pixels = self
+            .stride
+            .checked_mul(usize::from(height))
+            .ok_or("X11 screenshot is too large")?;
+        if data.len() != pixels {
+            return Err("Invalid X11 screenshot size".into());
+        }
+        let [width, height] = [width, height].map(u32::from);
+        if self.pixel_bytes == 4 {
+            // 32-bit X11 scanlines require no padding. Reuse the reply buffer.
+            let masks = self.channels.map(|channel| channel.mask);
+            let (pixels, _) = data.as_chunks_mut::<4>();
+            if masks != [0xff0000, 0xff00, 0xff] {
+                for pixel in pixels {
+                    *pixel = self.rgba(pixel);
+                }
+            } else if self.order == ImageOrder::LSB_FIRST {
+                for pixel in pixels {
+                    pixel.swap(0, 2);
+                    pixel[3] = 255;
+                }
+            } else {
+                for pixel in pixels {
+                    pixel.rotate_left(1);
+                    pixel[3] = 255;
+                }
+            }
+            return Image::from_rgba8(width, height, data);
+        }
+        let mut image = Image::buffer(width, height)?;
+        let active = width as usize * self.pixel_bytes;
+        for (source, target) in data
+            .chunks_exact(self.stride)
+            .zip(image.rgba.chunks_exact_mut(width as usize * 4))
+        {
+            for (pixel, output) in source[..active]
+                .chunks_exact(self.pixel_bytes)
+                .zip(target.as_chunks_mut::<4>().0)
+            {
+                *output = self.rgba(pixel);
+            }
+        }
+        Ok(image)
+    }
+}
+
+fn readback(
+    connection: &RustConnection,
+    point: ScreenPoint,
+    size: [u16; 2],
+) -> Result<(PixelLayout, Vec<u8>), String> {
+    let [width, height] = size;
+    let [x, y] = point.pixels;
+    Image::rgba8_len(width.into(), height.into())?;
+    let bounds = connection
+        .get_geometry(point.root)
+        .map_err(|error| error.to_string())?
+        .reply()
+        .map_err(|error| error.to_string())?;
+    if x < 0
+        || y < 0
+        || i32::from(x) + i32::from(width) > i32::from(bounds.width)
+        || i32::from(y) + i32::from(height) > i32::from(bounds.height)
+    {
+        return Err("Capture is outside the connected display bounds".into());
+    }
+    let mut reply = connection
+        .get_image(
+            ImageFormat::Z_PIXMAP,
+            point.root,
+            x,
+            y,
+            width,
+            height,
+            u32::MAX,
+        )
+        .map_err(|error| error.to_string())?
+        .reply()
+        .map_err(|error| format!("Cannot read the X11 desktop: {error}"))?;
+    let setup = connection.setup();
+    let format = setup
+        .pixmap_formats
+        .iter()
+        .find(|format| format.depth == reply.depth)
+        .ok_or("Missing X11 pixmap format")?;
+    let visuals = setup
+        .roots
+        .iter()
+        .find(|screen| screen.root == point.root)
+        .and_then(|screen| {
+            screen
+                .allowed_depths
+                .iter()
+                .find(|depth| depth.depth == reply.depth)
+        });
+    let visual = visuals
+        .and_then(|depth| {
+            depth
+                .visuals
+                .iter()
+                .find(|visual| visual.visual_id == reply.visual)
+        })
+        .ok_or("Missing X11 screenshot visual")?;
+    let layout = PixelLayout::new(width, format, setup.image_byte_order, visual)?;
+    let bytes = layout
+        .stride
+        .checked_mul(usize::from(height))
+        .ok_or("X11 screenshot is too large")?;
+    // X11 pads the entire reply to 32 bits in addition to row padding.
+    if reply.data.len() != bytes.next_multiple_of(4) {
+        return Err("Invalid X11 screenshot size".into());
+    }
+    reply.data.truncate(bytes);
+    Ok((layout, reply.data))
+}
+
+pub fn sample(window: &Window, point: ScreenPoint) -> Result<InkColor, String> {
+    let (layout, data) = readback(&connect()?, point, [1, 1])?;
+    let pixel = layout.pixel(&data[..layout.pixel_bytes]);
+    let rgb = layout.channels.map(|channel| channel.normalized(pixel));
+    Ok(crate::icc::display_sample_to_srgb(window, rgb))
+}
+
+pub fn capture(window: &Window) -> Result<Image, String> {
+    let connection = connect()?;
+    let origin = translate(&connection, window, [0.; 2])?;
+    let [w, h] = window.pixel_size();
+    let width = u16::try_from(w).map_err(|_| "Invalid X11 desktop capture width")?;
+    let height = u16::try_from(h).map_err(|_| "Invalid X11 desktop capture height")?;
+    let (layout, data) = readback(&connection, origin, [width, height])?;
+    let mut image = layout.image([width, height], data)?;
+    if let Some(profile) = window.icc_profile() {
+        image.convert_to_srgb(&profile);
+    }
+    Ok(image)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
 
     #[test]
     fn scales_and_rejects_invalid_window_dimensions() {
@@ -431,6 +336,66 @@ mod coordinate_tests {
         assert!(scaled_pixels([3., 4.], [0., 100.], [200, 200]).is_err());
         assert!(scaled_pixels([3., 4.], [100., 100.], [0, 200]).is_err());
         assert!(scaled_pixels([f32::NAN, 4.], [100., 100.], [200, 200]).is_err());
-        assert!(scaled_pixels([f32::MAX, 4.], [100., 100.], [200, 200]).is_err());
+        assert!(scaled_pixels([32_768., 4.], [100., 100.], [100, 100]).is_err());
+    }
+
+    #[test]
+    fn converts_padded_rows_and_both_x11_byte_orders() -> Result<(), String> {
+        let mut visual = Visualtype {
+            class: VisualClass::TRUE_COLOR,
+            red_mask: 0xff0000,
+            green_mask: 0xff00,
+            blue_mask: 0xff,
+            ..Visualtype::default()
+        };
+        for (order, source) in [
+            (ImageOrder::LSB_FIRST, [51, 34, 17, 0xde, 102, 85, 68, 0xad]),
+            (ImageOrder::MSB_FIRST, [17, 34, 51, 0xde, 68, 85, 102, 0xad]),
+        ] {
+            for bits_per_pixel in [24, 32] {
+                let format = Format {
+                    depth: 24,
+                    bits_per_pixel,
+                    scanline_pad: 32,
+                };
+                let layout = PixelLayout::new(1, &format, order, &visual)?;
+                let mut data = source.to_vec();
+                if bits_per_pixel == 32 && order == ImageOrder::MSB_FIRST {
+                    for pixel in data.as_chunks_mut::<4>().0 {
+                        pixel.rotate_right(1);
+                    }
+                }
+                assert!(layout.image([1, 2], vec![0; 7]).is_err());
+                let result = layout.image([1, 2], data)?;
+                assert_eq!(result.rgba, [17, 34, 51, 255, 68, 85, 102, 255]);
+            }
+        }
+        visual.red_mask = 0xf800;
+        visual.green_mask = 0x07e0;
+        visual.blue_mask = 0x001f;
+        let rgb565 = Format {
+            depth: 16,
+            bits_per_pixel: 16,
+            scanline_pad: 32,
+        };
+        let layout = PixelLayout::new(1, &rgb565, ImageOrder::LSB_FIRST, &visual)?;
+        assert_eq!(layout.rgba(&[0x1f, 0xf8]), [255, 0, 255, 255]);
+
+        visual.red_mask = 0x3ff00000;
+        visual.green_mask = 0x000ffc00;
+        visual.blue_mask = 0x000003ff;
+        let rgb10 = Format {
+            depth: 30,
+            bits_per_pixel: 32,
+            scanline_pad: 32,
+        };
+        let layout = PixelLayout::new(1, &rgb10, ImageOrder::LSB_FIRST, &visual)?;
+        assert_eq!(
+            layout.rgba(&0x3ff8_0000_u32.to_le_bytes()),
+            [255, 128, 0, 255]
+        );
+        visual.red_mask = 0;
+        assert!(PixelLayout::new(1, &rgb10, ImageOrder::LSB_FIRST, &visual).is_err());
+        Ok(())
     }
 }

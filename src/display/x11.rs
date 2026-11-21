@@ -1,244 +1,92 @@
-#![deny(clippy::undocumented_unsafe_blocks)]
-
-use crate::sdl::*;
-use libloading::{Library, Symbol};
-use std::{
-    ffi::{c_int, c_ulong, c_void},
-    ptr::NonNull,
-    sync::OnceLock,
+use x11rb::{
+    connection::Connection,
+    protocol::randr::{ConnectionExt as _, GetCrtcInfoReply, SetConfig},
+    rust_connection::RustConnection,
 };
-#[repr(C)]
-struct Resources {
-    timestamp: c_ulong,
-    config_timestamp: c_ulong,
-    count: c_int,
-    crtcs: Option<NonNull<c_ulong>>,
-}
-#[repr(C)]
-struct Crtc {
-    timestamp: c_ulong,
-    x: c_int,
-    y: c_int,
-    width: u32,
-    height: u32,
-    mode: c_ulong,
-}
-/// Reject implausibly large foreign counts before doing pointer arithmetic.
-const MAX_X11_SCREENS: c_int = 256;
-const MAX_RANDR_CRTCS: c_int = 4096;
 
-fn checked_crtc_count(count: c_int, has_crtcs: bool) -> Option<usize> {
-    if !(0..=MAX_RANDR_CRTCS).contains(&count) || (count > 0 && !has_crtcs) {
-        return None;
-    }
-    Some(count as usize)
-}
+const MAX_SCREENS: usize = 256;
+const MAX_CRTCS: usize = 4096;
 
-/// An XRandR-owned allocation, paired with the exact native destructor.
-/// `Randr` keeps the libraries providing these functions loaded.
-struct OwnedRandr<T> {
-    raw: NonNull<T>,
-    free: unsafe extern "C" fn(NonNull<T>),
-}
+// SDL can retain a display while its output is disabled. Consult RandR
+// before assigning a page, and fall back to SDL if the snapshot is incomplete.
+pub(super) struct Randr(RustConnection);
 
-impl<T> OwnedRandr<T> {
-    /// # Safety
-    /// `raw` must be either null or an owned pointer produced by the XRandR
-    /// function corresponding to `free`; the library must outlive this guard.
-    unsafe fn from_native(
-        raw: Option<NonNull<T>>,
-        free: unsafe extern "C" fn(NonNull<T>),
-    ) -> Option<Self> {
-        raw.map(|raw| Self { raw, free })
-    }
-
-    fn data(&self) -> &T {
-        // SAFETY: from_native establishes an owned, non-null allocation.
-        unsafe { self.raw.as_ref() }
-    }
-
-    fn as_non_null(&self) -> NonNull<T> {
-        self.raw
-    }
-}
-
-impl<T> Drop for OwnedRandr<T> {
-    fn drop(&mut self) {
-        // SAFETY: This is the allocation's matching native destructor and
-        // `Randr` retains the backing library for the duration of the query.
-        unsafe { (self.free)(self.raw) };
-    }
-}
-
-// Some XRandR backends retain an SDL display while its output is disabled.
-// Check active CRTCs as well, so that disabled outputs cannot retain a page.
-pub struct Randr {
-    x11: Library,
-    randr: Library,
-}
 impl Randr {
-    pub fn get() -> Option<&'static Self> {
-        // Xlib may call extension hooks when SDL closes the borrowed Display.
-        static API: OnceLock<Option<Randr>> = OnceLock::new();
-        API.get_or_init(Self::new).as_ref()
+    pub(super) fn connect() -> Option<Self> {
+        let (connection, _) = RustConnection::connect(None).ok()?;
+        let version = connection.randr_query_version(1, 3).ok()?.reply().ok()?;
+        ((version.major_version, version.minor_version) >= (1, 3)).then_some(Self(connection))
     }
-    fn new() -> Option<Self> {
-        // Loading is the native adapter's only library-initialization FFI;
-        // this guard owns both libraries for the full lifetime of the symbols.
-        Some(Self {
-            x11: crate::native::native_library(crate::native::NativeLibrary::X11).ok()?,
-            randr: crate::native::native_library(crate::native::NativeLibrary::Xrandr).ok()?,
-        })
-    }
-    pub fn active_areas(&self, window: &Window) -> Option<Vec<[i32; 4]>> {
-        // SAFETY: Xlib/XRandR symbols retain their loaded libraries through
-        // self, and SDL keeps the display live for the borrowed Window.
-        // OwnedRandr guards ensure every native allocation is released.
-        unsafe {
-            let count: Symbol<unsafe extern "C" fn(NonNull<c_void>) -> c_int> =
-                self.x11.get(b"XScreenCount\0").ok()?;
-            let root: Symbol<unsafe extern "C" fn(NonNull<c_void>, c_int) -> c_ulong> =
-                self.x11.get(b"XRootWindow\0").ok()?;
-            let resources: Symbol<
-                unsafe extern "C" fn(NonNull<c_void>, c_ulong) -> Option<NonNull<Resources>>,
-            > = self.randr.get(b"XRRGetScreenResourcesCurrent\0").ok()?;
-            let free_resources: Symbol<unsafe extern "C" fn(NonNull<Resources>)> =
-                self.randr.get(b"XRRFreeScreenResources\0").ok()?;
-            let crtc: Symbol<
-                unsafe extern "C" fn(
-                    NonNull<c_void>,
-                    NonNull<Resources>,
-                    c_ulong,
-                ) -> Option<NonNull<Crtc>>,
-            > = self.randr.get(b"XRRGetCrtcInfo\0").ok()?;
-            let free_crtc: Symbol<unsafe extern "C" fn(NonNull<Crtc>)> =
-                self.randr.get(b"XRRFreeCrtcInfo\0").ok()?;
-            let display = window.x11_display()?.as_non_null();
-            let mut areas = Vec::new();
-            let mut queried = false;
-            let mut failed = false;
-            let screen_count = count(display);
-            if !(1..=MAX_X11_SCREENS).contains(&screen_count) {
+
+    pub(super) fn active_areas(&self) -> Option<Vec<[i32; 4]>> {
+        let screens = &self.0.setup().roots;
+        if !(1..=MAX_SCREENS).contains(&screens.len()) {
+            return None;
+        }
+        let resources = screens
+            .iter()
+            .map(|screen| self.0.randr_get_screen_resources_current(screen.root).ok())
+            .collect::<Option<Vec<_>>>()?;
+        let mut areas = Vec::new();
+        let mut queried = false;
+        for reply in resources {
+            let resources = reply.reply().ok()?;
+            if resources.crtcs.len() > MAX_CRTCS {
                 return None;
             }
-            for screen in 0..screen_count {
-                let Some(list) = OwnedRandr::from_native(
-                    resources(display, root(display, screen)),
-                    *free_resources,
-                ) else {
-                    failed = true;
-                    continue;
-                };
-                // A positive CRTC count must have a backing array. Without
-                // this check another screen could hide a malformed response
-                // and make the incomplete result look authoritative.
-                let Some(crtc_count) =
-                    checked_crtc_count(list.data().count, list.data().crtcs.is_some())
-                else {
-                    failed = true;
-                    continue;
-                };
-                if crtc_count > 0 {
-                    queried = true;
-                    // SAFETY: XRandR returned a live resources allocation.
-                    // checked_crtc_count established a non-null pointer and
-                    // bounded native element count. The owned resources guard
-                    // outlives the borrowed slice and every CRTC query.
-                    let Some(crtcs) = list.data().crtcs else {
-                        failed = true;
-                        continue;
-                    };
-                    let ids = std::slice::from_raw_parts(crtcs.as_ptr(), crtc_count);
-                    for &id in ids {
-                        let Some(info) = OwnedRandr::from_native(
-                            crtc(display, list.as_non_null(), id),
-                            *free_crtc,
-                        ) else {
-                            failed = true;
-                            continue;
-                        };
-                        if info.data().mode != 0 && info.data().width > 0 && info.data().height > 0
-                        {
-                            if let (Ok(width), Ok(height)) = (
-                                i32::try_from(info.data().width),
-                                i32::try_from(info.data().height),
-                            ) {
-                                areas.push([info.data().x, info.data().y, width, height]);
-                            } else {
-                                failed = true;
-                            }
-                        }
-                    }
+            queried |= !resources.crtcs.is_empty();
+            // Queue all requests before waiting for each reply, so a screen
+            // with several outputs does not need one round trip per CRTC.
+            let queries = resources
+                .crtcs
+                .into_iter()
+                .map(|id| {
+                    self.0
+                        .randr_get_crtc_info(id, resources.config_timestamp)
+                        .ok()
+                })
+                .collect::<Option<Vec<_>>>()?;
+            for reply in queries {
+                if let Some(area) = active_area(&reply.reply().ok()?)? {
+                    areas.push(area);
                 }
             }
-            (queried && !failed).then_some(areas)
         }
+        queried.then_some(areas)
     }
+}
+
+fn active_area(reply: &GetCrtcInfoReply) -> Option<Option<[i32; 4]>> {
+    if reply.status != SetConfig::SUCCESS {
+        return None;
+    }
+    Some(
+        (reply.mode != 0 && reply.width > 0 && reply.height > 0).then_some([
+            i32::from(reply.x),
+            i32::from(reply.y),
+            i32::from(reply.width),
+            i32::from(reply.height),
+        ]),
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{OwnedRandr, checked_crtc_count};
-    use std::ptr::NonNull;
-    use std::sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    };
-
-    struct CountDrop(Arc<AtomicUsize>);
-
-    impl Drop for CountDrop {
-        fn drop(&mut self) {
-            self.0.fetch_add(1, Ordering::SeqCst);
-        }
-    }
-
-    static TEST_RESOURCE: Mutex<Option<Box<CountDrop>>> = Mutex::new(None);
-
-    extern "C" fn free_test_resource(raw: NonNull<CountDrop>) {
-        let mut slot = TEST_RESOURCE
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if slot
-            .as_mut()
-            .is_some_and(|resource| NonNull::from(resource.as_mut()) == raw)
-        {
-            // The matching Box remains owned by Rust until this destructor.
-            drop(slot.take());
-        }
-    }
+    use super::*;
 
     #[test]
-    fn rejects_invalid_native_crtc_array_lengths() {
-        assert_eq!(checked_crtc_count(0, false), Some(0));
-        assert_eq!(checked_crtc_count(1, false), None);
-        assert_eq!(checked_crtc_count(-1, true), None);
-        assert_eq!(checked_crtc_count(4097, true), None);
-        assert_eq!(checked_crtc_count(1, true), Some(1));
-    }
-
-    #[test]
-    fn owned_resource_drops_exactly_once() {
-        let freed = Arc::new(AtomicUsize::new(0));
-        let raw = {
-            let mut registry = TEST_RESOURCE
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            // Obtain the handle only after the Box has reached its final
-            // owner; the allocation stays stable until the Drop callback.
-            NonNull::from(
-                registry
-                    .insert(Box::new(CountDrop(Arc::clone(&freed))))
-                    .as_mut(),
-            )
+    fn randr_distinguishes_disabled_outputs_from_a_failed_query() {
+        let mut reply = GetCrtcInfoReply {
+            x: -1920,
+            width: 1920,
+            height: 1080,
+            mode: 1,
+            ..GetCrtcInfoReply::default()
         };
-        // The test registry owns the stable allocation. This verified pair
-        // exercises the same Drop path without manufacturing a native owner.
-        let owned = OwnedRandr {
-            raw,
-            free: free_test_resource,
-        };
-        drop(owned);
-        assert_eq!(freed.load(Ordering::SeqCst), 1);
+        assert_eq!(active_area(&reply), Some(Some([-1920, 0, 1920, 1080])));
+        reply.mode = 0;
+        assert_eq!(active_area(&reply), Some(None));
+        reply.status = SetConfig::INVALID_CONFIG_TIME;
+        assert_eq!(active_area(&reply), None);
     }
 }

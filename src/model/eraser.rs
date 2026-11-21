@@ -1,5 +1,6 @@
 use super::{
-    Bounds, History, MAX_POINTS, Point, PointSpan, Stroke, StrokeBounds, Tool, segment_distance,
+    Bounds, History, HistoryStep, MAX_POINTS, Point, PointSpan, STROKE_BLOCK_SEGMENTS, Stroke,
+    StrokeBounds, StrokeRangeEdit, Tool, segment_distance,
 };
 use std::{borrow::Cow, collections::BTreeMap, mem, ops::Range, sync::Arc};
 
@@ -75,6 +76,7 @@ impl Fragment {
     fn keep(
         &self,
         source: &[Point],
+        blocks: &[StrokeBounds],
         kept: Range<usize>,
         start: Option<Point>,
         end: Option<Point>,
@@ -93,23 +95,51 @@ impl Fragment {
             }),
         };
         let mut length = 0.;
-        let mut previous = None::<Point>;
-        let points = span.iter().inspect(|&point| {
-            if length < 0.5
-                && let Some(last) = previous
-            {
-                length += last.dist(point);
-            }
-            previous = Some(point);
+        let long_enough = span.iter().zip(span.iter().skip(1)).any(|(a, b)| {
+            length += a.dist(b);
+            length >= 0.5
         });
-        let bounds = StrokeBounds::measure(points)?;
-        (length >= 0.5).then_some(Self {
+        if !long_enough {
+            return None;
+        }
+        let bounds = Self::measure(span, &range, blocks)?;
+        Some(Self {
             range,
             start: span.start,
             end: span.end,
             head: self.head,
             bounds,
         })
+    }
+
+    fn measure(
+        span: PointSpan<'_>,
+        range: &Range<usize>,
+        blocks: &[StrokeBounds],
+    ) -> Option<StrokeBounds> {
+        let first = range.start.div_ceil(STROKE_BLOCK_SEGMENTS);
+        let last = range.end.saturating_sub(1) / STROKE_BLOCK_SEGMENTS;
+        if first >= last || blocks.is_empty() {
+            return StrokeBounds::measure(span.iter());
+        }
+        let prefix_end = first * STROKE_BLOCK_SEGMENTS - range.start;
+        let suffix_start = last * STROKE_BLOCK_SEGMENTS - range.start;
+        // Recompute the joins at the cut endpoints. Interior blocks still
+        // contain exactly the original samples, including their spacing.
+        let prefix = StrokeBounds::measure(
+            span.start
+                .into_iter()
+                .chain(span.points[..=prefix_end].iter().copied()),
+        )?;
+        let suffix =
+            StrokeBounds::measure(span.points[suffix_start..].iter().copied().chain(span.end))?;
+        Some(
+            blocks[first..last]
+                .iter()
+                .copied()
+                .fold(prefix, StrokeBounds::union)
+                .union(suffix),
+        )
     }
 }
 
@@ -176,6 +206,7 @@ impl Paths {
         &mut self,
         sweep: Sweep,
         stroke: &Stroke,
+        blocks: &[StrokeBounds],
         replacement: &mut Vec<Fragment>,
     ) -> Option<Bounds> {
         let mut damage = None;
@@ -183,7 +214,8 @@ impl Paths {
         while index < self.fragments.len() {
             let fragment = &self.fragments[index];
             let source = path_source(&self.outline, &self.head, stroke, fragment.head);
-            if let Some(bounds) = sweep.cut_path(source, fragment, stroke, replacement) {
+            let blocks = if fragment.head { &[] } else { blocks };
+            if let Some(bounds) = sweep.cut_path(source, fragment, stroke, blocks, replacement) {
                 Bounds::include(&mut damage, bounds);
                 let count = replacement.len();
                 self.count = self.count - fragment.len()
@@ -299,12 +331,9 @@ impl Erasure {
         let sweep_index = self.sweeps.len() as u32;
         let mut changed = false;
         let mut replacement = Vec::new();
-        for (index, (stroke, bounds)) in history
-            .doc
-            .strokes
-            .iter()
-            .zip(history.stroke_bounds().iter())
-            .enumerate()
+        let geometry = history.stroke_index();
+        for (index, (stroke, bounds)) in
+            history.doc.strokes.iter().zip(&geometry.bounds).enumerate()
         {
             let Some(bounds) = *bounds else {
                 continue;
@@ -312,10 +341,11 @@ impl Erasure {
             if !sweep.bounds(stroke).intersects(bounds.path) {
                 continue;
             }
+            let blocks = geometry.blocks(index);
             let (before, after, damage) = if let Some(edit) = self.edits.get_mut(&index) {
                 let before = edit.paths.count;
                 let old_bytes = edit.bytes();
-                let Some(damage) = edit.paths.cut(sweep, stroke, &mut replacement) else {
+                let Some(damage) = edit.paths.cut(sweep, stroke, blocks, &mut replacement) else {
                     continue;
                 };
                 edit.sweeps.push(sweep_index);
@@ -323,7 +353,7 @@ impl Erasure {
                 (before, edit.paths.count, damage)
             } else {
                 let mut paths = Paths::new(stroke, bounds);
-                let Some(damage) = paths.cut(sweep, stroke, &mut replacement) else {
+                let Some(damage) = paths.cut(sweep, stroke, blocks, &mut replacement) else {
                     continue;
                 };
                 let after = paths.count;
@@ -364,20 +394,29 @@ impl Erasure {
         stroke: &'a Stroke,
         index: usize,
         drafts: impl Iterator<Item = &'a Self>,
+        history: &History,
         visit: impl FnMut(&Stroke, PointSpan<'_>, StrokeBounds),
     ) -> bool {
-        let mut edits =
-            drafts.filter_map(|draft| draft.edits.get(&index).map(|edit| (draft, edit)));
+        let mut edits = drafts
+            .filter_map(|draft| draft.edits.get(&index).map(|edit| (draft, edit)))
+            .peekable();
         let Some((_, first)) = edits.next() else {
             return false;
         };
+        let geometry = edits.peek().is_some().then(|| history.stroke_index());
+        let blocks = geometry
+            .as_ref()
+            .map_or(&[][..], |geometry| geometry.blocks(index));
         let mut remaining = Cow::Borrowed(&first.paths);
         let mut replacement = Vec::new();
         'replay: for (draft, edit) in edits {
             for &sweep in &edit.sweeps {
-                remaining
-                    .to_mut()
-                    .cut(draft.sweeps[sweep as usize], stroke, &mut replacement);
+                remaining.to_mut().cut(
+                    draft.sweeps[sweep as usize],
+                    stroke,
+                    blocks,
+                    &mut replacement,
+                );
                 if remaining.buffer_bytes() > MAX_ERASURE_BYTES {
                     // Individual drafts still commit or cancel independently.
                     remaining = Cow::Borrowed(&first.paths);
@@ -422,16 +461,20 @@ impl Erasure {
         {
             Bounds::include(damage, bounds);
         }
-        history.snapshot();
         history.erase_revision = history.erase_revision.wrapping_add(1);
+        let previous_points = history.point_count;
         let committed_points = history.point_count as i64 + self.delta;
         debug_assert!((0..=MAX_POINTS as i64).contains(&committed_points));
         history.point_count = committed_points as usize;
         let previous = mem::take(&mut history.doc.strokes);
-        let mut bounds = mem::take(history.stroke_bounds.get_mut()).into_iter();
+        let geometry = history.stroke_index.get_mut();
+        let mut saved = mem::take(geometry);
+        let mut bounds = saved.bounds.into_iter();
         let mut remap = Vec::new();
+        let mut undo_edits = Vec::with_capacity(self.edits.len());
+        let mut undo_strokes = Vec::with_capacity(self.edits.len());
         for (index, stroke) in previous.into_iter().enumerate() {
-            let old_bounds = bounds.next().unwrap_or_else(|| StrokeBounds::new(&stroke));
+            let old_bounds = bounds.next();
             let start = history.doc.strokes.len();
             let edit = self.edits.remove(&index);
             let replaced = edit.is_some();
@@ -439,20 +482,43 @@ impl Erasure {
                 edit.paths.visit(&stroke, |style, points, bounds| {
                     let mut samples = Vec::with_capacity(points.len());
                     samples.extend(points.iter());
-                    history.doc.strokes.push(Arc::new(Stroke {
+                    let stroke = Arc::new(Stroke {
                         points: samples,
                         ..*style
-                    }));
-                    history.stroke_bounds.get_mut().push(Some(bounds));
+                    });
+                    if stroke.points.len() > 2 * STROKE_BLOCK_SEGMENTS {
+                        geometry.push(&stroke);
+                    } else {
+                        geometry.bounds.push(Some(bounds));
+                    }
+                    history.doc.strokes.push(stroke);
                 });
+                undo_edits.push(StrokeRangeEdit {
+                    first: start,
+                    remove: history.doc.strokes.len() - start,
+                    insert: 1,
+                });
+                undo_strokes.push(stroke);
             } else {
+                if let Some(bounds) = old_bounds {
+                    geometry.bounds.push(bounds);
+                    if let Some(blocks) = saved.blocks.remove(&index) {
+                        geometry.blocks.insert(start, blocks);
+                    }
+                } else {
+                    geometry.push(&stroke);
+                }
                 history.doc.strokes.push(stroke);
-                history.stroke_bounds.get_mut().push(old_bounds);
             }
             if other_bytes != 0 {
                 remap.push((start..history.doc.strokes.len(), replaced));
             }
         }
+        history.record_undo(HistoryStep::erasure(
+            undo_edits,
+            undo_strokes,
+            previous_points,
+        ));
         for draft in other_drafts
             .values_mut()
             .filter(|draft| !draft.edits.is_empty())
@@ -477,7 +543,7 @@ impl Erasure {
     ) {
         self.delta = 0;
         self.edit_bytes = 0;
-        let bounds = history.stroke_bounds();
+        let geometry = history.stroke_index();
         let mut replacement = Vec::new();
         for (old_index, edit) in mem::take(&mut self.edits) {
             let (range, replaced) = &remap[old_index];
@@ -490,7 +556,7 @@ impl Erasure {
                 };
                 for (offset, stroke) in strokes.iter().enumerate() {
                     let index = range.start + offset;
-                    let Some(stroke_bounds) = bounds.get(index).copied().flatten() else {
+                    let Some(stroke_bounds) = geometry.bounds.get(index).copied().flatten() else {
                         self.reject(EraseError::Preview, true);
                         return;
                     };
@@ -501,7 +567,12 @@ impl Erasure {
                     for &sweep in &edit.sweeps {
                         if remapped
                             .paths
-                            .cut(self.sweeps[sweep as usize], stroke, &mut replacement)
+                            .cut(
+                                self.sweeps[sweep as usize],
+                                stroke,
+                                geometry.blocks(index),
+                                &mut replacement,
+                            )
                             .is_some()
                         {
                             remapped.sweeps.push(sweep);
@@ -554,6 +625,7 @@ impl Sweep {
         source: &[Point],
         fragment: &Fragment,
         stroke: &Stroke,
+        blocks: &[StrokeBounds],
         kept: &mut Vec<Fragment>,
     ) -> Option<Bounds> {
         let bounds = self.bounds(stroke);
@@ -574,17 +646,45 @@ impl Sweep {
             return (segment_distance(dot, self.from, self.to) < self.radius + radius(dot))
                 .then(|| fragment.bounds.path.padded(margin));
         }
-        let mut previous_radius = None;
-        let mut cuts = (0..points.len().saturating_sub(1)).filter_map(|index| {
+        let prefix = usize::from(points.start.is_some());
+        let raw_start = fragment.range.start;
+        let raw_len = fragment.range.len();
+        let mut next = 0;
+        let mut block_end = 0;
+        let candidates = std::iter::from_fn(move || {
+            while next < points.len() - 1 {
+                if next >= block_end
+                    && !blocks.is_empty()
+                    && let Some(raw) = next.checked_sub(prefix)
+                    && raw + 1 < raw_len
+                {
+                    let block = (raw_start + raw) / STROKE_BLOCK_SEGMENTS;
+                    let end = ((block + 1) * STROKE_BLOCK_SEGMENTS).min(fragment.range.end - 1);
+                    block_end = prefix + end - raw_start;
+                    if !bounds.intersects(blocks[block].path) {
+                        next = block_end;
+                        continue;
+                    }
+                }
+                let index = next;
+                next += 1;
+                return Some(index);
+            }
+            None
+        });
+        let mut previous = None;
+        let mut cuts = candidates.filter_map(|index| {
             let a = points.at(index)?;
             let b = points.at(index + 1)?;
             if !bounds.intersects(Bounds::between(a, b)) {
-                previous_radius = None;
                 return None;
             }
-            let start_radius = previous_radius.unwrap_or_else(|| radius(a));
+            let start_radius = match previous {
+                Some((last, radius)) if last == index => radius,
+                _ => radius(a),
+            };
             let end_radius = radius(b);
-            previous_radius = Some(end_radius);
+            previous = Some((index + 1, end_radius));
             self.interval(a, b, [start_radius, end_radius])
                 .map(|cut| (index, cut))
         });
@@ -593,7 +693,7 @@ impl Sweep {
         let mut next = 0;
         let mut tail = None;
         let mut run_end = |next, end, tail, head, damage: &mut Option<Bounds>| {
-            if let Some(part) = fragment.keep(source, next..end, tail, head) {
+            if let Some(part) = fragment.keep(source, blocks, next..end, tail, head) {
                 kept.push(part);
             } else {
                 let discarded = tail
@@ -770,7 +870,7 @@ mod tests {
 
     fn cut_stroke(sweep: Sweep, stroke: &Stroke) -> Option<Vec<Stroke>> {
         let mut paths = Paths::new(stroke, StrokeBounds::new(stroke)?);
-        paths.cut(sweep, stroke, &mut Vec::new())?;
+        paths.cut(sweep, stroke, &[], &mut Vec::new())?;
         let mut fragments = Vec::new();
         paths.visit(stroke, |style, points, _| {
             fragments.push(Stroke {
@@ -807,6 +907,61 @@ mod tests {
     }
 
     #[test]
+    fn indexed_cuts_match_sample_by_sample_cuts_at_block_edges() -> Result<(), &'static str> {
+        let mut history = History::default();
+        history.append(std::iter::once(Stroke {
+            points: (0..1100)
+                .map(|x| {
+                    let x = x as f32;
+                    Point::new(x, (x / 13.).sin() * 2., x / 1100., [x % 90., 0.])
+                })
+                .collect(),
+            ..pencil()
+        }));
+        let stroke = &history.strokes()[0];
+        let index = history.stroke_index();
+        let bounds = index.bounds[0].ok_or("missing stroke bounds")?;
+        let blocks = index.blocks(0);
+        assert!(!blocks.is_empty());
+        let mut indexed = Paths::new(stroke, bounds);
+        let mut linear = Paths::new(stroke, bounds);
+        let mut scratch = Vec::new();
+        let span = |parts: &Paths| {
+            let mut result = Vec::new();
+            parts.visit(stroke, |_, points, bounds| {
+                result.push((
+                    points
+                        .iter()
+                        .map(|p| [p.x, p.y, p.pressure, p.tilt[0], p.tilt[1]])
+                        .collect::<Vec<_>>(),
+                    bounds.path.min,
+                    bounds.path.max,
+                    bounds.well_spaced,
+                ));
+            });
+            result
+        };
+        for x in [
+            512., 128., 256., 1., 1098., 640.5, 513., 513.5, 767.5, 384., 386.,
+        ] {
+            let sweep = Sweep {
+                from: Point::new(x, -3., 1., [0.; 2]),
+                to: Point::new(x, 3., 1., [0.; 2]),
+                radius: 2.,
+            };
+            let indexed_damage = indexed.cut(sweep, stroke, blocks, &mut scratch);
+            let linear_damage = linear.cut(sweep, stroke, &[], &mut scratch);
+            assert_eq!(
+                indexed_damage.map(|b| [b.min, b.max]),
+                linear_damage.map(|b| [b.min, b.max])
+            );
+            assert_eq!(indexed.count, linear.count);
+            assert_eq!(span(&indexed), span(&linear));
+        }
+        Ok(())
+    }
+
+    #[test]
     fn preview_borrows_samples_and_commit_keeps_compact_fragments() -> Result<(), String> {
         let point = |x, y| Point::new(x, y, 0.6, [30., 0.]);
         let mut history = History::default();
@@ -831,6 +986,7 @@ mod tests {
             &original,
             0,
             std::iter::once(&erase),
+            &history,
             |_, span, _| {
                 count += 1;
                 assert!(span.points.as_ptr_range().start >= original.points.as_ptr_range().start);
@@ -875,6 +1031,7 @@ mod tests {
             &history.doc.strokes[0],
             0,
             std::iter::once(&erase),
+            &history,
             |_, _, _| unreachable!()
         ));
         let mut damage = None;

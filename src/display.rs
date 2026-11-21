@@ -1,20 +1,19 @@
 #![forbid(unsafe_code)]
 
-use crate::{
-    model::{Document, History, MAX_FILE_BYTES},
-    sdl::*,
-};
+use crate::model::{Document, History, MAX_FILE_BYTES, Stroke, TextBox};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File},
-    io::{self, BufWriter, Read, Write},
+    io::{self, BufReader, BufWriter, Read, Write},
     path::Path,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
-// Native XRandR FFI is a crate-level sibling, outside this safe module's lint scope.
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-use crate::display_x11 as x11;
+mod x11;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Display {
@@ -26,23 +25,19 @@ pub struct Display {
 }
 pub struct Topology {
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    randr: Option<&'static x11::Randr>,
+    randr: Option<x11::Randr>,
 }
 impl Topology {
     pub fn new(_video: &str) -> Self {
         Self {
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-            randr: (_video == "x11").then(x11::Randr::get).flatten(),
+            randr: (_video == "x11").then(x11::Randr::connect).flatten(),
         }
     }
-    pub fn connected(&self, _window: &Window) -> Result<Vec<Display>, String> {
+    pub fn connected(&self) -> Result<Vec<Display>, String> {
         let result = sdl_displays()?;
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        let result = if let Some(areas) = self
-            .randr
-            .as_ref()
-            .and_then(|api| api.active_areas(_window))
-        {
+        let result = if let Some(areas) = self.randr.as_ref().and_then(x11::Randr::active_areas) {
             result
                 .into_iter()
                 .filter(|d| areas.contains(&d.bounds))
@@ -117,11 +112,29 @@ struct Session<K, D> {
     pages: Vec<(K, D)>,
 }
 
+// Decode the envelope directly into typed fields. The legacy and multi-page
+// writers share a version field, so serde never needs an untagged value tree.
 #[derive(Deserialize)]
-#[serde(untagged)]
-enum SessionFile {
-    Multi(Session<DisplayKey, Document>),
-    Single(Document),
+struct SessionFile {
+    version: u32,
+    pages: Option<Vec<(DisplayKey, Document)>>,
+    size: Option<[f32; 2]>,
+    strokes: Option<Vec<Arc<Stroke>>>,
+    #[serde(default)]
+    text_boxes: Vec<Arc<TextBox>>,
+}
+
+fn read_session(path: &Path) -> Result<SessionFile, String> {
+    let file = File::open(path).map_err(|error| error.to_string())?;
+    if file.metadata().map_err(|error| error.to_string())?.len() > MAX_FILE_BYTES {
+        return Err("Session exceeds 64 MiB".into());
+    }
+    let mut limited = file.take(MAX_FILE_BYTES + 1);
+    let result = serde_json::from_reader(BufReader::new(&mut limited));
+    if limited.limit() == 0 {
+        return Err("Session exceeds 64 MiB".into());
+    }
+    result.map_err(|error| error.to_string())
 }
 
 #[derive(Default)]
@@ -257,15 +270,15 @@ impl Pages {
         path: &Path,
         restore: bool,
     ) -> Result<usize, String> {
-        let mut data = Vec::new();
-        File::open(path)
-            .and_then(|file| file.take(MAX_FILE_BYTES + 1).read_to_end(&mut data))
-            .map_err(|e| e.to_string())?;
-        if data.len() as u64 > MAX_FILE_BYTES {
-            return Err("Session exceeds 64 MiB".into());
-        }
-        match serde_json::from_slice(&data).map_err(|e| e.to_string())? {
-            SessionFile::Single(doc) => {
+        let file = read_session(path)?;
+        match file.version {
+            1 => {
+                let doc = Document {
+                    version: file.version,
+                    size: file.size.ok_or("Session has no canvas dimensions")?,
+                    strokes: file.strokes.ok_or("Session has no strokes")?,
+                    text_boxes: file.text_boxes,
+                };
                 doc.validate()?;
                 // A legacy single-page document replaces the session, not
                 // only the active display. Otherwise parked and unmatched
@@ -276,12 +289,9 @@ impl Pages {
                 self.changed = true;
                 Ok(0)
             }
-            SessionFile::Multi(session) => {
-                if session.version != SESSION_VERSION {
-                    return Err("Unsupported session version".into());
-                }
+            SESSION_VERSION => {
                 let mut docs = BTreeMap::new();
-                for (key, doc) in session.pages {
+                for (key, doc) in file.pages.ok_or("Session has no display pages")? {
                     doc.validate()?;
                     if docs.insert(key, doc).is_some() {
                         return Err("Duplicate display in session".into());
@@ -351,6 +361,7 @@ impl Pages {
                 self.changed = !restore || relocated;
                 Ok(pending)
             }
+            _ => Err("Unsupported session version".into()),
         }
     }
 }
@@ -389,7 +400,7 @@ mod tests {
     use super::*;
     use crate::{
         color::InkColor,
-        model::{Point, Stroke, Tool},
+        model::{Point, Tool},
     };
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -447,6 +458,25 @@ mod tests {
         assert!(pages.unmatched.is_empty());
         assert_eq!(history.strokes()[0].points[0].x, 99.);
         fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn oversized_or_incomplete_session_keeps_the_current_page() -> TestResult {
+        let file = tempfile::NamedTempFile::new()?;
+        let mut pages = Pages::new(Some(10));
+        let mut history = History::default();
+        pages.sync(&mut history, &[screen(10, "Left", 0)]);
+        draw(&mut history, 25.);
+
+        file.as_file().set_len(MAX_FILE_BYTES + 1)?;
+        assert_eq!(
+            pages.load(&mut history, file.path(), false).unwrap_err(),
+            "Session exceeds 64 MiB"
+        );
+        fs::write(file.path(), br#"{"version":1,"size":[800,600]}"#)?;
+        assert!(pages.load(&mut history, file.path(), false).is_err());
+        assert_eq!(history.strokes()[0].points[0].x, 25.);
         Ok(())
     }
 
