@@ -466,7 +466,7 @@ impl App {
                     && motion.which != SDL_TOUCH_MOUSEID
                     && motion.which != SDL_PEN_MOUSEID
             })
-            && matches!(gui.raw.events.last(), Some(Event::PointerMoved(_)))
+            && gui.can_merge_mouse_position()
         {
             gui.raw.events.len().saturating_sub(1)
         } else {
