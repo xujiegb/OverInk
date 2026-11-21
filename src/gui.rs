@@ -210,7 +210,14 @@ impl Gui {
                     && m.which != SDL_TOUCH_MOUSEID
                     && m.which != SDL_PEN_MOUSEID
                 {
-                    self.queue_mouse_position(egui::pos2(m.x / scale, m.y / scale));
+                    let pos = egui::pos2(m.x / scale, m.y / scale);
+                    let unchanged = self.raw.events.is_empty()
+                        && !self.ctx.input(|input| input.pointer.any_down())
+                        && crate::toolbar::hovered_rect(&self.ctx)
+                            .is_some_and(|rect| rect.contains(pos));
+                    if !unchanged {
+                        self.queue_mouse_position(pos);
+                    }
                 }
             }
             SDL_EVENT_MOUSE_BUTTON_DOWN | SDL_EVENT_MOUSE_BUTTON_UP => {
