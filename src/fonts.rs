@@ -742,7 +742,7 @@ mod tests {
         fonts.revision += 1;
         let frame = ctx.run_ui(egui::RawInput::default(), |ui| {
             let changed = fonts.layout_cached(ui, "Text 👩🏽‍🎨 中文", 28., Color32::WHITE, 400.);
-            assert!(!Arc::ptr_eq(first.as_ref().expect("first layout"), &changed));
+            assert!(first.as_ref().is_some_and(|first| !Arc::ptr_eq(first, &changed)));
         });
         frame.drop_without_applying_deltas();
     }
