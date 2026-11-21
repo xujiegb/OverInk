@@ -388,7 +388,7 @@ impl Canvas {
                 .text
                 .as_ref()
                 .is_some_and(|gui| !gui.raw.events.is_empty())
-            && let Some(mut output) = self.text_frame(app, theme, true)
+            && let Some(mut output) = self.text_frame(app, theme, true, false)
         {
             // Apply input and upload texture deltas before a toolbar action changes the draft.
             // The next canvas frame will paint the resulting document.
