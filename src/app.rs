@@ -3092,6 +3092,11 @@ fn run_inner(options: Options) -> Result<(), String> {
                 }
                 app.last_save = Instant::now();
             }
+            // Expire warmed full-screen FP16 targets even during a completely
+            // idle event loop; waiting for another paint would retain memory.
+            for canvas in &mut canvases {
+                canvas.trim_idle_gpu_cache();
+            }
             frame += 1;
             if options.smoke && frame >= 3 {
                 let path = state_dir();
