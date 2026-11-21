@@ -266,9 +266,21 @@ impl Canvas {
 
     pub fn screenshot_event(&mut self, event: &SDL_Event) -> bool {
         let gui = self.text.get_or_insert_with(Gui::new);
+        // Adjacent mouse motions can replace the final egui event without
+        // increasing the queue length. A new screenshot hover still requires
+        // a frame even when the event count stays unchanged.
         let before = gui.raw.events.len();
+        let previous_pos = gui.raw.events.last().and_then(|event| match event {
+            egui::Event::PointerMoved(pos) => Some(*pos),
+            _ => None,
+        });
         gui.event(event, self.window.id, self.window.size());
         gui.raw.events.len() != before
+            || (event_type(event) == SDL_EVENT_MOUSE_MOTION
+                && previous_pos.is_some()
+                && gui.raw.events.last().is_some_and(|event| {
+                    matches!(event, egui::Event::PointerMoved(pos) if Some(*pos) != previous_pos)
+                }))
     }
 
     pub fn activate_text_editor(&mut self) {
