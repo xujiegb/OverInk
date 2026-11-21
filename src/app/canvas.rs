@@ -574,9 +574,24 @@ mod screenshot_input_tests {
     #[test]
     fn coalesced_screenshot_mouse_move_still_repaints() {
         let events = [Event::PointerMoved(pos2(22., 30.))];
-        assert!(screenshot_input_changed(1, Some(pos2(10., 30.)), &events, true));
-        assert!(!screenshot_input_changed(1, Some(pos2(22., 30.)), &events, true));
-        assert!(!screenshot_input_changed(1, Some(pos2(10., 30.)), &events, false));
+        assert!(screenshot_input_changed(
+            1,
+            Some(pos2(10., 30.)),
+            &events,
+            true
+        ));
+        assert!(!screenshot_input_changed(
+            1,
+            Some(pos2(22., 30.)),
+            &events,
+            true
+        ));
+        assert!(!screenshot_input_changed(
+            1,
+            Some(pos2(10., 30.)),
+            &events,
+            false
+        ));
         assert!(screenshot_input_changed(0, None, &events, false));
     }
 }
