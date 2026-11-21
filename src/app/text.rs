@@ -434,8 +434,17 @@ impl App {
             && motion.which != SDL_TOUCH_MOUSEID
             && motion.which != SDL_PEN_MOUSEID
             && self.input.text.press.is_none()
-            && (editing && self.input.text.osk.motion_inside_hovered_key(pos2(motion.x, motion.y))
-                || self.input.text.hovered_control.is_some_and(|rect| rect.contains(pos2(motion.x, motion.y))))
+            && (editing
+                && self
+                    .input
+                    .text
+                    .osk
+                    .motion_inside_hovered_key(pos2(motion.x, motion.y))
+                || self
+                    .input
+                    .text
+                    .hovered_control
+                    .is_some_and(|rect| rect.contains(pos2(motion.x, motion.y))))
             && !gui.ctx.input(|input| input.pointer.any_down())
             && !gui
                 .raw
@@ -1121,8 +1130,9 @@ impl App {
         for rgb in PRESETS {
             let preset = InkColor::from_rgb8(rgb);
             let label = format!("{} {}", tr.text("Text color"), preset.hex());
-            let response = toolbar::swatch_button(&mut menu, button, rgb, &label, color.srgb8() == rgb)
-                .on_hover_text(egui::RichText::new(label).size(toolbar::MENU_FONT_SIZE * scale));
+            let response =
+                toolbar::swatch_button(&mut menu, button, rgb, &label, color.srgb8() == rgb)
+                    .on_hover_text(egui::RichText::new(label).size(toolbar::MENU_FONT_SIZE * scale));
             if response.hovered() {
                 self.input.text.hovered_control = Some(response.rect);
             }
