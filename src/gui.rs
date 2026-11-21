@@ -511,7 +511,23 @@ impl Gui {
         r: &Renderer,
         window: &Window,
         color: &ColorManager,
+        output: egui::FullOutput,
+    ) -> Result<(), String> {
+        self.paint_region(r, window, color, output, [0.; 2], window.pixel_size())
+    }
+
+    /// Paint in a smaller render target without changing the egui layout or
+    /// glyph atlas coordinates. All positions are still window-logical;
+    /// only the GPU clip and vertex positions shift to the texture origin.
+    /// The caller restores the window render target after this call.
+    pub fn paint_region(
+        &mut self,
+        r: &Renderer,
+        window: &Window,
+        color: &ColorManager,
         mut output: egui::FullOutput,
+        origin: [f32; 2],
+        target_pixels: [i32; 2],
     ) -> Result<(), String> {
         if let Some(ime) = output.platform_output.ime {
             let cursor = ime.cursor_rect;
@@ -569,9 +585,13 @@ impl Gui {
                 texture.update([w, h], &self.pixels, rect.as_ref())?;
             }
         }
-        let px = window.pixel_size();
+        let px = target_pixels;
         let logical = window.size();
-        let scale = [px[0] as f32 / logical[0], px[1] as f32 / logical[1]];
+        let window_pixels = window.pixel_size();
+        let scale = [
+            window_pixels[0] as f32 / logical[0],
+            window_pixels[1] as f32 / logical[1],
+        ];
         for p in self.ctx.tessellate(output.shapes, output.pixels_per_point) {
             let egui::epaint::Primitive::Mesh(mesh) = p.primitive else {
                 continue;
@@ -580,16 +600,16 @@ impl Gui {
                 continue;
             };
             let rect = p.clip_rect;
-            let x = (rect.min.x * self.units * scale[0])
+            let x = ((rect.min.x * self.units - origin[0]) * scale[0])
                 .floor()
                 .clamp(0., px[0] as f32) as i32;
-            let y = (rect.min.y * self.units * scale[1])
+            let y = ((rect.min.y * self.units - origin[1]) * scale[1])
                 .floor()
                 .clamp(0., px[1] as f32) as i32;
-            let x2 = (rect.max.x * self.units * scale[0])
+            let x2 = ((rect.max.x * self.units - origin[0]) * scale[0])
                 .ceil()
                 .clamp(0., px[0] as f32) as i32;
-            let y2 = (rect.max.y * self.units * scale[1])
+            let y2 = ((rect.max.y * self.units - origin[1]) * scale[1])
                 .ceil()
                 .clamp(0., px[1] as f32) as i32;
             if x2 <= x || y2 <= y {
@@ -609,8 +629,8 @@ impl Gui {
                 let c = color.map([red as f32 / 255., green as f32 / 255., blue as f32 / 255.]);
                 SDL_Vertex {
                     position: SDL_FPoint {
-                        x: v.pos.x * self.units,
-                        y: v.pos.y * self.units,
+                        x: v.pos.x * self.units - origin[0],
+                        y: v.pos.y * self.units - origin[1],
                     },
                     color: SDL_FColor {
                         r: c[0],
