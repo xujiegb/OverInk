@@ -11,7 +11,7 @@ use crate::{
     model::{Bounds, Erasure, Point, PointSpan, Stroke, Tool},
     sdl::*,
 };
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const PAPER_SIZE: i32 = 64;
 const MARKER_TILE: i32 = 1024;
@@ -23,6 +23,11 @@ const GEOMETRY_BATCH: usize = 24_576;
 pub(super) const MAX_EXTENDED_INK_TEXTURE_BYTES: usize = 64 * 1024 * 1024;
 const EXTENDED_CACHE_STROKES: usize = 64;
 const EXTENDED_CACHE_POINTS: usize = 8192;
+// Small FP16 documents do not need a full-screen texture until repeated
+// hover/overlay frames make their per-frame history tessellation expensive.
+const EXTENDED_HOT_FRAMES: u8 = 3;
+const EXTENDED_HOT_WINDOW: Duration = Duration::from_millis(900);
+const EXTENDED_IDLE_EXPIRY: Duration = Duration::from_secs(20);
 
 use crate::sdl::InkTexture as Texture;
 
@@ -58,12 +63,32 @@ pub(super) struct Ink {
     layer: Option<CommittedLayer>,
     unavailable_at: Option<([i32; 2], SDL_PixelFormat)>,
     painter: StrokePainter,
+    last_extended_paint: Option<Instant>,
+    consecutive_extended_paints: u8,
+    hot_extended_cache: bool,
 }
 
 impl Ink {
     pub fn invalidate_layer(&mut self) {
         self.layer = None;
         self.unavailable_at = None;
+    }
+
+    fn observe_extended_paint(&mut self, now: Instant) {
+        self.consecutive_extended_paints = match self.last_extended_paint {
+            Some(previous) if now.duration_since(previous) <= EXTENDED_HOT_WINDOW => {
+                self.consecutive_extended_paints.saturating_add(1)
+            }
+            _ => 1,
+        };
+        if self
+            .last_extended_paint
+            .is_some_and(|last| now.duration_since(last) >= EXTENDED_IDLE_EXPIRY)
+        {
+            self.hot_extended_cache = false;
+        }
+        self.hot_extended_cache |= self.consecutive_extended_paints >= EXTENDED_HOT_FRAMES;
+        self.last_extended_paint = Some(now);
     }
 
     pub fn reset_textures(&mut self) {
@@ -110,6 +135,9 @@ impl Ink {
             extended_budget,
         };
         self.painter.queued = 0;
+        if renderer.extended && !app.has_contacts() && !app.history.strokes().is_empty() {
+            self.observe_extended_paint(Instant::now());
+        }
         if background.frozen
             && !app.pass
             && let Err(error) = background.draw(renderer, window, color)
@@ -202,7 +230,7 @@ impl Ink {
     }
 
     fn release_unused_extended_layer(&mut self, app: &App) {
-        if self.extended_bytes() != 0 && !extended_cache_needed(app) {
+        if self.extended_bytes() != 0 && !extended_cache_needed(app, self.hot_extended_cache) {
             self.invalidate_layer();
         }
     }
@@ -223,7 +251,7 @@ impl Ink {
         if renderer.extended
             && (renderer.name != "metal"
                 || extended_bytes(frame.pixels) > frame.extended_budget
-                || (self.layer.is_none() && !extended_cache_needed(app)))
+                || (self.layer.is_none() && !extended_cache_needed(app, self.hot_extended_cache)))
         {
             self.invalidate_layer();
             return self.painter.history(frame, app, 0, None, 1.);
@@ -318,10 +346,12 @@ fn extended_bytes([width, height]: [i32; 2]) -> usize {
         .saturating_mul(8)
 }
 
-fn extended_cache_needed(app: &App) -> bool {
-    app.history.strokes().len() >= EXTENDED_CACHE_STROKES
-        || app.history.point_count() >= EXTENDED_CACHE_POINTS
-        || app.input.pending_erasures.values().any(Erasure::has_edits)
+fn extended_cache_needed(app: &App, recently_busy: bool) -> bool {
+    !app.history.strokes().is_empty()
+        && (recently_busy
+            || app.history.strokes().len() >= EXTENDED_CACHE_STROKES
+            || app.history.point_count() >= EXTENDED_CACHE_POINTS
+            || app.input.pending_erasures.values().any(Erasure::has_edits))
 }
 
 fn revision_white_scale(layer: &CommittedLayer) -> f32 {
@@ -995,7 +1025,7 @@ mod tests {
             [255, 200, 0],
             &[[10., 60.], [300., 60.]],
         );
-        assert!(!extended_cache_needed(&app));
+        assert!(!extended_cache_needed(&app, ink.hot_extended_cache));
         for (id, x) in [(1, 100.), (2, 180.)] {
             app.erase_sample(id, Point::new(x, 60., 1., [0.; 2]));
             canvas.history(&mut ink, &mut app)?;
@@ -1012,7 +1042,7 @@ mod tests {
             } else {
                 app.reset_contacts();
             }
-            assert!(!extended_cache_needed(&app));
+            assert!(!extended_cache_needed(&app, ink.hot_extended_cache));
             ink.release_unused_extended_layer(&app);
             assert!(ink.layer.is_none());
             assert_eq!(ink.extended_bytes(), 0);
@@ -1021,8 +1051,22 @@ mod tests {
         let stroke = (*app.history.strokes()[0]).clone();
         app.history
             .append(std::iter::repeat_n(stroke, EXTENDED_CACHE_STROKES));
-        assert!(extended_cache_needed(&app));
+        assert!(extended_cache_needed(&app, ink.hot_extended_cache));
         Ok(())
+    }
+
+    #[test]
+    fn repeated_hover_frames_warm_small_fp16_document_cache() {
+        let mut ink = Ink::default();
+        let now = Instant::now();
+        ink.observe_extended_paint(now);
+        assert!(!ink.hot_extended_cache);
+        ink.observe_extended_paint(now + Duration::from_millis(10));
+        assert!(!ink.hot_extended_cache);
+        ink.observe_extended_paint(now + Duration::from_millis(20));
+        assert!(ink.hot_extended_cache);
+        ink.observe_extended_paint(now + EXTENDED_IDLE_EXPIRY + Duration::from_secs(1));
+        assert!(!ink.hot_extended_cache);
     }
 
     #[test]

@@ -11,7 +11,76 @@ use crate::{
     native::{self, Passthrough},
     sdl::*,
 };
-use std::{collections::BTreeSet, time::Instant};
+use std::{
+    collections::BTreeSet,
+    time::{Duration, Instant},
+};
+
+/// Only measured when OVERINK_PROFILE is set. Separates layout, geometry
+/// upload and Metal present from the ink compositor without per-frame logging.
+#[derive(Default)]
+pub(super) struct CanvasPaintTimings {
+    pub ink: Duration,
+    pub text_ui: Duration,
+    pub text_geometry: Duration,
+    pub static_text: Duration,
+    pub present: Duration,
+}
+
+pub(super) struct PaintFlags {
+    pub picker_choosing: bool,
+    pub keep_editor_open: bool,
+}
+
+/// A redraw is not necessarily a document change. Pointer hover, native
+/// surface changes and committed ink/text invalidate different GPU resources.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DirtyReason {
+    Overlay,
+    Content,
+    Surface,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct DirtyReasons(u8);
+
+impl DirtyReasons {
+    const OVERLAY: u8 = 1;
+    const CONTENT: u8 = 2;
+    const SURFACE: u8 = 4;
+
+    fn mark(&mut self, reason: DirtyReason) {
+        self.0 |= match reason {
+            DirtyReason::Overlay => Self::OVERLAY,
+            DirtyReason::Content => Self::CONTENT,
+            DirtyReason::Surface => Self::SURFACE,
+        };
+    }
+
+    fn any(self) -> bool {
+        self.0 != 0
+    }
+
+    fn clear(&mut self) {
+        self.0 = 0;
+    }
+}
+
+// The old ink layer is already retained by Ink. Committed text gets a
+// separate transparent GPU texture; live editors, menus, IME and OSK remain
+// immediate-mode and are composited on top. The GUI owns its glyph atlas.
+const MAX_STATIC_TEXT_TEXTURE_BYTES: usize = 64 * 1024 * 1024;
+
+struct StaticTextLayer {
+    gui: Gui,
+    texture: InkTexture,
+    pixels: [i32; 2],
+    logical_size: [f32; 2],
+    format: SDL_PixelFormat,
+    text_revision: u64,
+    selected: Option<usize>,
+    style: Option<(u64, u64)>,
+}
 
 pub(super) struct Canvas {
     // SDL destroys textures with their renderer, and renderers with their window.
@@ -19,6 +88,8 @@ pub(super) struct Canvas {
     ink: Ink,
     text: Option<Gui>,
     text_style: Option<(u64, u64)>,
+    static_text: Option<StaticTextLayer>,
+    static_text_unavailable: Option<([i32; 2], SDL_PixelFormat)>,
     pub text_repaint_at: Option<Instant>,
     pub render: Renderer,
     native: Passthrough,
@@ -32,7 +103,7 @@ pub(super) struct Canvas {
     bounds: Option<[i32; 4]>,
     pub protected: Option<Rect>,
     pub visible: bool,
-    pub dirty: bool,
+    dirty: DirtyReasons,
     pub guard_dirty: bool,
     animation: bool,
     mouse: bool,
@@ -79,6 +150,8 @@ impl Canvas {
             ink: Ink::default(),
             text: None,
             text_style: None,
+            static_text: None,
+            static_text_unavailable: None,
             text_repaint_at: None,
             render,
             native,
@@ -91,13 +164,27 @@ impl Canvas {
             bounds: display.map(|d| d.bounds),
             protected: None,
             visible: false,
-            dirty: true,
+            dirty: DirtyReasons(DirtyReasons::SURFACE),
             guard_dirty: true,
             animation: false,
             mouse: false,
             #[cfg(target_os = "macos")]
             extended_unavailable: false,
         })
+    }
+
+    pub fn invalidate(&mut self, reason: DirtyReason) {
+        self.dirty.mark(reason);
+        if reason == DirtyReason::Surface {
+            self.static_text = None;
+            self.static_text_unavailable = None;
+        }
+    }
+
+    pub fn invalidate_if(&mut self, changed: bool, reason: DirtyReason) {
+        if changed {
+            self.invalidate(reason);
+        }
     }
 
     fn attach(&mut self, display: Option<&Display>, toolbar: &Window) -> Result<(), String> {
@@ -137,7 +224,7 @@ impl Canvas {
             })?;
             self.visible = visible;
             self.guard_dirty = true;
-            self.dirty = true;
+            self.invalidate(DirtyReason::Surface);
             self.native.invalidate();
             if !visible && self.render.extended {
                 self.ink.invalidate_layer();
@@ -184,7 +271,7 @@ impl Canvas {
     pub fn surface_changed(&mut self) {
         self.color.refresh(&self.window, self.render.extended);
         self.background.invalidate_texture();
-        self.dirty = true;
+        self.invalidate(DirtyReason::Surface);
     }
 
     pub fn renderer_reset(&mut self) {
@@ -195,8 +282,10 @@ impl Canvas {
         // Dropping the old text GUI releases its SDL texture handles.
         self.text = None;
         self.text_style = None;
+        self.static_text = None;
+        self.static_text_unavailable = None;
         self.background.invalidate_texture();
-        self.dirty = true;
+        self.invalidate(DirtyReason::Surface);
     }
 
     pub fn suspend_text_input(&mut self) {
@@ -295,7 +384,7 @@ impl Canvas {
         self.text
             .get_or_insert_with(Gui::new)
             .sync_text_input(&self.window, true);
-        self.dirty = true;
+        self.invalidate(DirtyReason::Overlay);
     }
 
     pub fn flush_text_events(&mut self, app: &mut App, theme: egui::Theme) -> Result<(), String> {
@@ -304,14 +393,14 @@ impl Canvas {
                 .text
                 .as_ref()
                 .is_some_and(|gui| !gui.raw.events.is_empty())
-            && let Some(mut output) = self.text_frame(app, theme, true)
+            && let Some(mut output) = self.text_frame(app, theme, true, false)
         {
             // Apply input and upload texture deltas before a toolbar action changes the draft.
             // The next canvas frame will paint the resulting document.
             output.shapes.clear();
             if let Some(gui) = self.text.as_mut() {
                 gui.paint(&self.render, &self.window, &self.color, output)?;
-                self.dirty = true;
+                self.invalidate(DirtyReason::Overlay);
             }
         }
         Ok(())
@@ -321,7 +410,7 @@ impl Canvas {
         self.flush_text_events(app, theme)?;
         app.input.text.finish(&mut app.history);
         self.suspend_text_input();
-        self.dirty = true;
+        self.invalidate(DirtyReason::Content);
         Ok(())
     }
 
@@ -336,7 +425,7 @@ impl Canvas {
             return false;
         }
         self.background.invalidate_texture();
-        self.dirty = true;
+        self.invalidate(DirtyReason::Surface);
         true
     }
 
@@ -348,7 +437,10 @@ impl Canvas {
             if shape_changed {
                 self.native.invalidate();
             }
-            self.dirty |= self.protected != protected || shape_changed || self.mouse != mouse;
+            self.invalidate_if(
+                self.protected != protected || shape_changed || self.mouse != mouse,
+                DirtyReason::Overlay,
+            );
             self.protected = protected;
             self.guard_dirty = false;
             self.mouse = mouse;
@@ -386,17 +478,122 @@ impl Canvas {
         self.background.display(display, connected, mode, drawing)
     }
 
+    /// Rebuild committed text only when its document, font, color or surface
+    /// changes. Unlike the interactive egui context this one never receives
+    /// pointer events, so hovering a keyboard does not re-tessellate labels.
+    /// If an SDL backend cannot create a target, preserve the original path.
+    fn paint_static_text(&mut self, app: &App, theme: egui::Theme) -> Result<bool, String> {
+        let interactive =
+            !app.screenshot.active() && !app.picking && app.tool.is_text() && !app.pass;
+        let selected = if interactive {
+            app.input.text.selected
+        } else {
+            None
+        };
+        if app.hidden || app.history.text_boxes().len() <= usize::from(selected.is_some()) {
+            self.static_text = None;
+            return Ok(false);
+        }
+        let pixels = self.window.pixel_size();
+        let logical_size = self.window.size();
+        let format = if self.render.extended {
+            SDL_PIXELFORMAT_RGBA64_FLOAT
+        } else {
+            SDL_PIXELFORMAT_RGBA32
+        };
+        let bytes_per_pixel = if self.render.extended { 8 } else { 4 };
+        let bytes = usize::try_from(pixels[0])
+            .ok()
+            .zip(usize::try_from(pixels[1]).ok())
+            .and_then(|(w, h)| w.checked_mul(h))
+            .and_then(|area| area.checked_mul(bytes_per_pixel));
+        if !bytes.is_some_and(|bytes| bytes <= MAX_STATIC_TEXT_TEXTURE_BYTES) {
+            self.static_text = None;
+            return Ok(false);
+        }
+        let key = (pixels, format);
+        if self.static_text.as_ref().is_some_and(|layer| {
+            layer.pixels != pixels || layer.logical_size != logical_size || layer.format != format
+        }) {
+            self.static_text = None;
+        }
+        if self.static_text.is_none() {
+            if self.static_text_unavailable == Some(key) {
+                return Ok(false);
+            }
+            let Ok(texture) = InkTexture::with_format(
+                &self.render,
+                pixels,
+                SDL_TEXTUREACCESS_TARGET,
+                SDL_BLENDMODE_BLEND_PREMULTIPLIED,
+                format,
+            ) else {
+                self.static_text_unavailable = Some(key);
+                return Ok(false);
+            };
+            self.static_text = Some(StaticTextLayer {
+                gui: Gui::new(),
+                texture,
+                pixels,
+                logical_size,
+                format,
+                text_revision: u64::MAX,
+                selected: None,
+                style: None,
+            });
+        }
+        let Some(layer) = self.static_text.as_mut() else {
+            return Ok(false);
+        };
+        let style = (app.text_fonts.revision, self.color.revision);
+        if layer.style != Some(style) {
+            layer.gui.ctx.set_fonts(app.text_fonts.definitions());
+            layer.style = Some(style);
+            layer.text_revision = u64::MAX;
+        }
+        if layer.gui.ctx.theme() != theme {
+            layer.gui.ctx.set_theme(theme);
+            layer.text_revision = u64::MAX;
+        }
+        if layer.text_revision != app.history.text_revision() || layer.selected != selected {
+            let input = layer.gui.canvas_input(&self.window);
+            let output = layer
+                .gui
+                .ctx
+                .run_ui(input, |ui| app.static_text_ui(ui, selected));
+            let paint = self.render.with_target(&layer.texture, || {
+                self.render.begin(&self.window, [0.; 4])?;
+                layer
+                    .gui
+                    .paint(&self.render, &self.window, &self.color, output)
+            });
+            if paint.is_err() {
+                self.static_text = None;
+                self.static_text_unavailable = Some(key);
+                return Ok(false);
+            }
+            layer.text_revision = app.history.text_revision();
+            layer.selected = selected;
+        }
+        layer.texture.draw(&self.render, None, None)?;
+        Ok(true)
+    }
+
     pub fn paint(
         &mut self,
         app: &mut App,
         options: &Options,
-        picker_choosing: bool,
-        keep_editor_open: bool,
+        flags: PaintFlags,
         theme: egui::Theme,
         extended_ink_budget: usize,
+        mut timings: Option<&mut CanvasPaintTimings>,
     ) -> Result<bool, String> {
+        let PaintFlags {
+            picker_choosing,
+            keep_editor_open,
+        } = flags;
         let text_repaint = self.text_repaint_at.is_some_and(|at| Instant::now() >= at);
-        if !self.visible || !(options.smoke || self.dirty || self.animation || text_repaint) {
+        if !self.visible || !(options.smoke || self.dirty.any() || self.animation || text_repaint) {
             return Ok(false);
         }
         let on_output = self.on_output(options.smoke);
@@ -424,6 +621,7 @@ impl Canvas {
                     }
                 }
                 page.history.set_size(self.window.size());
+                let ink_started = timings.as_ref().map(|_| Instant::now());
                 let scale = if page.hidden {
                     self.render.begin(&self.window, [0.; 4])?
                 } else {
@@ -436,16 +634,43 @@ impl Canvas {
                         extended_ink_budget,
                     )?
                 };
-                if let Some(output) = self.text_frame(page, theme, keep_editor_open)
+                if let (Some(start), Some(metrics)) = (ink_started, timings.as_deref_mut()) {
+                    metrics.ink += start.elapsed();
+                }
+
+                let static_started = timings.as_ref().map(|_| Instant::now());
+                let cached_static_text = if page.hidden {
+                    false
+                } else {
+                    self.paint_static_text(page, theme)?
+                };
+                if let (Some(start), Some(metrics)) = (static_started, timings.as_deref_mut()) {
+                    metrics.static_text += start.elapsed();
+                }
+                let text_started = timings.as_ref().map(|_| Instant::now());
+                let text_output =
+                    self.text_frame(page, theme, keep_editor_open, cached_static_text);
+                if let (Some(start), Some(metrics)) = (text_started, timings.as_deref_mut()) {
+                    metrics.text_ui += start.elapsed();
+                }
+                let mesh_started = timings.as_ref().map(|_| Instant::now());
+                if let Some(output) = text_output
                     && let Some(gui) = self.text.as_mut()
                 {
                     gui.paint(&self.render, &self.window, &self.color, output)?;
                 }
+                if let (Some(start), Some(metrics)) = (mesh_started, timings.as_deref_mut()) {
+                    metrics.text_geometry += start.elapsed();
+                }
+                let present_started = timings.as_ref().map(|_| Instant::now());
                 if page.hidden {
                     self.render.present()?;
                 } else {
                     self.ink
                         .present(page, &self.render, &self.window, &self.color, scale)?;
+                }
+                if let (Some(start), Some(metrics)) = (present_started, timings) {
+                    metrics.present += start.elapsed();
                 }
                 self.animation = !page.input.laser.is_empty();
                 Ok(())
@@ -453,7 +678,7 @@ impl Canvas {
         } else {
             return Ok(false);
         }
-        self.dirty = false;
+        self.dirty.clear();
         Ok(true)
     }
 
@@ -462,6 +687,7 @@ impl Canvas {
         app: &mut App,
         theme: egui::Theme,
         keep_editor_open: bool,
+        cached_static_text: bool,
     ) -> Option<egui::FullOutput> {
         let screenshot = app.screenshot.targets(self.window.id);
         let interactive =
@@ -469,6 +695,12 @@ impl Canvas {
         let editing = interactive && app.input.text.editing();
         if !app.touch_enabled {
             self.cancel_text_touches(app);
+        }
+        if cached_static_text && !interactive && !screenshot {
+            // Mouse/pass-through mode needs no interactive egui run at all:
+            // the committed labels already live in the retained GPU layer.
+            self.stop_text_input(false);
+            return None;
         }
         if app.history.text_boxes().is_empty() && !editing && !screenshot {
             self.stop_text_input(interactive);
@@ -518,7 +750,13 @@ impl Canvas {
         let composing = gui.composing();
         let mut output = gui.ctx.run_ui(input, |ui| {
             if !app.hidden {
-                app.text_ui(ui, interactive, composing, keep_editor_open);
+                app.text_ui(
+                    ui,
+                    interactive,
+                    composing,
+                    keep_editor_open,
+                    cached_static_text,
+                );
             }
             if screenshot {
                 app.screenshot.ui(ui, app.language, app.input.canvas_units);
@@ -638,8 +876,25 @@ pub(super) fn failure(error: impl ToString) -> crate::appearance::Status {
 
 #[cfg(test)]
 mod screenshot_input_tests {
-    use super::screenshot_input_changed;
+    use super::{DirtyReason, DirtyReasons, screenshot_input_changed};
     use egui::{Event, pos2};
+
+    #[test]
+    fn overlay_dirt_does_not_implicitly_dirty_content_or_surface() {
+        let mut flags = DirtyReasons::default();
+        assert!(!flags.any());
+        flags.mark(DirtyReason::Overlay);
+        assert_eq!(flags.0, DirtyReasons::OVERLAY);
+        flags.mark(DirtyReason::Content);
+        assert_eq!(flags.0, DirtyReasons::OVERLAY | DirtyReasons::CONTENT);
+        flags.mark(DirtyReason::Surface);
+        assert_eq!(
+            flags.0,
+            DirtyReasons::OVERLAY | DirtyReasons::CONTENT | DirtyReasons::SURFACE
+        );
+        flags.clear();
+        assert!(!flags.any());
+    }
 
     #[test]
     fn coalesced_screenshot_mouse_move_still_repaints() {
