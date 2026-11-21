@@ -1132,7 +1132,9 @@ impl App {
             let label = format!("{} {}", tr.text("Text color"), preset.hex());
             let response =
                 toolbar::swatch_button(&mut menu, button, rgb, &label, color.srgb8() == rgb)
-                    .on_hover_text(egui::RichText::new(label).size(toolbar::MENU_FONT_SIZE * scale));
+                    .on_hover_text(
+                        egui::RichText::new(label).size(toolbar::MENU_FONT_SIZE * scale),
+                    );
             if response.hovered() {
                 self.input.text.hovered_control = Some(response.rect);
             }
