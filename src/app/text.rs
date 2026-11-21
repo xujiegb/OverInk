@@ -3219,6 +3219,32 @@ mod tests {
     }
 
     #[test]
+    fn idle_osk_hover_packets_coalesce_into_the_final_position() {
+        let mut app = app();
+        app.use_tool(Tool::Text);
+        click(&mut app, pos2(150., 120.));
+        app.input.text.open_osk();
+        let mut gui = Gui::new();
+        gui.ctx.set_fonts(app.text_fonts.definitions());
+        let window = SDL_WindowID(1);
+        let motion = |x| SDL_Event {
+            motion: SDL_MouseMotionEvent {
+                r#type: SDL_EVENT_MOUSE_MOTION,
+                windowID: window,
+                x,
+                y: 400.,
+                ..Default::default()
+            },
+        };
+        assert!(app.text_event(&mut gui, &motion(200.), window, SIZE));
+        assert!(app.text_event(&mut gui, &motion(300.), window, SIZE));
+        assert!(matches!(
+            gui.raw.events.as_slice(),
+            [Event::PointerMoved(point)] if *point == pos2(300., 400.)
+        ));
+    }
+
+    #[test]
     fn egui_keyboard_click_reaches_text_editor_without_committing_box() {
         let mut app = app();
         app.use_tool(Tool::Text);
