@@ -469,9 +469,11 @@ impl App {
             && self.input.text.osk_visible()
             && self.input.text.press.is_none()
             && !gui.ctx.input(|input| input.pointer.any_down())
-            && !gui.raw.events.iter().any(|event| {
-                matches!(event, Event::PointerButton { pressed: true, .. })
-            });
+            && !gui
+                .raw
+                .events
+                .iter()
+                .any(|event| matches!(event, Event::PointerButton { pressed: true, .. }));
         if ty == SDL_EVENT_MOUSE_MOTION && !osk_hover_motion {
             gui.preserve_pointer_transitions();
         }
