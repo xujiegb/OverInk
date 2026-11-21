@@ -480,7 +480,11 @@ impl Canvas {
     fn paint_static_text(&mut self, app: &App, theme: egui::Theme) -> Result<bool, String> {
         let interactive =
             !app.screenshot.active() && !app.picking && app.tool.is_text() && !app.pass;
-        let selected = if interactive { app.input.text.selected } else { None };
+        let selected = if interactive {
+            app.input.text.selected
+        } else {
+            None
+        };
         if app.hidden || app.history.text_boxes().len() <= usize::from(selected.is_some()) {
             self.static_text = None;
             return Ok(false);
@@ -503,15 +507,9 @@ impl Canvas {
             return Ok(false);
         }
         let key = (pixels, format);
-        if self
-            .static_text
-            .as_ref()
-            .is_some_and(|layer| {
-                layer.pixels != pixels
-                    || layer.logical_size != logical_size
-                    || layer.format != format
-            })
-        {
+        if self.static_text.as_ref().is_some_and(|layer| {
+            layer.pixels != pixels || layer.logical_size != logical_size || layer.format != format
+        }) {
             self.static_text = None;
         }
         if self.static_text.is_none() {
@@ -554,10 +552,15 @@ impl Canvas {
         }
         if layer.text_revision != app.history.text_revision() || layer.selected != selected {
             let input = layer.gui.canvas_input(&self.window);
-            let output = layer.gui.ctx.run_ui(input, |ui| app.static_text_ui(ui, selected));
+            let output = layer
+                .gui
+                .ctx
+                .run_ui(input, |ui| app.static_text_ui(ui, selected));
             let paint = self.render.with_target(&layer.texture, || {
                 self.render.begin(&self.window, [0.; 4])?;
-                layer.gui.paint(&self.render, &self.window, &self.color, output)
+                layer
+                    .gui
+                    .paint(&self.render, &self.window, &self.color, output)
             });
             if paint.is_err() {
                 self.static_text = None;
