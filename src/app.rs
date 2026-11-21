@@ -1782,6 +1782,9 @@ fn run_inner(options: Options) -> Result<(), String> {
     let mut performance = std::env::var_os("OVERINK_PROFILE").map(|_| PerformanceMonitor::new());
     while running {
         with_autorelease_pool(|| -> Result<(), String> {
+            let iteration_started = Instant::now();
+            let mut saw_passive_mouse_motion = false;
+            let mut only_mouse_motion = true;
             if let Some(monitor) = &mut performance {
                 monitor.counts.iterations += 1;
             }
@@ -1795,6 +1798,15 @@ fn run_inner(options: Options) -> Result<(), String> {
             let mut event = SDL_Event::default();
             while poll_event(&mut event) {
                 let ty = event_type(&event);
+                if ty == SDL_EVENT_MOUSE_MOTION
+                    && mouse_motion_event(&event).is_some_and(|motion| {
+                        motion.which != SDL_PEN_MOUSEID && motion.which != SDL_TOUCH_MOUSEID
+                    })
+                {
+                    saw_passive_mouse_motion = true;
+                } else {
+                    only_mouse_motion = false;
+                }
                 if let Some(monitor) = &mut performance {
                     monitor.event(ty);
                 }
@@ -3135,7 +3147,20 @@ fn run_inner(options: Options) -> Result<(), String> {
                     if let Some(monitor) = &mut performance {
                         monitor.counts.frame_sleeps += 1;
                     }
-                    std::thread::sleep(pacer.delay(Instant::now()));
+                    // Hover feedback does not need a 120/144 Hz full-canvas
+                    // swap. In Auto mode cap *motion-only* updates near 45 Hz;
+                    // clicks, typing, touch, pen and user-selected fixed frame
+                    // rates retain their existing latency and FPS.
+                    let hover_delay = if app.frame_rate == FrameRate::Auto
+                        && saw_passive_mouse_motion
+                        && only_mouse_motion
+                        && mouse_released()
+                    {
+                        Duration::from_millis(22).saturating_sub(iteration_started.elapsed())
+                    } else {
+                        Duration::ZERO
+                    };
+                    std::thread::sleep(pacer.delay(Instant::now()).max(hover_delay));
                 }
             } else if (!toolbar_dirty || toolbar_hidden) && !topology_dirty {
                 let mut timeout = if app.wait_for_mouse_up
