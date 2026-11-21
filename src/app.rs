@@ -716,11 +716,11 @@ impl App {
         }
     }
     fn refresh_displays(&mut self, displays: Vec<Display>, preferred: Option<u32>) -> (bool, bool) {
-        let old = self
+        let old_layout = self
             .displays
             .iter()
             .find(|d| Some(d.id) == self.pages.active)
-            .cloned();
+            .map(|d| (d.id, d.bounds, d.scale));
         let removed = self
             .displays
             .iter()
@@ -747,8 +747,7 @@ impl App {
             .position(|d| Some(d.id) == target)
             .unwrap_or(0);
         let new = self.displays.get(self.display);
-        let layout = old.as_ref().map(|d| (d.id, d.bounds, d.scale))
-            != new.map(|d| (d.id, d.bounds, d.scale));
+        let layout = old_layout != new.map(|d| (d.id, d.bounds, d.scale));
         if removed {
             self.status =
                 text("Display disconnected. Its ink and undo history were cleared.").into();
