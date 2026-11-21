@@ -1978,7 +1978,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                     continue;
                 }
                 if !file_dialog.pending() {
-                    gui.event(&event, toolbar.id, toolbar.size());
+                    gui.toolbar_event(&event, toolbar.id, toolbar.size());
                 }
                 if id == Some(toolbar.id)
                     && ty == SDL_EVENT_WINDOW_FOCUS_LOST
