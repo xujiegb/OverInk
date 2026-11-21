@@ -1548,6 +1548,7 @@ fn handle_screenshot_event(
             && (on_canvas || ty == SDL_EVENT_FINGER_CANCELED)
             && (ty != SDL_EVENT_FINGER_DOWN
                 || (app.touch_enabled && app.input.pen_proximity.is_empty()))
+            && !screenshot.ignores_hover_motion(event)
         {
             canvas.dirty |= canvas.screenshot_event(event);
         }
