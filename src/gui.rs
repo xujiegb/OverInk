@@ -725,7 +725,10 @@ mod tests {
         for x in [10., 20., 30.] {
             gui.event(&motion(x), id, [800., 600.]);
         }
-        assert!(matches!(gui.raw.events.as_slice(), [Event::PointerMoved(pos)] if *pos == egui::pos2(30., 40.)));
+        assert!(matches!(
+            gui.raw.events.as_slice(),
+            [Event::PointerMoved(pos)] if *pos == egui::pos2(30., 40.)
+        ));
         gui.event(
             &SDL_Event {
                 button: SDL_MouseButtonEvent {
@@ -744,7 +747,11 @@ mod tests {
         gui.event(&motion(50.), id, [800., 600.]);
         assert!(matches!(
             gui.raw.events.as_slice(),
-            [Event::PointerMoved(first), Event::PointerButton { pressed: true, .. }, Event::PointerMoved(last)]
+            [
+                Event::PointerMoved(first),
+                Event::PointerButton { pressed: true, .. },
+                Event::PointerMoved(last)
+            ]
                 if *first == egui::pos2(30., 40.) && *last == egui::pos2(50., 40.)
         ));
     }
@@ -798,17 +805,24 @@ mod tests {
         let mut gui = Gui::new();
         finger(&mut gui, SDL_EVENT_FINGER_DOWN, 1, 0.1, 0.2);
         finger(&mut gui, SDL_EVENT_FINGER_MOTION, 1, 0.2, 0.2);
-        gui.event(&SDL_Event {
-            motion: SDL_MouseMotionEvent {
-                r#type: SDL_EVENT_MOUSE_MOTION,
-                windowID: SDL_WindowID(1),
-                x: 400.,
-                y: 150.,
-                ..Default::default()
+        gui.event(
+            &SDL_Event {
+                motion: SDL_MouseMotionEvent {
+                    r#type: SDL_EVENT_MOUSE_MOTION,
+                    windowID: SDL_WindowID(1),
+                    x: 400.,
+                    y: 150.,
+                    ..Default::default()
+                },
             },
-        }, SDL_WindowID(1), [800., 600.]);
-        assert!(matches!(gui.raw.events.as_slice(), [.., Event::PointerMoved(touch), Event::PointerMoved(mouse)]
-            if *touch == egui::pos2(160., 120.) && *mouse == egui::pos2(400., 150.)));
+            SDL_WindowID(1),
+            [800., 600.],
+        );
+        assert!(matches!(
+            gui.raw.events.as_slice(),
+            [.., Event::PointerMoved(touch), Event::PointerMoved(mouse)]
+                if *touch == egui::pos2(160., 120.) && *mouse == egui::pos2(400., 150.)
+        ));
     }
 
     #[test]
