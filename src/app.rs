@@ -786,18 +786,18 @@ impl App {
     }
     #[cfg(any(target_os = "macos", test))]
     fn has_wide_ink(&self) -> bool {
-        self.history
-            .strokes()
-            .iter()
-            .map(|stroke| stroke.as_ref())
-            .chain(self.history.active.iter())
-            .chain(
-                self.input
-                    .touches
-                    .values()
-                    .flat_map(|finger| finger.fragments.iter().chain(finger.stroke.iter())),
-            )
-            .any(|stroke| !stroke.points.is_empty() && stroke.color.needs_wide_gamut())
+        self.history.has_wide_gamut_ink()
+            || self
+                .history
+                .active
+                .iter()
+                .chain(
+                    self.input
+                        .touches
+                        .values()
+                        .flat_map(|finger| finger.fragments.iter().chain(finger.stroke.iter())),
+                )
+                .any(Stroke::has_wide_gamut_ink)
     }
     fn commit_touch(&mut self, finger: FingerStroke) {
         if let Gesture::Erase(id) = finger.gesture {
@@ -1551,7 +1551,7 @@ fn handle_screenshot_event(
         .iter_mut()
         .find(|canvas| screenshot.targets(canvas.window.id))
     {
-        let on_canvas = canvas::event_window(event, ty) == Some(canvas.window.id);
+        let on_canvas = event_window(event, ty) == Some(canvas.window.id);
         let contact_cancelled =
             matches!(ty, SDL_EVENT_FINGER_CANCELED | SDL_EVENT_PEN_PROXIMITY_OUT);
         if on_canvas || contact_cancelled {
@@ -1667,6 +1667,8 @@ pub fn run(options: Options) -> Result<(), String> {
     with_autorelease_pool(|| run_inner(options))
 }
 
+const HOVER_FRAME_PERIOD: Duration = Duration::from_millis(22);
+
 fn run_inner(options: Options) -> Result<(), String> {
     let base = state_dir();
     let preferences_path = base.join("ui.json");
@@ -1771,7 +1773,9 @@ fn run_inner(options: Options) -> Result<(), String> {
     let mut follow_controller = false;
     let mut requested_display = None;
     let mut topology_dirty = !options.smoke;
+    let mut connected: BTreeSet<_> = app.displays.iter().map(|d| d.id).collect();
     let mut pacer = FramePacer::new(app.frame_rate, app.refresh_hz(), Instant::now());
+    let mut next_hover_frame: Option<Instant> = None;
     let mut appearance = ThemeMonitor::default();
     let mut toolbar_dirty = true;
     let mut toolbar_repaint_at: Option<Instant> = None;
@@ -1798,11 +1802,7 @@ fn run_inner(options: Options) -> Result<(), String> {
             let mut event = SDL_Event::default();
             while poll_event(&mut event) {
                 let ty = event_type(&event);
-                if ty == SDL_EVENT_MOUSE_MOTION
-                    && mouse_motion_event(&event).is_some_and(|motion| {
-                        motion.which != SDL_PEN_MOUSEID && motion.which != SDL_TOUCH_MOUSEID
-                    })
-                {
+                if real_mouse_motion(&event).is_some_and(|motion| motion.state.0 == 0) {
                     saw_passive_mouse_motion = true;
                 } else {
                     only_mouse_motion = false;
@@ -1967,10 +1967,19 @@ fn run_inner(options: Options) -> Result<(), String> {
                     continue;
                 }
 
-                let id = canvas::event_window(&event, ty);
+                let id = event_window(&event, ty);
                 let active = canvas::active_index(&canvases, app.pages.active);
                 let was_picking = picker.active();
                 picker.event(&event, &canvases[active].window, &toolbar);
+                // Outside the toolbar, passive motion has no consumer in ink or
+                // passthrough mode. The picker has already seen the packet.
+                if ty == SDL_EVENT_MOUSE_MOTION
+                    && id != Some(toolbar.id)
+                    && (app.pass || !app.tool.is_text())
+                    && !app.has_contacts()
+                {
+                    continue;
+                }
                 let target = if ty == SDL_EVENT_FINGER_CANCELED {
                     let key = touch::key_from_event(&event)
                         .ok_or("SDL finger cancellation event has no finger data")?;
@@ -2005,7 +2014,9 @@ fn run_inner(options: Options) -> Result<(), String> {
                     }
                     continue;
                 }
-                if !file_dialog.pending() {
+                if !file_dialog.pending()
+                    && (ty != SDL_EVENT_MOUSE_MOTION || id == Some(toolbar.id))
+                {
                     gui.toolbar_event(&event, toolbar.id, toolbar.size());
                 }
                 if id == Some(toolbar.id)
@@ -2031,7 +2042,6 @@ fn run_inner(options: Options) -> Result<(), String> {
                     let canvas = &canvases[index];
                     let activates = drawing
                         && canvas.visible
-                        && canvas.on_output(options.smoke)
                         && ((ty == SDL_EVENT_MOUSE_BUTTON_DOWN
                             && mouse_button_event(&event).is_some_and(|button| {
                                 button.which != SDL_TOUCH_MOUSEID && button.which != SDL_PEN_MOUSEID
@@ -2039,7 +2049,8 @@ fn run_inner(options: Options) -> Result<(), String> {
                             || matches!(
                                 ty,
                                 SDL_EVENT_PEN_DOWN | SDL_EVENT_FINGER_DOWN | SDL_EVENT_KEY_DOWN
-                            ));
+                            ))
+                        && canvas.on_output(options.smoke);
                     if activates
                         && app.multi
                         && let Some(output) = canvas.output
@@ -2204,6 +2215,36 @@ fn run_inner(options: Options) -> Result<(), String> {
                 return Ok(());
             }
 
+            let pace_hover = !options.smoke
+                && app.frame_rate == FrameRate::Auto
+                && pacer.period < HOVER_FRAME_PERIOD
+                && only_mouse_motion
+                && !mode_changed
+                && !topology_dirty
+                && !app.wait_for_mouse_up
+                && !picker.active()
+                && !app.screenshot.active()
+                && !file_dialog.pending()
+                && !app.has_contacts()
+                && !canvases
+                    .iter()
+                    .any(|canvas| canvas.animating() || canvas.background.pending());
+            if pace_hover
+                && let Some(deadline) = next_hover_frame
+                && let Some(delay) = deadline.checked_duration_since(Instant::now())
+                && !delay.is_zero()
+            {
+                // Do not sleep through input. SDL leaves the events queued;
+                // clicks, typing and pen/touch bypass this deadline.
+                if let Some(monitor) = &mut performance {
+                    monitor.counts.event_waits += 1;
+                    monitor.report();
+                }
+                wait_for_events(delay);
+                return Ok(());
+            }
+            next_hover_frame = None;
+
             if let Some((kind, result)) = file_dialog.poll() {
                 toolbar_dirty = true;
                 restore_toolbar_focus = !app.screenshot.active();
@@ -2282,6 +2323,9 @@ fn run_inner(options: Options) -> Result<(), String> {
                     desired
                 };
                 let topology_changed = displays != app.displays;
+                if topology_changed {
+                    connected = displays.iter().map(|display| display.id).collect();
+                }
                 let previous_page = app.pages.active;
                 if target.is_some_and(|id| Some(id) != previous_page)
                     && displays
@@ -2352,7 +2396,6 @@ fn run_inner(options: Options) -> Result<(), String> {
             }
 
             let active = canvas::active_index(&canvases, app.pages.active);
-            let connected = app.displays.iter().map(|d| d.id).collect();
             pacer.configure(app.frame_rate, app.refresh_hz(), Instant::now());
             for canvas in &mut canvases {
                 let mode = canvas.snapshot_mode(&video, xwayland, options.sdr);
@@ -2567,7 +2610,10 @@ fn run_inner(options: Options) -> Result<(), String> {
                     || !gui.raw.events.is_empty()
                     || toolbar_repaint_at.is_some_and(|at| Instant::now() >= at))
             {
-                previous_preferences = Some(app.preferences.clone());
+                let panel = app.panel.filter(|_| !app.picking).or(app.panel_retiring);
+                if panel == Some(crate::toolbar::Panel::Settings) {
+                    previous_preferences = Some(app.preferences.clone());
+                }
                 toolbar_dirty = false;
                 if app.input.text.editing()
                     && (toolbar.input_focused()
@@ -2853,6 +2899,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 .map(canvas::Canvas::extended_ink_bytes)
                 .sum();
             for (index, canvas) in canvases.iter_mut().enumerate() {
+                extended_ink_bytes -= canvas.extended_ink_bytes();
                 let screenshot = app.screenshot.targets(canvas.window.id);
                 let mouse = mouse && !screenshot;
                 // The native chooser owns interaction while pending. Even a
@@ -2893,7 +2940,6 @@ fn run_inner(options: Options) -> Result<(), String> {
                     let frozen = canvas.background.frozen;
                     let history_before = app.history_buttons();
                     let selection_before = app.input.text.selected;
-                    extended_ink_bytes -= canvas.extended_ink_bytes();
                     let canvas_started = performance.as_ref().map(|_| Instant::now());
                     let mut breakdown = canvas::CanvasPaintTimings::default();
                     let painted = canvas.paint(
@@ -3104,10 +3150,10 @@ fn run_inner(options: Options) -> Result<(), String> {
                 }
                 app.last_save = Instant::now();
             }
-            // Expire warmed full-screen FP16 targets even during a completely
-            // idle event loop; waiting for another paint would retain memory.
+            // Release adaptive ink caches even when no canvas needs another frame.
+            let now = Instant::now();
             for canvas in &mut canvases {
-                canvas.trim_idle_gpu_cache();
+                canvas.trim_idle_gpu_cache(now);
             }
             frame += 1;
             if options.smoke && frame >= 3 {
@@ -3138,29 +3184,15 @@ fn run_inner(options: Options) -> Result<(), String> {
                         monitor.counts.precise_waits += 1;
                     }
                     pacer.wait();
+                } else if pace_hover && saw_passive_mouse_motion {
+                    let _ = pacer.delay(Instant::now());
+                    next_hover_frame = Some(iteration_started + HOVER_FRAME_PERIOD);
                 } else {
-                    // The event queue can wake SDL_WaitEventTimeout on every
-                    // mouse-motion packet. That bypasses frame pacing and
-                    // can present hundreds of full-canvas frames per second.
-                    // A scheduler sleep caps ordinary UI refresh to the
-                    // selected frame rate without SDL_DelayPrecise spinning.
+                    // Keep ordinary UI refresh paced without a precise spin wait.
                     if let Some(monitor) = &mut performance {
                         monitor.counts.frame_sleeps += 1;
                     }
-                    // Hover feedback does not need a 120/144 Hz full-canvas
-                    // swap. In Auto mode cap *motion-only* updates near 45 Hz;
-                    // clicks, typing, touch, pen and user-selected fixed frame
-                    // rates retain their existing latency and FPS.
-                    let hover_delay = if app.frame_rate == FrameRate::Auto
-                        && saw_passive_mouse_motion
-                        && only_mouse_motion
-                        && mouse_released()
-                    {
-                        Duration::from_millis(22).saturating_sub(iteration_started.elapsed())
-                    } else {
-                        Duration::ZERO
-                    };
-                    std::thread::sleep(pacer.delay(Instant::now()).max(hover_delay));
+                    std::thread::sleep(pacer.delay(Instant::now()));
                 }
             } else if (!toolbar_dirty || toolbar_hidden) && !topology_dirty {
                 let mut timeout = if app.wait_for_mouse_up

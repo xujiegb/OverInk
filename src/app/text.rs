@@ -425,57 +425,41 @@ impl App {
 
         let ty = event_type(event);
         let editing = self.input.text.editing();
-        // A highlighted key or annotation action remains visually unchanged
-        // while the pointer is inside its rect. Preserve pointer drags,
-        // press/release sequences, and emoji paging/scrubbing.
-        if ty == SDL_EVENT_MOUSE_MOTION
-            && let Some(motion) = mouse_motion_event(event)
-            && motion.windowID == window
-            && motion.which != SDL_TOUCH_MOUSEID
-            && motion.which != SDL_PEN_MOUSEID
-            && self.input.text.press.is_none()
-            && (editing
-                && self
-                    .input
-                    .text
-                    .osk
-                    .motion_inside_hovered_key(pos2(motion.x, motion.y))
-                || self
-                    .input
-                    .text
-                    .hovered_control
-                    .is_some_and(|rect| rect.contains(pos2(motion.x, motion.y))))
-            // A prior move in this SDL batch can target another control.
-            // Keep the final position instead of reusing stale hover geometry.
-            && !gui.raw.events.iter().any(|event| matches!(event, Event::PointerMoved(_)))
-            && !gui.ctx.input(|input| input.pointer.any_down())
-            && !gui
-                .raw
-                .events
-                .iter()
-                .any(|event| matches!(event, Event::PointerButton { pressed: true, .. }))
-        {
-            return false;
+        let mut osk_hover_motion = false;
+        if ty == SDL_EVENT_MOUSE_MOTION {
+            let Some(motion) = real_mouse_motion(event).filter(|m| m.windowID == window) else {
+                return false;
+            };
+            let pos = pos2(motion.x, motion.y);
+            let over_control = self
+                .input
+                .text
+                .hovered_control
+                .is_some_and(|r| r.contains(pos))
+                || editing && self.input.text.osk.motion_inside_hovered_key(pos);
+            let osk_visible = self.input.text.osk_visible();
+            if motion.state.0 == 0
+                && self.input.text.press.is_none()
+                && (over_control || osk_visible)
+                && !gui.ctx.input(|input| input.pointer.any_down())
+                && !gui
+                    .raw
+                    .events
+                    .iter()
+                    .any(|e| matches!(e, Event::PointerButton { pressed: true, .. }))
+            {
+                // Pending input can invalidate the previously highlighted control.
+                if over_control && gui.raw.events.is_empty() {
+                    return false;
+                }
+                osk_hover_motion = osk_visible;
+            }
+            if !osk_hover_motion {
+                gui.preserve_pointer_transitions();
+            }
         }
         if !editing && self.input.text.selected.is_none() {
             gui.clear_events();
-        }
-        // The embedded keyboard only needs the final hover position per
-        // native event batch. Preserve all press, drag, resize and text-menu
-        // transitions, but replace adjacent *unpressed* OSK hover positions
-        // instead of feeding dozens of obsolete pointer events into egui.
-        let osk_hover_motion = ty == SDL_EVENT_MOUSE_MOTION
-            && editing
-            && self.input.text.osk_visible()
-            && self.input.text.press.is_none()
-            && !gui.ctx.input(|input| input.pointer.any_down())
-            && !gui
-                .raw
-                .events
-                .iter()
-                .any(|event| matches!(event, Event::PointerButton { pressed: true, .. }));
-        if ty == SDL_EVENT_MOUSE_MOTION && !osk_hover_motion {
-            gui.preserve_pointer_transitions();
         }
         let first = gui.raw.events.len();
         let mut changed = false;
@@ -1326,7 +1310,6 @@ impl App {
         cached_static_text: bool,
     ) {
         self.input.text.hovered_control = None;
-        let selected = self.input.text.selected;
         let draft = self.input.text.draft.as_ref();
         let preview = self
             .input
@@ -1334,19 +1317,24 @@ impl App {
             .press
             .as_ref()
             .and_then(|press| press.preview.as_ref());
-        for (index, item) in self.history.text_boxes().iter().enumerate() {
-            if cached_static_text && (!interactive || selected != Some(index)) {
-                continue;
+        let selected = interactive.then_some(self.input.text.selected).flatten();
+        let draw_selected = |item: &TextBox| {
+            if draft.is_none() {
+                draw_text_box(ui, &self.text_fonts, preview.unwrap_or(item));
             }
-            let item = if interactive && selected == Some(index) {
-                if draft.is_some() {
-                    continue;
+        };
+        if cached_static_text {
+            if let Some(item) = selected.and_then(|index| self.history.text_boxes().get(index)) {
+                draw_selected(item);
+            }
+        } else {
+            for (index, item) in self.history.text_boxes().iter().enumerate() {
+                if selected == Some(index) {
+                    draw_selected(item);
+                } else {
+                    draw_text_box(ui, &self.text_fonts, item);
                 }
-                preview.unwrap_or(item)
-            } else {
-                item
-            };
-            draw_text_box(ui, &self.text_fonts, item);
+            }
         }
         if interactive {
             let screen = ui.clip_rect();
@@ -3244,6 +3232,41 @@ mod tests {
             gui.raw.events.as_slice(),
             [Event::PointerMoved(point)] if *point == pos2(300., 400.)
         ));
+    }
+
+    #[test]
+    fn osk_ignores_synthetic_mouse_hover_and_preserves_held_button_samples() {
+        let mut app = app();
+        app.use_tool(Tool::Text);
+        click(&mut app, pos2(150., 120.));
+        app.input.text.open_osk();
+        let mut gui = Gui::new();
+        let window = SDL_WindowID(1);
+        for which in [SDL_PEN_MOUSEID, SDL_TOUCH_MOUSEID] {
+            let event = SDL_Event {
+                motion: SDL_MouseMotionEvent {
+                    r#type: SDL_EVENT_MOUSE_MOTION,
+                    windowID: window,
+                    which,
+                    ..Default::default()
+                },
+            };
+            assert!(!app.text_event(&mut gui, &event, window, SIZE));
+        }
+        for x in [200., 240.] {
+            let event = SDL_Event {
+                motion: SDL_MouseMotionEvent {
+                    r#type: SDL_EVENT_MOUSE_MOTION,
+                    windowID: window,
+                    state: SDL_BUTTON_LMASK,
+                    x,
+                    y: 400.,
+                    ..Default::default()
+                },
+            };
+            assert!(app.text_event(&mut gui, &event, window, SIZE));
+        }
+        assert_eq!(gui.raw.events.len(), 2);
     }
 
     #[test]

@@ -21,16 +21,14 @@ const MESH_SEGMENTS: usize = 1024;
 const GEOMETRY_BATCH: usize = 24_576;
 // Extra FP16 ink targets share this allowance across displays.
 pub(super) const MAX_EXTENDED_INK_TEXTURE_BYTES: usize = 64 * 1024 * 1024;
-const EXTENDED_CACHE_STROKES: usize = 64;
-const EXTENDED_CACHE_POINTS: usize = 8192;
-// Small FP16 documents do not need a full-screen texture until repeated
-// hover/overlay frames make their per-frame history tessellation expensive.
-const EXTENDED_HOT_FRAMES: u8 = 3;
-const EXTENDED_HOT_WINDOW: Duration = Duration::from_millis(900);
-// Cache a small FP16 document only if direct history replay actually costs
-// enough CPU to justify retaining a full-screen HDR render target.
-const EXTENDED_REPLAY_CACHE_THRESHOLD: Duration = Duration::from_micros(500);
-const EXTENDED_IDLE_EXPIRY: Duration = Duration::from_secs(20);
+// Cheap documents should not reserve a large render target for a few strokes.
+// Small SDR targets still benefit from incremental painting immediately.
+const MAX_EAGER_SDR_BYTES: usize = 4 * 1024 * 1024;
+const CACHE_STROKES: usize = 64;
+const CACHE_POINTS: usize = 8192;
+const REPLAY_WINDOW: Duration = Duration::from_millis(900);
+const EXPENSIVE_REPLAY: Duration = Duration::from_micros(500);
+const CACHE_IDLE_EXPIRY: Duration = Duration::from_secs(20);
 
 use crate::sdl::InkTexture as Texture;
 
@@ -62,51 +60,47 @@ struct CommittedLayer {
 }
 
 #[derive(Default)]
+struct ReplayActivity {
+    previous: [Option<Instant>; 2],
+    last_use: Option<Instant>,
+}
+
+impl ReplayActivity {
+    fn observe(&mut self, now: Instant, cost: Duration) {
+        if cost < EXPENSIVE_REPLAY {
+            *self = Self::default();
+            return;
+        }
+        let [first, second] = self.previous;
+        self.previous = [second, Some(now)];
+        if first.is_some_and(|first| now.duration_since(first) <= REPLAY_WINDOW) {
+            self.last_use = Some(now);
+        }
+    }
+}
+
+#[derive(Default)]
 pub(super) struct Ink {
     layer: Option<CommittedLayer>,
     unavailable_at: Option<([i32; 2], SDL_PixelFormat)>,
     painter: StrokePainter,
-    last_extended_paint: Option<Instant>,
-    consecutive_extended_paints: u8,
-    hot_extended_cache: bool,
+    activity: ReplayActivity,
 }
 
 impl Ink {
     pub fn invalidate_layer(&mut self) {
         self.layer = None;
         self.unavailable_at = None;
+        self.activity = ReplayActivity::default();
     }
 
-    fn observe_extended_paint(&mut self, now: Instant, history_cost: Duration) {
-        let frequent = self
-            .last_extended_paint
-            .is_some_and(|previous| now.duration_since(previous) <= EXTENDED_HOT_WINDOW);
-        self.consecutive_extended_paints =
-            if frequent && history_cost >= EXTENDED_REPLAY_CACHE_THRESHOLD {
-                self.consecutive_extended_paints.saturating_add(1)
-            } else if history_cost >= EXTENDED_REPLAY_CACHE_THRESHOLD {
-                1
-            } else {
-                0
-            };
-        self.hot_extended_cache = self.consecutive_extended_paints >= EXTENDED_HOT_FRAMES;
-        self.last_extended_paint = Some(now);
-    }
-
-    /// The event loop wakes even without painting. Release an adaptive
-    /// full-screen FP16 layer after inactivity instead of retaining it until
-    /// the next mouse movement. Large documents keep their normal cache.
-    pub fn release_idle_extended_layer(&mut self) {
-        if self.hot_extended_cache
-            && self
-                .last_extended_paint
-                .is_some_and(|last| last.elapsed() >= EXTENDED_IDLE_EXPIRY)
+    pub fn release_idle_layer(&mut self, now: Instant) {
+        if self
+            .activity
+            .last_use
+            .is_some_and(|last| now.duration_since(last) >= CACHE_IDLE_EXPIRY)
         {
-            self.hot_extended_cache = false;
-            self.consecutive_extended_paints = 0;
-            if self.extended_bytes() != 0 {
-                self.invalidate_layer();
-            }
+            self.invalidate_layer();
         }
     }
 
@@ -123,7 +117,7 @@ impl Ink {
     pub fn extended_bytes(&self) -> usize {
         self.layer.as_ref().map_or(0, |layer| {
             if layer.format == SDL_PIXELFORMAT_RGBA64_FLOAT {
-                extended_bytes(layer.size)
+                layer_bytes(layer.size, layer.format)
             } else {
                 0
             }
@@ -154,9 +148,6 @@ impl Ink {
             extended_budget,
         };
         self.painter.queued = 0;
-        if renderer.extended && self.hot_extended_cache && !app.has_contacts() {
-            self.last_extended_paint = Some(Instant::now());
-        }
         if background.frozen
             && !app.pass
             && let Err(error) = background.draw(renderer, window, color)
@@ -242,14 +233,19 @@ impl Ink {
             clear_hole(renderer, hole)?;
         }
         renderer.present()?;
-        // A small canvas can use its FP16 layer for the final erase frame.
-        // Release it after SDL has submitted the composition.
-        self.release_unused_extended_layer(app);
+        // Keep the final eraser frame until SDL has submitted its composition.
+        self.release_unused_layer(app);
         Ok(())
     }
 
-    fn release_unused_extended_layer(&mut self, app: &App) {
-        if self.extended_bytes() != 0 && !extended_cache_needed(app, self.hot_extended_cache) {
+    fn release_unused_layer(&mut self, app: &App) {
+        if self.activity.last_use.is_none()
+            && self
+                .layer
+                .as_ref()
+                .is_some_and(|layer| uses_adaptive_cache(layer.size, layer.format))
+            && !document_needs_layer(app)
+        {
             self.invalidate_layer();
         }
     }
@@ -258,7 +254,7 @@ impl Ink {
         let damage = app.input.ink_damage.take();
         let count = app.history.strokes().len();
         if count == 0 {
-            self.layer = None;
+            self.invalidate_layer();
             return Ok(());
         }
         let renderer = frame.renderer;
@@ -267,29 +263,43 @@ impl Ink {
         } else {
             SDL_PIXELFORMAT_RGBA32
         };
+        let target = (frame.pixels, format);
         if renderer.extended
             && (renderer.name != "metal"
-                || extended_bytes(frame.pixels) > frame.extended_budget
-                || (self.layer.is_none() && !extended_cache_needed(app, self.hot_extended_cache)))
+                || layer_bytes(frame.pixels, format) > frame.extended_budget)
         {
             self.invalidate_layer();
-            let started = Instant::now();
-            let result = self.painter.history(frame, app, 0, None, 1.);
-            if result.is_ok() && renderer.extended && !app.has_contacts() {
-                self.observe_extended_paint(Instant::now(), started.elapsed());
-            }
-            return result;
+            return self.painter.history(frame, app, 0, None, 1.);
         }
-
         if self
             .layer
             .as_ref()
-            .is_some_and(|layer| layer.size != frame.pixels || layer.format != format)
+            .is_some_and(|layer| (layer.size, layer.format) != target)
         {
             self.invalidate_layer();
         }
-        let target = (frame.pixels, format);
-        if self.layer.is_none() && self.unavailable_at != Some(target) {
+        if self.unavailable_at == Some(target) {
+            return self.painter.history(frame, app, 0, None, 1.);
+        }
+        if uses_adaptive_cache(frame.pixels, format) && !document_needs_layer(app) {
+            if let Some(last_use) = &mut self.activity.last_use {
+                // A paint during a long drawing gesture is activity too.
+                *last_use = Instant::now();
+            } else if self.layer.is_none() {
+                let started = (!app.input.has_contacts()).then(Instant::now);
+                self.painter.history(frame, app, 0, None, 1.)?;
+                if let Some(started) = started {
+                    let now = Instant::now();
+                    self.activity.observe(now, now.duration_since(started));
+                }
+                return Ok(());
+            }
+        } else {
+            // A large document or an active eraser needs its layer independent
+            // of hover activity; an old idle deadline must not evict it.
+            self.activity = ReplayActivity::default();
+        }
+        if self.layer.is_none() {
             match Texture::with_format(
                 renderer,
                 frame.pixels,
@@ -308,7 +318,10 @@ impl Ink {
                         erase: 0,
                     });
                 }
-                Err(_) => self.unavailable_at = Some(target),
+                Err(_) => {
+                    self.activity = ReplayActivity::default();
+                    self.unavailable_at = Some(target);
+                }
             }
         }
         if let Some(layer) = &mut self.layer {
@@ -347,7 +360,7 @@ impl Ink {
                 });
                 self.painter.queued = 0;
                 if result.is_err() {
-                    self.layer = None;
+                    self.invalidate_layer();
                     self.unavailable_at = Some(target);
                     return self.painter.history(frame, app, 0, None, 1.);
                 }
@@ -364,18 +377,25 @@ impl Ink {
     }
 }
 
-fn extended_bytes([width, height]: [i32; 2]) -> usize {
+fn layer_bytes([width, height]: [i32; 2], format: SDL_PixelFormat) -> usize {
+    let bytes_per_pixel = if format == SDL_PIXELFORMAT_RGBA64_FLOAT {
+        8
+    } else {
+        4
+    };
     (width.max(0) as usize)
         .saturating_mul(height.max(0) as usize)
-        .saturating_mul(8)
+        .saturating_mul(bytes_per_pixel)
 }
 
-fn extended_cache_needed(app: &App, recently_busy: bool) -> bool {
-    !app.history.strokes().is_empty()
-        && (recently_busy
-            || app.history.strokes().len() >= EXTENDED_CACHE_STROKES
-            || app.history.point_count() >= EXTENDED_CACHE_POINTS
-            || app.input.pending_erasures.values().any(Erasure::has_edits))
+fn uses_adaptive_cache(pixels: [i32; 2], format: SDL_PixelFormat) -> bool {
+    format == SDL_PIXELFORMAT_RGBA64_FLOAT || layer_bytes(pixels, format) > MAX_EAGER_SDR_BYTES
+}
+
+fn document_needs_layer(app: &App) -> bool {
+    app.history.strokes().len() >= CACHE_STROKES
+        || app.history.point_count() >= CACHE_POINTS
+        || app.input.pending_erasures.values().any(Erasure::has_edits)
 }
 
 fn revision_white_scale(layer: &CommittedLayer) -> f32 {
@@ -1039,6 +1059,18 @@ mod tests {
     }
 
     #[test]
+    fn a_single_stroke_on_a_4k_sdr_canvas_draws_without_a_full_surface_cache() -> TestResult {
+        let canvas = TestCanvas::new([3840, 2160])?;
+        let mut app = app();
+        let mut ink = Ink::default();
+        commit(&mut app, Tool::Pen, [255, 0, 0], &[[10., 20.], [100., 20.]]);
+        canvas.history(&mut ink, &mut app)?;
+        assert!(canvas.pixel(50, 20)?[0] > 0);
+        assert!(ink.layer.is_none());
+        Ok(())
+    }
+
+    #[test]
     fn small_extended_cache_releases_its_layer_after_erase() -> TestResult {
         let canvas = TestCanvas::new([320, 160])?;
         let mut app = app();
@@ -1049,7 +1081,7 @@ mod tests {
             [255, 200, 0],
             &[[10., 60.], [300., 60.]],
         );
-        assert!(!extended_cache_needed(&app, ink.hot_extended_cache));
+        assert!(!document_needs_layer(&app));
         for (id, x) in [(1, 100.), (2, 180.)] {
             app.erase_sample(id, Point::new(x, 60., 1., [0.; 2]));
             canvas.history(&mut ink, &mut app)?;
@@ -1058,44 +1090,50 @@ mod tests {
                 panic!("expected a cached ink layer");
             };
             layer.format = SDL_PIXELFORMAT_RGBA64_FLOAT;
-            ink.release_unused_extended_layer(&app);
-            assert_eq!(ink.extended_bytes(), extended_bytes([320, 160]));
+            ink.release_unused_layer(&app);
+            assert_eq!(
+                ink.extended_bytes(),
+                layer_bytes([320, 160], SDL_PIXELFORMAT_RGBA64_FLOAT)
+            );
 
             if id == 1 {
                 app.commit_erase(id);
             } else {
                 app.reset_contacts();
             }
-            assert!(!extended_cache_needed(&app, ink.hot_extended_cache));
-            ink.release_unused_extended_layer(&app);
+            assert!(!document_needs_layer(&app));
+            ink.release_unused_layer(&app);
             assert!(ink.layer.is_none());
             assert_eq!(ink.extended_bytes(), 0);
         }
 
         let stroke = (*app.history.strokes()[0]).clone();
         app.history
-            .append(std::iter::repeat_n(stroke, EXTENDED_CACHE_STROKES));
-        assert!(extended_cache_needed(&app, ink.hot_extended_cache));
+            .append(std::iter::repeat_n(stroke, CACHE_STROKES));
+        assert!(document_needs_layer(&app));
         Ok(())
     }
 
     #[test]
-    fn repeated_hover_frames_warm_small_fp16_document_cache() {
+    fn three_expensive_replays_must_fit_in_one_window_and_expire_after_last_use() {
         let mut ink = Ink::default();
-        let now = Instant::now();
-        ink.observe_extended_paint(now, Duration::from_micros(20));
-        assert!(!ink.hot_extended_cache);
-        ink.observe_extended_paint(now + Duration::from_millis(10), Duration::from_millis(1));
-        assert!(!ink.hot_extended_cache);
-        ink.observe_extended_paint(now + Duration::from_millis(20), Duration::from_millis(1));
-        assert!(!ink.hot_extended_cache);
-        ink.observe_extended_paint(now + Duration::from_millis(30), Duration::from_millis(1));
-        assert!(ink.hot_extended_cache);
-        ink.observe_extended_paint(
-            now + EXTENDED_IDLE_EXPIRY + Duration::from_secs(1),
-            Duration::from_micros(10),
-        );
-        assert!(!ink.hot_extended_cache);
+        let start = Instant::now();
+        ink.activity.observe(start, Duration::from_micros(20));
+        for ms in [10, 710, 960] {
+            ink.activity
+                .observe(start + Duration::from_millis(ms), EXPENSIVE_REPLAY);
+            assert!(ink.activity.last_use.is_none());
+        }
+        let last = start + Duration::from_secs(1);
+        ink.activity.observe(last, EXPENSIVE_REPLAY);
+        assert_eq!(ink.activity.last_use, Some(last));
+        ink.release_idle_layer(last + CACHE_IDLE_EXPIRY - Duration::from_millis(1));
+        assert_eq!(ink.activity.last_use, Some(last));
+        ink.release_idle_layer(last + CACHE_IDLE_EXPIRY);
+        assert!(ink.activity.last_use.is_none());
+        ink.activity
+            .observe(last + CACHE_IDLE_EXPIRY, EXPENSIVE_REPLAY);
+        assert!(ink.activity.last_use.is_none());
     }
 
     #[test]

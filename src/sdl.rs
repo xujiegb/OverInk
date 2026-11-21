@@ -841,9 +841,9 @@ pub fn desktop_display_mode(id: u32) -> Option<([i32; 2], f32)> {
 
 // Consolidate the checked SDL_Event union reads in one audited boundary.
 macro_rules! tagged_event {
-    ($event:expr, $field:ident, $($tag:pat_param)|+) => {{
+    ($event:expr, $field:ident, $($tag:pat_param)|+ $(if $guard:expr)?) => {{
         let event = $event;
-        if matches!(event_type(event), $($tag)|+) {
+        if matches!(event_type(event), $($tag)|+ $(if $guard)?) {
             // SAFETY: The field is read only for SDL event tags that own it.
             Some(unsafe { event.$field })
         } else {
@@ -1203,6 +1203,12 @@ pub fn mouse_motion_event(event: &SDL_Event) -> Option<SDL_MouseMotionEvent> {
     tagged_event!(event, motion, SDL_EVENT_MOUSE_MOTION)
 }
 
+/// Mouse packets synthesized from pen or touch are handled by their native paths.
+pub fn real_mouse_motion(event: &SDL_Event) -> Option<SDL_MouseMotionEvent> {
+    mouse_motion_event(event)
+        .filter(|motion| motion.which != SDL_PEN_MOUSEID && motion.which != SDL_TOUCH_MOUSEID)
+}
+
 pub fn pen_touch_event(event: &SDL_Event) -> Option<SDL_PenTouchEvent> {
     tagged_event!(event, ptouch, SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP)
 }
@@ -1296,13 +1302,8 @@ pub fn removed_display_id(event: &SDL_Event) -> Option<u32> {
 
 /// Read a window event's owning ID only for a tagged window event.
 pub fn window_event_id(event: &SDL_Event) -> Option<SDL_WindowID> {
-    if (SDL_EVENT_WINDOW_FIRST..=SDL_EVENT_WINDOW_LAST).contains(&event_type(event)) {
-        // SAFETY: The tag matches an SDL window event, so the window union
-        // variant is the active member and its window ID is initialized.
-        Some(unsafe { event.window.windowID })
-    } else {
-        None
-    }
+    tagged_event!(event, window, tag if (SDL_EVENT_WINDOW_FIRST..=SDL_EVENT_WINDOW_LAST).contains(&tag))
+        .map(|event| event.windowID)
 }
 
 /// A reset may apply to an individual window, or all windows (ID zero).
@@ -2958,10 +2959,10 @@ impl Renderer {
         // Draw and panic-safe restoration now happen entirely in safe Rust.
         let mut previous = None;
         self.run_command(RenderCommand::ReadTarget(&mut previous))?;
-        self.run_command(RenderCommand::SetTarget(RenderTarget::Ink(target)))?;
         let mut unwind_restore = RestoreOnDrop::new(|| {
             let _ = self.run_command(RenderCommand::SetTarget(RenderTarget::Previous(previous)));
         });
+        self.run_command(RenderCommand::SetTarget(RenderTarget::Ink(target)))?;
         let result = draw();
         let restore = self.run_command(RenderCommand::SetTarget(RenderTarget::Previous(previous)));
         unwind_restore.disarm();
