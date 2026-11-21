@@ -505,26 +505,29 @@ impl App {
         self.motion(source, p);
     }
     fn append(stroke: &mut Stroke, p: Point, can_append: bool) {
-        let pressure_enabled = stroke.pressure_enabled;
-        let pencil = stroke.tool == Tool::Pencil;
         if stroke.tool.is_shape() {
             if stroke.points.len() == 1 && can_append {
                 stroke.points.push(p);
             } else if let Some(end) = stroke.points.get_mut(1) {
                 *end = p;
             }
-        } else if let Some(last) = stroke.points.last_mut()
-            && last.dist(p) <= Point::MERGE_DISTANCE
-        {
-            last.merge_sample(p, pressure_enabled, pencil);
-        } else if can_append
-            && stroke.points.len() < 100_000
-            && stroke.points.last().is_none_or(|last| {
-                last.dist(p) > 0.15
-                    || (pressure_enabled && (last.pressure - p.pressure).abs() > 0.00001)
-                    || (pencil && last.tilt != p.tilt)
-            })
-        {
+            return;
+        }
+        if let Some(last) = stroke.points.last_mut() {
+            let distance = last.dist(p);
+            let pressure_enabled = stroke.pressure_enabled;
+            let pencil = stroke.tool == Tool::Pencil;
+            if distance <= Point::MERGE_DISTANCE {
+                last.merge_sample(p, pressure_enabled, pencil);
+                return;
+            }
+            let new_pressure = pressure_enabled && (last.pressure - p.pressure).abs() > 0.00001;
+            let new_tilt = pencil && last.tilt != p.tilt;
+            if distance <= 0.15 && !new_pressure && !new_tilt {
+                return;
+            }
+        }
+        if can_append && stroke.points.len() < 100_000 {
             stroke.points.push(p);
         }
     }
@@ -1053,11 +1056,7 @@ impl App {
                     return;
                 };
                 let source = Source::Mouse(b.button);
-                if self.input.contact.is_some_and(|contact| {
-                    contact.source == source && matches!(contact.gesture, Gesture::Erase(_))
-                }) {
-                    self.motion(source, Point::new(b.x, b.y, 1., [0.; 2]));
-                }
+                self.motion(source, Point::new(b.x, b.y, 1., [0.; 2]));
                 self.end(source);
             }
             SDL_EVENT_MOUSE_MOTION
@@ -1684,7 +1683,7 @@ fn run_inner(options: Options) -> Result<(), String> {
     let window =
         with_autorelease_pool(|| Window::new("OverInk - canvas", 1100, 720, !options.smoke))?;
     let topology = crate::display::Topology::new(&video);
-    let displays = with_autorelease_pool(|| topology.connected(&window)).unwrap_or_default();
+    let displays = with_autorelease_pool(|| topology.connected()).unwrap_or_default();
     let xwayland = crate::background::is_xwayland(&window, &video);
     let mut app = with_autorelease_pool(|| {
         App::new(
@@ -2302,7 +2301,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 };
                 let requested = requested_display.take();
                 let displays = topology
-                    .connected(&canvases[0].window)
+                    .connected()
                     .unwrap_or_else(|error| {
                         app.status = text("Display query failed").detail(error);
                         toolbar_dirty = true;
@@ -3519,6 +3518,42 @@ mod touch_tests {
         assert!(a.history.active.is_none());
     }
     #[test]
+    fn mouse_release_supplies_the_last_ink_and_shape_sample() {
+        let mut a = app();
+        let window = SDL_WindowID(1);
+        for tool in [Tool::Pen, Tool::Line] {
+            a.use_tool(tool);
+            for (kind, x) in [
+                (SDL_EVENT_MOUSE_BUTTON_DOWN, 20.),
+                (SDL_EVENT_MOUSE_BUTTON_UP, 90.),
+            ] {
+                a.event(
+                    &SDL_Event {
+                        button: SDL_MouseButtonEvent {
+                            r#type: kind,
+                            windowID: window,
+                            button: LEFT_BUTTON,
+                            x,
+                            y: 80.,
+                            ..Default::default()
+                        },
+                    },
+                    window,
+                    [800., 600.],
+                );
+            }
+            assert_eq!(
+                a.history
+                    .strokes()
+                    .last()
+                    .and_then(|stroke| stroke.points.last())
+                    .map(|p| p.x),
+                Some(90.)
+            );
+        }
+    }
+
+    #[test]
     fn mouse_buttons_own_their_contacts_and_erase_is_one_edit() {
         fn button(a: &mut App, kind: SDL_EventType, button: u8, x: f32) {
             a.event(
@@ -3585,6 +3620,7 @@ mod touch_tests {
             &a.history.strokes()[0],
             0,
             a.input.pending_erasures.values(),
+            &a.history,
             |_, _, _| fragments += 1,
         ));
         assert_eq!(fragments, 0);
@@ -3725,6 +3761,7 @@ mod touch_tests {
             &a.history.strokes()[0],
             0,
             a.input.pending_erasures.values(),
+            &a.history,
             |_, _, _| fragments += 1,
         ));
         assert_eq!(fragments, 3);

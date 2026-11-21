@@ -12,7 +12,6 @@ use std::{
 pub(crate) enum NativeLibrary {
     X11,
     Xext,
-    Xrandr,
     Wayland,
 }
 
@@ -21,7 +20,6 @@ impl NativeLibrary {
         match self {
             Self::X11 => &["libX11.so.6", "libX11.so"],
             Self::Xext => &["libXext.so.6", "libXext.so"],
-            Self::Xrandr => &["libXrandr.so.2", "libXrandr.so"],
             Self::Wayland => &["libwayland-client.so.0", "libwayland-client.so"],
         }
     }

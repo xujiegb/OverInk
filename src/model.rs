@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     borrow::Cow,
     cell::{Ref, RefCell},
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     sync::Arc,
 };
 
@@ -302,6 +302,13 @@ impl StrokeBounds {
         Some(bounds)
     }
 
+    fn union(self, other: Self) -> Self {
+        Self {
+            path: self.path.union(other.path),
+            well_spaced: self.well_spaced && other.well_spaced,
+        }
+    }
+
     fn measure(mut points: impl Iterator<Item = Point>) -> Option<Self> {
         let mut previous = points.next()?;
         let mut path = Bounds::between(previous, previous);
@@ -316,6 +323,43 @@ impl StrokeBounds {
             previous = point;
         }
         Some(Self { path, well_spaced })
+    }
+}
+
+const STROKE_BLOCK_SEGMENTS: usize = 128;
+
+#[derive(Default)]
+struct StrokeIndex {
+    bounds: Vec<Option<StrokeBounds>>,
+    blocks: BTreeMap<usize, Box<[StrokeBounds]>>,
+}
+
+impl StrokeIndex {
+    fn push(&mut self, stroke: &Stroke) {
+        let bounds = if !stroke.tool.is_shape() && stroke.points.len() > 2 * STROKE_BLOCK_SEGMENTS {
+            // Adjacent blocks include their shared point so both the bounds
+            // and spacing of every original segment are covered.
+            let last = stroke.points.len() - 1;
+            let blocks: Box<[_]> = (0..last)
+                .step_by(STROKE_BLOCK_SEGMENTS)
+                .filter_map(|first| {
+                    let end = (first + STROKE_BLOCK_SEGMENTS).min(last);
+                    StrokeBounds::measure(stroke.points[first..=end].iter().copied())
+                })
+                .collect();
+            let combined = blocks.iter().copied().reduce(StrokeBounds::union);
+            self.blocks.insert(self.bounds.len(), blocks);
+            combined
+        } else {
+            StrokeBounds::new(stroke)
+        };
+        self.bounds.push(bounds);
+    }
+
+    fn blocks(&self, index: usize) -> &[StrokeBounds] {
+        self.blocks
+            .get(&index)
+            .map_or(&[], |blocks| blocks.as_ref())
     }
 }
 
@@ -379,7 +423,7 @@ pub struct History {
     pub active: Option<Stroke>,
     undo: VecDeque<HistoryStep>,
     redo: VecDeque<HistoryStep>,
-    stroke_bounds: RefCell<Vec<Option<StrokeBounds>>>,
+    stroke_index: RefCell<StrokeIndex>,
     // Appends can be painted over the committed layer. Erasure supplies its
     // own damage, while replacing committed ink invalidates the whole layer.
     append_revision: u64,
@@ -445,18 +489,20 @@ impl History {
         self.point_count
     }
 
-    pub fn stroke_bounds(&self) -> Ref<'_, [Option<StrokeBounds>]> {
-        let end = self.doc.strokes.len();
-        if self.stroke_bounds.borrow().len() < end {
-            let mut bounds = self.stroke_bounds.borrow_mut();
-            let first = bounds.len();
-            bounds.extend(
-                self.doc.strokes[first..end]
-                    .iter()
-                    .map(|stroke| StrokeBounds::new(stroke)),
-            );
+    fn stroke_index(&self) -> Ref<'_, StrokeIndex> {
+        let first = self.stroke_index.borrow().bounds.len();
+        let next = &self.doc.strokes[first..];
+        if !next.is_empty() {
+            let mut index = self.stroke_index.borrow_mut();
+            for stroke in next {
+                index.push(stroke);
+            }
         }
-        Ref::map(self.stroke_bounds.borrow(), Vec::as_slice)
+        self.stroke_index.borrow()
+    }
+
+    pub fn stroke_bounds(&self) -> Ref<'_, [Option<StrokeBounds>]> {
+        Ref::map(self.stroke_index(), |index| index.bounds.as_slice())
     }
 
     pub fn can_undo(&self) -> bool {
@@ -468,12 +514,16 @@ impl History {
 
     fn snapshot(&mut self) {
         // Committed strokes are immutable, so snapshots share their samples.
-        self.redo.clear();
-        self.undo.push_back(HistoryStep::new(
+        self.record_undo(HistoryStep::new(
             self.doc.strokes.clone(),
             self.doc.text_boxes.clone(),
             self.point_count,
         ));
+    }
+
+    fn record_undo(&mut self, step: HistoryStep) {
+        self.redo.clear();
+        self.undo.push_back(step);
         self.trim_steps();
         self.changed = true;
     }
@@ -497,17 +547,25 @@ impl History {
         }
     }
 
-    fn snapshot_replacement(&mut self) {
-        self.snapshot();
-        self.invalidate_stroke_bounds();
-        self.ink_revision = self.ink_revision.wrapping_add(1);
+    fn replace_with_undo(&mut self, doc: Document, point_count: usize) {
+        let old = std::mem::replace(&mut self.doc, doc);
+        if !old.strokes.is_empty() || !self.doc.strokes.is_empty() {
+            self.invalidate_stroke_bounds();
+            self.ink_revision = self.ink_revision.wrapping_add(1);
+        }
+        if !old.text_boxes.is_empty() || !self.doc.text_boxes.is_empty() {
+            self.text_revision = self.text_revision.wrapping_add(1);
+        }
+        let old_count = std::mem::replace(&mut self.point_count, point_count);
+        self.record_undo(HistoryStep::new(old.strokes, old.text_boxes, old_count));
     }
 
     fn invalidate_stroke_bounds(&mut self) {
-        let bounds = self.stroke_bounds.get_mut();
-        bounds.clear();
-        if bounds.capacity() > 4096 {
-            *bounds = Vec::new();
+        let index = self.stroke_index.get_mut();
+        index.bounds.clear();
+        index.blocks.clear();
+        if index.bounds.capacity() > 4096 {
+            index.bounds = Vec::new();
         }
     }
 
@@ -633,17 +691,12 @@ impl History {
     pub fn clear(&mut self) {
         self.active = None;
         if !self.doc.is_empty() {
-            if self.doc.strokes.is_empty() {
-                self.snapshot();
-            } else {
-                self.snapshot_replacement();
-            }
-            if !self.doc.text_boxes.is_empty() {
-                self.text_revision = self.text_revision.wrapping_add(1);
-            }
-            self.doc.strokes = Vec::new();
-            self.doc.text_boxes = Vec::new();
-            self.point_count = 0;
+            let empty = Document {
+                size: self.doc.size,
+                version: self.doc.version,
+                ..Document::default()
+            };
+            self.replace_with_undo(empty, 0);
         }
     }
     pub fn set_document(&mut self, doc: Document, restore: bool) {
@@ -657,10 +710,7 @@ impl History {
                 ..Self::default()
             };
         } else {
-            self.snapshot_replacement();
-            self.doc = doc;
-            self.text_revision = self.text_revision.wrapping_add(1);
-            self.point_count = point_count;
+            self.replace_with_undo(doc, point_count);
             self.active = None;
         }
     }

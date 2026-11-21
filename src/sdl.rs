@@ -2373,6 +2373,10 @@ impl InkTexture {
         })
     }
 
+    pub fn dimensions(&self) -> [i32; 2] {
+        self.dimensions
+    }
+
     pub fn update_rgba8(&self, pixels: &[u8]) -> Result<(), String> {
         let [width, height] = self.dimensions;
         let pitch = usize::try_from(width)
