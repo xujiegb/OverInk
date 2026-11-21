@@ -203,6 +203,25 @@ impl Gui {
         self.last_mouse_motion = true;
     }
 
+    /// Only the native main toolbar publishes stable button bounds.
+    /// Other egui instances (text canvas, screenshot, OSK) must always receive
+    /// pointer motion; avoid an unnecessary egui temporary-map lookup there.
+    pub fn toolbar_event(&mut self, e: &SDL_Event, id: SDL_WindowID, size: [f32; 2]) {
+        if let Some(motion) = mouse_motion_event(e)
+            && motion.windowID == id
+            && motion.which != SDL_TOUCH_MOUSEID
+            && motion.which != SDL_PEN_MOUSEID
+            && self.raw.events.is_empty()
+            && crate::toolbar::hovered_rect(&self.ctx).is_some_and(|rect| {
+                rect.contains(egui::pos2(motion.x / self.units, motion.y / self.units))
+            })
+            && !self.ctx.input(|input| input.pointer.any_down())
+        {
+            return;
+        }
+        self.event(e, id, size);
+    }
+
     /// Decode tagged SDL events through the checked, owning SDL API.
     pub fn event(&mut self, e: &SDL_Event, id: SDL_WindowID, size: [f32; 2]) {
         let ty = event_type(e);
@@ -217,14 +236,7 @@ impl Gui {
                     && m.which != SDL_TOUCH_MOUSEID
                     && m.which != SDL_PEN_MOUSEID
                 {
-                    let pos = egui::pos2(m.x / scale, m.y / scale);
-                    let unchanged = self.raw.events.is_empty()
-                        && crate::toolbar::hovered_rect(&self.ctx)
-                            .is_some_and(|rect| rect.contains(pos))
-                        && !self.ctx.input(|input| input.pointer.any_down());
-                    if !unchanged {
-                        self.queue_mouse_position(pos);
-                    }
+                    self.queue_mouse_position(egui::pos2(m.x / scale, m.y / scale));
                 }
             }
             SDL_EVENT_MOUSE_BUTTON_DOWN | SDL_EVENT_MOUSE_BUTTON_UP => {
