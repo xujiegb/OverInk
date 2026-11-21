@@ -335,8 +335,8 @@ impl Screenshot {
     // Keep mouse hover feedback, but don't re-render the fullscreen screenshot
     // for movement within one highlighted button or an inert screen region.
     // Button-down/drag motion must continue reaching egui for click cancellation.
-    pub fn ignores_hover_motion(&self, event: &SDL_Event) -> bool {
-        if !self.ready() || !mouse_released() {
+    pub fn ignores_hover_motion(&self, event: &SDL_Event, buttons_released: bool) -> bool {
+        if !self.ready() || !buttons_released {
             return false;
         }
         let Some(motion) = mouse_motion_event(event) else {
@@ -936,14 +936,14 @@ mod tests {
             },
         };
         // The UI has already highlighted the same button.
-        assert!(screenshot.ignores_hover_motion(&motion(40., 35.)));
+        assert!(screenshot.ignores_hover_motion(&motion(40., 35.), true));
         // A different button needs a new hover frame.
-        assert!(!screenshot.ignores_hover_motion(&motion(85., 35.)));
+        assert!(!screenshot.ignores_hover_motion(&motion(85., 35.), true));
         // Leaving the last highlighted button must clear its visual state.
-        assert!(!screenshot.ignores_hover_motion(&motion(180., 80.)));
+        assert!(!screenshot.ignores_hover_motion(&motion(180., 80.), true));
         screenshot.hovered_button = None;
-        assert!(screenshot.ignores_hover_motion(&motion(180., 80.)));
-        assert!(!screenshot.ignores_hover_motion(&motion(85., 35.)));
+        assert!(screenshot.ignores_hover_motion(&motion(180., 80.), true));
+        assert!(!screenshot.ignores_hover_motion(&motion(85., 35.), true));
         Ok(())
     }
 
