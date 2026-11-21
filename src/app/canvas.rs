@@ -202,6 +202,10 @@ impl Canvas {
         })
     }
 
+    pub fn trim_idle_gpu_cache(&mut self) {
+        self.ink.release_idle_extended_layer();
+    }
+
     pub fn invalidate(&mut self, reason: DirtyReason) {
         self.dirty.mark(reason);
         if reason == DirtyReason::Surface {
@@ -255,10 +259,11 @@ impl Canvas {
             self.guard_dirty = true;
             self.invalidate(DirtyReason::Surface);
             self.native.invalidate();
-            if !visible && self.render.extended {
-                self.ink.invalidate_layer();
-            }
             if !visible {
+                self.ink.invalidate_layer();
+                // Hidden canvases must not pin GPU targets or a second
+                // egui glyph atlas until the window becomes visible again.
+                self.static_text = None;
                 self.suspend_text_input();
             }
             if visible {
@@ -977,8 +982,30 @@ pub(super) fn failure(error: impl ToString) -> crate::appearance::Status {
 
 #[cfg(test)]
 mod screenshot_input_tests {
-    use super::{DirtyReason, DirtyReasons, screenshot_input_changed};
-    use egui::{Event, pos2};
+    use super::{DirtyReason, DirtyReasons, screenshot_input_changed, static_text_region};
+    use egui::{Event, Rect, pos2, vec2};
+
+    #[test]
+    fn static_text_uses_pixel_aligned_bounds_instead_of_full_canvas() {
+        let rect = Rect::from_min_size(pos2(11.2, 20.2), vec2(150.5, 70.5));
+        assert_eq!(
+            static_text_region(std::iter::once(rect), [1000., 600.], [2000, 1200]),
+            Some([22, 40, 302, 142])
+        );
+        assert_eq!(
+            static_text_region(
+                [rect, Rect::from_min_size(pos2(400., 200.), vec2(30., 40.))].into_iter(),
+                [1000., 600.],
+                [2000, 1200],
+            ),
+            Some([22, 40, 838, 440])
+        );
+        assert!(static_text_region(
+            std::iter::once(Rect::from_min_size(pos2(1100., 800.), vec2(10., 10.))),
+            [1000., 600.],
+            [2000, 1200],
+        ).is_none());
+    }
 
     #[test]
     fn overlay_dirt_does_not_implicitly_dirty_content_or_surface() {
