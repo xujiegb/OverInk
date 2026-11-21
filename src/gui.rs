@@ -482,12 +482,8 @@ impl Gui {
                 let egui::ImageData::Color(image) = delta.image;
                 let [w, h] = image.size;
                 self.pixels.clear();
-                self.pixels.extend(
-                    image
-                        .pixels
-                        .iter()
-                        .flat_map(|p| p.to_srgba_unmultiplied()),
-                );
+                self.pixels
+                    .extend(image.pixels.iter().flat_map(|p| p.to_srgba_unmultiplied()));
                 if id == TextureId::default() && !color.is_identity() {
                     // The font atlas carries the color of emoji, while
                     // monochrome glyphs are tinted with mapped vertices.
@@ -560,25 +556,25 @@ impl Gui {
             r.set_clip_rect(Some(&clip));
             self.vertices.clear();
             self.vertices.extend(mesh.vertices.iter().map(|v| {
-                    let [red, green, blue, alpha] = v.color.to_srgba_unmultiplied();
-                    let c = color.map([red as f32 / 255., green as f32 / 255., blue as f32 / 255.]);
-                    SDL_Vertex {
-                        position: SDL_FPoint {
-                            x: v.pos.x * self.units,
-                            y: v.pos.y * self.units,
-                        },
-                        color: SDL_FColor {
-                            r: c[0],
-                            g: c[1],
-                            b: c[2],
-                            a: alpha as f32 / 255.,
-                        },
-                        tex_coord: SDL_FPoint {
-                            x: v.uv.x,
-                            y: v.uv.y,
-                        },
-                    }
-                }));
+                let [red, green, blue, alpha] = v.color.to_srgba_unmultiplied();
+                let c = color.map([red as f32 / 255., green as f32 / 255., blue as f32 / 255.]);
+                SDL_Vertex {
+                    position: SDL_FPoint {
+                        x: v.pos.x * self.units,
+                        y: v.pos.y * self.units,
+                    },
+                    color: SDL_FColor {
+                        r: c[0],
+                        g: c[1],
+                        b: c[2],
+                        a: alpha as f32 / 255.,
+                    },
+                    tex_coord: SDL_FPoint {
+                        x: v.uv.x,
+                        y: v.uv.y,
+                    },
+                }
+            }));
             texture.geometry(r, &self.vertices, &mesh.indices)?;
         }
         r.set_clip_rect(None);
