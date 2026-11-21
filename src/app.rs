@@ -2556,6 +2556,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 input.predicted_dt = pacer.period.as_secs_f32();
                 let canvas = &canvases[active];
                 let ui_started = performance.as_ref().map(|_| Instant::now());
+                crate::toolbar::clear_hover(&gui.ctx);
                 let frame = gui.ctx.run_ui(input, |ui| {
                     cmd = app.ui(
                         ui,
