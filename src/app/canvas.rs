@@ -27,6 +27,11 @@ pub(super) struct CanvasPaintTimings {
     pub present: Duration,
 }
 
+pub(super) struct PaintFlags {
+    pub picker_choosing: bool,
+    pub keep_editor_open: bool,
+}
+
 /// A redraw is not necessarily a document change. Pointer hover, native
 /// surface changes and committed ink/text invalidate different GPU resources.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -578,12 +583,15 @@ impl Canvas {
         &mut self,
         app: &mut App,
         options: &Options,
-        picker_choosing: bool,
-        keep_editor_open: bool,
+        flags: PaintFlags,
         theme: egui::Theme,
         extended_ink_budget: usize,
         mut timings: Option<&mut CanvasPaintTimings>,
     ) -> Result<bool, String> {
+        let PaintFlags {
+            picker_choosing,
+            keep_editor_open,
+        } = flags;
         let text_repaint = self.text_repaint_at.is_some_and(|at| Instant::now() >= at);
         if !self.visible || !(options.smoke || self.dirty.any() || self.animation || text_repaint) {
             return Ok(false);
@@ -661,7 +669,7 @@ impl Canvas {
                     self.ink
                         .present(page, &self.render, &self.window, &self.color, scale)?;
                 }
-                if let (Some(start), Some(metrics)) = (present_started, timings.as_deref_mut()) {
+                if let (Some(start), Some(metrics)) = (present_started, timings) {
                     metrics.present += start.elapsed();
                 }
                 self.animation = !page.input.laser.is_empty();
