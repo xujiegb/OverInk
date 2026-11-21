@@ -174,6 +174,17 @@ impl Gui {
         }
         was_composing
     }
+    // egui consumes the final hover position per UI frame. SDL can queue
+    // hundreds of motion samples between paints; preserve clicks, wheel and
+    // touch events, but replace an adjacent stale mouse position in place.
+    fn queue_mouse_position(&mut self, pos: egui::Pos2) {
+        if let Some(Event::PointerMoved(last)) = self.raw.events.last_mut() {
+            *last = pos;
+        } else {
+            self.raw.events.push(Event::PointerMoved(pos));
+        }
+    }
+
     /// Decode tagged SDL events through the checked, owning SDL API.
     pub fn event(&mut self, e: &SDL_Event, id: SDL_WindowID, size: [f32; 2]) {
         let ty = event_type(e);
@@ -185,9 +196,7 @@ impl Gui {
                     && m.which != SDL_TOUCH_MOUSEID
                     && m.which != SDL_PEN_MOUSEID
                 {
-                    self.raw
-                        .events
-                        .push(Event::PointerMoved(egui::pos2(m.x / scale, m.y / scale)));
+                    self.queue_mouse_position(egui::pos2(m.x / scale, m.y / scale));
                 }
             }
             SDL_EVENT_MOUSE_BUTTON_DOWN | SDL_EVENT_MOUSE_BUTTON_UP => {
@@ -688,6 +697,46 @@ mod tests {
             });
             output.textures_delta.clear();
         }
+    }
+
+    #[test]
+    fn adjacent_mouse_motion_coalesces_without_crossing_clicks() {
+        let mut gui = Gui::new();
+        let id = SDL_WindowID(1);
+        let motion = |x| SDL_Event {
+            motion: SDL_MouseMotionEvent {
+                r#type: SDL_EVENT_MOUSE_MOTION,
+                windowID: id,
+                x,
+                y: 40.,
+                ..Default::default()
+            },
+        };
+        for x in [10., 20., 30.] {
+            gui.event(&motion(x), id, [800., 600.]);
+        }
+        assert!(matches!(gui.raw.events.as_slice(), [Event::PointerMoved(pos)] if *pos == egui::pos2(30., 40.)));
+        gui.event(
+            &SDL_Event {
+                button: SDL_MouseButtonEvent {
+                    r#type: SDL_EVENT_MOUSE_BUTTON_DOWN,
+                    windowID: id,
+                    button: SDL_BUTTON_LEFT as u8,
+                    x: 30.,
+                    y: 40.,
+                    down: true,
+                    ..Default::default()
+                },
+            },
+            id,
+            [800., 600.],
+        );
+        gui.event(&motion(50.), id, [800., 600.]);
+        assert!(matches!(
+            gui.raw.events.as_slice(),
+            [Event::PointerMoved(first), Event::PointerButton { pressed: true, .. }, Event::PointerMoved(last)]
+                if *first == egui::pos2(30., 40.) && *last == egui::pos2(50., 40.)
+        ));
     }
 
     #[test]
