@@ -23,6 +23,9 @@ pub struct Gui {
     pub ctx: Context,
     pub raw: RawInput,
     textures: HashMap<TextureId, GuiTexture>,
+    // Reuse conversion buffers across egui meshes and atlas updates.
+    vertices: Vec<SDL_Vertex>,
+    pixels: Vec<u8>,
     started: Instant,
     pub units: f32,
     touch_primary: Option<TouchKey>,
@@ -58,6 +61,8 @@ impl Gui {
             ctx,
             raw: RawInput::default(),
             textures: HashMap::new(),
+            vertices: Vec::new(),
+            pixels: Vec::new(),
             started: Instant::now(),
             units: 1.,
             touch_primary: None,
@@ -476,15 +481,18 @@ impl Gui {
             for delta in deltas {
                 let egui::ImageData::Color(image) = delta.image;
                 let [w, h] = image.size;
-                let mut bytes: Vec<u8> = image
-                    .pixels
-                    .iter()
-                    .flat_map(|p| p.to_srgba_unmultiplied())
-                    .collect();
+                self.pixels.clear();
+                self.pixels.extend(
+                    image
+                        .pixels
+                        .iter()
+                        .flat_map(|p| p.to_srgba_unmultiplied()),
+                );
                 if id == TextureId::default() && !color.is_identity() {
                     // The font atlas carries the color of emoji, while
                     // monochrome glyphs are tinted with mapped vertices.
-                    for (rgba, pixel) in bytes
+                    for (rgba, pixel) in self
+                        .pixels
                         .as_chunks_mut::<4>()
                         .0
                         .iter_mut()
@@ -513,7 +521,7 @@ impl Gui {
                     w: w as i32,
                     h: h as i32,
                 });
-                texture.update([w, h], &bytes, rect.as_ref())?;
+                texture.update([w, h], &self.pixels, rect.as_ref())?;
             }
         }
         let px = window.pixel_size();
@@ -550,10 +558,8 @@ impl Gui {
                 h: ((y2 - y) as f32 / scale[1]).ceil() as i32,
             };
             r.set_clip_rect(Some(&clip));
-            let vertices: Vec<SDL_Vertex> = mesh
-                .vertices
-                .iter()
-                .map(|v| {
+            self.vertices.clear();
+            self.vertices.extend(mesh.vertices.iter().map(|v| {
                     let [red, green, blue, alpha] = v.color.to_srgba_unmultiplied();
                     let c = color.map([red as f32 / 255., green as f32 / 255., blue as f32 / 255.]);
                     SDL_Vertex {
@@ -572,9 +578,8 @@ impl Gui {
                             y: v.uv.y,
                         },
                     }
-                })
-                .collect();
-            texture.geometry(r, &vertices, &mesh.indices)?;
+                }));
+            texture.geometry(r, &self.vertices, &mesh.indices)?;
         }
         r.set_clip_rect(None);
         for id in output.textures_delta.free.drain() {

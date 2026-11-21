@@ -1415,6 +1415,66 @@ fn wait_for_events(timeout: Duration) {
     }
 }
 
+// Optional, five-second counters for locating event storms and idle redraws
+// without adding a profiler dependency or logging on every frame.
+#[derive(Default)]
+struct PerformanceCounts {
+    iterations: u64,
+    events: u64,
+    window_events: u64,
+    motion_events: u64,
+    toolbar_frames: u64,
+    canvas_frames: u64,
+    precise_waits: u64,
+    event_waits: u64,
+}
+
+struct PerformanceMonitor {
+    started: Instant,
+    counts: PerformanceCounts,
+}
+
+impl PerformanceMonitor {
+    fn new() -> Self {
+        Self {
+            started: Instant::now(),
+            counts: PerformanceCounts::default(),
+        }
+    }
+
+    fn event(&mut self, ty: SDL_EventType) {
+        self.counts.events += 1;
+        if (SDL_EVENT_WINDOW_FIRST..=SDL_EVENT_WINDOW_LAST).contains(&ty) {
+            self.counts.window_events += 1;
+        } else if matches!(
+            ty,
+            SDL_EVENT_MOUSE_MOTION | SDL_EVENT_PEN_MOTION | SDL_EVENT_FINGER_MOTION
+        ) {
+            self.counts.motion_events += 1;
+        }
+    }
+
+    fn report(&mut self) {
+        if self.started.elapsed() < Duration::from_secs(5) {
+            return;
+        }
+        let c = &self.counts;
+        eprintln!(
+            "OverInk perf/5s: loops={} events={} window={} motion={} toolbar={} canvas={} precise_wait={} event_wait={}",
+            c.iterations,
+            c.events,
+            c.window_events,
+            c.motion_events,
+            c.toolbar_frames,
+            c.canvas_frames,
+            c.precise_waits,
+            c.event_waits,
+        );
+        self.started = Instant::now();
+        self.counts = PerformanceCounts::default();
+    }
+}
+
 pub struct Options {
     pub board: bool,
     pub x11: bool,
@@ -1693,8 +1753,12 @@ fn run_inner(options: Options) -> Result<(), String> {
     let mut restore_toolbar_focus = false;
     let mut text_focus = text::ToolbarTextFocus::default();
     let mut text_pick = None;
+    let mut performance = std::env::var_os("OVERINK_PROFILE").map(|_| PerformanceMonitor::new());
     while running {
         with_autorelease_pool(|| -> Result<(), String> {
+            if let Some(monitor) = &mut performance {
+                monitor.counts.iterations += 1;
+            }
             let mut disconnected = BTreeSet::new();
             let mut controller_scale_changed = false;
             let mut controller_moved = false;
@@ -1705,6 +1769,9 @@ fn run_inner(options: Options) -> Result<(), String> {
             let mut event = SDL_Event::default();
             while poll_event(&mut event) {
                 let ty = event_type(&event);
+                if let Some(monitor) = &mut performance {
+                    monitor.event(ty);
+                }
                 if ty == SDL_EVENT_QUIT {
                     running = false;
                     break;
@@ -2718,6 +2785,9 @@ fn run_inner(options: Options) -> Result<(), String> {
                 toolbar_render.begin(&toolbar, [0.; 4])?;
                 gui.paint(&toolbar_render, &toolbar, &toolbar_color, output)?;
                 toolbar_render.present()?;
+                if let Some(monitor) = &mut performance {
+                    monitor.counts.toolbar_frames += 1;
+                }
                 tooltips.update(&toolbar, &gui, app.language, &toolbar_color);
             }
             if !follow_controller {
@@ -2786,6 +2856,9 @@ fn run_inner(options: Options) -> Result<(), String> {
                         ink::MAX_EXTENDED_INK_TEXTURE_BYTES.saturating_sub(extended_ink_bytes),
                     )?;
                     presented |= painted;
+                    if painted && let Some(monitor) = &mut performance {
+                        monitor.counts.canvas_frames += 1;
+                    }
                     if screenshot && painted {
                         app.screenshot.presented();
                     }
@@ -2993,7 +3066,23 @@ fn run_inner(options: Options) -> Result<(), String> {
                 running = false;
             }
             if presented {
-                pacer.wait();
+                if app.has_contacts() || !app.input.laser.is_empty() {
+                    // Preserve precise pacing only during active drawing or
+                    // laser animation, where its latency can be perceptible.
+                    if let Some(monitor) = &mut performance {
+                        monitor.counts.precise_waits += 1;
+                    }
+                    pacer.wait();
+                } else {
+                    // SDL_DelayPrecise busy-waits near the deadline. For
+                    // static ink, mouse passthrough and ordinary UI frames,
+                    // sleep in SDL's event wait instead: input wakes us early
+                    // and the event stays queued for the next poll.
+                    if let Some(monitor) = &mut performance {
+                        monitor.counts.event_waits += 1;
+                    }
+                    wait_for_events(pacer.delay(Instant::now()));
+                }
             } else if (!toolbar_dirty || toolbar_hidden) && !topology_dirty {
                 let mut timeout = if app.wait_for_mouse_up
                     || picker.active()
@@ -3019,7 +3108,13 @@ fn run_inner(options: Options) -> Result<(), String> {
                 {
                     timeout = timeout.min(at.saturating_duration_since(Instant::now()));
                 }
+                if let Some(monitor) = &mut performance {
+                    monitor.counts.event_waits += 1;
+                }
                 wait_for_events(timeout);
+            }
+            if let Some(monitor) = &mut performance {
+                monitor.report();
             }
             Ok(())
         })?;
