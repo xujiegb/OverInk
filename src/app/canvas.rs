@@ -73,6 +73,7 @@ impl DirtyReasons {
 // the text's clipped pixel bounds, capped to 8 MiB per visible canvas.
 const MAX_STATIC_TEXT_TEXTURE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_STATIC_TEXT_REGIONS: usize = 16;
+const STATIC_TEXT_ATLAS_IDLE: Duration = Duration::from_secs(15);
 
 /// Group overlapping, pixel-aligned labels while keeping empty space out
 /// of the retained textures.
@@ -158,12 +159,14 @@ struct StaticTextKey {
 }
 
 struct StaticTextLayer {
-    gui: Gui,
+    gui: Option<Gui>,
+    built_at: Instant,
     tiles: Vec<StaticTextTile>,
 }
 
 struct StaticTextTile {
     texture: InkTexture,
+    pixels: [i32; 4],
     destination: egui::Rect,
 }
 
@@ -284,6 +287,13 @@ impl Canvas {
 
     pub fn trim_idle_gpu_cache(&mut self, now: Instant) {
         self.ink.release_idle_layer(now);
+        if let Some(layer) = &mut self.static_text
+            && now.saturating_duration_since(layer.built_at) >= STATIC_TEXT_ATLAS_IDLE
+        {
+            // The baked textures still contain the labels. Rasterizing the
+            // next edit can recreate the CPU and SDL glyph atlases on demand.
+            layer.gui = None;
+        }
     }
 
     pub fn invalidate(&mut self, reason: DirtyReason) {
@@ -592,7 +602,12 @@ impl Canvas {
     /// changes. Unlike the interactive egui context this one never receives
     /// pointer events, so hovering a keyboard does not re-tessellate labels.
     /// If an SDL backend cannot create a target, preserve the original path.
-    fn paint_static_text(&mut self, app: &App, theme: egui::Theme) -> StaticTextPaint {
+    fn paint_static_text(
+        &mut self,
+        app: &App,
+        theme: egui::Theme,
+        scale: [f32; 2],
+    ) -> StaticTextPaint {
         let interactive =
             !app.screenshot.active() && !app.picking && app.tool.is_text() && !app.pass;
         let selected = if interactive {
@@ -621,7 +636,7 @@ impl Canvas {
         let previous = self.static_text_key.replace(key);
         if previous == Some(key) {
             // Also remember when there was no visible or affordable texture.
-            return self.draw_static_text();
+            return self.draw_static_text(scale);
         }
         let previous_layer = self.static_text.take();
         let regions = static_text_regions(
@@ -639,10 +654,12 @@ impl Canvas {
             return StaticTextPaint::Uncached;
         }
 
-        let (mut gui, mut old_tiles) = match previous_layer.zip(previous) {
+        let (previous_gui, mut old_tiles) = match previous_layer.zip(previous) {
             Some((layer, previous)) if previous.style.1 == key.style.1 => {
-                if previous.style.0 != key.style.0 {
-                    layer.gui.ctx.set_fonts(app.text_fonts.definitions());
+                if previous.style.0 != key.style.0
+                    && let Some(gui) = &layer.gui
+                {
+                    gui.ctx.set_fonts(app.text_fonts.definitions());
                 }
                 let tiles = if previous.format == key.format {
                     layer.tiles
@@ -651,8 +668,9 @@ impl Canvas {
                 };
                 (layer.gui, tiles)
             }
-            _ => (Gui::with_fonts(app.text_fonts.definitions()), Vec::new()),
+            _ => (None, Vec::new()),
         };
+        let mut gui = previous_gui.unwrap_or_else(|| Gui::with_fonts(app.text_fonts.definitions()));
         if gui.ctx.theme() != theme {
             gui.ctx.set_theme(theme);
         }
@@ -702,47 +720,54 @@ impl Canvas {
             }
             tiles.push(StaticTextTile {
                 texture,
+                pixels: region,
                 destination,
             });
         }
-        self.static_text = Some(StaticTextLayer { gui, tiles });
-        self.draw_static_text()
+        self.static_text = Some(StaticTextLayer {
+            gui: Some(gui),
+            built_at: Instant::now(),
+            tiles,
+        });
+        self.draw_static_text(scale)
     }
 
-    fn draw_static_text(&mut self) -> StaticTextPaint {
+    fn draw_static_text(&mut self, scale: [f32; 2]) -> StaticTextPaint {
         let Some(layer) = self.static_text.as_ref() else {
             return StaticTextPaint::Uncached;
         };
-        for (index, tile) in layer.tiles.iter().enumerate() {
-            let rect = tile.destination;
-            let destination = SDL_FRect {
-                x: rect.min.x,
-                y: rect.min.y,
-                w: rect.width(),
-                h: rect.height(),
-            };
-            if tile
-                .texture
-                .draw(&self.render, None, Some(&destination))
-                .is_err()
-            {
-                // Draw the untouched labels via egui if the driver fails halfway
-                // through compositing. Avoid blending successful tiles twice.
-                let fallback = if index == 0 {
-                    StaticTextPaint::Uncached
-                } else {
-                    StaticTextPaint::Partial(
-                        layer.tiles[..index]
-                            .iter()
-                            .map(|tile| tile.destination)
-                            .collect(),
-                    )
+        let mut drawn = 0;
+        let result = self.render.with_pixel_scale(scale, || {
+            for tile in &layer.tiles {
+                let [x, y, w, h] = tile.pixels;
+                let destination = SDL_FRect {
+                    x: x as f32,
+                    y: y as f32,
+                    w: w as f32,
+                    h: h as f32,
                 };
-                self.static_text = None;
-                return fallback;
+                tile.texture.draw(&self.render, None, Some(&destination))?;
+                drawn += 1;
             }
+            Ok(())
+        });
+        if result.is_ok() {
+            return StaticTextPaint::Cached;
         }
-        StaticTextPaint::Cached
+        // Draw the untouched labels via egui if the driver fails halfway
+        // through compositing. Avoid blending successful tiles twice.
+        let fallback = if drawn == 0 {
+            StaticTextPaint::Uncached
+        } else {
+            StaticTextPaint::Partial(
+                layer.tiles[..drawn]
+                    .iter()
+                    .map(|tile| tile.destination)
+                    .collect(),
+            )
+        };
+        self.static_text = None;
+        fallback
     }
 
     pub fn paint(
@@ -808,7 +833,7 @@ impl Canvas {
                 let cached_static_text = if page.hidden {
                     StaticTextPaint::Uncached
                 } else {
-                    self.paint_static_text(page, theme)
+                    self.paint_static_text(page, theme, scale)
                 };
                 if let (Some(start), Some(metrics)) = (static_started, timings.as_deref_mut()) {
                     metrics.static_text += start.elapsed();

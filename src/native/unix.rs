@@ -9,7 +9,7 @@ use std::{
 /// The only native desktop libraries the application may load.
 /// Callers cannot construct dynamic paths or select an arbitrary soname.
 #[derive(Clone, Copy)]
-pub(crate) enum NativeLibrary {
+enum NativeLibrary {
     X11,
     Xext,
     Wayland,
@@ -26,7 +26,7 @@ impl NativeLibrary {
 }
 
 /// Load only known native desktop ABIs; keep the original soname fallback.
-pub(crate) fn library(which: NativeLibrary) -> Result<Library, String> {
+fn library(which: NativeLibrary) -> Result<Library, String> {
     let names = which.sonames();
     for &name in names {
         // SAFETY: The sealed enum fixes the only allowable shared-library

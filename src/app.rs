@@ -98,6 +98,9 @@ const LEFT_BUTTON: u8 = SDL_BUTTON_LEFT as u8;
 const RIGHT_BUTTON: u8 = SDL_BUTTON_RIGHT as u8;
 const LASER_LIFETIME: Duration = Duration::from_millis(900);
 const MAX_LASER_SAMPLES: usize = 4096;
+const X11_DISPLAY_POLL: Duration = Duration::from_millis(500);
+const COLOR_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
+const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(10);
 #[derive(Default)]
 struct Commands {
     mode: bool,
@@ -1684,7 +1687,7 @@ fn run_inner(options: Options) -> Result<(), String> {
         with_autorelease_pool(|| Window::new("OverInk - canvas", 1100, 720, !options.smoke))?;
     let topology = crate::display::Topology::new(&video);
     let displays = with_autorelease_pool(|| topology.connected()).unwrap_or_default();
-    let xwayland = crate::background::is_xwayland(&window, &video);
+    let xwayland = crate::background::is_xwayland(&video);
     let mut app = with_autorelease_pool(|| {
         App::new(
             options.board || options.smoke,
@@ -2288,8 +2291,7 @@ fn run_inner(options: Options) -> Result<(), String> {
             }
 
             if !options.smoke
-                && (topology_dirty
-                    || video == "x11" && last_displays.elapsed() > Duration::from_millis(500))
+                && (topology_dirty || video == "x11" && last_displays.elapsed() >= X11_DISPLAY_POLL)
             {
                 let moved_to = if follow_controller && controller_moved {
                     let reported = toolbar.display_id();
@@ -2397,6 +2399,9 @@ fn run_inner(options: Options) -> Result<(), String> {
             let active = canvas::active_index(&canvases, app.pages.active);
             pacer.configure(app.frame_rate, app.refresh_hz(), Instant::now());
             for canvas in &mut canvases {
+                if !canvas.background.frozen {
+                    continue;
+                }
                 let mode = canvas.snapshot_mode(&video, xwayland, options.sdr);
                 if let Err(reason) = canvas.update_background(
                     &app.displays,
@@ -2568,7 +2573,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 return Ok(());
             }
 
-            if last_color.elapsed() > Duration::from_secs(3) {
+            if last_color.elapsed() >= COLOR_REFRESH_INTERVAL {
                 let previous_toolbar = toolbar_color.revision;
                 toolbar_color.refresh(&toolbar, toolbar_render.extended);
                 toolbar_dirty |= previous_toolbar != toolbar_color.revision;
@@ -3138,7 +3143,7 @@ fn run_inner(options: Options) -> Result<(), String> {
             }
             if !options.smoke
                 && app.preferences.restore_session
-                && app.last_save.elapsed() > Duration::from_secs(10)
+                && app.last_save.elapsed() >= AUTOSAVE_INTERVAL
                 && !app.has_contacts()
             {
                 if app.pages.needs_save(&app.history)
@@ -3194,6 +3199,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                     std::thread::sleep(pacer.delay(Instant::now()));
                 }
             } else if (!toolbar_dirty || toolbar_hidden) && !topology_dirty {
+                let now = Instant::now();
                 let mut timeout = if app.wait_for_mouse_up
                     || picker.active()
                     || file_dialog.pending()
@@ -3203,20 +3209,30 @@ fn run_inner(options: Options) -> Result<(), String> {
                 } else if app.input.text.editing() && toolbar.input_focused() {
                     Duration::from_millis(24)
                 } else {
-                    Duration::from_millis(500)
+                    COLOR_REFRESH_INTERVAL.saturating_sub(now.duration_since(last_color))
                 };
+                // SDL still wakes immediately on events. Keep the X11
+                // topology and autosave deadlines without a generic 500 ms poll.
+                if video == "x11" && !options.smoke {
+                    timeout = timeout
+                        .min(X11_DISPLAY_POLL.saturating_sub(now.duration_since(last_displays)));
+                }
+                if app.preferences.restore_session && !options.smoke && !app.has_contacts() {
+                    timeout = timeout
+                        .min(AUTOSAVE_INTERVAL.saturating_sub(now.duration_since(app.last_save)));
+                }
                 if let Some(deadline) = text_focus.deadline {
-                    timeout = timeout.min(deadline.saturating_duration_since(Instant::now()));
+                    timeout = timeout.min(deadline.saturating_duration_since(now));
                 }
                 if !toolbar_hidden && let Some(at) = toolbar_repaint_at {
-                    timeout = timeout.min(at.saturating_duration_since(Instant::now()));
+                    timeout = timeout.min(at.saturating_duration_since(now));
                 }
                 for at in canvases
                     .iter()
                     .filter(|canvas| canvas.visible)
                     .filter_map(|canvas| canvas.text_repaint_at)
                 {
-                    timeout = timeout.min(at.saturating_duration_since(Instant::now()));
+                    timeout = timeout.min(at.saturating_duration_since(now));
                 }
                 if let Some(monitor) = &mut performance {
                     monitor.counts.event_waits += 1;

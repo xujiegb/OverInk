@@ -8,13 +8,13 @@ mod system;
 mod windows;
 use crate::{icc::ColorManager, sdl::*};
 use std::{
-    borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     io::Read,
     time::{Duration, Instant},
 };
 
 const MAX_SNAPSHOT_BYTES: usize = 256 * 1024 * 1024;
+const SNAPSHOT_UPLOAD_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Encoding {
@@ -61,6 +61,24 @@ impl Image {
             return Err("Capture exceeds the 256 MiB limit".into());
         }
         Ok(size)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd", test))]
+    pub(crate) fn rgba8_len(width: u32, height: u32) -> Result<usize, String> {
+        Self::byte_len(width, height, Encoding::Srgb8)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd", test))]
+    pub(crate) fn from_rgba8(width: u32, height: u32, rgba: Vec<u8>) -> Result<Self, String> {
+        if Self::rgba8_len(width, height)? != rgba.len() {
+            return Err("Invalid capture pixel buffer size".into());
+        }
+        Ok(Self {
+            width,
+            height,
+            rgba,
+            encoding: Encoding::Srgb8,
+        })
     }
 
     fn allocate(width: u32, height: u32, encoding: Encoding) -> Result<Self, String> {
@@ -180,17 +198,12 @@ impl Image {
         // Source pixels can expand substantially when converted to RGBA8
         // (for example, grayscale PNG/JPEG). Check the output before decoding.
         let (width, height) = decoder.dimensions();
-        Self::byte_len(width, height, Encoding::Srgb8)?;
+        Self::rgba8_len(width, height)?;
         let profile = decoder.icc_profile().ok().flatten();
         let pixels = image::DynamicImage::from_decoder(decoder)
             .map_err(|e| e.to_string())?
             .into_rgba8();
-        let mut result = Self {
-            width: pixels.width(),
-            height: pixels.height(),
-            rgba: pixels.into_raw(),
-            encoding: Encoding::Srgb8,
-        };
+        let mut result = Self::from_rgba8(pixels.width(), pixels.height(), pixels.into_raw())?;
         if let Some(profile) = profile {
             result.convert_to_srgb(&profile);
         }
@@ -233,28 +246,58 @@ impl Snapshot {
         encoder
             .write_all(&snapshot.bytes)
             .map_err(|e| e.to_string())?;
-        let compressed = encoder.finish().map_err(|e| e.to_string())?;
+        let mut compressed = encoder.finish().map_err(|e| e.to_string())?;
         if compressed.len() < snapshot.bytes.len() {
+            compressed.shrink_to_fit();
             snapshot.bytes = compressed;
             snapshot.compressed = true;
         }
         Ok(snapshot)
     }
 
-    fn pixels(&self) -> Result<Cow<'_, [u8]>, String> {
+    fn upload_rows(
+        &self,
+        color: &ColorManager,
+        mut upload: impl FnMut(usize, &[u8]) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let size = Image::byte_len(self.width, self.height, self.encoding)?;
+        let convert = self.encoding == Encoding::Srgb8 && !color.is_identity();
         if !self.compressed {
-            return Ok(Cow::Borrowed(&self.bytes));
+            if self.bytes.len() != size {
+                return Err("Invalid frozen desktop snapshot size".into());
+            }
+            if !convert {
+                return upload(0, &self.bytes);
+            }
         }
-        let size = self.width as usize * self.height as usize * self.encoding.bytes_per_pixel();
-        let mut pixels = Vec::with_capacity(size);
-        flate2::read::ZlibDecoder::new(self.bytes.as_slice())
-            .take(size as u64 + 1)
-            .read_to_end(&mut pixels)
-            .map_err(|e| e.to_string())?;
-        if pixels.len() != size {
+        let mut plain = self.bytes.as_slice();
+        let mut compressed;
+        let reader: &mut dyn Read = if self.compressed {
+            compressed = flate2::read::ZlibDecoder::new(plain);
+            &mut compressed
+        } else {
+            &mut plain
+        };
+        let stride = self.width as usize * self.encoding.bytes_per_pixel();
+        let rows = (SNAPSHOT_UPLOAD_BYTES / stride)
+            .max(1)
+            .min(self.height as usize);
+        let mut buffer = vec![0; rows * stride];
+        for first in (0..self.height as usize).step_by(rows) {
+            let count = rows.min(self.height as usize - first);
+            let chunk = &mut buffer[..count * stride];
+            reader
+                .read_exact(chunk)
+                .map_err(|error| error.to_string())?;
+            if convert {
+                color.map_rgba8(chunk);
+            }
+            upload(first, chunk)?;
+        }
+        if reader.read(&mut [0]).map_err(|error| error.to_string())? != 0 {
             return Err("Invalid frozen desktop snapshot size".into());
         }
-        Ok(Cow::Owned(pixels))
+        Ok(())
     }
 }
 
@@ -279,12 +322,12 @@ impl SnapshotMode {
     }
 }
 
-pub fn is_xwayland(window: &Window, driver: &str) -> bool {
+pub fn is_xwayland(driver: &str) -> bool {
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     if driver == "x11" {
-        return crate::picker_desktop::is_xwayland(window);
+        return crate::picker_desktop::is_xwayland();
     }
-    let _ = (window, driver);
+    let _ = driver;
     false
 }
 
@@ -437,15 +480,18 @@ impl Background {
         match result {
             Ok(Some(image)) if self.mode.accepts(image.encoding) => {
                 if let Some(id) = self.display {
-                    // Bound retained screenshots to 256 MiB across displays.
-                    while self.images.values().map(|v| v.bytes.len()).sum::<usize>()
-                        + image.bytes.len()
-                        > MAX_SNAPSHOT_BYTES
-                    {
-                        let Some(key) = self.images.keys().next().copied() else {
+                    // Include the full retained allocation for each snapshot.
+                    let mut retained = self
+                        .images
+                        .values()
+                        .map(|v| v.bytes.capacity())
+                        .sum::<usize>()
+                        + image.bytes.capacity();
+                    while retained > MAX_SNAPSHOT_BYTES {
+                        let Some((_, evicted)) = self.images.pop_first() else {
                             break;
                         };
-                        self.images.remove(&key);
+                        retained -= evicted.bytes.capacity();
                     }
                     self.images.insert(id, image);
                     self.texture = None;
@@ -518,25 +564,21 @@ impl Background {
         let Some(image) = self.display.and_then(|id| self.images.get(&id)) else {
             return Ok(());
         };
-        let linear = image.encoding == Encoding::LinearRgba16;
-        if self.texture.is_none() {
-            let mut pixels = image.pixels()?;
-            if !linear && !color.is_identity() {
-                color.map_rgba8(pixels.to_mut());
+        let texture = match &mut self.texture {
+            Some(texture) => texture,
+            slot @ None => {
+                let texture = SnapshotTexture::new(
+                    render,
+                    [image.width, image.height],
+                    image.encoding == Encoding::LinearRgba16,
+                )?;
+                image.upload_rows(color, |first, rgba| texture.update_rows(first, rgba))?;
+                slot.insert(texture)
             }
-            self.texture = Some(SnapshotTexture::new(
-                render,
-                [image.width, image.height],
-                linear,
-                pixels.as_ref(),
-            )?);
-        }
-        let Some(texture) = self.texture.as_ref() else {
-            return Err("Background snapshot texture was not initialized".into());
         };
         let [w, h] = window.size();
         let dst = SDL_FRect { x: 0., y: 0., w, h };
-        texture.draw(render, &dst, linear)
+        texture.draw(render, &dst)
     }
 }
 
@@ -709,7 +751,8 @@ mod tests {
     }
     #[test]
     fn compressed_hdr_snapshot_can_rebuild_the_texture_losslessly() -> TestResult {
-        let mut image = Image::hdr_buffer(128, 64)?;
+        let (width, height) = (2048, 129);
+        let mut image = Image::hdr_buffer(width, height)?;
         let pixel = [0x4800_u16, 0xb800, 0x4000, 0x3c00].map(u16::to_ne_bytes);
         for bytes in image.rgba.as_chunks_mut::<8>().0 {
             bytes.copy_from_slice(pixel.as_flattened());
@@ -717,15 +760,47 @@ mod tests {
         let snapshot = Snapshot::compress(image)?;
         assert!(snapshot.compressed);
         assert_eq!(snapshot.encoding, Encoding::LinearRgba16);
-        assert!(snapshot.bytes.len() < 8192);
+        assert!(snapshot.bytes.len() < SNAPSHOT_UPLOAD_BYTES);
         for _ in 0..2 {
-            let rgba = snapshot.pixels()?;
-            assert_eq!(rgba.len(), 128 * 64 * 8);
+            let mut next_row = 0;
+            let mut uploads = 0;
+            snapshot.upload_rows(&ColorManager::default(), |first, rgba| {
+                assert_eq!(first, next_row);
+                assert!(rgba.len() <= SNAPSHOT_UPLOAD_BYTES);
+                assert!(
+                    rgba.as_chunks::<8>()
+                        .0
+                        .iter()
+                        .all(|rgba| rgba == pixel.as_flattened())
+                );
+                next_row += rgba.len() / (width as usize * 8);
+                uploads += 1;
+                Ok(())
+            })?;
+            assert_eq!(next_row, height as usize);
+            assert_eq!(uploads, 3);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn streamed_frozen_snapshot_rejects_short_or_extra_rows() -> TestResult {
+        use std::io::Write;
+        for bytes in [15, 17] {
+            let mut encoder =
+                flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+            encoder.write_all(&[0; 17][..bytes])?;
+            let snapshot = Snapshot {
+                width: 2,
+                height: 2,
+                encoding: Encoding::Srgb8,
+                compressed: true,
+                bytes: encoder.finish()?,
+            };
             assert!(
-                rgba.as_chunks::<8>()
-                    .0
-                    .iter()
-                    .all(|rgba| rgba == pixel.as_flattened())
+                snapshot
+                    .upload_rows(&ColorManager::default(), |_, _| Ok(()))
+                    .is_err()
             );
         }
         Ok(())

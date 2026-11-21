@@ -460,13 +460,15 @@ impl Ink {
             // The history was painted with source-over into a transparent
             // texture, so its stored RGB is already premultiplied by alpha.
             let destination = SDL_FRect {
-                x: region.x as f32 / frame.scale[0],
-                y: region.y as f32 / frame.scale[1],
-                w: region.w as f32 / frame.scale[0],
-                h: region.h as f32 / frame.scale[1],
+                x: region.x as f32,
+                y: region.y as f32,
+                w: region.w as f32,
+                h: region.h as f32,
             };
-            return with_color_scale(renderer, revision_white_scale(layer), || {
-                layer.texture.draw(renderer, None, Some(&destination))
+            return renderer.with_pixel_scale(frame.scale, || {
+                renderer.with_color_scale(revision_white_scale(layer), || {
+                    layer.texture.draw(renderer, None, Some(&destination))
+                })
             });
         }
         self.painter.history(frame, app, 0, None, 1.)
@@ -515,18 +517,6 @@ fn revision_white_scale(layer: &CommittedLayer) -> f32 {
         .as_ref()
         .map_or(0., |revision| revision.white);
     if white > 0. { white.recip() } else { 1. }
-}
-
-fn with_color_scale(
-    renderer: &Renderer,
-    scale: f32,
-    draw: impl FnOnce() -> Result<(), String>,
-) -> Result<(), String> {
-    renderer.with_color_scale(scale, draw)
-}
-
-fn set_scale(renderer: &Renderer, scale: [f32; 2]) -> Result<(), String> {
-    renderer.set_render_scale(scale)
 }
 
 fn dirty_rect(frame: &Frame<'_>, bounds: Bounds) -> Option<SDL_Rect> {
@@ -586,7 +576,7 @@ impl StrokePainter {
         white: f32,
     ) -> Result<(), String> {
         let renderer = frame.renderer;
-        set_scale(renderer, [1.; 2])?;
+        renderer.set_render_scale([1.; 2])?;
         let clip = Some(InkClip::new(target, target, frame.scale));
         let Some(first) = first else {
             renderer.clear([0.; 4])?;
@@ -715,7 +705,7 @@ impl StrokePainter {
                 return self.marker(frame, rgb, stroke, region, white, rect);
             }
         }
-        with_color_scale(renderer, white, || {
+        renderer.with_color_scale(white, || {
             let margin = stroke.max_radius() * 2. + frame.aa;
             let visible = |a, b| {
                 stroke.tool == Tool::Arrow
@@ -822,87 +812,85 @@ impl StrokePainter {
         let [left, top, right, bottom] = [rect.x, rect.y, rect.x + rect.w, rect.y + rect.h];
         let margin = stroke.width + frame.aa;
         mask.set_modulation(rgb, stroke.opacity)?;
-        for y in (top..bottom).step_by(tile_height as usize) {
-            for x in (left..right).step_by(tile_width as usize) {
-                let width = (right - x).min(tile_width) as f32;
-                let height = (bottom - y).min(tile_height) as f32;
-                let tile = Bounds {
-                    min: [x as f32 / frame.scale[0], y as f32 / frame.scale[1]],
-                    max: [
-                        (x as f32 + width) / frame.scale[0],
-                        (y as f32 + height) / frame.scale[1],
-                    ],
-                };
-                if region.is_some_and(|region| !region.intersects(tile)) {
-                    continue;
-                }
-                // The mask accumulates coverage at full opacity. Tint it and
-                // apply the marker's opacity only once, after intersections.
-                self.queued = 0;
-                renderer.with_target(mask, || {
-                    renderer.set_render_scale([1., 1.])?;
-                    renderer.clear([1., 1., 1., 0.])?;
-                    let visible = |a, b| {
-                        // Include the ribbon's miter and antialias coverage.
-                        // Only tessellate segments that can reach this tile.
-                        let bounds = Bounds::between(a, b).padded(margin);
-                        tile.intersects(bounds)
-                            && region.is_none_or(|region| region.intersects(bounds))
+        let origin = region.map_or([0; 2], |region| region.origin);
+        let scale = if region.is_some() {
+            [1.; 2]
+        } else {
+            frame.scale
+        };
+        renderer.with_pixel_scale(scale, || {
+            for y in (top..bottom).step_by(tile_height as usize) {
+                for x in (left..right).step_by(tile_width as usize) {
+                    let width = (right - x).min(tile_width) as f32;
+                    let height = (bottom - y).min(tile_height) as f32;
+                    let tile = Bounds {
+                        min: [x as f32 / frame.scale[0], y as f32 / frame.scale[1]],
+                        max: [
+                            (x as f32 + width) / frame.scale[0],
+                            (y as f32 + height) / frame.scale[1],
+                        ],
                     };
-                    for range in geometry::mesh_ranges(&self.samples, MESH_SEGMENTS, visible) {
-                        self.mesh
-                            .update(stroke, &self.samples, range, frame.aa, false);
-                        set_vertices(
-                            &self.mesh,
-                            &mut self.vertices,
-                            [1.; 3],
-                            1.,
-                            frame.scale,
-                            [x, y],
-                            false,
-                        );
-                        #[cfg(test)]
-                        {
-                            self.submitted_indices += self.mesh.indices.len();
-                        }
-                        submit(
-                            renderer,
-                            None,
-                            &self.vertices,
-                            &self.mesh.indices,
-                            &mut self.queued,
-                        )?;
+                    if region.is_some_and(|region| !region.intersects(tile)) {
+                        continue;
                     }
-                    Ok(())
-                })?;
-                self.queued = 0;
-                let src = SDL_FRect {
-                    x: 0.,
-                    y: 0.,
-                    w: width,
-                    h: height,
-                };
-                let dst = if let Some(region) = region {
-                    SDL_FRect {
-                        x: (x - region.origin[0]) as f32,
-                        y: (y - region.origin[1]) as f32,
+                    // The mask accumulates coverage at full opacity. Tint it and
+                    // apply the marker's opacity only once, after intersections.
+                    self.queued = 0;
+                    renderer.with_target(mask, || {
+                        renderer.set_render_scale([1., 1.])?;
+                        renderer.clear([1., 1., 1., 0.])?;
+                        let visible = |a, b| {
+                            // Include the ribbon's miter and antialias coverage.
+                            // Only tessellate segments that can reach this tile.
+                            let bounds = Bounds::between(a, b).padded(margin);
+                            tile.intersects(bounds)
+                                && region.is_none_or(|region| region.intersects(bounds))
+                        };
+                        for range in geometry::mesh_ranges(&self.samples, MESH_SEGMENTS, visible) {
+                            self.mesh
+                                .update(stroke, &self.samples, range, frame.aa, false);
+                            set_vertices(
+                                &self.mesh,
+                                &mut self.vertices,
+                                [1.; 3],
+                                1.,
+                                frame.scale,
+                                [x, y],
+                                false,
+                            );
+                            #[cfg(test)]
+                            {
+                                self.submitted_indices += self.mesh.indices.len();
+                            }
+                            submit(
+                                renderer,
+                                None,
+                                &self.vertices,
+                                &self.mesh.indices,
+                                &mut self.queued,
+                            )?;
+                        }
+                        Ok(())
+                    })?;
+                    self.queued = 0;
+                    let src = SDL_FRect {
+                        x: 0.,
+                        y: 0.,
                         w: width,
                         h: height,
-                    }
-                } else {
-                    SDL_FRect {
-                        x: x as f32 / frame.scale[0],
-                        y: y as f32 / frame.scale[1],
-                        w: width / frame.scale[0],
-                        h: height / frame.scale[1],
-                    }
-                };
-                with_color_scale(renderer, white, || {
-                    mask.draw(renderer, Some(&src), Some(&dst))
-                })?;
+                    };
+                    let dst = SDL_FRect {
+                        x: (x - origin[0]) as f32,
+                        y: (y - origin[1]) as f32,
+                        w: width,
+                        h: height,
+                    };
+                    renderer
+                        .with_color_scale(white, || mask.draw(renderer, Some(&src), Some(&dst)))?;
+                }
             }
-        }
-        Ok(())
+            Ok(())
+        })
     }
 }
 
@@ -1356,7 +1344,7 @@ mod tests {
             ..frame
         };
         for renderer in [&canvas.renderer, &full.renderer] {
-            set_scale(renderer, frame.scale)?;
+            renderer.set_render_scale(frame.scale)?;
         }
         for (tool, color, points) in [
             (
@@ -1475,6 +1463,46 @@ mod tests {
         app.commit_erase(1);
         canvas.history(&mut ink, &mut app)?;
         assert_eq!(ink.painter.submitted_indices, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn offset_ink_layer_matches_direct_rendering_at_fractional_scale() -> TestResult {
+        let canvas = TestCanvas::new([640, 256])?;
+        let direct = TestCanvas::new([640, 256])?;
+        let mut app = app();
+        let mut ink = Ink::default();
+        commit(
+            &mut app,
+            Tool::Pen,
+            [255, 0, 0],
+            &[[352., 50.], [352., 150.]],
+        );
+        let frame = Frame {
+            scale: [1.21; 2],
+            aa: 0.8 / 1.21,
+            ..canvas.frame()
+        };
+        let reference = Frame {
+            renderer: &direct.renderer,
+            color: &direct.color,
+            ..frame
+        };
+        for renderer in [&canvas.renderer, &direct.renderer] {
+            renderer.set_render_scale(frame.scale)?;
+            renderer.clear([0.; 4])?;
+        }
+        ink.committed(&frame, &mut app)?;
+        assert_eq!(ink.layer.as_ref().map(|layer| layer.region.x), Some(384));
+        let mut painter = StrokePainter::default();
+        painter.history(&reference, &app, 0, None, 1.)?;
+        let pixels = canvas.pixels()?;
+        let expected = direct.pixels()?;
+        let difference = pixels.iter().zip(&expected).position(|(a, b)| a[3] != b[3]);
+        assert_eq!(
+            difference.map(|i| (i % 640, i / 640, pixels[i], expected[i])),
+            None
+        );
         Ok(())
     }
 

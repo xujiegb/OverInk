@@ -9,8 +9,6 @@ mod unix;
 pub mod windows_keyboard;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub use unix::Passthrough;
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
-pub(crate) use unix::{NativeLibrary, library as native_library};
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 #[derive(Default)]

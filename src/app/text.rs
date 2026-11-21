@@ -58,7 +58,7 @@ pub(super) struct TextPickTarget {
     selected: Option<usize>,
     editing: bool,
     item: TextBox,
-    committed: Option<String>,
+    committed_override: Option<String>,
 }
 
 impl TextMenus {
@@ -1026,11 +1026,12 @@ impl App {
             selected: self.input.text.selected,
             editing: self.input.text.editing(),
             item: self.text_menu_item()?.clone(),
-            committed: self
+            committed_override: self
                 .input
                 .text
                 .draft
                 .as_ref()
+                .filter(|draft| draft.committed != draft.item.text)
                 .map(|draft| draft.committed.clone()),
         })
     }
@@ -1046,13 +1047,13 @@ impl App {
             && self
                 .text_menu_item()
                 .is_some_and(|item| item == &target.item)
-            && self
-                .input
-                .text
-                .draft
-                .as_ref()
-                .map(|draft| draft.committed.as_str())
-                == target.committed.as_deref()
+            && self.input.text.draft.as_ref().is_none_or(|draft| {
+                draft.committed
+                    == target
+                        .committed_override
+                        .as_deref()
+                        .unwrap_or(&target.item.text)
+            })
     }
 
     pub(super) fn pick_text_color(&mut self, color: InkColor) -> Option<InkColor> {
