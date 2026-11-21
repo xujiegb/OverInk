@@ -230,9 +230,7 @@ impl Ink {
     }
 
     fn release_unused_extended_layer(&mut self, app: &App) {
-        if self.extended_bytes() != 0
-            && !extended_cache_needed(app, self.hot_extended_cache)
-        {
+        if self.extended_bytes() != 0 && !extended_cache_needed(app, self.hot_extended_cache) {
             self.invalidate_layer();
         }
     }
