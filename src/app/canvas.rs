@@ -859,8 +859,25 @@ pub(super) fn failure(error: impl ToString) -> crate::appearance::Status {
 
 #[cfg(test)]
 mod screenshot_input_tests {
-    use super::screenshot_input_changed;
+    use super::{DirtyReason, DirtyReasons, screenshot_input_changed};
     use egui::{Event, pos2};
+
+    #[test]
+    fn overlay_dirt_does_not_implicitly_dirty_content_or_surface() {
+        let mut flags = DirtyReasons::default();
+        assert!(!flags.any());
+        flags.mark(DirtyReason::Overlay);
+        assert_eq!(flags.0, DirtyReasons::OVERLAY);
+        flags.mark(DirtyReason::Content);
+        assert_eq!(flags.0, DirtyReasons::OVERLAY | DirtyReasons::CONTENT);
+        flags.mark(DirtyReason::Surface);
+        assert_eq!(
+            flags.0,
+            DirtyReasons::OVERLAY | DirtyReasons::CONTENT | DirtyReasons::SURFACE
+        );
+        flags.clear();
+        assert!(!flags.any());
+    }
 
     #[test]
     fn coalesced_screenshot_mouse_move_still_repaints() {
