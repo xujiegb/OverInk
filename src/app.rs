@@ -2,6 +2,8 @@
 
 mod canvas;
 mod ink;
+
+use canvas::DirtyReason;
 mod osk;
 mod panel;
 #[cfg(test)]
@@ -1538,7 +1540,7 @@ fn handle_screenshot_event(
     {
         screenshot.cancel();
         for canvas in canvases {
-            canvas.dirty = true;
+            canvas.invalidate(DirtyReason::Overlay);
             canvas.suspend_text_input();
         }
         return true;
@@ -1551,10 +1553,13 @@ fn handle_screenshot_event(
         let contact_cancelled =
             matches!(ty, SDL_EVENT_FINGER_CANCELED | SDL_EVENT_PEN_PROXIMITY_OUT);
         if on_canvas || contact_cancelled {
-            canvas.dirty |= screenshot.event(
-                event,
-                &canvas.window,
-                app.touch_enabled && app.input.pen_proximity.is_empty(),
+            canvas.invalidate_if(
+                screenshot.event(
+                    event,
+                    &canvas.window,
+                    app.touch_enabled && app.input.pen_proximity.is_empty(),
+                ),
+                DirtyReason::Overlay,
             );
         }
         if screenshot.ready()
@@ -1565,7 +1570,7 @@ fn handle_screenshot_event(
                 && !canvas.pending_screenshot_input()
                 && screenshot.ignores_hover_motion(event, mouse_released()))
         {
-            canvas.dirty |= canvas.screenshot_event(event);
+            canvas.invalidate_if(canvas.screenshot_event(event), DirtyReason::Overlay);
         }
     }
     false
@@ -1854,14 +1859,14 @@ fn run_inner(options: Options) -> Result<(), String> {
                         {
                             app.input.text.saw_input_focus();
                             let index = canvas::active_index(&canvases, app.pages.active);
-                            canvases[index].dirty = true;
+                            canvases[index].invalidate(DirtyReason::Overlay);
                         }
                     } else if let Some(canvas) =
                         canvases.iter_mut().find(|canvas| canvas.window.id == id)
                     {
                         topology_dirty |= ty == SDL_EVENT_WINDOW_DISPLAY_CHANGED && !options.smoke;
                         canvas.guard_dirty |= bounds_changed;
-                        canvas.dirty |= redraw;
+                        canvas.invalidate_if(redraw, DirtyReason::Overlay);
                         if surface_changed {
                             canvas.surface_changed();
                             toolbar_dirty = true;
@@ -1933,7 +1938,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                                 .iter_mut()
                                 .find(|canvas| app.screenshot.targets(canvas.window.id))
                         {
-                            canvas.dirty = true;
+                            canvas.invalidate(DirtyReason::Overlay);
                         }
                     }
                     // SDL owns the native dialog's input and delivers its result through
@@ -1981,7 +1986,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                     mode_changed = true;
                     toolbar_dirty = true;
                     for canvas in &mut canvases {
-                        canvas.dirty = true;
+                        canvas.invalidate(DirtyReason::Content);
                     }
                     continue;
                 }
@@ -2002,7 +2007,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                     // one that received its earlier packets.
                     app.for_each_page(|page| page.track_pen(&event));
                     for canvas in &mut canvases {
-                        canvas.dirty = true;
+                        canvas.invalidate(DirtyReason::Overlay);
                     }
                     toolbar_dirty = true;
                 } else if let Some(index) =
@@ -2028,7 +2033,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                         canvases[active].flush_text_events(&mut app, gui.ctx.theme())?;
                         app.select_page(output);
                         canvases[active].suspend_text_input();
-                        canvases[active].dirty = true;
+                        canvases[active].invalidate(DirtyReason::Content);
                         toolbar_dirty = true;
                     }
                     let canvas = &mut canvases[index];
@@ -2056,7 +2061,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                         }
                         had_contacts || app.input.has_contacts()
                     });
-                    canvas.dirty |= edited;
+                    canvas.invalidate_if(edited, DirtyReason::Overlay);
                     toolbar_dirty |= before != app.history_buttons();
                     toolbar_dirty |= selection_before != app.input.text.selected;
                     toolbar_dirty |= panel_before != app.panel;
@@ -2082,7 +2087,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                         let canceled_text = canvas.cancel_text_touches(page);
                         canceled_text || (had_touches && page.input.touches.is_empty())
                     });
-                    canvas.dirty |= edited;
+                    canvas.invalidate_if(edited, DirtyReason::Overlay);
                 }
                 toolbar_dirty |= app.panel == Some(crate::toolbar::Panel::Brush)
                     && matches!(ty, SDL_EVENT_PEN_AXIS | SDL_EVENT_PEN_PROXIMITY_OUT);
@@ -2095,7 +2100,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 {
                     toolbar_dirty = true;
                     for canvas in &mut canvases {
-                        canvas.dirty = true;
+                        canvas.invalidate(DirtyReason::Content);
                     }
                     let was_editing = app.input.text.editing();
                     let from_toolbar = id == Some(toolbar.id);
@@ -2165,7 +2170,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                     }
                     if mode_changed {
                         for canvas in &mut canvases {
-                            canvas.dirty = true;
+                            canvas.invalidate(DirtyReason::Content);
                         }
                     }
                 }
@@ -2176,7 +2181,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                     .iter_mut()
                     .find(|canvas| app.screenshot.targets(canvas.window.id))
             {
-                canvas.dirty = true;
+                canvas.invalidate(DirtyReason::Overlay);
             }
             if !running {
                 let active = canvas::active_index(&canvases, app.pages.active);
@@ -2207,7 +2212,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                             .iter_mut()
                             .find(|canvas| app.screenshot.targets(canvas.window.id))
                         {
-                            canvas.dirty = true;
+                            canvas.invalidate(DirtyReason::Overlay);
                             canvas.suspend_text_input();
                             match result {
                                 Ok(Some(path)) => {
@@ -2285,7 +2290,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                         .find(|canvas| canvas.output == previous_page)
                 {
                     canvas.suspend_text_input();
-                    canvas.dirty = true;
+                    canvas.invalidate(DirtyReason::Overlay);
                 }
                 if requested.is_some()
                     && !wayland
@@ -2343,7 +2348,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                     !app.pass && !app.hidden && !picker.active() && !app.screenshot.active(),
                 ) {
                     app.status = reason.into();
-                    canvas.dirty = true;
+                    canvas.invalidate(DirtyReason::Overlay);
                     toolbar_dirty = true;
                 }
             }
@@ -2356,7 +2361,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                     app.screenshot
                         .poll_capture(&canvas.window, &app.displays, wayland || xwayland)
                 {
-                    canvas.dirty = true;
+                    canvas.invalidate(DirtyReason::Overlay);
                     match result {
                         Ok(true) => canvas.window.raise(),
                         Ok(false) => {
@@ -2380,7 +2385,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                     .iter_mut()
                     .find(|canvas| app.screenshot.targets(canvas.window.id))
                 {
-                    canvas.dirty = true;
+                    canvas.invalidate(DirtyReason::Overlay);
                     if result.is_ok() {
                         canvas.suspend_text_input();
                     }
@@ -2454,7 +2459,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 };
                 toolbar_dirty = true;
                 for canvas in &mut canvases {
-                    canvas.dirty = true;
+                    canvas.invalidate(DirtyReason::Surface);
                     canvas.guard_dirty = true;
                 }
                 app.status = match result {
@@ -2478,7 +2483,7 @@ fn run_inner(options: Options) -> Result<(), String> {
             }
             for canvas in &mut canvases {
                 if let Some(result) = canvas.background.poll(&canvas.window) {
-                    canvas.dirty = true;
+                    canvas.invalidate(DirtyReason::Content);
                     toolbar_dirty = true;
                     app.status = match result {
                         Ok(()) => {
@@ -2529,7 +2534,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 gui.ctx.set_theme(theme);
                 toolbar_dirty = true;
                 for canvas in &mut canvases {
-                    canvas.dirty = true;
+                    canvas.invalidate(DirtyReason::Content);
                 }
             }
             // Capturing the whole preferences object every event-loop tick
@@ -2720,7 +2725,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 || cmd.pick
                 || was_board != app.board;
             for canvas in &mut canvases {
-                canvas.dirty |= redraw;
+                canvas.invalidate_if(redraw, DirtyReason::Overlay);
                 canvas.guard_dirty |= controller_bounds_changed || mode_changed || cmd.pick;
             }
 
@@ -2972,7 +2977,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                     // This egui overlay cannot steal the native editor focus.
                     app.input.text.open_osk();
                 }
-                canvas.dirty = true;
+                canvas.invalidate(DirtyReason::Overlay);
                 toolbar_dirty = true;
             }
             if app.input.text.take_input_source_request() {
@@ -2997,7 +3002,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 picker.start(wayland || xwayland);
                 toolbar_dirty = true;
                 for canvas in &mut canvases {
-                    canvas.dirty = true;
+                    canvas.invalidate(DirtyReason::Surface);
                     canvas.guard_dirty = true;
                 }
             }
@@ -3006,7 +3011,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                     .iter_mut()
                     .find(|canvas| app.screenshot.targets(canvas.window.id))
             {
-                canvas.dirty = true;
+                canvas.invalidate(DirtyReason::Overlay);
                 match action {
                     MenuAction::Cancel => {
                         app.screenshot.cancel();
