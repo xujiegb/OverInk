@@ -921,7 +921,10 @@ mod tests {
     #[test]
     fn screenshot_hover_filters_only_stable_hit_regions() -> TestResult {
         let mut screenshot = Screenshot {
-            stage: Stage::Ready(Rect::from_min_size(Pos2::ZERO, vec2(200., 100.)), Arc::new(Image::buffer(1, 1)?)),
+            stage: Stage::Ready(
+                Rect::from_min_size(Pos2::ZERO, vec2(200., 100.)),
+                Arc::new(Image::buffer(1, 1)?),
+            ),
             menu_rect: Some(Rect::from_min_size(pos2(20., 20.), vec2(150., 40.))),
             hovered_button: Some(Rect::from_min_size(pos2(25., 25.), vec2(40., 30.))),
             ..Default::default()
