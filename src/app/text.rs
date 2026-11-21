@@ -2901,6 +2901,41 @@ mod tests {
     }
 
     #[test]
+    fn same_annotation_action_hover_is_inert_but_click_is_not() {
+        let mut app = app();
+        let mut gui = Gui::new();
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::from(SIZE));
+        let item = TextBox::new(pos2(350., 100.), screen, InkColor::default(), 1.);
+        app.input.text.selected = app.history.set_text_box(None, item);
+        let area = Rect::from_min_size(pos2(40., 40.), vec2(80., 40.));
+        app.input.text.hovered_control = Some(area);
+        let window = SDL_WindowID(1);
+        let motion = SDL_Event {
+            motion: SDL_MouseMotionEvent {
+                r#type: SDL_EVENT_MOUSE_MOTION,
+                windowID: window,
+                x: area.center().x,
+                y: area.center().y,
+                ..Default::default()
+            },
+        };
+        assert!(!app.text_event(&mut gui, &motion, window, SIZE));
+        assert!(gui.raw.events.is_empty());
+        let pressed = SDL_Event {
+            button: SDL_MouseButtonEvent {
+                r#type: SDL_EVENT_MOUSE_BUTTON_DOWN,
+                windowID: window,
+                button: SDL_BUTTON_LEFT as u8,
+                x: area.center().x,
+                y: area.center().y,
+                down: true,
+                ..Default::default()
+            },
+        };
+        assert!(app.text_event(&mut gui, &pressed, window, SIZE));
+    }
+
+    #[test]
     fn selection_motion_only_repaints_when_it_interacts_with_the_menu() {
         let mut app = app();
         let mut gui = Gui::new();
