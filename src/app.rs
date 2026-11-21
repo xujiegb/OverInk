@@ -1425,6 +1425,9 @@ struct PerformanceCounts {
     motion_events: u64,
     toolbar_frames: u64,
     canvas_frames: u64,
+    toolbar_ui_time: Duration,
+    toolbar_present_time: Duration,
+    canvas_present_time: Duration,
     precise_waits: u64,
     frame_sleeps: u64,
     event_waits: u64,
@@ -1461,13 +1464,16 @@ impl PerformanceMonitor {
         }
         let c = &self.counts;
         eprintln!(
-            "OverInk perf/5s: loops={} events={} window={} motion={} toolbar={} canvas={} precise_wait={} frame_sleep={} event_wait={}",
+            "OverInk perf/5s: loops={} events={} window={} motion={} toolbar={} canvas={} toolbar_ui_ms={:.1} toolbar_present_ms={:.1} canvas_present_ms={:.1} precise_wait={} frame_sleep={} event_wait={}",
             c.iterations,
             c.events,
             c.window_events,
             c.motion_events,
             c.toolbar_frames,
             c.canvas_frames,
+            c.toolbar_ui_time.as_secs_f64() * 1000.,
+            c.toolbar_present_time.as_secs_f64() * 1000.,
+            c.canvas_present_time.as_secs_f64() * 1000.,
             c.precise_waits,
             c.frame_sleeps,
             c.event_waits,
@@ -2548,6 +2554,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 let mut input = gui.input(&toolbar);
                 input.predicted_dt = pacer.period.as_secs_f32();
                 let canvas = &canvases[active];
+                let ui_started = performance.as_ref().map(|_| Instant::now());
                 let frame = gui.ctx.run_ui(input, |ui| {
                     cmd = app.ui(
                         ui,
@@ -2560,6 +2567,9 @@ fn run_inner(options: Options) -> Result<(), String> {
                         file_dialog.pending(),
                     )
                 });
+                if let (Some(start), Some(monitor)) = (ui_started, &mut performance) {
+                    monitor.counts.toolbar_ui_time += start.elapsed();
+                }
                 toolbar_text_input = frame.platform_output.ime.is_some();
                 toolbar_repaint_at = gui::repaint_at(&frame);
                 output = Some(frame);
@@ -2775,6 +2785,7 @@ fn run_inner(options: Options) -> Result<(), String> {
             gui.sync_text_input(&toolbar, toolbar_ime_active);
             let mut presented = false;
             if let Some(mut output) = output {
+                let toolbar_started = performance.as_ref().map(|_| Instant::now());
                 presented = true;
                 if !toolbar_ime_active {
                     output.platform_output.ime = None;
@@ -2791,6 +2802,9 @@ fn run_inner(options: Options) -> Result<(), String> {
                 toolbar_render.present()?;
                 if let Some(monitor) = &mut performance {
                     monitor.counts.toolbar_frames += 1;
+                    if let Some(start) = toolbar_started {
+                        monitor.counts.toolbar_present_time += start.elapsed();
+                    }
                 }
                 tooltips.update(&toolbar, &gui, app.language, &toolbar_color);
             }
@@ -2851,6 +2865,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                     let history_before = app.history_buttons();
                     let selection_before = app.input.text.selected;
                     extended_ink_bytes -= canvas.extended_ink_bytes();
+                    let canvas_started = performance.as_ref().map(|_| Instant::now());
                     let painted = canvas.paint(
                         &mut app,
                         &options,
@@ -2862,6 +2877,9 @@ fn run_inner(options: Options) -> Result<(), String> {
                     presented |= painted;
                     if painted && let Some(monitor) = &mut performance {
                         monitor.counts.canvas_frames += 1;
+                        if let Some(start) = canvas_started {
+                            monitor.counts.canvas_present_time += start.elapsed();
+                        }
                     }
                     if screenshot && painted {
                         app.screenshot.presented();
