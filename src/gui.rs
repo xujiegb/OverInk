@@ -26,6 +26,8 @@ pub struct Gui {
     // Reuse conversion buffers across egui meshes and atlas updates.
     vertices: Vec<SDL_Vertex>,
     pixels: Vec<u8>,
+    // Do not coalesce a real mouse event with a touch-generated pointer move.
+    last_mouse_motion: bool,
     started: Instant,
     pub units: f32,
     touch_primary: Option<TouchKey>,
@@ -63,6 +65,7 @@ impl Gui {
             textures: HashMap::new(),
             vertices: Vec::new(),
             pixels: Vec::new(),
+            last_mouse_motion: false,
             started: Instant::now(),
             units: 1.,
             touch_primary: None,
@@ -148,6 +151,7 @@ impl Gui {
     pub fn clear_events(&mut self) {
         self.composition_ended = None;
         self.raw.events.clear();
+        self.last_mouse_motion = false;
     }
 
     pub fn composing(&self) -> bool {
@@ -178,17 +182,23 @@ impl Gui {
     // hundreds of motion samples between paints; preserve clicks, wheel and
     // touch events, but replace an adjacent stale mouse position in place.
     fn queue_mouse_position(&mut self, pos: egui::Pos2) {
-        if let Some(Event::PointerMoved(last)) = self.raw.events.last_mut() {
+        if self.last_mouse_motion
+            && let Some(Event::PointerMoved(last)) = self.raw.events.last_mut()
+        {
             *last = pos;
         } else {
             self.raw.events.push(Event::PointerMoved(pos));
         }
+        self.last_mouse_motion = true;
     }
 
     /// Decode tagged SDL events through the checked, owning SDL API.
     pub fn event(&mut self, e: &SDL_Event, id: SDL_WindowID, size: [f32; 2]) {
         let ty = event_type(e);
         let scale = self.units;
+        if ty != SDL_EVENT_MOUSE_MOTION {
+            self.last_mouse_motion = false;
+        }
         match ty {
             SDL_EVENT_MOUSE_MOTION => {
                 if let Some(m) = mouse_motion_event(e)
@@ -783,6 +793,24 @@ mod tests {
             [800., 600.],
         );
     }
+    #[test]
+    fn mouse_motion_does_not_replace_touch_pointer_motion() {
+        let mut gui = Gui::new();
+        finger(&mut gui, SDL_EVENT_FINGER_DOWN, 1, 0.1, 0.2);
+        finger(&mut gui, SDL_EVENT_FINGER_MOTION, 1, 0.2, 0.2);
+        gui.event(&SDL_Event {
+            motion: SDL_MouseMotionEvent {
+                r#type: SDL_EVENT_MOUSE_MOTION,
+                windowID: SDL_WindowID(1),
+                x: 400.,
+                y: 150.,
+                ..Default::default()
+            },
+        }, SDL_WindowID(1), [800., 600.]);
+        assert!(matches!(gui.raw.events.as_slice(), [.., Event::PointerMoved(touch), Event::PointerMoved(mouse)]
+            if *touch == egui::pos2(160., 120.) && *mouse == egui::pos2(400., 150.)));
+    }
+
     #[test]
     fn gui_touch_scales_coordinates_and_only_primary_finger_emulates_pointer() {
         let mut gui = Gui::new();
