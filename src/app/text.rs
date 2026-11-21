@@ -1293,12 +1293,24 @@ impl App {
         }
     }
 
+    /// Draw immutable committed labels into a retained GPU texture. The
+    /// selected label is rendered by the dynamic editor instead, preventing
+    /// old text from showing behind a drag/resize/IME draft.
+    pub(super) fn static_text_ui(&self, ui: &Ui, skip_selected: Option<usize>) {
+        for (index, item) in self.history.text_boxes().iter().enumerate() {
+            if skip_selected != Some(index) {
+                draw_text_box(ui, &self.text_fonts, item);
+            }
+        }
+    }
+
     pub(super) fn text_ui(
         &mut self,
         ui: &mut Ui,
         interactive: bool,
         composing: bool,
         keep_editor_open: bool,
+        cached_static_text: bool,
     ) {
         self.input.text.hovered_control = None;
         let selected = self.input.text.selected;
@@ -1310,6 +1322,9 @@ impl App {
             .as_ref()
             .and_then(|press| press.preview.as_ref());
         for (index, item) in self.history.text_boxes().iter().enumerate() {
+            if cached_static_text && (!interactive || selected != Some(index)) {
+                continue;
+            }
             let item = if interactive && selected == Some(index) {
                 if draft.is_some() {
                     continue;
