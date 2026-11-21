@@ -52,7 +52,7 @@ impl Image {
     fn hdr_buffer(width: u32, height: u32) -> Result<Self, String> {
         Self::allocate(width, height, Encoding::LinearRgba16)
     }
-    fn allocate(width: u32, height: u32, encoding: Encoding) -> Result<Self, String> {
+    fn byte_len(width: u32, height: u32, encoding: Encoding) -> Result<usize, String> {
         let size = (width as usize)
             .checked_mul(height as usize)
             .and_then(|pixels| pixels.checked_mul(encoding.bytes_per_pixel()))
@@ -60,6 +60,11 @@ impl Image {
         if size == 0 || size > MAX_SNAPSHOT_BYTES {
             return Err("Capture exceeds the 256 MiB limit".into());
         }
+        Ok(size)
+    }
+
+    fn allocate(width: u32, height: u32, encoding: Encoding) -> Result<Self, String> {
+        let size = Self::byte_len(width, height, encoding)?;
         let mut rgba = Vec::new();
         rgba.try_reserve_exact(size)
             .map_err(|error| error.to_string())?;
@@ -169,9 +174,13 @@ impl Image {
         let mut limits = image::Limits::default();
         limits.max_image_width = Some(16384);
         limits.max_image_height = Some(16384);
-        limits.max_alloc = Some(256 * 1024 * 1024);
+        limits.max_alloc = Some(MAX_SNAPSHOT_BYTES as u64);
         reader.limits(limits);
         let mut decoder = reader.into_decoder().map_err(|e| e.to_string())?;
+        // Source pixels can expand substantially when converted to RGBA8
+        // (for example, grayscale PNG/JPEG). Check the output before decoding.
+        let (width, height) = decoder.dimensions();
+        Self::byte_len(width, height, Encoding::Srgb8)?;
         let profile = decoder.icc_profile().ok().flatten();
         let pixels = image::DynamicImage::from_decoder(decoder)
             .map_err(|e| e.to_string())?
@@ -536,6 +545,24 @@ mod tests {
     use super::*;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn portal_image_checks_rgba_size_before_decoding() -> Result<(), Box<dyn std::error::Error>> {
+        let file = tempfile::NamedTempFile::new()?;
+        // The grayscale source fits the decoder limit but would expand to
+        // 366 MiB in RGBA8. The allocation check must precede pixel decoding.
+        let mut image = ::png::Encoder::new(file.as_file(), 12_000, 8_000);
+        image.set_color(::png::ColorType::Grayscale);
+        let mut png = image.write_header()?;
+        png.write_chunk(::png::chunk::IDAT, &[0x78, 0x01])?;
+        png.finish()?;
+        let result = Image::load(file.path());
+        assert_eq!(
+            result.err().as_deref(),
+            Some("Capture exceeds the 256 MiB limit")
+        );
+        Ok(())
+    }
 
     #[test]
     fn sdr_capture_converts_bgra_with_stride_and_rejects_short_frames() -> TestResult {

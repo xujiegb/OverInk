@@ -99,13 +99,13 @@ impl Passthrough {
             },
         };
 
+        if self.applied == Some((window.id, pass)) {
+            return Ok(());
+        }
         let identity = window
             .win32_hwnd()
             .ok_or("No Win32 window handle")?
             .as_non_null();
-        if self.applied == Some((window.id, pass)) {
-            return Ok(());
-        }
         self.invalidate();
         let hwnd = HWND(identity.as_ptr());
         // SAFETY: The HWND is borrowed from the live SDL window; the typed

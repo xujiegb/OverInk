@@ -27,7 +27,8 @@ fn fan(m: &mut Mesh, p: Point, r: f32, arc: [f32; 2], n: u32, aa: f32, alpha: f3
     let stride = if aa > 0. { 2 } else { 1 };
     for i in 0..=n {
         let angle = arc[0] + i as f32 / n as f32 * arc[1];
-        let point = |radius| [p.x + radius * angle.cos(), p.y + radius * angle.sin()];
+        let (sin, cos) = angle.sin_cos();
+        let point = |radius| [p.x + radius * cos, p.y + radius * sin];
         add(m, point(r), alpha);
         if aa > 0. {
             add(m, point(r + aa), 0.);
@@ -69,13 +70,13 @@ fn ribbon(m: &mut Mesh, p: &[Point], range: RangeInclusive<usize>, stroke: &Stro
     let base = m.vertices.len() as u32;
     let stride = if aa > 0. { 4 } else { 2 };
     let (first, last) = (*range.start(), *range.end());
+    let direction = |a: Point, b: Point| {
+        let length = a.dist(b).max(1e-6);
+        [(b.x - a.x) / length, (b.y - a.y) / length]
+    };
+    let mut d0 = direction(p[first.saturating_sub(1)], p[first]);
     for i in range {
         let q = p[i];
-        let direction = |a: Point, b: Point| {
-            let l = a.dist(b).max(1e-6);
-            [(b.x - a.x) / l, (b.y - a.y) / l]
-        };
-        let d0 = direction(p[i.saturating_sub(1)], q);
         let d1 = direction(q, p[(i + 1).min(p.len() - 1)]);
         let (normal, factor) = if i == 0 {
             ([-d1[1], d1[0]], 1.)
@@ -92,6 +93,7 @@ fn ribbon(m: &mut Mesh, p: &[Point], range: RangeInclusive<usize>, stroke: &Stro
                 (n, 1. / dot)
             }
         };
+        d0 = d1;
         let r = stroke.radius(q) * factor;
         let alpha = coverage(q);
         let lanes = [(r + aa, 0.), (r, alpha), (-r, alpha), (-r - aa, 0.)];

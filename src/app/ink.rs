@@ -455,7 +455,6 @@ struct StrokePainter {
     mesh: Mesh,
     samples: Vec<Point>,
     vertices: Vec<SDL_Vertex>,
-    tile_indices: Vec<u32>,
     queued: usize,
     paper: Option<Texture>,
     paper_unavailable: bool,
@@ -538,6 +537,7 @@ impl StrokePainter {
                 stroke,
                 index,
                 app.input.pending_erasures.values(),
+                &app.history,
                 |style, points, bounds| {
                     if result.is_ok()
                         && region.is_none_or(|region| {
@@ -582,8 +582,13 @@ impl StrokePainter {
         let vertex_grain = !use_paper;
         geometry::prepare_samples(stroke, points, vertex_grain, &mut self.samples);
         let rgb = frame.color.map(stroke.color.output_rgb(renderer.extended));
-        if stroke.tool == Tool::Marker && self.ensure_marker_texture(renderer) {
-            return self.marker(frame, rgb, stroke, region, white);
+        if stroke.tool == Tool::Marker && (!self.marker_unavailable || self.marker_mask.is_some()) {
+            let Some(rect) = marker_rect(frame, &self.samples, stroke.width + frame.aa) else {
+                return Ok(());
+            };
+            if self.ensure_marker_texture(renderer, [rect.w, rect.h]) {
+                return self.marker(frame, rgb, stroke, region, white, rect);
+            }
         }
         with_color_scale(renderer, white, || {
             let margin = stroke.max_radius() * 2. + frame.aa;
@@ -655,16 +660,24 @@ impl StrokePainter {
         self.paper.is_some()
     }
 
-    fn ensure_marker_texture(&mut self, renderer: &Renderer) -> bool {
-        if self.marker_mask.is_none() && !self.marker_unavailable {
-            self.marker_mask = Texture::new(
+    fn ensure_marker_texture(&mut self, renderer: &Renderer, required: [i32; 2]) -> bool {
+        let required =
+            required.map(|size| (size.min(MARKER_TILE) as u32).next_power_of_two() as i32);
+        let current = self
+            .marker_mask
+            .as_ref()
+            .map_or([0; 2], Texture::dimensions);
+        if !self.marker_unavailable && (current[0] < required[0] || current[1] < required[1]) {
+            let size = std::array::from_fn(|axis| current[axis].max(required[axis]));
+            match Texture::new(
                 renderer,
-                [MARKER_TILE; 2],
+                size,
                 SDL_TEXTUREACCESS_TARGET,
                 SDL_BLENDMODE_BLEND,
-            )
-            .ok();
-            self.marker_unavailable = self.marker_mask.is_none();
+            ) {
+                Ok(mask) => self.marker_mask = Some(mask),
+                Err(_) => self.marker_unavailable = true,
+            }
         }
         self.marker_mask.is_some()
     }
@@ -676,42 +689,18 @@ impl StrokePainter {
         stroke: &Stroke,
         region: Option<Bounds>,
         white: f32,
+        rect: SDL_Rect,
     ) -> Result<(), String> {
         let renderer = frame.renderer;
-        // The ribbon can extend up to twice the largest radius at a join.
+        let mask = self.marker_mask.as_ref().ok_or("Missing marker mask")?;
+        let [tile_width, tile_height] = mask.dimensions();
+        let [left, top, right, bottom] = [rect.x, rect.y, rect.x + rect.w, rect.y + rect.h];
         let margin = stroke.width + frame.aa;
-        let bounds = self.samples.iter().fold(
-            [
-                f32::INFINITY,
-                f32::INFINITY,
-                f32::NEG_INFINITY,
-                f32::NEG_INFINITY,
-            ],
-            |bounds, p| {
-                [
-                    bounds[0].min(p.x - margin),
-                    bounds[1].min(p.y - margin),
-                    bounds[2].max(p.x + margin),
-                    bounds[3].max(p.y + margin),
-                ]
-            },
-        );
-        let left = ((bounds[0] * frame.scale[0]).floor() as i32).clamp(0, frame.pixels[0]);
-        let top = ((bounds[1] * frame.scale[1]).floor() as i32).clamp(0, frame.pixels[1]);
-        let right = ((bounds[2] * frame.scale[0]).ceil() as i32).clamp(0, frame.pixels[0]);
-        let bottom = ((bounds[3] * frame.scale[1]).ceil() as i32).clamp(0, frame.pixels[1]);
-        if left >= right || top >= bottom {
-            return Ok(());
-        }
-        self.marker_mask
-            .as_ref()
-            .ok_or("Missing marker mask")?
-            .set_modulation(rgb, stroke.opacity)?;
-        let tiled = right - left > MARKER_TILE || bottom - top > MARKER_TILE;
-        for y in (top..bottom).step_by(MARKER_TILE as usize) {
-            for x in (left..right).step_by(MARKER_TILE as usize) {
-                let width = (right - x).min(MARKER_TILE) as f32;
-                let height = (bottom - y).min(MARKER_TILE) as f32;
+        mask.set_modulation(rgb, stroke.opacity)?;
+        for y in (top..bottom).step_by(tile_height as usize) {
+            for x in (left..right).step_by(tile_width as usize) {
+                let width = (right - x).min(tile_width) as f32;
+                let height = (bottom - y).min(tile_height) as f32;
                 let tile = Bounds {
                     min: [x as f32 / frame.scale[0], y as f32 / frame.scale[1]],
                     max: [
@@ -725,53 +714,42 @@ impl StrokePainter {
                 // The mask accumulates coverage at full opacity. Tint it and
                 // apply the marker's opacity only once, after intersections.
                 self.queued = 0;
-                renderer.with_target(
-                    self.marker_mask.as_ref().ok_or("Missing marker mask")?,
-                    || {
-                        renderer.set_render_scale([1., 1.])?;
-                        renderer.clear([1., 1., 1., 0.])?;
-                        let visible = |a, b| {
-                            region.is_none_or(|region| {
-                                region.intersects(Bounds::between(a, b).padded(margin))
-                            })
-                        };
-                        for range in geometry::mesh_ranges(&self.samples, MESH_SEGMENTS, visible) {
-                            self.mesh
-                                .update(stroke, &self.samples, range, frame.aa, false);
-                            set_vertices(
-                                &self.mesh,
-                                &mut self.vertices,
-                                [1.; 3],
-                                1.,
-                                frame.scale,
-                                [x, y],
-                                false,
-                            );
-                            let indices = if tiled {
-                                self.tile_indices.clear();
-                                for triangle in self.mesh.indices.as_chunks::<3>().0 {
-                                    let p = triangle.map(|i| self.vertices[i as usize].position);
-                                    if p.iter().any(|p| p.x >= 0.)
-                                        && p.iter().any(|p| p.x < width)
-                                        && p.iter().any(|p| p.y >= 0.)
-                                        && p.iter().any(|p| p.y < height)
-                                    {
-                                        self.tile_indices.extend(triangle);
-                                    }
-                                }
-                                self.tile_indices.as_slice()
-                            } else {
-                                self.mesh.indices.as_slice()
-                            };
-                            #[cfg(test)]
-                            {
-                                self.submitted_indices += indices.len();
-                            }
-                            submit(renderer, None, &self.vertices, indices, &mut self.queued)?;
+                renderer.with_target(mask, || {
+                    renderer.set_render_scale([1., 1.])?;
+                    renderer.clear([1., 1., 1., 0.])?;
+                    let visible = |a, b| {
+                        // Include the ribbon's miter and antialias coverage.
+                        // Only tessellate segments that can reach this tile.
+                        let bounds = Bounds::between(a, b).padded(margin);
+                        tile.intersects(bounds)
+                            && region.is_none_or(|region| region.intersects(bounds))
+                    };
+                    for range in geometry::mesh_ranges(&self.samples, MESH_SEGMENTS, visible) {
+                        self.mesh
+                            .update(stroke, &self.samples, range, frame.aa, false);
+                        set_vertices(
+                            &self.mesh,
+                            &mut self.vertices,
+                            [1.; 3],
+                            1.,
+                            frame.scale,
+                            [x, y],
+                            false,
+                        );
+                        #[cfg(test)]
+                        {
+                            self.submitted_indices += self.mesh.indices.len();
                         }
-                        Ok(())
-                    },
-                )?;
+                        submit(
+                            renderer,
+                            None,
+                            &self.vertices,
+                            &self.mesh.indices,
+                            &mut self.queued,
+                        )?;
+                    }
+                    Ok(())
+                })?;
                 self.queued = 0;
                 let src = SDL_FRect {
                     x: 0.,
@@ -795,15 +773,28 @@ impl StrokePainter {
                     }
                 };
                 with_color_scale(renderer, white, || {
-                    self.marker_mask
-                        .as_ref()
-                        .ok_or("Missing marker mask")?
-                        .draw(renderer, Some(&src), Some(&dst))
+                    mask.draw(renderer, Some(&src), Some(&dst))
                 })?;
             }
         }
         Ok(())
     }
+}
+
+fn marker_rect(frame: &Frame<'_>, samples: &[Point], margin: f32) -> Option<SDL_Rect> {
+    let bounds = Bounds::points(samples.iter().copied())?.padded(margin);
+    let [left, top] = std::array::from_fn(|i| {
+        ((bounds.min[i] * frame.scale[i]).floor() as i32).clamp(0, frame.pixels[i])
+    });
+    let [right, bottom] = std::array::from_fn(|i| {
+        ((bounds.max[i] * frame.scale[i]).ceil() as i32).clamp(0, frame.pixels[i])
+    });
+    (left < right && top < bottom).then_some(SDL_Rect {
+        x: left,
+        y: top,
+        w: right - left,
+        h: bottom - top,
+    })
 }
 
 fn set_vertices(
@@ -974,6 +965,41 @@ mod tests {
         app.history.clear();
         canvas.history(&mut ink, &mut app)?;
         assert!(ink.layer.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn small_marker_mask_grows_with_its_pixel_bounds() -> TestResult {
+        let canvas = TestCanvas::new([1280, 160])?;
+        let mut app = app();
+        let mut ink = Ink::default();
+        commit(
+            &mut app,
+            Tool::Marker,
+            [255, 200, 0],
+            &[[24., 35.], [110., 35.]],
+        );
+        canvas.history(&mut ink, &mut app)?;
+        assert_eq!(
+            ink.painter.marker_mask.as_ref().map(Texture::dimensions),
+            Some([128, 32])
+        );
+        let small = canvas.pixel(64, 35)?;
+        assert!(small[3] > 0);
+
+        commit(
+            &mut app,
+            Tool::Marker,
+            [255, 200, 0],
+            &[[16., 80.], [1250., 80.]],
+        );
+        canvas.history(&mut ink, &mut app)?;
+        assert_eq!(
+            ink.painter.marker_mask.as_ref().map(Texture::dimensions),
+            Some([1024, 32])
+        );
+        assert_eq!(canvas.pixel(64, 35)?, small);
+        assert_eq!(canvas.pixel(1026, 80)?, canvas.pixel(1080, 80)?);
         Ok(())
     }
 

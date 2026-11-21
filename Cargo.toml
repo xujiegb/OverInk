@@ -43,6 +43,7 @@ libloading = "0.9"
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 async-channel = "2"
 futures-lite = "2"
+x11rb = { version = "0.13.2", default-features = false, features = ["randr"] }
 zbus = { version = "=6.3.0", default-features = false, features = ["default-rt", "proxy", "service"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
