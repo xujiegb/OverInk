@@ -1572,7 +1572,8 @@ fn handle_screenshot_event(
                 && !canvas.pending_screenshot_input()
                 && screenshot.ignores_hover_motion(event, mouse_released()))
         {
-            canvas.invalidate_if(canvas.screenshot_event(event), DirtyReason::Overlay);
+            let changed = canvas.screenshot_event(event);
+            canvas.invalidate_if(changed, DirtyReason::Overlay);
         }
     }
     false
