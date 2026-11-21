@@ -16,7 +16,7 @@ impl App {
         ui: &mut Ui,
         canvas: &Canvas,
         video: &str,
-        freeze_unavailable: Option<Text>,
+        freeze_unavailable: impl FnOnce() -> Option<Text>,
         mark: egui::TextureId,
         dialog_open: bool,
     ) -> Commands {
@@ -96,7 +96,7 @@ impl App {
                                             Panel::Colors => self.palette(ui, &mut commands),
                                             Panel::Background => self.background_controls(
                                                 ui,
-                                                freeze_unavailable,
+                                                freeze_unavailable(),
                                                 &mut commands,
                                             ),
                                             Panel::Settings => self.settings(
@@ -660,7 +660,7 @@ impl App {
                 if self.preferences.screenshot_folder.is_some()
                     && ui.button(tr.text("Use Downloads")).clicked()
                 {
-                    self.preferences.screenshot_folder = None;
+                    commands.reset_screenshot_folder = true;
                     commands.preferences = true;
                 }
             });

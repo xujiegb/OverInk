@@ -119,6 +119,7 @@ struct Commands {
     font_remove: Option<String>,
     screenshot: bool,
     screenshot_folder: bool,
+    reset_screenshot_folder: bool,
 }
 
 enum HistoryAction {
@@ -1579,8 +1580,20 @@ fn handle_screenshot_event(
     false
 }
 
-fn update_preferences(app: &mut App, previous: Preferences, multi_supported: bool) -> bool {
-    if let Err(error) = app.preferences.save(&state_dir().join("ui.json")) {
+fn update_preferences(
+    app: &mut App,
+    path: &Path,
+    mut previous: Preferences,
+    reset_screenshot_folder: bool,
+    multi_supported: bool,
+) -> bool {
+    if reset_screenshot_folder {
+        previous.screenshot_folder = app.preferences.screenshot_folder.take();
+    }
+    if let Err(error) = app.preferences.save(path) {
+        if !reset_screenshot_folder {
+            previous.screenshot_folder = app.preferences.screenshot_folder.take();
+        }
         app.preferences = previous;
         app.status = text("Settings save failed").detail(error);
         return false;
@@ -2269,7 +2282,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                     DialogKind::ScreenshotFolder => match result {
                         Ok(Some(path)) => {
                             let previous = app.preferences.screenshot_folder.replace(path);
-                            if let Err(error) = app.preferences.save(&state_dir().join("ui.json")) {
+                            if let Err(error) = app.preferences.save(&preferences_path) {
                                 app.preferences.screenshot_folder = previous;
                                 app.status = text("Settings save failed").detail(error);
                             }
@@ -2606,9 +2619,6 @@ fn run_inner(options: Options) -> Result<(), String> {
                     canvas.invalidate(DirtyReason::Content);
                 }
             }
-            // Capturing the whole preferences object every event-loop tick
-            // copies the optional screenshot path even when the toolbar is
-            // idle. Only UI processing can mutate settings this iteration.
             #[cfg(target_os = "linux")]
             let previous_wayland = app.preferences.wayland;
             let mut previous_preferences = None;
@@ -2623,7 +2633,7 @@ fn run_inner(options: Options) -> Result<(), String> {
             {
                 let panel = app.panel.filter(|_| !app.picking).or(app.panel_retiring);
                 if panel == Some(crate::toolbar::Panel::Settings) {
-                    previous_preferences = Some(app.preferences.clone());
+                    previous_preferences = Some(app.preferences.panel_values());
                 }
                 toolbar_dirty = false;
                 if app.input.text.editing()
@@ -2646,9 +2656,11 @@ fn run_inner(options: Options) -> Result<(), String> {
                         ui,
                         canvas,
                         &video,
-                        canvas
-                            .snapshot_mode(&video, xwayland, options.sdr)
-                            .unavailable(),
+                        || {
+                            canvas
+                                .snapshot_mode(&video, xwayland, options.sdr)
+                                .unavailable()
+                        },
                         mark.id(),
                         file_dialog.pending(),
                     )
@@ -2738,11 +2750,14 @@ fn run_inner(options: Options) -> Result<(), String> {
             if cmd.preferences {
                 toolbar_dirty = true;
                 if let Some(previous_preferences) = previous_preferences
-                    && app.preferences != previous_preferences
+                    && (cmd.reset_screenshot_folder
+                        || app.preferences.panel_values() != previous_preferences)
                 {
                     topology_dirty |= update_preferences(
                         &mut app,
+                        &preferences_path,
                         previous_preferences,
+                        cmd.reset_screenshot_folder,
                         !wayland && !options.smoke,
                     );
                 }
@@ -3510,6 +3525,28 @@ mod touch_tests {
             },
         };
         app.event(&event, SDL_WindowID(1), [800., 600.]);
+    }
+
+    #[test]
+    fn failed_preference_save_restores_the_custom_screenshot_folder() {
+        use crate::appearance::ThemeMode;
+
+        let mut a = app();
+        let folder = Path::new("Custom screenshots");
+        a.preferences.screenshot_folder = Some(folder.to_path_buf());
+        for reset_screenshot_folder in [false, true] {
+            let previous = a.preferences.panel_values();
+            a.preferences.theme = ThemeMode::Dark;
+            update_preferences(
+                &mut a,
+                Path::new(""),
+                previous,
+                reset_screenshot_folder,
+                false,
+            );
+            assert_eq!(a.preferences.theme, ThemeMode::System);
+            assert_eq!(a.preferences.screenshot_folder.as_deref(), Some(folder));
+        }
     }
 
     #[test]
