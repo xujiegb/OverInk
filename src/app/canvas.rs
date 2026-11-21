@@ -11,7 +11,20 @@ use crate::{
     native::{self, Passthrough},
     sdl::*,
 };
-use std::{collections::BTreeSet, time::Instant};
+use std::{
+    collections::BTreeSet,
+    time::{Duration, Instant},
+};
+
+/// Only measured when OVERINK_PROFILE is set. Separates layout, geometry
+/// upload and Metal present from the ink compositor without per-frame logging.
+#[derive(Default)]
+pub(super) struct CanvasPaintTimings {
+    pub ink: Duration,
+    pub text_ui: Duration,
+    pub text_geometry: Duration,
+    pub present: Duration,
+}
 
 pub(super) struct Canvas {
     // SDL destroys textures with their renderer, and renderers with their window.
@@ -394,6 +407,7 @@ impl Canvas {
         keep_editor_open: bool,
         theme: egui::Theme,
         extended_ink_budget: usize,
+        mut timings: Option<&mut CanvasPaintTimings>,
     ) -> Result<bool, String> {
         let text_repaint = self.text_repaint_at.is_some_and(|at| Instant::now() >= at);
         if !self.visible || !(options.smoke || self.dirty || self.animation || text_repaint) {
@@ -424,6 +438,7 @@ impl Canvas {
                     }
                 }
                 page.history.set_size(self.window.size());
+                let ink_started = timings.as_ref().map(|_| Instant::now());
                 let scale = if page.hidden {
                     self.render.begin(&self.window, [0.; 4])?
                 } else {
@@ -436,16 +451,33 @@ impl Canvas {
                         extended_ink_budget,
                     )?
                 };
-                if let Some(output) = self.text_frame(page, theme, keep_editor_open)
+                if let (Some(start), Some(metrics)) = (ink_started, timings.as_deref_mut()) {
+                    metrics.ink += start.elapsed();
+                }
+
+                let text_started = timings.as_ref().map(|_| Instant::now());
+                let text_output = self.text_frame(page, theme, keep_editor_open);
+                if let (Some(start), Some(metrics)) = (text_started, timings.as_deref_mut()) {
+                    metrics.text_ui += start.elapsed();
+                }
+                let mesh_started = timings.as_ref().map(|_| Instant::now());
+                if let Some(output) = text_output
                     && let Some(gui) = self.text.as_mut()
                 {
                     gui.paint(&self.render, &self.window, &self.color, output)?;
                 }
+                if let (Some(start), Some(metrics)) = (mesh_started, timings.as_deref_mut()) {
+                    metrics.text_geometry += start.elapsed();
+                }
+                let present_started = timings.as_ref().map(|_| Instant::now());
                 if page.hidden {
                     self.render.present()?;
                 } else {
                     self.ink
                         .present(page, &self.render, &self.window, &self.color, scale)?;
+                }
+                if let (Some(start), Some(metrics)) = (present_started, timings.as_deref_mut()) {
+                    metrics.present += start.elapsed();
                 }
                 self.animation = !page.input.laser.is_empty();
                 Ok(())
