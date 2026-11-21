@@ -688,6 +688,12 @@ impl Canvas {
         if !app.touch_enabled {
             self.cancel_text_touches(app);
         }
+        if cached_static_text && !interactive && !screenshot {
+            // Mouse/pass-through mode needs no interactive egui run at all:
+            // the committed labels already live in the retained GPU layer.
+            self.stop_text_input(false);
+            return None;
+        }
         if app.history.text_boxes().is_empty() && !editing && !screenshot {
             self.stop_text_input(interactive);
             return None;
