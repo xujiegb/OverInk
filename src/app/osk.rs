@@ -41,6 +41,9 @@ pub(super) struct Keyboard {
     emoji_display: f32,
     // Actual egui Window geometry for pointer-focus protection and resizing.
     window_rect: Option<Rect>,
+    // Last hovered key is stable while the mouse stays inside its bounds.
+    // Avoid re-tessellating the fullscreen canvas for intra-key motion.
+    hovered_key: Option<Rect>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -323,6 +326,13 @@ impl Keyboard {
     pub fn close(&mut self) {
         self.visible = false;
         self.window_rect = None;
+        self.hovered_key = None;
+    }
+
+    pub fn motion_inside_hovered_key(&self, pos: egui::Pos2) -> bool {
+        self.visible
+            && self.page != Page::Emoji
+            && self.hovered_key.is_some_and(|rect| rect.contains(pos))
     }
     /// Usable keyboard area, shared by initial placement and egui's
     /// draggable-window constraint. Do not maintain separate Dock insets
@@ -391,6 +401,7 @@ impl Keyboard {
     }
 
     pub fn ui(&mut self, ui: &mut Ui, rect: Rect, scale: f32) -> Option<Action> {
+        self.hovered_key = None;
         let dark = Color32::from_rgb(43, 43, 47);
         ui.painter().rect_filled(rect, CornerRadius::same(12), dark);
         let margin = (8. * scale).max(3.);
@@ -479,7 +490,7 @@ impl Keyboard {
         pressed
     }
 
-    fn key(&self, ui: &mut Ui, rect: Rect, key: Key) -> bool {
+    fn key(&mut self, ui: &mut Ui, rect: Rect, key: Key) -> bool {
         if rect.width() < 2. || rect.height() < 2. {
             return false;
         }
@@ -539,31 +550,28 @@ impl Keyboard {
         response.widget_info(|| {
             egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), description)
         });
-        let hovered = ui.ctx().animate_bool_with_time(
-            response.id.with("osk-hover"),
-            response.hovered(),
-            0.11,
-        );
-        let down = ui.ctx().animate_bool_with_time(
-            response.id.with("osk-pressed"),
-            response.is_pointer_button_down_on(),
-            0.075,
-        );
-        if hovered > 0.01 || down > 0.01 {
+        let hovered = response.hovered();
+        let down = response.is_pointer_button_down_on();
+        if hovered {
+            self.hovered_key = Some(rect);
+        }
+        // Static feedback avoids scheduling animation frames on every
+        // pointer crossing, which otherwise repaints every text and ink layer.
+        if hovered || down {
             ui.painter().rect_stroke(
                 rect.shrink(1.),
                 CornerRadius::same(9),
                 Stroke::new(
-                    (1.5 * hovered + 2. * down).max(0.5),
-                    Color32::from_white_alpha((110. * hovered + 110. * down).min(220.) as u8),
+                    if down { 3.5 } else { 1.5 },
+                    Color32::from_white_alpha(if down { 220 } else { 110 }),
                 ),
                 StrokeKind::Inside,
             );
-            if down > 0.01 {
+            if down {
                 ui.painter().rect_filled(
                     rect.shrink(2.),
                     CornerRadius::same(8),
-                    Color32::from_white_alpha((45. * down) as u8),
+                    Color32::from_white_alpha(45),
                 );
             }
         }
@@ -956,6 +964,20 @@ mod tests {
             Some(Action::Insert(Cow::Borrowed("1"))),
         );
         assert!(ctx.memory(|memory| memory.has_focus(editor_id)));
+    }
+
+    #[test]
+    fn stable_hover_only_ignores_motion_inside_the_same_regular_key() {
+        let mut keyboard = Keyboard::default();
+        keyboard.open();
+        keyboard.hovered_key = Some(Rect::from_min_max(pos2(30., 40.), pos2(90., 80.)));
+        assert!(keyboard.motion_inside_hovered_key(pos2(50., 60.)));
+        assert!(!keyboard.motion_inside_hovered_key(pos2(91., 60.)));
+        keyboard.page = Page::Emoji;
+        assert!(!keyboard.motion_inside_hovered_key(pos2(50., 60.)));
+        keyboard.page = Page::Letters;
+        keyboard.close();
+        assert!(!keyboard.motion_inside_hovered_key(pos2(50., 60.)));
     }
 
     #[test]

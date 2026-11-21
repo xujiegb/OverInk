@@ -1426,6 +1426,7 @@ struct PerformanceCounts {
     toolbar_frames: u64,
     canvas_frames: u64,
     precise_waits: u64,
+    frame_sleeps: u64,
     event_waits: u64,
 }
 
@@ -1460,7 +1461,7 @@ impl PerformanceMonitor {
         }
         let c = &self.counts;
         eprintln!(
-            "OverInk perf/5s: loops={} events={} window={} motion={} toolbar={} canvas={} precise_wait={} event_wait={}",
+            "OverInk perf/5s: loops={} events={} window={} motion={} toolbar={} canvas={} precise_wait={} frame_sleep={} event_wait={}",
             c.iterations,
             c.events,
             c.window_events,
@@ -1468,6 +1469,7 @@ impl PerformanceMonitor {
             c.toolbar_frames,
             c.canvas_frames,
             c.precise_waits,
+            c.frame_sleeps,
             c.event_waits,
         );
         self.started = Instant::now();
@@ -3074,14 +3076,15 @@ fn run_inner(options: Options) -> Result<(), String> {
                     }
                     pacer.wait();
                 } else {
-                    // SDL_DelayPrecise busy-waits near the deadline. For
-                    // static ink, mouse passthrough and ordinary UI frames,
-                    // sleep in SDL's event wait instead: input wakes us early
-                    // and the event stays queued for the next poll.
+                    // The event queue can wake SDL_WaitEventTimeout on every
+                    // mouse-motion packet. That bypasses frame pacing and
+                    // can present hundreds of full-canvas frames per second.
+                    // A scheduler sleep caps ordinary UI refresh to the
+                    // selected frame rate without SDL_DelayPrecise spinning.
                     if let Some(monitor) = &mut performance {
-                        monitor.counts.event_waits += 1;
+                        monitor.counts.frame_sleeps += 1;
                     }
-                    wait_for_events(pacer.delay(Instant::now()));
+                    std::thread::sleep(pacer.delay(Instant::now()));
                 }
             } else if (!toolbar_dirty || toolbar_hidden) && !topology_dirty {
                 let mut timeout = if app.wait_for_mouse_up
