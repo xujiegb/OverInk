@@ -1427,6 +1427,10 @@ struct PerformanceCounts {
     toolbar_ui_time: Duration,
     toolbar_present_time: Duration,
     canvas_present_time: Duration,
+    canvas_ink_time: Duration,
+    canvas_text_ui_time: Duration,
+    canvas_text_geometry_time: Duration,
+    canvas_swap_time: Duration,
     precise_waits: u64,
     frame_sleeps: u64,
     event_waits: u64,
@@ -1463,7 +1467,7 @@ impl PerformanceMonitor {
         }
         let c = &self.counts;
         eprintln!(
-            "OverInk perf/5s: loops={} events={} window={} motion={} toolbar={} canvas={} toolbar_ui_ms={:.1} toolbar_present_ms={:.1} canvas_present_ms={:.1} precise_wait={} frame_sleep={} event_wait={}",
+            "OverInk perf/5s: loops={} events={} window={} motion={} toolbar={} canvas={} toolbar_ui_ms={:.1} toolbar_present_ms={:.1} canvas_present_ms={:.1} ink_ms={:.1} text_ui_ms={:.1} text_geometry_ms={:.1} swap_ms={:.1} precise_wait={} frame_sleep={} event_wait={}",
             c.iterations,
             c.events,
             c.window_events,
@@ -1473,6 +1477,10 @@ impl PerformanceMonitor {
             c.toolbar_ui_time.as_secs_f64() * 1000.,
             c.toolbar_present_time.as_secs_f64() * 1000.,
             c.canvas_present_time.as_secs_f64() * 1000.,
+            c.canvas_ink_time.as_secs_f64() * 1000.,
+            c.canvas_text_ui_time.as_secs_f64() * 1000.,
+            c.canvas_text_geometry_time.as_secs_f64() * 1000.,
+            c.canvas_swap_time.as_secs_f64() * 1000.,
             c.precise_waits,
             c.frame_sleeps,
             c.event_waits,
@@ -2867,6 +2875,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                     let selection_before = app.input.text.selected;
                     extended_ink_bytes -= canvas.extended_ink_bytes();
                     let canvas_started = performance.as_ref().map(|_| Instant::now());
+                    let mut breakdown = canvas::CanvasPaintTimings::default();
                     let painted = canvas.paint(
                         &mut app,
                         &options,
@@ -2874,6 +2883,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                         keep_editor_open,
                         theme,
                         ink::MAX_EXTENDED_INK_TEXTURE_BYTES.saturating_sub(extended_ink_bytes),
+                        performance.as_ref().map(|_| &mut breakdown),
                     )?;
                     presented |= painted;
                     if painted && let Some(monitor) = &mut performance {
@@ -2881,6 +2891,10 @@ fn run_inner(options: Options) -> Result<(), String> {
                         if let Some(start) = canvas_started {
                             monitor.counts.canvas_present_time += start.elapsed();
                         }
+                        monitor.counts.canvas_ink_time += breakdown.ink;
+                        monitor.counts.canvas_text_ui_time += breakdown.text_ui;
+                        monitor.counts.canvas_text_geometry_time += breakdown.text_geometry;
+                        monitor.counts.canvas_swap_time += breakdown.present;
                     }
                     if screenshot && painted {
                         app.screenshot.presented();
