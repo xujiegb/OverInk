@@ -448,7 +448,21 @@ impl App {
         if !editing && self.input.text.selected.is_none() {
             gui.clear_events();
         }
-        let first = gui.raw.events.len();
+        // Gui folds adjacent SDL motion packets into the final egui position.
+        // Revisit the last event when it was replaced, otherwise the editor
+        // would miss drag endpoints and hover transitions inside one batch.
+        let first = if ty == SDL_EVENT_MOUSE_MOTION
+            && mouse_motion_event(event).is_some_and(|motion| {
+                motion.windowID == window
+                    && motion.which != SDL_TOUCH_MOUSEID
+                    && motion.which != SDL_PEN_MOUSEID
+            })
+            && matches!(gui.raw.events.last(), Some(Event::PointerMoved(_)))
+        {
+            gui.raw.events.len().saturating_sub(1)
+        } else {
+            gui.raw.events.len()
+        };
         let mut changed = false;
         if ty == SDL_EVENT_FINGER_CANCELED
             && gui.primary_touch() == crate::touch::key_from_event(event)
