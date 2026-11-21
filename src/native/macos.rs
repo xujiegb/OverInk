@@ -5,6 +5,7 @@ pub use pencil::PencilModeMonitor;
 
 use crate::sdl::*;
 use objc2::{Encoding, RefEncode, msg_send, runtime::AnyObject};
+use objc2_core_foundation::{CFRetained, CFType};
 use std::{ffi::c_void, ptr::NonNull};
 
 pub fn configure_metal(raw: NonNull<SDL_Renderer>, extended: bool) {
@@ -19,11 +20,7 @@ pub fn configure_metal(raw: NonNull<SDL_Renderer>, extended: bool) {
     #[link(name = "CoreGraphics", kind = "framework")]
     unsafe extern "C" {
         static kCGColorSpaceSRGB: Option<NonNull<c_void>>;
-        fn CGColorSpaceCreateWithName(name: NonNull<c_void>) -> Option<NonNull<c_void>>;
-    }
-    #[link(name = "CoreFoundation", kind = "framework")]
-    unsafe extern "C" {
-        fn CFRelease(value: NonNull<c_void>);
+        fn CGColorSpaceCreateWithName(name: NonNull<c_void>) -> Option<NonNull<CFType>>;
     }
     unsafe {
         let layer = SDL_GetRenderMetalLayer(raw.as_ptr()).cast::<AnyObject>();
@@ -35,8 +32,9 @@ pub fn configure_metal(raw: NonNull<SDL_Renderer>, extended: bool) {
             && let Some(name) = kCGColorSpaceSRGB
             && let Some(srgb) = CGColorSpaceCreateWithName(name)
         {
-            let _: () = msg_send![layer, setColorspace: srgb.as_ptr().cast::<ColorSpace>()];
-            CFRelease(srgb);
+            let srgb = CFRetained::from_raw(srgb);
+            let color_space = CFRetained::as_ptr(&srgb).cast::<ColorSpace>();
+            let _: () = msg_send![layer, setColorspace: color_space.as_ptr()];
         }
     }
 }

@@ -383,37 +383,97 @@ impl Default for Document {
 }
 
 struct HistoryStep {
-    strokes: Vec<Arc<Stroke>>,
-    text_boxes: Vec<Arc<TextBox>>,
+    change: HistoryChange,
     bytes: usize,
-    point_count: usize,
+}
+
+enum HistoryChange {
+    Page(Vec<Arc<Stroke>>, Vec<Arc<TextBox>>, usize),
+    StrokeTail(usize, Vec<Arc<Stroke>>, usize),
+    Erasure(Vec<StrokeRangeEdit>, Vec<Arc<Stroke>>, usize),
+    Text(TextEdit),
+    Group(Vec<HistoryStep>),
+}
+
+struct StrokeRangeEdit {
+    first: usize,
+    remove: usize,
+    insert: usize,
+}
+
+enum TextEdit {
+    Insert(usize, Arc<TextBox>),
+    Remove(usize),
+    Replace(usize, Arc<TextBox>),
 }
 
 impl HistoryStep {
     fn new(strokes: Vec<Arc<Stroke>>, text_boxes: Vec<Arc<TextBox>>, point_count: usize) -> Self {
-        let entries = strokes.capacity() * size_of::<Arc<Stroke>>();
-        let bytes = strokes.iter().fold(entries, |total, stroke| {
+        let bytes = text_boxes.iter().fold(
+            stroke_history_bytes(&strokes)
+                .saturating_add(text_boxes.capacity() * size_of::<Arc<TextBox>>()),
+            |total, item| total.saturating_add(text_history_bytes(item)),
+        );
+        Self {
+            change: HistoryChange::Page(strokes, text_boxes, point_count),
+            bytes,
+        }
+    }
+
+    fn tail(first: usize, strokes: Vec<Arc<Stroke>>, point_count: usize) -> Self {
+        Self {
+            bytes: stroke_history_bytes(&strokes),
+            change: HistoryChange::StrokeTail(first, strokes, point_count),
+        }
+    }
+
+    fn erasure(edits: Vec<StrokeRangeEdit>, strokes: Vec<Arc<Stroke>>, point_count: usize) -> Self {
+        Self {
+            bytes: stroke_history_bytes(&strokes)
+                .saturating_add(edits.capacity() * size_of::<StrokeRangeEdit>()),
+            change: HistoryChange::Erasure(edits, strokes, point_count),
+        }
+    }
+
+    fn text(edit: TextEdit) -> Self {
+        let bytes = match &edit {
+            TextEdit::Insert(_, item) | TextEdit::Replace(_, item) => text_history_bytes(item),
+            TextEdit::Remove(_) => 0,
+        };
+        Self {
+            change: HistoryChange::Text(edit),
+            bytes,
+        }
+    }
+
+    fn group(edits: Vec<Self>) -> Self {
+        let bytes = edits
+            .iter()
+            .fold(edits.capacity() * size_of::<Self>(), |bytes, edit| {
+                bytes.saturating_add(edit.bytes)
+            });
+        Self {
+            change: HistoryChange::Group(edits),
+            bytes,
+        }
+    }
+}
+
+fn stroke_history_bytes(strokes: &Vec<Arc<Stroke>>) -> usize {
+    strokes.iter().fold(
+        strokes.capacity() * size_of::<Arc<Stroke>>(),
+        |total, stroke| {
             total.saturating_add(
                 size_of::<Stroke>()
                     + 2 * size_of::<usize>()
                     + stroke.points.capacity() * size_of::<Point>(),
             )
-        });
-        let bytes = text_boxes.iter().fold(
-            bytes.saturating_add(text_boxes.capacity() * size_of::<Arc<TextBox>>()),
-            |total, item| {
-                total.saturating_add(
-                    size_of::<TextBox>() + 2 * size_of::<usize>() + item.text.capacity(),
-                )
-            },
-        );
-        Self {
-            strokes,
-            text_boxes,
-            bytes,
-            point_count,
-        }
-    }
+        },
+    )
+}
+
+fn text_history_bytes(item: &TextBox) -> usize {
+    size_of::<TextBox>() + 2 * size_of::<usize>() + item.text.capacity()
 }
 
 #[derive(Default)]
@@ -512,15 +572,6 @@ impl History {
         !self.redo.is_empty()
     }
 
-    fn snapshot(&mut self) {
-        // Committed strokes are immutable, so snapshots share their samples.
-        self.record_undo(HistoryStep::new(
-            self.doc.strokes.clone(),
-            self.doc.text_boxes.clone(),
-            self.point_count,
-        ));
-    }
-
     fn record_undo(&mut self, step: HistoryStep) {
         self.redo.clear();
         self.undo.push_back(step);
@@ -570,14 +621,15 @@ impl History {
     }
 
     pub fn append(&mut self, strokes: impl Iterator<Item = Stroke>) {
-        let mut strokes = strokes.peekable();
-        if strokes.peek().is_some() {
-            self.snapshot();
-            self.doc.strokes.extend(
-                strokes
-                    .inspect(|stroke| self.point_count += stroke.points.len())
-                    .map(Arc::new),
-            );
+        let first = self.doc.strokes.len();
+        let previous_points = self.point_count;
+        self.doc.strokes.extend(
+            strokes
+                .inspect(|stroke| self.point_count += stroke.points.len())
+                .map(Arc::new),
+        );
+        if self.doc.strokes.len() != first {
+            self.record_undo(HistoryStep::tail(first, Vec::new(), previous_points));
             self.append_revision = self.append_revision.wrapping_add(1);
         }
     }
@@ -597,21 +649,14 @@ impl History {
             }
             return None;
         }
-        self.put_text_box(index, value, true)
+        self.put_text_box(index, value, false)
     }
 
-    fn put_text_box(
-        &mut self,
-        index: Option<usize>,
-        value: TextBox,
-        record: bool,
-    ) -> Option<usize> {
+    fn put_text_box(&mut self, index: Option<usize>, value: TextBox, merge: bool) -> Option<usize> {
         if let Some(index) = index {
             if **self.doc.text_boxes.get(index)? != value {
-                if record {
-                    self.snapshot();
-                }
-                self.doc.text_boxes[index] = Arc::new(value);
+                let old = std::mem::replace(&mut self.doc.text_boxes[index], Arc::new(value));
+                self.record_text_edit(TextEdit::Replace(index, old), merge);
                 self.text_revision = self.text_revision.wrapping_add(1);
             }
             return Some(index);
@@ -620,27 +665,44 @@ impl History {
         if index >= MAX_TEXT_BOXES {
             return None;
         }
-        if record {
-            self.snapshot();
-        }
+        self.record_text_edit(TextEdit::Remove(index), merge);
         self.doc.text_boxes.push(Arc::new(value));
         self.text_revision = self.text_revision.wrapping_add(1);
         Some(index)
+    }
+
+    fn record_text_edit(&mut self, edit: TextEdit, merge: bool) {
+        let step = HistoryStep::text(edit);
+        if !merge {
+            self.record_undo(step);
+        } else if let Some(previous) = self.undo.pop_back() {
+            let mut edits = match previous.change {
+                HistoryChange::Group(edits) => edits,
+                _ => vec![previous],
+            };
+            edits.push(step);
+            self.record_undo(HistoryStep::group(edits));
+        }
     }
 
     pub fn remove_text_box(&mut self, index: usize) -> bool {
         if index >= self.doc.text_boxes.len() {
             return false;
         }
-        self.snapshot();
-        self.doc.text_boxes.remove(index);
+        let old = self.doc.text_boxes.remove(index);
+        self.record_undo(HistoryStep::text(TextEdit::Insert(index, old)));
         self.text_revision = self.text_revision.wrapping_add(1);
         true
     }
 
-    fn apply_step(&mut self, step: HistoryStep) -> HistoryStep {
-        let strokes = std::mem::replace(&mut self.doc.strokes, step.strokes);
-        let text_boxes = std::mem::replace(&mut self.doc.text_boxes, step.text_boxes);
+    fn swap_page(
+        &mut self,
+        strokes: Vec<Arc<Stroke>>,
+        text_boxes: Vec<Arc<TextBox>>,
+        points: usize,
+    ) -> HistoryStep {
+        let strokes = std::mem::replace(&mut self.doc.strokes, strokes);
+        let text_boxes = std::mem::replace(&mut self.doc.text_boxes, text_boxes);
         if text_boxes.len() != self.doc.text_boxes.len()
             || text_boxes
                 .iter()
@@ -649,7 +711,7 @@ impl History {
         {
             self.text_revision = self.text_revision.wrapping_add(1);
         }
-        let point_count = std::mem::replace(&mut self.point_count, step.point_count);
+        let point_count = std::mem::replace(&mut self.point_count, points);
         if strokes.len() != self.doc.strokes.len()
             || strokes
                 .iter()
@@ -659,8 +721,73 @@ impl History {
             self.invalidate_stroke_bounds();
             self.ink_revision = self.ink_revision.wrapping_add(1);
         }
-        self.changed = true;
         HistoryStep::new(strokes, text_boxes, point_count)
+    }
+
+    fn apply_step(&mut self, step: HistoryStep) -> HistoryStep {
+        self.changed = true;
+        match step.change {
+            HistoryChange::Page(strokes, text, points) => self.swap_page(strokes, text, points),
+            HistoryChange::StrokeTail(first, strokes, points) => {
+                let removed = self.doc.strokes.split_off(first);
+                self.doc.strokes.extend(strokes);
+                // The index for the unchanged prefix remains valid.
+                let bounds = self.stroke_index.get_mut();
+                bounds.bounds.truncate(first);
+                bounds.blocks.retain(|&index, _| index < first);
+                self.ink_revision = self.ink_revision.wrapping_add(1);
+                let old_points = std::mem::replace(&mut self.point_count, points);
+                HistoryStep::tail(first, removed, old_points)
+            }
+            HistoryChange::Erasure(mut edits, strokes, points) => {
+                let mut old = std::mem::take(&mut self.doc.strokes).into_iter();
+                let mut replacement = strokes.into_iter();
+                let mut inverse = Vec::new();
+                let mut consumed = 0;
+                for edit in &mut edits {
+                    self.doc
+                        .strokes
+                        .extend(old.by_ref().take(edit.first - consumed));
+                    consumed = edit.first + edit.remove;
+                    edit.first = self.doc.strokes.len();
+                    inverse.extend(old.by_ref().take(edit.remove));
+                    self.doc
+                        .strokes
+                        .extend(replacement.by_ref().take(edit.insert));
+                    std::mem::swap(&mut edit.remove, &mut edit.insert);
+                }
+                self.doc.strokes.extend(old);
+                self.invalidate_stroke_bounds();
+                self.ink_revision = self.ink_revision.wrapping_add(1);
+                let old_points = std::mem::replace(&mut self.point_count, points);
+                HistoryStep::erasure(edits, inverse, old_points)
+            }
+            HistoryChange::Text(edit) => {
+                let inverse = match edit {
+                    TextEdit::Insert(index, item) => {
+                        self.doc.text_boxes.insert(index, item);
+                        TextEdit::Remove(index)
+                    }
+                    TextEdit::Remove(index) => {
+                        TextEdit::Insert(index, self.doc.text_boxes.remove(index))
+                    }
+                    TextEdit::Replace(index, item) => TextEdit::Replace(
+                        index,
+                        std::mem::replace(&mut self.doc.text_boxes[index], item),
+                    ),
+                };
+                self.text_revision = self.text_revision.wrapping_add(1);
+                HistoryStep::text(inverse)
+            }
+            HistoryChange::Group(edits) => {
+                let inverse = edits
+                    .into_iter()
+                    .rev()
+                    .map(|edit| self.apply_step(edit))
+                    .collect();
+                HistoryStep::group(inverse)
+            }
+        }
     }
 
     pub fn undo(&mut self) {
@@ -681,9 +808,10 @@ impl History {
         }
     }
     pub fn clear_with_text(&mut self, draft: Option<(Option<usize>, TextBox)>) {
-        // The draft belongs to the single snapshot of the page being cleared.
+        // Undoing clear restores the draft. Undoing the preceding action
+        // also rolls back the draft, as with a full-page snapshot.
         if let Some((index, item)) = draft.filter(|(_, item)| !item.text.trim().is_empty()) {
-            self.put_text_box(index, item, false);
+            self.put_text_box(index, item, true);
         }
         self.clear();
     }
@@ -801,6 +929,46 @@ mod tests {
     }
 
     #[test]
+    fn undo_append_and_text_edits_keep_only_the_change() -> Result<(), String> {
+        let mut history = History::default();
+        let strokes = std::iter::repeat_with(|| Arc::new(stroke()))
+            .take(20_000)
+            .collect();
+        history.set_document(
+            Document {
+                strokes,
+                ..Document::default()
+            },
+            true,
+        );
+        let original = Arc::clone(&history.strokes()[0]);
+        history.append(std::iter::once(stroke()));
+        let step = history.undo.back().ok_or("missing stroke undo")?;
+        assert!(
+            matches!(&step.change, HistoryChange::StrokeTail(20_000, strokes, 40_000) if strokes.is_empty())
+        );
+        assert_eq!(step.bytes, 0);
+
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800., 600.));
+        let mut draft = TextBox::new(egui::pos2(160., 100.), screen, InkColor::default(), 1.);
+        draft.text = "Draft restored by clear".into();
+        history.clear_with_text(Some((None, draft)));
+        history.undo();
+        assert_eq!(history.strokes().len(), 20_001);
+        assert_eq!(history.text_boxes().len(), 1);
+        history.undo();
+        assert_eq!(history.strokes().len(), 20_000);
+        assert!(history.text_boxes().is_empty());
+        assert!(Arc::ptr_eq(&history.strokes()[0], &original));
+        history.redo();
+        assert_eq!(history.strokes().len(), 20_001);
+        assert_eq!(history.text_boxes().len(), 1);
+        history.redo();
+        assert!(history.document().is_empty());
+        Ok(())
+    }
+
+    #[test]
     fn point_span_rejects_out_of_bounds_without_reusing_end_point() {
         let point = |x| Point::new(x, 0., 1., [0.; 2]);
         let samples = [point(10.), point(20.)];
@@ -835,17 +1003,18 @@ mod tests {
         let mut history = History::default();
         for stack in [&mut history.undo, &mut history.redo] {
             stack.push_back(HistoryStep {
-                strokes: Vec::new(),
-                text_boxes: Vec::new(),
+                change: HistoryChange::Page(Vec::new(), Vec::new(), 0),
                 bytes: MAX_HISTORY_BYTES / 2,
-                point_count: 0,
             });
         }
         history.undo.push_back(step);
         history.trim_steps();
         assert_eq!(history.undo.len(), 1);
         assert_eq!(history.redo.len(), 1);
-        assert_eq!(history.undo[0].strokes.len(), 1);
+        assert!(matches!(
+            &history.undo[0].change,
+            HistoryChange::Page(strokes, _, _) if strokes.len() == 1
+        ));
     }
     #[test]
     fn all_8192_pressure_steps_remain_distinct() {

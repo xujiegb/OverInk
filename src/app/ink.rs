@@ -8,7 +8,7 @@ use crate::{
     controller::Rect,
     geometry::{self, Mesh},
     icc::ColorManager,
-    model::{Bounds, Erasure, Point, PointSpan, Stroke, Tool},
+    model::{Bounds, Erasure, History, Point, PointSpan, Stroke, Tool},
     sdl::*,
 };
 use std::time::{Duration, Instant};
@@ -26,6 +26,7 @@ pub(super) const MAX_EXTENDED_INK_TEXTURE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_EAGER_SDR_BYTES: usize = 4 * 1024 * 1024;
 const CACHE_STROKES: usize = 64;
 const CACHE_POINTS: usize = 8192;
+const CACHE_ALIGNMENT: i32 = 128;
 const REPLAY_WINDOW: Duration = Duration::from_millis(900);
 const EXPENSIVE_REPLAY: Duration = Duration::from_micros(500);
 const CACHE_IDLE_EXPIRY: Duration = Duration::from_secs(20);
@@ -51,12 +52,73 @@ struct LayerRevision {
 
 struct CommittedLayer {
     texture: Texture,
-    size: [i32; 2],
+    region: SDL_Rect,
+    surface: [i32; 2],
     format: SDL_PixelFormat,
     revision: Option<LayerRevision>,
     count: usize,
     append: u64,
     erase: u64,
+}
+
+#[derive(Default)]
+struct InkBounds {
+    revision: [u64; 2],
+    count: usize,
+    bounds: Option<Bounds>,
+}
+
+impl InkBounds {
+    fn get(&mut self, history: &History) -> Option<Bounds> {
+        let revision = [history.ink_revision(), history.erase_revision()];
+        if self.revision != revision || self.count > history.strokes().len() {
+            *self = Self {
+                revision,
+                ..Self::default()
+            };
+        }
+        if self.count != history.strokes().len() {
+            let paths = history.stroke_bounds();
+            for (stroke, bounds) in history.strokes()[self.count..]
+                .iter()
+                .zip(&paths[self.count..])
+            {
+                if let Some(bounds) = bounds {
+                    Bounds::include(
+                        &mut self.bounds,
+                        bounds.path.padded(stroke.max_radius() * 2.),
+                    );
+                }
+            }
+            self.count = history.strokes().len();
+        }
+        self.bounds
+    }
+}
+
+#[derive(Clone, Copy)]
+struct InkClip {
+    bounds: Bounds,
+    origin: [i32; 2],
+}
+
+impl InkClip {
+    fn new(region: SDL_Rect, target: SDL_Rect, scale: [f32; 2]) -> Self {
+        Self {
+            bounds: Bounds {
+                min: [region.x as f32 / scale[0], region.y as f32 / scale[1]],
+                max: [
+                    (region.x + region.w) as f32 / scale[0],
+                    (region.y + region.h) as f32 / scale[1],
+                ],
+            },
+            origin: [target.x, target.y],
+        }
+    }
+
+    fn intersects(self, bounds: Bounds) -> bool {
+        self.bounds.intersects(bounds)
+    }
 }
 
 #[derive(Default)]
@@ -85,6 +147,7 @@ pub(super) struct Ink {
     unavailable_at: Option<([i32; 2], SDL_PixelFormat)>,
     painter: StrokePainter,
     activity: ReplayActivity,
+    bounds: InkBounds,
 }
 
 impl Ink {
@@ -92,6 +155,7 @@ impl Ink {
         self.layer = None;
         self.unavailable_at = None;
         self.activity = ReplayActivity::default();
+        self.bounds = InkBounds::default();
     }
 
     pub fn release_idle_layer(&mut self, now: Instant) {
@@ -117,7 +181,7 @@ impl Ink {
     pub fn extended_bytes(&self) -> usize {
         self.layer.as_ref().map_or(0, |layer| {
             if layer.format == SDL_PIXELFORMAT_RGBA64_FLOAT {
-                layer_bytes(layer.size, layer.format)
+                layer_bytes([layer.region.w, layer.region.h], layer.format)
             } else {
                 0
             }
@@ -243,8 +307,9 @@ impl Ink {
             && self
                 .layer
                 .as_ref()
-                .is_some_and(|layer| uses_adaptive_cache(layer.size, layer.format))
+                .is_some_and(|layer| uses_adaptive_cache(layer.surface, layer.format))
             && !document_needs_layer(app)
+            && !app.input.pending_erasures.values().any(Erasure::has_edits)
         {
             self.invalidate_layer();
         }
@@ -263,30 +328,24 @@ impl Ink {
         } else {
             SDL_PIXELFORMAT_RGBA32
         };
-        let target = (frame.pixels, format);
-        if renderer.extended
-            && (renderer.name != "metal"
-                || layer_bytes(frame.pixels, format) > frame.extended_budget)
-        {
+        if renderer.extended && renderer.name != "metal" {
             self.invalidate_layer();
             return self.painter.history(frame, app, 0, None, 1.);
         }
         if self
             .layer
             .as_ref()
-            .is_some_and(|layer| (layer.size, layer.format) != target)
+            .is_some_and(|layer| layer.surface != frame.pixels || layer.format != format)
         {
             self.invalidate_layer();
-        }
-        if self.unavailable_at == Some(target) {
-            return self.painter.history(frame, app, 0, None, 1.);
         }
         if uses_adaptive_cache(frame.pixels, format) && !document_needs_layer(app) {
             if let Some(last_use) = &mut self.activity.last_use {
                 // A paint during a long drawing gesture is activity too.
                 *last_use = Instant::now();
             } else if self.layer.is_none() {
-                let started = (!app.input.has_contacts()).then(Instant::now);
+                let started = (!app.input.has_contacts() && app.input.pending_erasures.is_empty())
+                    .then(Instant::now);
                 self.painter.history(frame, app, 0, None, 1.)?;
                 if let Some(started) = started {
                     let now = Instant::now();
@@ -295,14 +354,38 @@ impl Ink {
                 return Ok(());
             }
         } else {
-            // A large document or an active eraser needs its layer independent
-            // of hover activity; an old idle deadline must not evict it.
+            // A busy document keeps its layer independent of hover activity.
             self.activity = ReplayActivity::default();
+        }
+        let Some(region) = self
+            .bounds
+            .get(&app.history)
+            .and_then(|bounds| cache_region(frame, bounds))
+        else {
+            self.invalidate_layer();
+            return Ok(());
+        };
+        let size = [region.w, region.h];
+        let target = (size, format);
+        if renderer.extended && layer_bytes(size, format) > frame.extended_budget {
+            self.layer = None;
+            self.activity = ReplayActivity::default();
+            return self.painter.history(frame, app, 0, None, 1.);
+        }
+        if self
+            .layer
+            .as_ref()
+            .is_some_and(|layer| layer.region != region)
+        {
+            self.layer = None;
+        }
+        if self.unavailable_at == Some(target) {
+            return self.painter.history(frame, app, 0, None, 1.);
         }
         if self.layer.is_none() {
             match Texture::with_format(
                 renderer,
-                frame.pixels,
+                size,
                 SDL_TEXTUREACCESS_TARGET,
                 SDL_BLENDMODE_BLEND_PREMULTIPLIED,
                 format,
@@ -310,7 +393,8 @@ impl Ink {
                 Ok(texture) => {
                     self.layer = Some(CommittedLayer {
                         texture,
-                        size: frame.pixels,
+                        region,
+                        surface: frame.pixels,
                         format,
                         revision: None,
                         count: 0,
@@ -355,8 +439,14 @@ impl Ink {
                     } else {
                         1.
                     };
-                    self.painter
-                        .repaint_layer(frame, app, rebuild, first, damage, white)
+                    self.painter.repaint_layer(
+                        frame,
+                        app,
+                        region,
+                        (!rebuild).then_some(first),
+                        damage,
+                        white,
+                    )
                 });
                 self.painter.queued = 0;
                 if result.is_err() {
@@ -369,8 +459,14 @@ impl Ink {
 
             // The history was painted with source-over into a transparent
             // texture, so its stored RGB is already premultiplied by alpha.
+            let destination = SDL_FRect {
+                x: region.x as f32 / frame.scale[0],
+                y: region.y as f32 / frame.scale[1],
+                w: region.w as f32 / frame.scale[0],
+                h: region.h as f32 / frame.scale[1],
+            };
             return with_color_scale(renderer, revision_white_scale(layer), || {
-                layer.texture.draw(renderer, None, None)
+                layer.texture.draw(renderer, None, Some(&destination))
             });
         }
         self.painter.history(frame, app, 0, None, 1.)
@@ -393,9 +489,24 @@ fn uses_adaptive_cache(pixels: [i32; 2], format: SDL_PixelFormat) -> bool {
 }
 
 fn document_needs_layer(app: &App) -> bool {
-    app.history.strokes().len() >= CACHE_STROKES
-        || app.history.point_count() >= CACHE_POINTS
-        || app.input.pending_erasures.values().any(Erasure::has_edits)
+    app.history.strokes().len() >= CACHE_STROKES || app.history.point_count() >= CACHE_POINTS
+}
+
+fn cache_region(frame: &Frame<'_>, bounds: Bounds) -> Option<SDL_Rect> {
+    let pixels = dirty_rect(frame, bounds)?;
+    let left = pixels.x / CACHE_ALIGNMENT * CACHE_ALIGNMENT;
+    let top = pixels.y / CACHE_ALIGNMENT * CACHE_ALIGNMENT;
+    let align_end = |end: i32, limit: i32| {
+        ((i64::from(end) + i64::from(CACHE_ALIGNMENT) - 1) / i64::from(CACHE_ALIGNMENT)
+            * i64::from(CACHE_ALIGNMENT))
+        .min(i64::from(limit)) as i32
+    };
+    Some(SDL_Rect {
+        x: left,
+        y: top,
+        w: align_end(pixels.x + pixels.w, frame.pixels[0]) - left,
+        h: align_end(pixels.y + pixels.h, frame.pixels[1]) - top,
+    })
 }
 
 fn revision_white_scale(layer: &CommittedLayer) -> f32 {
@@ -469,40 +580,54 @@ impl StrokePainter {
         &mut self,
         frame: &Frame<'_>,
         app: &App,
-        rebuild: bool,
-        first: usize,
+        target: SDL_Rect,
+        first: Option<usize>,
         damage: Option<Bounds>,
         white: f32,
     ) -> Result<(), String> {
         let renderer = frame.renderer;
-        if rebuild {
-            set_scale(renderer, frame.scale)?;
+        set_scale(renderer, [1.; 2])?;
+        let clip = Some(InkClip::new(target, target, frame.scale));
+        let Some(first) = first else {
             renderer.clear([0.; 4])?;
-            return self.history(frame, app, 0, None, white);
-        }
+            return self.history(frame, app, 0, clip, white);
+        };
         if first < app.history.strokes().len() {
-            set_scale(renderer, frame.scale)?;
-            self.history(frame, app, first, None, white)?;
+            self.history(frame, app, first, clip, white)?;
         }
         if let Some(region) = damage.and_then(|bounds| dirty_rect(frame, bounds)) {
-            // Set the clip in device pixels, including at fractional scale.
-            set_scale(renderer, [1.; 2])?;
-            renderer.try_set_clip_rect(Some(&region))?;
+            let left = region.x.max(target.x);
+            let top = region.y.max(target.y);
+            let width = (region.x + region.w).min(target.x + target.w) - left;
+            let height = (region.y + region.h).min(target.y + target.h) - top;
+            if width <= 0 || height <= 0 {
+                return Ok(());
+            }
+            let local = SDL_Rect {
+                x: left - target.x,
+                y: top - target.y,
+                w: width,
+                h: height,
+            };
+            renderer.try_set_clip_rect(Some(&local))?;
             let rect = SDL_FRect {
-                x: region.x as f32,
-                y: region.y as f32,
-                w: region.w as f32,
-                h: region.h as f32,
+                x: local.x as f32,
+                y: local.y as f32,
+                w: local.w as f32,
+                h: local.h as f32,
             };
-            let bounds = Bounds {
-                min: [rect.x / frame.scale[0], rect.y / frame.scale[1]],
-                max: [
-                    (rect.x + rect.w) / frame.scale[0],
-                    (rect.y + rect.h) / frame.scale[1],
-                ],
-            };
+            let clip = InkClip::new(
+                SDL_Rect {
+                    x: left,
+                    y: top,
+                    w: width,
+                    h: height,
+                },
+                target,
+                frame.scale,
+            );
             let result = clear_rect(renderer, rect)
-                .and_then(|()| self.history(frame, app, 0, Some(bounds), white));
+                .and_then(|()| self.history(frame, app, 0, Some(clip), white));
             let reset_clip = renderer.try_set_clip_rect(None);
             result.and(reset_clip)?;
         }
@@ -514,7 +639,7 @@ impl StrokePainter {
         frame: &Frame<'_>,
         app: &App,
         first: usize,
-        region: Option<Bounds>,
+        region: Option<InkClip>,
         white: f32,
     ) -> Result<(), String> {
         let bounds = region.map(|_| app.history.stroke_bounds());
@@ -571,7 +696,7 @@ impl StrokePainter {
         frame: &Frame<'_>,
         stroke: &Stroke,
         points: PointSpan<'_>,
-        region: Option<Bounds>,
+        region: Option<InkClip>,
         white: f32,
     ) -> Result<(), String> {
         if points.is_empty() || stroke.opacity <= 0. {
@@ -612,7 +737,7 @@ impl StrokePainter {
                     rgb,
                     stroke.opacity,
                     scale,
-                    [0; 2],
+                    region.map_or([0; 2], |region| region.origin),
                     !vertex_grain,
                 );
                 #[cfg(test)]
@@ -687,7 +812,7 @@ impl StrokePainter {
         frame: &Frame<'_>,
         rgb: [f32; 3],
         stroke: &Stroke,
-        region: Option<Bounds>,
+        region: Option<InkClip>,
         white: f32,
         rect: SDL_Rect,
     ) -> Result<(), String> {
@@ -757,10 +882,10 @@ impl StrokePainter {
                     w: width,
                     h: height,
                 };
-                let dst = if region.is_some() {
+                let dst = if let Some(region) = region {
                     SDL_FRect {
-                        x: x as f32,
-                        y: y as f32,
+                        x: (x - region.origin[0]) as f32,
+                        y: (y - region.origin[1]) as f32,
                         w: width,
                         h: height,
                     }
@@ -1085,7 +1210,7 @@ mod tests {
     }
 
     #[test]
-    fn a_single_stroke_on_a_4k_sdr_canvas_draws_without_a_full_surface_cache() -> TestResult {
+    fn a_single_stroke_and_local_erase_on_4k_do_not_allocate_a_layer() -> TestResult {
         let canvas = TestCanvas::new([3840, 2160])?;
         let mut app = app();
         let mut ink = Ink::default();
@@ -1093,6 +1218,59 @@ mod tests {
         canvas.history(&mut ink, &mut app)?;
         assert!(canvas.pixel(50, 20)?[0] > 0);
         assert!(ink.layer.is_none());
+        app.erase_sample(1, Point::new(50., 20., 1., [0.; 2]));
+        canvas.history(&mut ink, &mut app)?;
+        assert_eq!(canvas.pixel(50, 20)?[3], 0);
+        assert!(ink.layer.is_none());
+        app.reset_contacts();
+        canvas.history(&mut ink, &mut app)?;
+        assert!(canvas.pixel(50, 20)?[0] > 0);
+        Ok(())
+    }
+
+    #[test]
+    fn dense_local_ink_on_4k_keeps_a_small_offset_layer() -> TestResult {
+        let canvas = TestCanvas::new([3840, 2160])?;
+        let mut app = app();
+        let mut ink = Ink::default();
+        for i in 0..CACHE_STROKES {
+            let y = 145. + i as f32;
+            commit(
+                &mut app,
+                Tool::Marker,
+                [255, 200, 0],
+                &[[530., y], [610., y]],
+            );
+        }
+        canvas.history(&mut ink, &mut app)?;
+        let region = ink
+            .layer
+            .as_ref()
+            .ok_or("expected cropped ink layer")?
+            .region;
+        assert_eq!(
+            [region.x, region.y, region.w, region.h],
+            [512, 128, 128, 128]
+        );
+        assert_eq!(
+            layer_bytes([region.w, region.h], SDL_PIXELFORMAT_RGBA32),
+            64 * 1024
+        );
+        let drawn = canvas.pixel(570, 172)?;
+        assert!(drawn[3] > 0);
+        assert_eq!(canvas.pixel(58, 44)?, [0; 4]);
+        app.erase_sample(1, Point::new(570., 172., 1., [0.; 2]));
+        canvas.history(&mut ink, &mut app)?;
+        assert_eq!(canvas.pixel(570, 172)?, [0; 4]);
+        app.commit_erase(1);
+        canvas.history(&mut ink, &mut app)?;
+        assert_eq!(canvas.pixel(570, 172)?, [0; 4]);
+        app.history.undo();
+        canvas.history(&mut ink, &mut app)?;
+        assert_eq!(canvas.pixel(570, 172)?, drawn);
+        app.history.redo();
+        canvas.history(&mut ink, &mut app)?;
+        assert_eq!(canvas.pixel(570, 172)?, [0; 4]);
         Ok(())
     }
 
@@ -1119,7 +1297,7 @@ mod tests {
             ink.release_unused_layer(&app);
             assert_eq!(
                 ink.extended_bytes(),
-                layer_bytes([320, 160], SDL_PIXELFORMAT_RGBA64_FLOAT)
+                layer_bytes([320, 128], SDL_PIXELFORMAT_RGBA64_FLOAT)
             );
 
             if id == 1 {

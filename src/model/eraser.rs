@@ -1,6 +1,6 @@
 use super::{
-    Bounds, History, MAX_POINTS, Point, PointSpan, STROKE_BLOCK_SEGMENTS, Stroke, StrokeBounds,
-    Tool, segment_distance,
+    Bounds, History, HistoryStep, MAX_POINTS, Point, PointSpan, STROKE_BLOCK_SEGMENTS, Stroke,
+    StrokeBounds, StrokeRangeEdit, Tool, segment_distance,
 };
 use std::{borrow::Cow, collections::BTreeMap, mem, ops::Range, sync::Arc};
 
@@ -461,8 +461,8 @@ impl Erasure {
         {
             Bounds::include(damage, bounds);
         }
-        history.snapshot();
         history.erase_revision = history.erase_revision.wrapping_add(1);
+        let previous_points = history.point_count;
         let committed_points = history.point_count as i64 + self.delta;
         debug_assert!((0..=MAX_POINTS as i64).contains(&committed_points));
         history.point_count = committed_points as usize;
@@ -471,6 +471,8 @@ impl Erasure {
         let mut saved = mem::take(geometry);
         let mut bounds = saved.bounds.into_iter();
         let mut remap = Vec::new();
+        let mut undo_edits = Vec::with_capacity(self.edits.len());
+        let mut undo_strokes = Vec::with_capacity(self.edits.len());
         for (index, stroke) in previous.into_iter().enumerate() {
             let old_bounds = bounds.next();
             let start = history.doc.strokes.len();
@@ -491,6 +493,12 @@ impl Erasure {
                     }
                     history.doc.strokes.push(stroke);
                 });
+                undo_edits.push(StrokeRangeEdit {
+                    first: start,
+                    remove: history.doc.strokes.len() - start,
+                    insert: 1,
+                });
+                undo_strokes.push(stroke);
             } else {
                 if let Some(bounds) = old_bounds {
                     geometry.bounds.push(bounds);
@@ -506,6 +514,11 @@ impl Erasure {
                 remap.push((start..history.doc.strokes.len(), replaced));
             }
         }
+        history.record_undo(HistoryStep::erasure(
+            undo_edits,
+            undo_strokes,
+            previous_points,
+        ));
         for draft in other_drafts
             .values_mut()
             .filter(|draft| !draft.edits.is_empty())

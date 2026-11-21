@@ -391,6 +391,10 @@ impl Keyboard {
         self.window_rect.unwrap_or(fallback)
     }
 
+    pub fn displayed_rect(&self) -> Option<Rect> {
+        self.window_rect
+    }
+
     pub fn set_window_rect(&mut self, rect: Rect) {
         self.window_rect = Some(rect);
     }

@@ -1,10 +1,10 @@
 #![forbid(unsafe_code)]
 
-use super::{App, osk};
+use super::{App, canvas::StaticTextPaint, osk};
 use crate::{
     appearance::text,
     color::{InkColor, PRESETS},
-    fonts::TextFonts,
+    fonts::{LayoutRuns, TextFonts},
     gui::Gui,
     model::{History, MAX_TEXT_BOXES, MAX_TEXT_CHARS, TextBox, Tool},
     sdl::{SDL_Event, SDL_WindowID},
@@ -193,6 +193,7 @@ impl MenuPointer {
 
 struct Draft {
     item: TextBox,
+    layout: LayoutRuns,
     focus: bool,
     had_input_focus: bool,
     cursor: Option<CCursorRange>,
@@ -328,6 +329,7 @@ impl TextInput {
         self.selected = index;
         self.draft = Some(Draft {
             committed: item.text.clone(),
+            layout: LayoutRuns::default(),
             cursor: Some(CCursorRange::one(CCursor::new(item.text.chars().count()))),
             scroll_offset: item.scroll_offset,
             item,
@@ -425,6 +427,7 @@ impl App {
 
         let ty = event_type(event);
         let editing = self.input.text.editing();
+        let canvas = Rect::from_min_size(Pos2::ZERO, Vec2::from(size));
         let mut osk_hover_motion = false;
         if ty == SDL_EVENT_MOUSE_MOTION {
             let Some(motion) = real_mouse_motion(event).filter(|m| m.windowID == window) else {
@@ -448,8 +451,12 @@ impl App {
                     .iter()
                     .any(|e| matches!(e, Event::PointerButton { pressed: true, .. }))
             {
-                // Pending input can invalidate the previously highlighted control.
-                if over_control && gui.raw.events.is_empty() {
+                // Do send the first move away from any control so egui
+                // clears its highlight, tooltip or text cursor.
+                if gui.raw.events.is_empty()
+                    && (over_control
+                        || osk_visible && self.idle_annotation_motion(gui, canvas, pos))
+                {
                     return false;
                 }
                 osk_hover_motion = osk_visible;
@@ -474,7 +481,6 @@ impl App {
         }
         let primary_touch = gui.primary_touch();
         gui.event(event, window, size);
-        let canvas = Rect::from_min_size(Pos2::ZERO, Vec2::from(size));
         // Resolve keyboard clicks before filtering raw egui input. On macOS
         // and Windows the native pointer sequence can cross an overlay
         // layer or focus boundary without registering an egui Button click.
@@ -558,6 +564,32 @@ impl App {
             self.input.text.touch_origin = None;
         }
         changed
+    }
+
+    fn idle_annotation_motion(&self, gui: &Gui, canvas: Rect, position: Pos2) -> bool {
+        let state = &self.input.text;
+        if gui.primary_touch().is_some() {
+            return false;
+        }
+        let Some(draft) = &state.draft else {
+            return false;
+        };
+        let Some(keyboard) = state.osk.displayed_rect() else {
+            return false;
+        };
+        let previous = gui.ctx.input(|input| input.pointer.hover_pos());
+        let menus = self.text_menus(canvas);
+        let popup = self.text_context_rect(canvas);
+        let interactive = |point| {
+            // Include the resize handles on the keyboard frame.
+            keyboard
+                .expand(8. * self.input.canvas_units)
+                .contains(point)
+                || draft.item.rect().contains(point)
+                || menus.is_some_and(|menus| menus.contains(point))
+                || popup.is_some_and(|popup| popup.contains(point))
+        };
+        !interactive(position) && previous.is_none_or(|point| !interactive(point))
     }
 
     pub(super) fn text_pointer(&mut self, event: &Event, size: [f32; 2]) -> bool {
@@ -1293,9 +1325,9 @@ impl App {
     /// Draw immutable committed labels into a retained GPU texture. The
     /// selected label is rendered by the dynamic editor instead, preventing
     /// old text from showing behind a drag/resize/IME draft.
-    pub(super) fn static_text_ui(&self, ui: &Ui, skip_selected: Option<usize>) {
+    pub(super) fn static_text_ui(&self, ui: &Ui, skip_selected: Option<usize>, region: Rect) {
         for (index, item) in self.history.text_boxes().iter().enumerate() {
-            if skip_selected != Some(index) {
+            if skip_selected != Some(index) && region.intersect(item.text_rect()).is_positive() {
                 draw_text_box(ui, &self.text_fonts, item);
             }
         }
@@ -1307,7 +1339,7 @@ impl App {
         interactive: bool,
         composing: bool,
         keep_editor_open: bool,
-        cached_static_text: bool,
+        cached_static_text: &StaticTextPaint,
     ) {
         self.input.text.hovered_control = None;
         let draft = self.input.text.draft.as_ref();
@@ -1323,7 +1355,7 @@ impl App {
                 draw_text_box(ui, &self.text_fonts, preview.unwrap_or(item));
             }
         };
-        if cached_static_text {
+        if matches!(cached_static_text, StaticTextPaint::Cached) {
             if let Some(item) = selected.and_then(|index| self.history.text_boxes().get(index)) {
                 draw_selected(item);
             }
@@ -1331,7 +1363,7 @@ impl App {
             for (index, item) in self.history.text_boxes().iter().enumerate() {
                 if selected == Some(index) {
                     draw_selected(item);
-                } else {
+                } else if !cached_static_text.contains(item.text_rect()) {
                     draw_text_box(ui, &self.text_fonts, item);
                 }
             }
@@ -1702,8 +1734,9 @@ impl App {
         child.set_clip_rect(text_rect.intersect(ui.clip_rect()));
         child.spacing_mut().item_spacing = Vec2::ZERO;
         let mut layouter = |ui: &Ui, value: &dyn egui::TextBuffer, wrap: f32| {
-            self.text_fonts
-                .layout(ui, value.as_str(), font_size, color, wrap)
+            draft
+                .layout
+                .layout(&self.text_fonts, ui, value.as_str(), font_size, color, wrap)
         };
         let mut scroll = egui::ScrollArea::vertical()
             .id_salt("annotation-scroll")
@@ -1968,7 +2001,13 @@ mod tests {
         gui.preserve_embedded_keyboard_focus(app.input.text.osk_visible());
         let input = gui.raw.take();
         let output = gui.ctx.run_ui(input, |ui| {
-            app.text_ui(ui, true, composing, toolbar_focused, false)
+            app.text_ui(
+                ui,
+                true,
+                composing,
+                toolbar_focused,
+                &StaticTextPaint::Uncached,
+            )
         });
         output.drop_without_applying_deltas();
     }
@@ -2747,7 +2786,7 @@ mod tests {
     }
 
     #[test]
-    fn native_mouse_pen_and_finger_clicks_open_the_selected_text_keyboard() {
+    fn native_mouse_pen_and_finger_clicks_open_the_selected_text_keyboard() -> Result<(), String> {
         for device in ["mouse", "pen", "finger"] {
             let mut app = app();
             app.use_tool(Tool::Select);
@@ -2758,7 +2797,7 @@ mod tests {
             app.input.text.selected = Some(0);
             let point = app
                 .keyboard_button_rect(canvas)
-                .expect("selected item has keyboard button")
+                .ok_or("selected item has no keyboard button")?
                 .center();
             let window = SDL_WindowID(1);
             let mut gui = Gui::new();
@@ -2815,10 +2854,11 @@ mod tests {
             }
             assert!(app.input.text.editing(), "{device}");
         }
+        Ok(())
     }
 
     #[test]
-    fn keyboard_click_requires_release_inside_and_does_not_create_text_box() {
+    fn keyboard_click_requires_release_inside_and_does_not_create_text_box() -> Result<(), String> {
         let mut app = app();
         app.use_tool(Tool::Select);
         let canvas = Rect::from_min_size(Pos2::ZERO, Vec2::from(SIZE));
@@ -2826,7 +2866,9 @@ mod tests {
         item.text = "Test".into();
         assert!(app.history.set_text_box(None, item).is_some());
         app.input.text.selected = Some(0);
-        let area = app.keyboard_button_rect(canvas).expect("keyboard menu");
+        let area = app
+            .keyboard_button_rect(canvas)
+            .ok_or("missing keyboard menu")?;
         let down = Event::PointerButton {
             pos: area.center(),
             button: PointerButton::Primary,
@@ -2849,6 +2891,7 @@ mod tests {
         assert_eq!(app.history.text_boxes().len(), 1);
         assert!(app.input.text.editing());
         assert!(app.input.text.take_keyboard_request());
+        Ok(())
     }
 
     #[test]
@@ -3063,14 +3106,16 @@ mod tests {
     }
 
     #[test]
-    fn palette_tracks_text_menu_width_and_available_window_height() {
+    fn palette_tracks_text_menu_width_and_available_window_height() -> Result<(), String> {
         let mut app = app();
         app.use_tool(Tool::Text);
         click(&mut app, pos2(150., 120.));
         app.input.text.color_wheel = Some(ColorWheel::new(app.color));
         for screen_size in [vec2(800., 600.), vec2(500., 420.), vec2(1100., 700.)] {
             let screen = Rect::from_min_size(Pos2::ZERO, screen_size);
-            let menus = app.text_menus(screen).expect("text annotation menu");
+            let menus = app
+                .text_menus(screen)
+                .ok_or("missing text annotation menu")?;
             let Some((palette, scale)) = menus.palette else {
                 panic!("expected color palette");
             };
@@ -3080,6 +3125,7 @@ mod tests {
             assert!(palette.height() >= 0.);
             assert!(scale > 0.);
         }
+        Ok(())
     }
 
     #[test]
@@ -3206,6 +3252,45 @@ mod tests {
         assert!(!app.matches_text_pick_target(&target));
         assert!(app.text_pick_target().is_none());
         assert!(app.pick_text_color(color).is_none());
+    }
+
+    #[test]
+    fn open_keyboard_skips_empty_canvas_motion_but_repaints_enter_and_leave() -> Result<(), String>
+    {
+        let mut app = app();
+        app.use_tool(Tool::Text);
+        click(&mut app, pos2(150., 120.));
+        app.input.text.open_osk();
+        let mut gui = Gui::new();
+        gui.ctx.set_fonts(app.text_fonts.definitions());
+        render(&mut app, &mut gui);
+        render(&mut app, &mut gui);
+        let keyboard = app
+            .input
+            .text
+            .osk
+            .displayed_rect()
+            .ok_or("missing keyboard bounds")?;
+        let window = SDL_WindowID(1);
+        let event = |p: Pos2| SDL_Event {
+            motion: SDL_MouseMotionEvent {
+                r#type: SDL_EVENT_MOUSE_MOTION,
+                windowID: window,
+                x: p.x,
+                y: p.y,
+                ..Default::default()
+            },
+        };
+        assert!(app.text_event(&mut gui, &event(keyboard.center()), window, SIZE));
+        render(&mut app, &mut gui);
+        assert!(app.text_event(&mut gui, &event(pos2(650., 30.)), window, SIZE));
+        render(&mut app, &mut gui);
+        for x in 650..770 {
+            assert!(!app.text_event(&mut gui, &event(pos2(x as f32, 30.)), window, SIZE));
+        }
+        assert!(gui.raw.events.is_empty());
+        assert!(app.text_event(&mut gui, &event(keyboard.center()), window, SIZE));
+        Ok(())
     }
 
     #[test]

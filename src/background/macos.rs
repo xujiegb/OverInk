@@ -2,6 +2,7 @@ use super::{
     Image, SnapshotMode,
     system::{CaptureResult, Job},
 };
+use core_graphics::{access::ScreenCaptureAccess, display::CGDisplay};
 use libloading::Library;
 use objc2::{
     msg_send,
@@ -9,6 +10,7 @@ use objc2::{
     runtime::{AnyClass, AnyObject},
     sel,
 };
+use objc2_core_foundation::{CFData, CFRetained, CFType};
 use objc2_foundation::{NSArray, NSError};
 use std::{
     ffi::c_void,
@@ -91,26 +93,19 @@ unsafe extern "C" {
         displays: &mut u32,
         count: &mut u32,
     ) -> i32;
-    // CGDisplayCreateImage takes only a scalar display ID. It returns an
-    // owned (+1) image reference or null, without borrowing Rust memory.
-    safe fn CGDisplayCreateImage(display: u32) -> Option<NonNull<c_void>>;
-    // Both APIs take and return scalar values and do not borrow or retain
-    // Rust memory. The UI-thread permission flow remains in capture_permission.
-    safe fn CGPreflightScreenCaptureAccess() -> bool;
-    safe fn CGRequestScreenCaptureAccess() -> bool;
-    fn CGColorSpaceCreateWithName(name: NonNull<c_void>) -> Option<NonNull<c_void>>;
+    fn CGColorSpaceCreateWithName(name: NonNull<c_void>) -> Option<NonNull<CFType>>;
     fn CGBitmapContextCreate(
         data: NonNull<c_void>,
         width: usize,
         height: usize,
         bits_per_component: usize,
         bytes_per_row: usize,
-        color_space: NonNull<c_void>,
+        color_space: NonNull<CFType>,
         bitmap_info: u32,
-    ) -> Option<NonNull<c_void>>;
-    fn CGContextDrawImage(context: NonNull<c_void>, rect: CGRect, image: NonNull<c_void>);
+    ) -> Option<NonNull<CFType>>;
+    fn CGContextDrawImage(context: NonNull<CFType>, rect: CGRect, image: NonNull<c_void>);
     #[cfg(test)]
-    fn CGBitmapContextCreateImage(context: NonNull<c_void>) -> Option<NonNull<c_void>>;
+    fn CGBitmapContextCreateImage(context: NonNull<CFType>) -> Option<NonNull<CFType>>;
     fn CGImageGetWidth(image: NonNull<c_void>) -> usize;
     fn CGImageGetHeight(image: NonNull<c_void>) -> usize;
     fn CGImageGetBitsPerComponent(image: NonNull<c_void>) -> usize;
@@ -120,7 +115,7 @@ unsafe extern "C" {
     fn CGImageGetColorSpace(image: NonNull<c_void>) -> Option<NonNull<c_void>>;
     fn CGColorSpaceGetName(space: NonNull<c_void>) -> Option<NonNull<c_void>>;
     fn CGImageGetDataProvider(image: NonNull<c_void>) -> Option<NonNull<c_void>>;
-    fn CGDataProviderCopyData(provider: NonNull<c_void>) -> Option<NonNull<c_void>>;
+    fn CGDataProviderCopyData(provider: NonNull<c_void>) -> Option<NonNull<CFData>>;
     // CoreGraphics constants are nullable C object pointers.
     static kCGColorSpaceExtendedLinearSRGB: Option<NonNull<c_void>>;
     static kCGColorSpaceSRGB: Option<NonNull<c_void>>;
@@ -129,9 +124,6 @@ unsafe extern "C" {
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
     fn CFEqual(left: NonNull<c_void>, right: NonNull<c_void>) -> u8;
-    fn CFDataGetLength(data: NonNull<c_void>) -> isize;
-    fn CFDataGetBytePtr(data: NonNull<c_void>) -> Option<NonNull<u8>>;
-    fn CFRelease(value: NonNull<c_void>);
 }
 
 fn display_id([x, y, w, h]: [i32; 4]) -> Result<u32, String> {
@@ -160,13 +152,13 @@ fn screen_capture_kit() -> Result<(), String> {
 }
 
 fn capture_permission() -> Result<(), String> {
-    if CGPreflightScreenCaptureAccess() {
+    if ScreenCaptureAccess.preflight() {
         return Ok(());
     }
     // TCC may cache a denial until the application is restarted. Request once
     // per process rather than showing another OS alert for every screenshot.
     static REQUESTED: OnceLock<bool> = OnceLock::new();
-    if *REQUESTED.get_or_init(|| CGRequestScreenCaptureAccess()) {
+    if *REQUESTED.get_or_init(|| ScreenCaptureAccess.request()) {
         // A newly granted permission may be usable immediately even if TCC's
         // preflight result remains cached until the next process launch.
         Ok(())
@@ -362,16 +354,9 @@ fn begin_screenshot(
     Ok(())
 }
 
-struct Data(NonNull<c_void>);
-impl Drop for Data {
-    fn drop(&mut self) {
-        // SAFETY: Data exclusively owns a non-null Core Foundation object
-        // created by a +1 Copy/Create API and releases it exactly once.
-        unsafe { CFRelease(self.0) }
-    }
-}
-
 fn copy_screenshot(image: NonNull<c_void>) -> Result<Image, String> {
+    // SAFETY: The callback owns the image while we read it. CopyData
+    // returns an owned, immutable CFData reference.
     unsafe {
         let bitmap = CGImageGetBitmapInfo(image);
         let float_components = bitmap & (1 << 8) != 0;
@@ -396,13 +381,11 @@ fn copy_screenshot(image: NonNull<c_void>) -> Result<Image, String> {
         let mut snapshot = Image::hdr_buffer(width, height)?;
         let provider =
             CGImageGetDataProvider(image).ok_or("The HDR screenshot has no pixel data")?;
-        let data = Data(CGDataProviderCopyData(provider).ok_or("Cannot read the HDR screenshot")?);
-        let len =
-            usize::try_from(CFDataGetLength(data.0)).map_err(|_| "Invalid screenshot data")?;
-        let bytes = CFDataGetBytePtr(data.0).ok_or("The HDR screenshot has no pixel data")?;
-        // CFData owns the initialized byte buffer until the row copy completes.
-        let pixels = std::slice::from_raw_parts(bytes.as_ptr(), len);
-        snapshot.copy_hdr_rows(len, CGImageGetBytesPerRow(image), |offset, row| {
+        let data = CFRetained::from_raw(
+            CGDataProviderCopyData(provider).ok_or("Cannot read the HDR screenshot")?,
+        );
+        let pixels = data.as_bytes_unchecked();
+        snapshot.copy_hdr_rows(pixels.len(), CGImageGetBytesPerRow(image), |offset, row| {
             row.copy_from_slice(&pixels[offset..offset + row.len()]);
         })?;
         Ok(snapshot)
@@ -410,6 +393,8 @@ fn copy_screenshot(image: NonNull<c_void>) -> Result<Image, String> {
 }
 
 fn copy_sdr_screenshot(image: NonNull<c_void>) -> Result<Image, String> {
+    // SAFETY: The caller keeps the image alive. Each +1 result is owned by
+    // CFRetained, and the bitmap context is dropped before its pixel buffer.
     unsafe {
         let width = u32::try_from(CGImageGetWidth(image)).map_err(|_| "Capture is too large")?;
         let height = u32::try_from(CGImageGetHeight(image)).map_err(|_| "Capture is too large")?;
@@ -419,7 +404,7 @@ fn copy_sdr_screenshot(image: NonNull<c_void>) -> Result<Image, String> {
             .and_then(|width| width.checked_mul(4))
             .ok_or("Invalid SDR screenshot row width")?;
         let srgb = kCGColorSpaceSRGB.ok_or("The sRGB screenshot color space is unavailable")?;
-        let space = Data(
+        let space = CFRetained::from_raw(
             CGColorSpaceCreateWithName(srgb)
                 .ok_or("Cannot create an sRGB screenshot color space")?,
         );
@@ -432,15 +417,16 @@ fn copy_sdr_screenshot(image: NonNull<c_void>) -> Result<Image, String> {
             height as usize,
             8,
             stride,
-            space.0,
+            CFRetained::as_ptr(&space),
             0x4001,
         );
-        let context = Data(context.ok_or("Cannot create the SDR screenshot bitmap")?);
+        let context =
+            CFRetained::from_raw(context.ok_or("Cannot create the SDR screenshot bitmap")?);
         // The bitmap context stores top-to-bottom RGBA rows. The Core
         // Graphics user-space convention already maps the image into them.
         // Flipping the CTM here would invert the output scanlines.
         CGContextDrawImage(
-            context.0,
+            CFRetained::as_ptr(&context),
             CGRect {
                 origin: Point { x: 0., y: 0. },
                 size: Size {
@@ -461,13 +447,13 @@ fn sdr_capture(bounds: [i32; 4], cancelled: &AtomicBool) -> CaptureResult {
     // macOS 11–13 fallback: capture directly in OverInk instead of spawning
     // /usr/sbin/screencapture, which could trigger a different TCC identity.
     let id = display_id(bounds)?;
-    let image = Data(CGDisplayCreateImage(id).ok_or(
-        "Core Graphics could not capture the display. Check Screen Recording permission.",
-    )?);
+    let image = CGDisplay::new(id)
+        .image()
+        .ok_or("Core Graphics could not capture the display. Check Screen Recording permission.")?;
     if cancelled.load(Ordering::Relaxed) {
         return Ok(None);
     }
-    copy_sdr_screenshot(image.0).map(Some)
+    copy_sdr_screenshot(NonNull::from(&*image).cast()).map(Some)
 }
 
 #[cfg(test)]
@@ -482,17 +468,20 @@ mod tests {
         // same +1 Core Graphics APIs as production capture.
         unsafe {
             let srgb = kCGColorSpaceSRGB.ok_or("The test sRGB color space is unavailable")?;
-            let color =
-                Data(CGColorSpaceCreateWithName(srgb).ok_or("Cannot create a test color space")?);
+            let color = CFRetained::from_raw(
+                CGColorSpaceCreateWithName(srgb).ok_or("Cannot create a test color space")?,
+            );
             let buffer = NonNull::new(pixels.as_mut_ptr().cast())
                 .ok_or("Cannot obtain the test pixel buffer")?;
-            let context = Data(
-                CGBitmapContextCreate(buffer, 1, 2, 8, 4, color.0, 0x4001)
+            let context = CFRetained::from_raw(
+                CGBitmapContextCreate(buffer, 1, 2, 8, 4, CFRetained::as_ptr(&color), 0x4001)
                     .ok_or("Cannot create a test bitmap")?,
             );
-            let source =
-                Data(CGBitmapContextCreateImage(context.0).ok_or("Cannot create a test image")?);
-            let actual = copy_sdr_screenshot(source.0)?;
+            let source = CFRetained::from_raw(
+                CGBitmapContextCreateImage(CFRetained::as_ptr(&context))
+                    .ok_or("Cannot create a test image")?,
+            );
+            let actual = copy_sdr_screenshot(CFRetained::as_ptr(&source).cast())?;
             assert_eq!(
                 actual.rgba, pixels,
                 "SDR screenshot must not flip vertically"

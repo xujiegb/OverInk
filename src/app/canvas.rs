@@ -72,29 +72,78 @@ impl DirtyReasons {
 // Full-screen text targets waste tens of MiB for a few labels. Keep only
 // the text's clipped pixel bounds, capped to 8 MiB per visible canvas.
 const MAX_STATIC_TEXT_TEXTURE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_STATIC_TEXT_REGIONS: usize = 16;
 
-/// The union of committed label rectangles, expressed as pixel-aligned
-/// [x, y, width, height] in the original canvas. Empty/outside labels
-/// don't allocate a render target.
-fn static_text_region(
+/// Group overlapping, pixel-aligned labels while keeping empty space out
+/// of the retained textures.
+fn static_text_regions(
     rects: impl Iterator<Item = egui::Rect>,
     logical: [f32; 2],
     pixels: [i32; 2],
-) -> Option<[i32; 4]> {
+    bytes_per_pixel: usize,
+) -> Vec<[i32; 4]> {
     if logical.iter().any(|v| !v.is_finite() || *v <= 0.) || pixels.iter().any(|v| *v <= 0) {
-        return None;
+        return Vec::new();
     }
     let frame = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::from(logical));
-    let union = rects
+    let [sx, sy] = [pixels[0] as f32 / logical[0], pixels[1] as f32 / logical[1]];
+    let mut regions: Vec<[i32; 4]> = Vec::new();
+    for rect in rects
         .map(|rect| rect.intersect(frame))
-        .filter(|rect| rect.width() > 0. && rect.height() > 0.)
-        .reduce(|a, b| a.union(b))?;
-    let scale = [pixels[0] as f32 / logical[0], pixels[1] as f32 / logical[1]];
-    let x = (union.min.x * scale[0]).floor().clamp(0., pixels[0] as f32) as i32;
-    let y = (union.min.y * scale[1]).floor().clamp(0., pixels[1] as f32) as i32;
-    let right = (union.max.x * scale[0]).ceil().clamp(0., pixels[0] as f32) as i32;
-    let bottom = (union.max.y * scale[1]).ceil().clamp(0., pixels[1] as f32) as i32;
-    (right > x && bottom > y).then_some([x, y, right - x, bottom - y])
+        .filter(|rect| rect.is_positive())
+    {
+        let x = (rect.min.x * sx).floor() as i32;
+        let y = (rect.min.y * sy).floor() as i32;
+        let right = ((rect.max.x * sx).ceil() as i32).min(pixels[0]);
+        let bottom = ((rect.max.y * sy).ceil() as i32).min(pixels[1]);
+        if right <= x || bottom <= y {
+            continue;
+        }
+        let mut region = [x, y, right - x, bottom - y];
+        // Composite intersecting labels together in their original order.
+        while let Some(index) = regions
+            .iter()
+            .position(|&other| regions_touch(region, other))
+        {
+            region = region_union(region, regions.swap_remove(index));
+        }
+        regions.push(region);
+    }
+
+    let bytes = |[_, _, w, h]: [i32; 4]| {
+        (w as usize)
+            .saturating_mul(h as usize)
+            .saturating_mul(bytes_per_pixel)
+    };
+    if regions.len() <= MAX_STATIC_TEXT_REGIONS
+        && regions
+            .iter()
+            .fold(0usize, |sum, &region| sum.saturating_add(bytes(region)))
+            <= MAX_STATIC_TEXT_TEXTURE_BYTES
+    {
+        return regions;
+    }
+    regions
+        .into_iter()
+        .reduce(region_union)
+        .filter(|&region| bytes(region) <= MAX_STATIC_TEXT_TEXTURE_BYTES)
+        .into_iter()
+        .collect()
+}
+
+fn regions_touch([x, y, w, h]: [i32; 4], [a, b, c, d]: [i32; 4]) -> bool {
+    x <= a + c && a <= x + w && y <= b + d && b <= y + h
+}
+
+fn region_union([x, y, w, h]: [i32; 4], [a, b, c, d]: [i32; 4]) -> [i32; 4] {
+    let left = x.min(a);
+    let top = y.min(b);
+    [
+        left,
+        top,
+        (x + w).max(a + c) - left,
+        (y + h).max(b + d) - top,
+    ]
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -110,9 +159,32 @@ struct StaticTextKey {
 
 struct StaticTextLayer {
     gui: Gui,
+    tiles: Vec<StaticTextTile>,
+}
+
+struct StaticTextTile {
     texture: InkTexture,
-    size: [i32; 2],
-    destination: SDL_FRect,
+    destination: egui::Rect,
+}
+
+#[derive(Default)]
+pub(super) enum StaticTextPaint {
+    #[default]
+    Uncached,
+    Cached,
+    Partial(Vec<egui::Rect>),
+}
+
+impl StaticTextPaint {
+    pub fn contains(&self, rect: egui::Rect) -> bool {
+        match self {
+            Self::Uncached => false,
+            Self::Cached => true,
+            Self::Partial(drawn) => drawn
+                .iter()
+                .any(|region| region.intersect(rect).is_positive()),
+        }
+    }
 }
 
 pub(super) struct Canvas {
@@ -431,7 +503,7 @@ impl Canvas {
                 .text
                 .as_ref()
                 .is_some_and(|gui| !gui.raw.events.is_empty())
-            && let Some(mut output) = self.text_frame(app, theme, true, false)
+            && let Some(mut output) = self.text_frame(app, theme, true, &StaticTextPaint::Uncached)
         {
             // Apply input and upload texture deltas before a toolbar action changes the draft.
             // The next canvas frame will paint the resulting document.
@@ -520,7 +592,7 @@ impl Canvas {
     /// changes. Unlike the interactive egui context this one never receives
     /// pointer events, so hovering a keyboard does not re-tessellate labels.
     /// If an SDL backend cannot create a target, preserve the original path.
-    fn paint_static_text(&mut self, app: &App, theme: egui::Theme) -> bool {
+    fn paint_static_text(&mut self, app: &App, theme: egui::Theme) -> StaticTextPaint {
         let interactive =
             !app.screenshot.active() && !app.picking && app.tool.is_text() && !app.pass;
         let selected = if interactive {
@@ -531,7 +603,7 @@ impl Canvas {
         if app.history.text_boxes().len() <= usize::from(selected.is_some()) {
             self.static_text = None;
             self.static_text_key = None;
-            return false;
+            return StaticTextPaint::Uncached;
         }
         let key = StaticTextKey {
             full_pixels: self.window.pixel_size(),
@@ -552,7 +624,7 @@ impl Canvas {
             return self.draw_static_text();
         }
         let previous_layer = self.static_text.take();
-        let region = static_text_region(
+        let regions = static_text_regions(
             app.history
                 .text_boxes()
                 .iter()
@@ -561,91 +633,116 @@ impl Canvas {
                 .map(|(_, item)| item.text_rect()),
             key.logical_size,
             key.full_pixels,
+            if self.render.extended { 8 } else { 4 },
         );
-        let Some([x, y, width, height]) = region else {
-            return false;
-        };
-        let bytes_per_pixel = if self.render.extended { 8 } else { 4 };
-        let bytes = (width as u64 * height as u64).saturating_mul(bytes_per_pixel);
-        if bytes > MAX_STATIC_TEXT_TEXTURE_BYTES as u64 {
-            return false;
+        if regions.is_empty() {
+            return StaticTextPaint::Uncached;
         }
 
-        let size = [width, height];
-        let (previous_gui, previous_texture) = match previous_layer.zip(previous) {
+        let (mut gui, mut old_tiles) = match previous_layer.zip(previous) {
             Some((layer, previous)) if previous.style.1 == key.style.1 => {
                 if previous.style.0 != key.style.0 {
                     layer.gui.ctx.set_fonts(app.text_fonts.definitions());
                 }
-                let texture =
-                    (layer.size == size && previous.format == key.format).then_some(layer.texture);
-                (Some(layer.gui), texture)
+                let tiles = if previous.format == key.format {
+                    layer.tiles
+                } else {
+                    Vec::new()
+                };
+                (layer.gui, tiles)
             }
-            _ => (None, None),
+            _ => (Gui::with_fonts(app.text_fonts.definitions()), Vec::new()),
         };
-        let texture = if let Some(texture) = previous_texture {
-            texture
-        } else {
-            let Ok(texture) = InkTexture::with_format(
-                &self.render,
-                size,
-                SDL_TEXTUREACCESS_TARGET,
-                SDL_BLENDMODE_BLEND_PREMULTIPLIED,
-                key.format,
-            ) else {
-                return false;
-            };
-            texture
-        };
-        let mut gui = previous_gui.unwrap_or_else(|| Gui::with_fonts(app.text_fonts.definitions()));
         if gui.ctx.theme() != theme {
             gui.ctx.set_theme(theme);
         }
-        let paint = self.render.with_target(&texture, || {
-            self.render.try_set_clip_rect(None)?;
-            self.render.clear([0.; 4])?;
-            let input = gui.canvas_input(&self.window);
-            let output = gui.ctx.run_ui(input, |ui| app.static_text_ui(ui, selected));
-            gui.paint_region(
-                &self.render,
-                &self.window,
-                &self.color,
-                output,
-                [x, y, width, height],
-            )
-        });
-        if paint.is_err() {
-            return false;
-        }
         let dx = key.logical_size[0] / key.full_pixels[0] as f32;
         let dy = key.logical_size[1] / key.full_pixels[1] as f32;
-        self.static_text = Some(StaticTextLayer {
-            gui,
-            texture,
-            size,
-            destination: SDL_FRect {
-                x: x as f32 * dx,
-                y: y as f32 * dy,
-                w: width as f32 * dx,
-                h: height as f32 * dy,
-            },
+        old_tiles.retain(|tile| {
+            let [w, h] = tile.texture.dimensions();
+            regions
+                .iter()
+                .any(|&[_, _, width, height]| [w, h] == [width, height])
         });
+        let mut tiles = Vec::with_capacity(regions.len());
+        for region @ [x, y, width, height] in regions {
+            let size = [width, height];
+            let texture = if let Some(index) = old_tiles
+                .iter()
+                .position(|tile| tile.texture.dimensions() == size)
+            {
+                old_tiles.swap_remove(index).texture
+            } else {
+                let Ok(texture) = InkTexture::with_format(
+                    &self.render,
+                    size,
+                    SDL_TEXTUREACCESS_TARGET,
+                    SDL_BLENDMODE_BLEND_PREMULTIPLIED,
+                    key.format,
+                ) else {
+                    return StaticTextPaint::Uncached;
+                };
+                texture
+            };
+            let destination = egui::Rect::from_min_max(
+                egui::pos2(x as f32 * dx, y as f32 * dy),
+                egui::pos2((x + width) as f32 * dx, (y + height) as f32 * dy),
+            );
+            let paint = self.render.with_target(&texture, || {
+                self.render.try_set_clip_rect(None)?;
+                self.render.clear([0.; 4])?;
+                let input = gui.canvas_input(&self.window);
+                let output = gui
+                    .ctx
+                    .run_ui(input, |ui| app.static_text_ui(ui, selected, destination));
+                gui.paint_region(&self.render, &self.window, &self.color, output, region)
+            });
+            if paint.is_err() {
+                return StaticTextPaint::Uncached;
+            }
+            tiles.push(StaticTextTile {
+                texture,
+                destination,
+            });
+        }
+        self.static_text = Some(StaticTextLayer { gui, tiles });
         self.draw_static_text()
     }
 
-    fn draw_static_text(&mut self) -> bool {
-        if let Some(layer) = self.static_text.as_ref() {
-            if layer
+    fn draw_static_text(&mut self) -> StaticTextPaint {
+        let Some(layer) = self.static_text.as_ref() else {
+            return StaticTextPaint::Uncached;
+        };
+        for (index, tile) in layer.tiles.iter().enumerate() {
+            let rect = tile.destination;
+            let destination = SDL_FRect {
+                x: rect.min.x,
+                y: rect.min.y,
+                w: rect.width(),
+                h: rect.height(),
+            };
+            if tile
                 .texture
-                .draw(&self.render, None, Some(&layer.destination))
-                .is_ok()
+                .draw(&self.render, None, Some(&destination))
+                .is_err()
             {
-                return true;
+                // Draw the untouched labels via egui if the driver fails halfway
+                // through compositing. Avoid blending successful tiles twice.
+                let fallback = if index == 0 {
+                    StaticTextPaint::Uncached
+                } else {
+                    StaticTextPaint::Partial(
+                        layer.tiles[..index]
+                            .iter()
+                            .map(|tile| tile.destination)
+                            .collect(),
+                    )
+                };
+                self.static_text = None;
+                return fallback;
             }
-            // If a driver cannot composite this target, use ordinary egui painting.
-            self.static_text = None;
         }
-        false
+        StaticTextPaint::Cached
     }
 
     pub fn paint(
@@ -709,7 +806,7 @@ impl Canvas {
 
                 let static_started = timings.as_ref().map(|_| Instant::now());
                 let cached_static_text = if page.hidden {
-                    false
+                    StaticTextPaint::Uncached
                 } else {
                     self.paint_static_text(page, theme)
                 };
@@ -718,7 +815,7 @@ impl Canvas {
                 }
                 let text_started = timings.as_ref().map(|_| Instant::now());
                 let text_output =
-                    self.text_frame(page, theme, keep_editor_open, cached_static_text);
+                    self.text_frame(page, theme, keep_editor_open, &cached_static_text);
                 if let (Some(start), Some(metrics)) = (text_started, timings.as_deref_mut()) {
                     metrics.text_ui += start.elapsed();
                 }
@@ -756,7 +853,7 @@ impl Canvas {
         app: &mut App,
         theme: egui::Theme,
         keep_editor_open: bool,
-        cached_static_text: bool,
+        cached_static_text: &StaticTextPaint,
     ) -> Option<egui::FullOutput> {
         let screenshot = app.screenshot.targets(self.window.id);
         let interactive =
@@ -765,7 +862,7 @@ impl Canvas {
         if !app.touch_enabled {
             self.cancel_text_touches(app);
         }
-        if cached_static_text && !interactive && !screenshot {
+        if matches!(cached_static_text, StaticTextPaint::Cached) && !interactive && !screenshot {
             // Mouse/pass-through mode needs no interactive egui run at all:
             // the committed labels already live in the retained GPU layer.
             self.stop_text_input(false);
@@ -944,32 +1041,51 @@ pub(super) fn failure(error: impl ToString) -> crate::appearance::Status {
 
 #[cfg(test)]
 mod screenshot_input_tests {
-    use super::{DirtyReason, DirtyReasons, screenshot_input_changed, static_text_region};
+    use super::{DirtyReason, DirtyReasons, screenshot_input_changed, static_text_regions};
     use egui::{Event, Rect, pos2, vec2};
 
     #[test]
     fn static_text_uses_pixel_aligned_bounds_instead_of_full_canvas() {
         let rect = Rect::from_min_size(pos2(11.2, 20.2), vec2(150.5, 70.5));
         assert_eq!(
-            static_text_region(std::iter::once(rect), [1000., 600.], [2000, 1200]),
-            Some([22, 40, 302, 142])
-        );
-        assert_eq!(
-            static_text_region(
-                [rect, Rect::from_min_size(pos2(400., 200.), vec2(30., 40.))].into_iter(),
-                [1000., 600.],
-                [2000, 1200],
-            ),
-            Some([22, 40, 838, 440])
+            static_text_regions([rect].into_iter(), [1000., 600.], [2000, 1200], 4),
+            [[22, 40, 302, 142]]
         );
         assert!(
-            static_text_region(
-                std::iter::once(Rect::from_min_size(pos2(1100., 800.), vec2(10., 10.))),
+            static_text_regions(
+                [Rect::from_min_size(pos2(1100., 800.), vec2(10., 10.))].into_iter(),
                 [1000., 600.],
                 [2000, 1200],
+                4,
             )
-            .is_none()
+            .is_empty()
         );
+    }
+
+    #[test]
+    fn far_apart_labels_share_a_budget_without_caching_empty_4k_space() {
+        let top = Rect::from_min_size(pos2(8., 8.), vec2(150., 40.));
+        let bottom = Rect::from_min_size(pos2(1762., 1032.), vec2(150., 40.));
+        for bytes_per_pixel in [4, 8] {
+            assert_eq!(
+                static_text_regions(
+                    [top, bottom].into_iter(),
+                    [1920., 1080.],
+                    [3840, 2160],
+                    bytes_per_pixel
+                ),
+                [[16, 16, 300, 80], [3524, 2064, 300, 80]]
+            );
+            let neighbor = Rect::from_min_size(pos2(120., 28.), vec2(100., 20.));
+            let regions = static_text_regions(
+                [top, bottom, neighbor].into_iter(),
+                [1920., 1080.],
+                [3840, 2160],
+                bytes_per_pixel,
+            );
+            assert_eq!(regions.len(), 2);
+            assert!(regions.contains(&[16, 16, 424, 80]));
+        }
     }
 
     #[test]
