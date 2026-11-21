@@ -1318,7 +1318,10 @@ impl App {
             } else {
                 item
             };
-            draw_text_box(ui, &self.text_fonts, item);
+            // Moving/resizing a draft changes its layout continuously; static
+            // annotations can reuse their already-shaped egui galley.
+            let cache = !(interactive && selected == Some(index) && preview.is_some());
+            draw_text_box(ui, &self.text_fonts, item, cache);
         }
         if interactive {
             let screen = ui.clip_rect();
@@ -1843,11 +1846,15 @@ fn overlay(ui: &Ui, id: &str, rect: Rect, content: impl FnOnce(&mut Ui)) {
         });
 }
 
-fn draw_text_box(ui: &Ui, fonts: &TextFonts, item: &TextBox) {
+fn draw_text_box(ui: &Ui, fonts: &TextFonts, item: &TextBox, cache: bool) {
     let rect = item.text_rect();
     if ui.is_rect_visible(rect) {
         let color = ink(item);
-        let galley = fonts.layout(ui, &item.text, item.font_size, color, rect.width());
+        let galley = if cache {
+            fonts.layout_cached(ui, &item.text, item.font_size, color, rect.width())
+        } else {
+            fonts.layout(ui, &item.text, item.font_size, color, rect.width())
+        };
         let offset = item.visible_scroll_offset(galley.size().y);
         ui.painter()
             .with_clip_rect(rect.intersect(ui.clip_rect()))
