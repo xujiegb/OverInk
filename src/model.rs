@@ -813,8 +813,12 @@ mod tests {
             text: "Annotation".into(),
             scroll_offset: 0.,
         };
+        let text_revision = history.text_revision();
         history.set_text_box(None, item.clone());
+        assert_ne!(history.text_revision(), text_revision);
+        let inserted_revision = history.text_revision();
         history.undo();
+        assert_ne!(history.text_revision(), inserted_revision);
         assert!(history.text_boxes().is_empty());
         assert_eq!(history.ink_revision(), ink_revision);
         history.redo();
