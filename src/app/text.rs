@@ -460,21 +460,13 @@ impl App {
         if !editing && self.input.text.selected.is_none() {
             gui.clear_events();
         }
-        // Gui folds adjacent SDL motion packets into the final egui position.
-        // Revisit the last event when it was replaced, otherwise the editor
-        // would miss drag endpoints and hover transitions inside one batch.
-        let first = if ty == SDL_EVENT_MOUSE_MOTION
-            && mouse_motion_event(event).is_some_and(|motion| {
-                motion.windowID == window
-                    && motion.which != SDL_TOUCH_MOUSEID
-                    && motion.which != SDL_PEN_MOUSEID
-            })
-            && gui.can_merge_mouse_position()
-        {
-            gui.raw.events.len().saturating_sub(1)
-        } else {
-            gui.raw.events.len()
-        };
+        // Annotations use per-event menu hit tests and can enter and leave
+        // multiple controls in one SDL event batch. Unlike the independent
+        // main toolbar, the text canvas must keep those pointer transitions.
+        if ty == SDL_EVENT_MOUSE_MOTION {
+            gui.preserve_pointer_transitions();
+        }
+        let first = gui.raw.events.len();
         let mut changed = false;
         if ty == SDL_EVENT_FINGER_CANCELED
             && gui.primary_touch() == crate::touch::key_from_event(event)
