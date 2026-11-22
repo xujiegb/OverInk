@@ -94,6 +94,7 @@ impl Image {
             encoding,
         })
     }
+    #[cfg(any(not(target_os = "windows"), test))]
     pub fn crop(mut self, [left, top, right, bottom]: [u32; 4]) -> Result<Self, String> {
         if left >= right || top >= bottom || right > self.width || bottom > self.height {
             return Err("The selection is outside the screenshot".into());
@@ -524,12 +525,18 @@ impl Background {
         #[cfg(any(target_os = "windows", target_os = "macos"))]
         {
             #[cfg(target_os = "windows")]
-            let job = windows::start(id, self.mode == SnapshotMode::Linear, Snapshot::compress);
+            let job = windows::start(
+                id,
+                self.mode == SnapshotMode::Linear,
+                None,
+                Snapshot::compress,
+            );
             #[cfg(target_os = "macos")]
             let job = macos::start(
                 self.bounds,
                 window.pixel_size(),
                 self.mode,
+                None,
                 Snapshot::compress,
             );
             let _ = id;

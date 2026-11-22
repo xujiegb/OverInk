@@ -1,4 +1,8 @@
-use super::{Encoding, Image, system::Job};
+use super::{
+    Encoding, Image,
+    screenshot::{CaptureArea, Crop},
+    system::Job,
+};
 use crate::sdl::*;
 use ::windows::{
     Foundation::TypedEventHandler,
@@ -13,7 +17,7 @@ use ::windows::{
         Graphics::{
             Direct3D::D3D_DRIVER_TYPE_HARDWARE,
             Direct3D11::{
-                D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAP_READ,
+                D3D11_BOX, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAP_READ,
                 D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
                 D3D11_USAGE_STAGING, D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext,
                 ID3D11Texture2D,
@@ -46,6 +50,7 @@ use std::{
 pub fn start<T: Send + 'static>(
     display: u32,
     linear: bool,
+    crop: Option<Crop>,
     prepare: impl FnOnce(Image) -> Result<T, String> + Send + 'static,
 ) -> Result<Job<T>, String> {
     let handle =
@@ -56,6 +61,7 @@ pub fn start<T: Send + 'static>(
                 HMONITOR(ptr::with_exposed_provenance_mut(handle)),
                 cancelled,
                 linear,
+                crop,
             )
             .map_err(|error| format!("Windows desktop capture: {error}"))
         },
@@ -92,6 +98,7 @@ fn capture(
     monitor: HMONITOR,
     cancelled: &AtomicBool,
     linear: bool,
+    crop: Option<Crop>,
 ) -> Result<Option<Image>, Box<dyn Error>> {
     unsafe {
         RoInitialize(RO_INIT_MULTITHREADED)?;
@@ -102,8 +109,8 @@ fn capture(
         let interop = factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
         let item: GraphicsCaptureItem = interop.CreateForMonitor(monitor)?;
         let size = item.Size()?;
-        let width = size.Width.try_into()?;
-        let height = size.Height.try_into()?;
+        let area = CaptureArea::new([size.Width.try_into()?, size.Height.try_into()?], crop)?;
+        let [width, height] = area.dimensions();
         let mut image = if linear {
             Image::hdr_buffer(width, height)?
         } else {
@@ -156,13 +163,10 @@ fn capture(
                     Ok(()) => {
                         let frame = pool.TryGetNextFrame()?;
                         let copied = (|| {
-                            let size = frame.ContentSize()?;
-                            if size.Width != image.width as i32
-                                || size.Height != image.height as i32
-                            {
+                            if frame.ContentSize()? != size {
                                 return Err("The display size changed during capture".into());
                             }
-                            copy_frame(&device, &context, &frame, &mut image)
+                            copy_frame(&device, &context, &frame, &mut image, area)
                         })();
                         let _ = frame.Close();
                         copied?;
@@ -188,6 +192,7 @@ fn copy_frame(
     context: &ID3D11DeviceContext,
     frame: &Direct3D11CaptureFrame,
     image: &mut Image,
+    area: CaptureArea,
 ) -> Result<(), Box<dyn Error>> {
     unsafe {
         let access: IDirect3DDxgiInterfaceAccess = frame.Surface()?.cast()?;
@@ -198,9 +203,20 @@ fn copy_frame(
             Encoding::LinearRgba16 => DXGI_FORMAT_R16G16B16A16_FLOAT,
             Encoding::Srgb8 => DXGI_FORMAT_B8G8R8A8_UNORM,
         };
-        if desc.Format != expected || desc.Width != image.width || desc.Height != image.height {
+        if desc.Format != expected || [desc.Width, desc.Height] != area.full {
             return Err("The capture did not return the requested desktop frame format".into());
         }
+        let [left, top, right, bottom] = area.bounds;
+        let source_box = D3D11_BOX {
+            left,
+            top,
+            front: 0,
+            right,
+            bottom,
+            back: 1,
+        };
+        desc.Width = image.width;
+        desc.Height = image.height;
         desc.Usage = D3D11_USAGE_STAGING;
         desc.BindFlags = 0;
         desc.MiscFlags = 0;
@@ -208,7 +224,11 @@ fn copy_frame(
         let mut staging = None;
         device.CreateTexture2D(&desc, None, Some(&mut staging))?;
         let staging = staging.ok_or("Could not allocate the frame readback texture")?;
-        context.CopyResource(&staging, &source);
+        if area.dimensions() == area.full {
+            context.CopyResource(&staging, &source);
+        } else {
+            context.CopySubresourceRegion(&staging, 0, 0, 0, 0, &source, 0, Some(&source_box));
+        }
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
         let stride = mapped.RowPitch as usize;

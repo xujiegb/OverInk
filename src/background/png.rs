@@ -25,37 +25,106 @@ impl Image {
                 writer.write_chunk(::png::chunk::cICP, &[9, 16, 0, 1])?;
             }
             let mut stream = writer.stream_writer()?;
-            let pixel_bytes = self.encoding.bytes_per_pixel();
-            let mut row = Vec::with_capacity(self.width as usize * if hdr { 6 } else { 3 });
-            for pixels in self.rgba.chunks_exact(self.width as usize * pixel_bytes) {
-                row.clear();
-                if self.encoding == Encoding::Srgb8 {
-                    for pixel in pixels.as_chunks::<4>().0 {
-                        row.extend_from_slice(&pixel[..3]);
+            let width = self.width as usize;
+            let stride = width * self.encoding.bytes_per_pixel();
+            let rows = self.rgba.chunks_exact(stride);
+            // Sample neighboring rows before enabling PQ reuse. Detailed
+            // captures can stay on the original conversion loop.
+            let reuse_pq = hdr
+                && self
+                    .rgba
+                    .chunks_exact(stride)
+                    .zip(self.rgba.chunks_exact(stride).skip(1))
+                    .step_by((self.height as usize / 16).max(1))
+                    .filter(|(a, b)| a == b)
+                    .nth(1)
+                    .is_some();
+            if reuse_pq {
+                let mut row = vec![[0; 6]; width];
+                let mut previous = &[][..];
+                for pixels in rows {
+                    let pixels = pixels.as_chunks::<8>().0;
+                    if pixels != previous {
+                        pq_row(pixels, previous, &mut row);
                     }
-                } else {
-                    for pixel in pixels.as_chunks::<8>().0 {
-                        let [r, g, b] = [0, 2, 4]
-                            .map(|i| binary16(u16::from_ne_bytes([pixel[i], pixel[i + 1]])));
-                        if hdr {
-                            for channel in rec2020([r, g, b]) {
-                                row.extend_from_slice(&pq(channel).to_be_bytes());
+                    stream.write_all(row.as_flattened())?;
+                    previous = pixels;
+                }
+            } else {
+                let mut row = Vec::with_capacity(width * if hdr { 6 } else { 3 });
+                for pixels in rows {
+                    row.clear();
+                    if self.encoding == Encoding::Srgb8 {
+                        for pixel in pixels.as_chunks::<4>().0 {
+                            row.extend_from_slice(&pixel[..3]);
+                        }
+                    } else {
+                        for pixel in pixels.as_chunks::<8>().0 {
+                            let rgb = linear_rgb(pixel);
+                            if hdr {
+                                for channel in rec2020(rgb) {
+                                    row.extend_from_slice(&pq(channel).to_be_bytes());
+                                }
+                            } else {
+                                row.extend(rgb.map(|channel| {
+                                    (crate::color::encode((channel / sdr_white).clamp(0., 1.))
+                                        * 255.)
+                                        .round() as u8
+                                }));
                             }
-                        } else {
-                            row.extend([r, g, b].map(|channel| {
-                                (crate::color::encode((channel / sdr_white).clamp(0., 1.)) * 255.)
-                                    .round() as u8
-                            }));
                         }
                     }
+                    stream.write_all(&row)?;
                 }
-                stream.write_all(&row)?;
             }
             stream.finish()?;
             writer.finish()
         };
         write().map_err(|error| error.to_string())
     }
+}
+
+fn linear_rgb(pixel: &[u8; 8]) -> [f32; 3] {
+    [0, 2, 4].map(|i| binary16(u16::from_ne_bytes([pixel[i], pixel[i + 1]])))
+}
+
+/// Reuse exact PQ results from the preceding row or the preceding pixel.
+/// The streaming encoder already needs this row buffer. Alpha is discarded.
+fn pq_row(pixels: &[[u8; 8]], previous: &[[u8; 8]], row: &mut [[u8; 6]]) {
+    // Sample the row before paying for a reuse check on every pixel.
+    // Detailed capture rows can go straight through the scalar encoder.
+    let step = (pixels.len() / 16).max(1);
+    let repeated = (0..pixels.len())
+        .step_by(step)
+        .filter(|&x| {
+            let rgb = &pixels[x][..6];
+            previous.get(x).is_some_and(|old| old[..6] == *rgb)
+                || pixels.get(x + 1).is_some_and(|next| next[..6] == *rgb)
+        })
+        .nth(1)
+        .is_some();
+    if !repeated {
+        for (pixel, encoded) in pixels.iter().zip(row) {
+            *encoded = pq_pixel(pixel);
+        }
+        return;
+    }
+    let mut last = None;
+    for (x, (pixel, encoded)) in pixels.iter().zip(row).enumerate() {
+        let rgb = &pixel[..6];
+        if let Some((_, value)) = last.filter(|(key, _)| *key == rgb) {
+            *encoded = value;
+        } else if !previous.get(x).is_some_and(|old| old[..6] == *rgb) {
+            *encoded = pq_pixel(pixel);
+        }
+        last = Some((rgb, *encoded));
+    }
+}
+
+fn pq_pixel(pixel: &[u8; 8]) -> [u8; 6] {
+    let [[r0, r1], [g0, g1], [b0, b1]] =
+        rec2020(linear_rgb(pixel)).map(|channel| pq(channel).to_be_bytes());
+    [r0, r1, g0, g1, b0, b1]
 }
 
 fn binary16(bits: u16) -> f32 {
@@ -135,6 +204,42 @@ mod tests {
         let [white, highlight] = [0, 6].map(|i| u16::from_be_bytes([output[i], output[i + 1]]));
         assert_eq!(white, pq(1.));
         assert!(highlight > white);
+        Ok(())
+    }
+
+    #[test]
+    fn hdr_png_matches_per_pixel_encoding_when_colors_repeat() -> Result<(), String> {
+        let a = [0x3c00_u16, 0x4400, 0x3800, 0];
+        let b = [0x7c00, 0x7e00, 0xbc00, 0x3c00];
+        let c = [0, 0x0001, 0x3400, 0x3c00];
+        let repeated = [[a[0], a[1], a[2], 0x3c00], c, c, b];
+        let source = [[a, a, c, b], repeated, repeated, repeated];
+        let mut image = Image::hdr_buffer(4, 4)?;
+        for (pixel, source) in image
+            .rgba
+            .as_chunks_mut::<8>()
+            .0
+            .iter_mut()
+            .zip(source.as_flattened())
+        {
+            for (bytes, &bits) in pixel.as_chunks_mut::<2>().0.iter_mut().zip(source) {
+                *bytes = bits.to_ne_bytes();
+            }
+        }
+        let mut data = Vec::new();
+        image.write_png(&mut data, true, 1.)?;
+        let mut reader = ::png::Decoder::new(std::io::Cursor::new(data))
+            .read_info()
+            .map_err(|error| error.to_string())?;
+        let mut output = [0; 4 * 4 * 6];
+        reader
+            .next_frame(&mut output)
+            .map_err(|error| error.to_string())?;
+        for (&[r, g, b, _], encoded) in source.as_flattened().iter().zip(output.as_chunks::<6>().0)
+        {
+            let expected = rec2020([r, g, b].map(binary16)).map(|value| pq(value).to_be_bytes());
+            assert_eq!(encoded, expected.as_flattened());
+        }
         Ok(())
     }
 }

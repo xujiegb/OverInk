@@ -43,13 +43,13 @@ libloading = "0.9"
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 async-channel = "2"
 futures-lite = "2"
-x11rb = { version = "0.13.2", default-features = false, features = ["randr", "shape"] }
+x11rb = { version = "0.14.0", default-features = false, features = ["randr", "shape"] }
 zbus = { version = "=6.3.0", default-features = false, features = ["default-rt", "proxy", "service"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = "=0.25.0"
 objc2 = "=0.6.5"
-objc2-core-foundation = { version = "=0.3.2", default-features = false, features = ["std", "CFBase", "CFData"] }
+objc2-core-foundation = { version = "=0.3.2", default-features = false, features = ["std", "CFBase", "CFData", "CFCGTypes"] }
 objc2-foundation = { version = "=0.3.2", default-features = false, features = ["NSArray", "NSError", "NSString"] }
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = [
     "std",
@@ -77,5 +77,6 @@ windows = { version = "=0.62.2", features = [
     "UI_ViewManagement",
     "Win32_System_WinRT_Direct3D11",
     "Win32_System_WinRT_Graphics_Capture",
+    "Win32_UI_Accessibility",
     "Win32_UI_WindowsAndMessaging",
 ] }

@@ -346,6 +346,10 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
             }
             SdlNativeAction::DestroyWindow(id, window) => {
                 if SDL_GetWindowFromID(id) == window.as_ptr() {
+                    #[cfg(target_os = "macos")]
+                    if crate::native::macos::overink_macos_destroy_overlay(id.0) {
+                        return SdlNativeResult::Done;
+                    }
                     SDL_DestroyWindow(window.as_ptr());
                 }
                 SdlNativeResult::Done
@@ -674,6 +678,8 @@ impl Runtime {
             SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, c"1".as_ptr());
             // A canvas drag must release on entering the separate controller.
             SDL_SetHint(SDL_HINT_MOUSE_AUTO_CAPTURE, c"0".as_ptr());
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, c"0".as_ptr());
             SDL_SetHint(SDL_HINT_IME_IMPLEMENTED_UI, c"composition".as_ptr());
             let version = cstring(crate::VERSION);
             SDL_SetAppMetadata(
@@ -1229,6 +1235,8 @@ impl SystemCursor {
             let _ = sdl_native(SdlNativeAction::DestroyCursor(cursor));
             return None;
         }
+        #[cfg(target_os = "macos")]
+        crate::native::macos::overink_macos_overlay_crosshair(true);
         Some(Self(cursor))
     }
 }
@@ -1240,6 +1248,8 @@ impl Drop for SystemCursor {
         if sdl_native(SdlNativeAction::CurrentCursor).cursor() == Some(self.0) {
             let default = sdl_native(SdlNativeAction::DefaultCursor).cursor();
             let _ = sdl_native(SdlNativeAction::SetCursor(default));
+            #[cfg(target_os = "macos")]
+            crate::native::macos::overink_macos_overlay_crosshair(false);
         }
         let _ = sdl_native(SdlNativeAction::DestroyCursor(self.0));
     }
@@ -1354,7 +1364,9 @@ enum WindowCommand<'a> {
         h: i32,
     },
     AlwaysOnTop(bool),
-    RaiseIfCurrent,
+    RaiseIfCurrent {
+        keyboard: bool,
+    },
     Show(bool),
     SetParent(Option<&'a Window>),
     ToolbarSetup([i32; 2], &'a mut [u8]),
@@ -1579,9 +1591,18 @@ impl Window {
                     let _ = SDL_SetWindowAlwaysOnTop(self.raw.as_ptr(), enabled);
                     Ok(())
                 }
-                WindowCommand::RaiseIfCurrent => {
+                WindowCommand::RaiseIfCurrent { keyboard } => {
                     let window = SDL_GetWindowFromID(self.id);
                     if !window.is_null() && window == self.raw.as_ptr() {
+                        #[cfg(target_os = "macos")]
+                        if crate::native::macos::overink_macos_raise_overlay(self.id.0, keyboard) {
+                            return Ok(());
+                        }
+                        #[cfg(target_os = "windows")]
+                        if !keyboard && !self.hidden() && self.win32_hwnd().is_some() {
+                            return crate::native::raise_win32_overlay(self);
+                        }
+                        let _ = keyboard;
                         SDL_RaiseWindow(window);
                     }
                     Ok(())
@@ -1592,7 +1613,12 @@ impl Window {
                         SDL_ShowWindow(self.raw.as_ptr())
                     } else {
                         SDL_HideWindow(self.raw.as_ptr())
-                    })
+                    })?;
+                    #[cfg(target_os = "macos")]
+                    if show {
+                        crate::native::macos::overink_macos_raise_overlay(self.id.0, false);
+                    }
+                    Ok(())
                 }
                 WindowCommand::SetParent(parent) => {
                     let raw = parent.map_or(ptr::null_mut(), |window| window.raw.as_ptr());
@@ -1806,7 +1832,11 @@ impl Window {
     }
 
     pub fn raise(&self) {
-        let _ = self.run_command(WindowCommand::RaiseIfCurrent);
+        let _ = self.run_command(WindowCommand::RaiseIfCurrent { keyboard: false });
+    }
+
+    pub fn focus_keyboard(&self) {
+        let _ = self.run_command(WindowCommand::RaiseIfCurrent { keyboard: true });
     }
 
     pub fn input_focused(&self) -> bool {
@@ -1850,6 +1880,26 @@ impl Window {
                         flags |= SDL_WINDOW_BORDERLESS | SDL_WINDOW_TRANSPARENT;
                     }
                     SDL_ClearError();
+                    #[cfg(target_os = "macos")]
+                    if *overlay && driver() == "cocoa" {
+                        let id =
+                            crate::native::macos::overink_macos_create_overlay(*w, *h, flags.0);
+                        if id == 0 {
+                            return Err(format!(
+                                "Creating the nonactivating {} panel failed ({})",
+                                title.to_string_lossy(),
+                                error()
+                            ));
+                        }
+                        let id = SDL_WindowID(id);
+                        let raw = NonNull::new(SDL_GetWindowFromID(id))
+                            .ok_or("SDL could not find the Cocoa panel it just created")?;
+                        // SDL's Cocoa wrapper infers the border flag from the
+                        // style mask, which now also has NonactivatingPanel.
+                        SDL_SetWindowBordered(raw.as_ptr(), false);
+                        SDL_SetWindowTitle(raw.as_ptr(), title.as_ptr());
+                        return Ok(Self { raw, id });
+                    }
                     SDL_CreateWindow(title.as_ptr(), *w, *h, flags)
                 }
                 WindowCreation::Tooltip(parent, [x, y, w, h]) => SDL_CreatePopupWindow(
@@ -1935,7 +1985,7 @@ impl Window {
     pub fn update_rounded_shape(
         &self,
         applied: &mut Option<([i32; 2], i32)>,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let pixels = self.pixel_size();
         // SDL's native hit-test uses physical pixels. UI layout uses
         // gui::window_units instead; these are deliberately different spaces.
@@ -1944,17 +1994,18 @@ impl Window {
         let radius = (f32::from(crate::toolbar::OUTER_RADIUS) * self.scale()).round() as i32;
         let key = (pixels, radius.max(1));
         if *applied == Some(key) {
-            return Ok(());
+            return Ok(false);
         }
         *applied = Some(key);
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         if let Some(id) = self.x11_window_number() {
             let size = self.query_size(false).ok_or("No X11 toolbar size")?;
             let radius = (f32::from(crate::toolbar::OUTER_RADIUS) * self.ui_scale()).round() as i32;
-            return crate::x11::set_rounded_input(id, size, radius.max(1));
+            crate::x11::set_rounded_input(id, size, radius.max(1))?;
+            return Ok(true);
         }
         self.run_command(WindowCommand::RoundedCorners(key.0, key.1))?;
-        Ok(())
+        Ok(true)
     }
 
     pub fn arrange_toolbar(&self, expanded: bool, on_display: Option<u32>) -> Result<(), String> {
@@ -2198,7 +2249,7 @@ fn destroy_owned_surface(raw: NonNull<SDL_Surface>) {
 /// A limited source of new caller-owned SDL surfaces. No borrowed surfaces
 /// or arbitrary native surface pointers may be passed to the safe constructor.
 enum SurfaceSource<'a> {
-    Readback(&'a Renderer),
+    Readback(&'a Renderer, Option<&'a SDL_Rect>),
     #[cfg(test)]
     Test([i32; 2]),
 }
@@ -2208,17 +2259,16 @@ enum SurfaceSource<'a> {
 struct OwnedSurface(NonNull<SDL_Surface>);
 
 impl OwnedSurface {
-    /// Acquire one of the known SDL-created surfaces and copy its dimensions
-    /// before returning to entirely safe test and screenshot code.
-    fn acquire(source: SurfaceSource<'_>) -> Result<(Self, [i32; 2]), String> {
+    /// Acquire an SDL-created surface and copy its dimensions and format.
+    fn acquire(source: SurfaceSource<'_>) -> Result<(Self, [i32; 2], SDL_PixelFormat), String> {
         // SAFETY: Both SDL calls return unique, caller-owned surfaces and
         // the owned guard releases them on all success and failure paths.
         // The readback surface is live while reading its C-layout fields.
         unsafe {
             let raw = match source {
-                SurfaceSource::Readback(renderer) => {
+                SurfaceSource::Readback(renderer, region) => {
                     let renderer = renderer.raw.ok_or("Renderer has been destroyed")?;
-                    SDL_RenderReadPixels(renderer.as_ptr(), ptr::null())
+                    SDL_RenderReadPixels(renderer.as_ptr(), region.map_or(ptr::null(), |rect| rect))
                 }
                 #[cfg(test)]
                 SurfaceSource::Test([width, height]) => {
@@ -2226,14 +2276,13 @@ impl OwnedSurface {
                 }
             };
             let surface = Self(NonNull::new(raw).ok_or_else(error)?);
-            let dimensions = [
-                (*surface.as_non_null().as_ptr()).w,
-                (*surface.as_non_null().as_ptr()).h,
-            ];
+            let details = surface.as_non_null().as_ref();
+            let dimensions = [details.w, details.h];
+            let format = details.format;
             if dimensions[0] <= 0 || dimensions[1] <= 0 {
                 return Err("SDL returned invalid surface dimensions".into());
             }
-            Ok((surface, dimensions))
+            Ok((surface, dimensions, format))
         }
     }
 
@@ -2696,7 +2745,7 @@ enum RenderTarget<'a> {
 /// pointers or arbitrary memory for the renderer to access.
 enum RenderCommand<'a> {
     Clear([f32; 4]),
-    TransparentRect(&'a SDL_FRect),
+    ReplaceRect(&'a SDL_FRect, [f32; 4]),
     Clip(Option<&'a SDL_Rect>),
     Scale([f32; 2]),
     GetColorScale(&'a mut f32),
@@ -2760,14 +2809,8 @@ impl Renderer {
                     check(SDL_SetRenderDrawColorFloat(renderer.as_ptr(), r, g, b, a))?;
                     check(SDL_RenderClear(renderer.as_ptr()))
                 }
-                RenderCommand::TransparentRect(rect) => {
-                    check(SDL_SetRenderDrawColorFloat(
-                        renderer.as_ptr(),
-                        0.,
-                        0.,
-                        0.,
-                        0.,
-                    ))?;
+                RenderCommand::ReplaceRect(rect, [r, g, b, a]) => {
+                    check(SDL_SetRenderDrawColorFloat(renderer.as_ptr(), r, g, b, a))?;
                     check(SDL_SetRenderDrawBlendMode(
                         renderer.as_ptr(),
                         SDL_BLENDMODE_NONE,
@@ -2930,11 +2973,37 @@ impl Renderer {
     /// Write a renderer snapshot to BMP for headless smoke tests.
     /// The returned surface is always destroyed, including on write failures.
     pub fn save_bmp(&self, path: &std::path::Path) -> Result<(), String> {
-        let (surface, _) = OwnedSurface::acquire(SurfaceSource::Readback(self))?;
+        let (surface, ..) = OwnedSurface::acquire(SurfaceSource::Readback(self, None))?;
         let name = cstring(&path.to_string_lossy());
         // The owned surface and filename remain borrowed for the duration of
         // SDL's synchronous save. The native dispatcher keeps the FFI private.
         check(sdl_native(SdlNativeAction::SaveBmp(&surface, &name)).succeeded())
+    }
+
+    /// Probe one pixel on the software target to verify its channel precision.
+    /// The display mode's pixel format can differ from the window's surface.
+    pub fn software_output_is_rgb8(&self) -> bool {
+        let pixel = SDL_Rect {
+            x: 0,
+            y: 0,
+            w: 1,
+            h: 1,
+        };
+        OwnedSurface::acquire(SurfaceSource::Readback(self, Some(&pixel))).is_ok_and(
+            |(_, _, format)| {
+                matches!(
+                    format,
+                    SDL_PIXELFORMAT_XRGB8888
+                        | SDL_PIXELFORMAT_RGBX8888
+                        | SDL_PIXELFORMAT_XBGR8888
+                        | SDL_PIXELFORMAT_BGRX8888
+                        | SDL_PIXELFORMAT_ARGB8888
+                        | SDL_PIXELFORMAT_RGBA8888
+                        | SDL_PIXELFORMAT_ABGR8888
+                        | SDL_PIXELFORMAT_BGRA8888
+                )
+            },
+        )
     }
 
     pub fn hdr(&self) -> (bool, f32) {
@@ -2984,7 +3053,11 @@ impl Renderer {
     /// Clear a damaged rectangle without blending, restoring normal draw
     /// blending even if rendering the rectangle returns an error.
     pub fn clear_rect_transparent(&self, rect: &SDL_FRect) -> Result<(), String> {
-        self.run_command(RenderCommand::TransparentRect(rect))
+        self.replace_rect(rect, [0.; 4])
+    }
+
+    pub fn replace_rect(&self, rect: &SDL_FRect, color: [f32; 4]) -> Result<(), String> {
+        self.run_command(RenderCommand::ReplaceRect(rect, color))
     }
 
     pub fn set_render_scale(&self, scale: [f32; 2]) -> Result<(), String> {
@@ -3134,7 +3207,7 @@ impl TestSurface {
         if width <= 0 || height <= 0 {
             return Err("Test surface dimensions must be positive".into());
         }
-        let (surface, dimensions) = OwnedSurface::acquire(SurfaceSource::Test([width, height]))?;
+        let (surface, dimensions, _) = OwnedSurface::acquire(SurfaceSource::Test([width, height]))?;
         Ok(Self {
             surface,
             dimensions,
@@ -3171,7 +3244,8 @@ impl TestSurface {
     }
 
     fn readback(renderer: &Renderer) -> Result<Self, String> {
-        let (surface, dimensions) = OwnedSurface::acquire(SurfaceSource::Readback(renderer))?;
+        let (surface, dimensions, _) =
+            OwnedSurface::acquire(SurfaceSource::Readback(renderer, None))?;
         Ok(Self {
             surface,
             dimensions,

@@ -30,6 +30,8 @@ const MENU_SIZE: Vec2 = vec2(
 );
 const CAPTURE_DELAY: Duration = Duration::from_millis(120);
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(120);
+const SHADE_ALPHA: u8 = 76;
+const SHADE: [f32; 4] = [0., 0., 0., SHADE_ALPHA as f32 / 255.];
 
 #[derive(Clone, Copy)]
 pub enum MenuAction {
@@ -238,7 +240,122 @@ pub struct Screenshot {
     hovered_button: Option<Rect>,
 }
 
+pub(super) struct SoftwareSelection {
+    pub clear: [f32; 4],
+    pub ink: Option<SDL_Rect>,
+    pub scale: [f32; 2],
+}
+
+impl SoftwareSelection {
+    fn paint_shade(&self, renderer: &Renderer, rects: &[Rect]) -> Result<(), String> {
+        let alpha = u16::from(SHADE_ALPHA);
+        // Match SDL's 8-bit source-over blend of black on the clear color.
+        let mut shaded = self.clear.map(|channel| {
+            let byte = (channel * 255.).round() as u16;
+            byte * (255 - alpha) / 255
+        });
+        shaded[3] += alpha;
+        let shaded = shaded.map(|v| f32::from(v) / 255.);
+        let ink = self.ink.map(|SDL_Rect { x, y, w, h }| {
+            Rect::from_min_size(pos2(x as f32, y as f32), vec2(w as f32, h as f32))
+        });
+        let [sx, sy] = self.scale;
+        let mut pixels = [Rect::NOTHING; 4];
+        for (index, &rect) in rects.iter().enumerate() {
+            // SDL truncates the origin and size independently. Check for a
+            // shared edge pixel before replacing a blend with a single fill.
+            let rect = Rect::from_min_size(
+                pos2((rect.left() * sx).trunc(), (rect.top() * sy).trunc()),
+                vec2((rect.width() * sx).trunc(), (rect.height() * sy).trunc()),
+            );
+            if pixels[..index]
+                .iter()
+                .any(|&other| rect.intersect(other).is_positive())
+            {
+                return paint_selection_quads(renderer, rects, SHADE);
+            }
+            pixels[index] = rect;
+        }
+        renderer.with_pixel_scale(self.scale, || {
+            for &rect in &pixels[..rects.len()] {
+                let covered = ink.map_or(Rect::NOTHING, |ink| rect.intersect(ink));
+                if covered.is_positive() {
+                    replace_selection_rects(renderer, &outside_selection(rect, covered), shaded)?;
+                    paint_selection_quads(renderer, &[covered], SHADE)?;
+                } else {
+                    replace_selection_rects(renderer, &[rect], shaded)?;
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+fn replace_selection_rects(
+    renderer: &Renderer,
+    rects: &[Rect],
+    color: [f32; 4],
+) -> Result<(), String> {
+    for rect in rects.iter().filter(|rect| rect.is_positive()) {
+        renderer.replace_rect(
+            &SDL_FRect {
+                x: rect.left(),
+                y: rect.top(),
+                w: rect.width(),
+                h: rect.height(),
+            },
+            color,
+        )?;
+    }
+    Ok(())
+}
+
+fn paint_selection_quads(
+    renderer: &Renderer,
+    rects: &[Rect],
+    [r, g, b, a]: [f32; 4],
+) -> Result<(), String> {
+    let color = SDL_FColor { r, g, b, a };
+    let mut quads = [[SDL_Vertex::default(); 4]; 4];
+    for (&rect, quad) in rects.iter().zip(&mut quads) {
+        *quad = [
+            rect.left_top(),
+            rect.right_top(),
+            rect.right_bottom(),
+            rect.left_bottom(),
+        ]
+        .map(|pos| SDL_Vertex {
+            position: SDL_FPoint { x: pos.x, y: pos.y },
+            color,
+            tex_coord: SDL_FPoint::default(),
+        });
+    }
+    let indices = [
+        [0, 1, 2, 0, 2, 3],
+        [4, 5, 6, 4, 6, 7],
+        [8, 9, 10, 8, 10, 11],
+        [12, 13, 14, 12, 14, 15],
+    ];
+    renderer.geometry(
+        GeometryTexture::Solid,
+        quads[..rects.len()].as_flattened(),
+        indices[..rects.len()].as_flattened(),
+    )
+}
+
 impl Screenshot {
+    #[cfg(test)]
+    fn test_drag(start: Pos2, end: Pos2) -> Self {
+        Self {
+            stage: Stage::Selecting(Some(Drag {
+                pointer: Pointer::Pen(SDL_PenID(1)),
+                start,
+                end,
+            })),
+            ..Self::default()
+        }
+    }
+
     pub fn start(&mut self, window: &Window, hdr: bool) {
         self.target = window.id;
         self.hdr = hdr && hdr_available(window);
@@ -276,64 +393,48 @@ impl Screenshot {
         matches!(self.stage, Stage::Selecting(_))
     }
 
+    fn selection_rects(&self, screen: Rect, units: f32) -> Option<[Rect; 2]> {
+        let Stage::Selecting(Some(drag)) = self.stage else {
+            return None;
+        };
+        let outer = Rect::from_two_pos(drag.start, drag.end).intersect(screen);
+        if !outer.is_positive() {
+            return None;
+        }
+        let border = (1.5 * units)
+            .min(outer.width() * 0.5)
+            .min(outer.height() * 0.5);
+        Some([outer, outer.shrink(border)])
+    }
+
     /// Draw the live selection without an egui context or a full-window mesh.
-    pub fn paint_selection(
+    pub(super) fn paint_selection(
         &self,
         renderer: &Renderer,
         size: [f32; 2],
         units: f32,
         accent: [f32; 3],
+        software: Option<SoftwareSelection>,
     ) -> Result<(), String> {
-        let Stage::Selecting(drag) = self.stage else {
+        if !self.selecting() {
             return Ok(());
-        };
-        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::from(size));
-        let fill = |rects: &[Rect], [r, g, b, a]: [f32; 4]| {
-            let color = SDL_FColor { r, g, b, a };
-            let mut quads = [[SDL_Vertex::default(); 4]; 4];
-            for (&rect, quad) in rects.iter().zip(&mut quads) {
-                *quad = [
-                    rect.left_top(),
-                    rect.right_top(),
-                    rect.right_bottom(),
-                    rect.left_bottom(),
-                ]
-                .map(|pos| SDL_Vertex {
-                    position: SDL_FPoint { x: pos.x, y: pos.y },
-                    color,
-                    tex_coord: SDL_FPoint::default(),
-                });
-            }
-            let indices = [
-                [0, 1, 2, 0, 2, 3],
-                [4, 5, 6, 4, 6, 7],
-                [8, 9, 10, 8, 10, 11],
-                [12, 13, 14, 12, 14, 15],
-            ];
-            renderer.geometry(
-                GeometryTexture::Solid,
-                quads[..rects.len()].as_flattened(),
-                indices[..rects.len()].as_flattened(),
-            )
-        };
-        let dim = [0., 0., 0., 76. / 255.];
-        if let Some(drag) = drag {
-            let region = Rect::from_two_pos(drag.start, drag.end).intersect(screen);
-            if !region.is_positive() {
-                return fill(&[screen], dim);
-            }
-            fill(&outside_selection(screen, region), dim)?;
-            let border = (1.5 * units)
-                .min(region.width() * 0.5)
-                .min(region.height() * 0.5);
-            let [r, g, b] = accent;
-            fill(
-                &outside_selection(region, region.shrink(border)),
-                [r, g, b, 1.],
-            )
-        } else {
-            fill(&[screen], dim)
         }
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::from(size));
+        let selection = self.selection_rects(screen, units);
+        let shaded = selection.map(|[outer, _]| outside_selection(screen, outer));
+        let rects = shaded
+            .as_ref()
+            .map_or(std::slice::from_ref(&screen), |bands| bands.as_slice());
+        if let Some(software) = software {
+            software.paint_shade(renderer, rects)?;
+        } else {
+            paint_selection_quads(renderer, rects, SHADE)?;
+        }
+        if let Some([region, inner]) = selection {
+            let [r, g, b] = accent;
+            paint_selection_quads(renderer, &outside_selection(region, inner), [r, g, b, 1.])?;
+        }
+        Ok(())
     }
 
     /// Hide OverInk's annotations only after the Shell bridge is confirmed
@@ -733,7 +834,7 @@ fn outside_selection(screen: Rect, region: Rect) -> [Rect; 4] {
 }
 
 fn shade(ui: &Ui, screen: Rect, region: Rect, units: f32) {
-    let shade = Color32::from_black_alpha(76);
+    let shade = Color32::from_black_alpha(SHADE_ALPHA);
     let painter = ui.painter();
     for rect in outside_selection(screen, region) {
         painter.rect_filled(rect, 0., shade);
@@ -946,16 +1047,85 @@ mod tests {
         assert!(screenshot.select(SelectionEvent::Down(pointer, pos2(20., 20.)), size));
         assert!(screenshot.select(SelectionEvent::Move(pointer, pos2(70., 60.)), size));
         renderer.clear([0.; 4])?;
-        screenshot.paint_selection(&renderer, size, 2., [0., 1., 0.])?;
+        screenshot.paint_selection(&renderer, size, 2., [0., 1., 0.], None)?;
         assert_eq!(TestSurface::pixel(&renderer, 40, 40)?, [0; 4]);
         assert_eq!(TestSurface::pixel(&renderer, 20, 22)?, [0, 255, 0, 255]);
         assert!((74..=77).contains(&TestSurface::pixel(&renderer, 5, 5)?[3]));
 
         assert!(screenshot.select(SelectionEvent::Move(pointer, pos2(35., 35.)), size));
         renderer.clear([0.; 4])?;
-        screenshot.paint_selection(&renderer, size, 2., [0., 1., 0.])?;
+        screenshot.paint_selection(&renderer, size, 2., [0., 1., 0.], None)?;
         assert_eq!(TestSurface::pixel(&renderer, 28, 28)?, [0; 4]);
         assert!((74..=77).contains(&TestSurface::pixel(&renderer, 40, 40)?[3]));
+        Ok(())
+    }
+
+    #[test]
+    fn software_selection_matches_full_blending_at_fractional_scales() -> TestResult {
+        let size = [100., 80.];
+        let accent = [0.25, 0.72, 0.5];
+        let ink = SDL_Rect {
+            x: 14,
+            y: 22,
+            w: 53,
+            h: 33,
+        };
+        let art = SDL_FRect {
+            x: 15.,
+            y: 23.,
+            w: 51.,
+            h: 31.,
+        };
+        for factor in [1., 1.25, 2.] {
+            let scale = [factor; 2];
+            let pixels = size.map(|side| (side * factor) as i32);
+            let direct = TestSurface::new(pixels)?.software_renderer()?;
+            let optimized = TestSurface::new(pixels)?.software_renderer()?;
+            assert!(optimized.software_output_is_rgb8());
+            for (clear, coverage) in [
+                ([0.; 4], None),
+                ([0., 0., 0., 1. / 255.], Some(ink)),
+                ([0., 0., 0., 1.], Some(ink)),
+                ([0.97, 0.97, 0.96, 1.], Some(ink)),
+            ] {
+                for end in [
+                    pos2(77.3, 67.7),
+                    pos2(71.8, 65.2),
+                    pos2(12.7, 33.3),
+                    pos2(20.4, 18.9),
+                    pos2(98.8, 19.2),
+                ] {
+                    let selection = Screenshot::test_drag(pos2(20.4, 18.9), end);
+                    for renderer in [&*direct, &*optimized] {
+                        renderer.set_render_scale([1.; 2])?;
+                        renderer.clear(clear)?;
+                        if coverage.is_some() {
+                            renderer.replace_rect(&art, [0.17, 0.41, 0.63, 0.47])?;
+                        }
+                        renderer.set_render_scale(scale)?;
+                    }
+                    selection.paint_selection(&direct, size, 1., accent, None)?;
+                    selection.paint_selection(
+                        &optimized,
+                        size,
+                        1.,
+                        accent,
+                        Some(SoftwareSelection {
+                            clear,
+                            ink: coverage,
+                            scale,
+                        }),
+                    )?;
+                    let expected = TestSurface::pixels(&direct)?;
+                    let actual = TestSurface::pixels(&optimized)?;
+                    let difference = expected.iter().zip(&actual).position(|(a, b)| a != b);
+                    assert_eq!(
+                        difference, None,
+                        "Selection differs at {factor}× for {end:?}"
+                    );
+                }
+            }
+        }
         Ok(())
     }
 

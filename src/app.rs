@@ -398,7 +398,10 @@ impl App {
         let now = Instant::now();
         if !starts_segment
             && let Some(last) = trail.back_mut()
-            && last.point.dist(point) <= Point::MERGE_DISTANCE
+            && last
+                .point
+                .distance_within(point, Point::MERGE_DISTANCE)
+                .is_some()
         {
             last.at = now;
             return;
@@ -517,8 +520,9 @@ impl App {
             }
             return;
         }
-        if let Some(last) = stroke.points.last_mut() {
-            let distance = last.dist(p);
+        if let Some(last) = stroke.points.last_mut()
+            && let Some(distance) = last.distance_within(p, 0.15)
+        {
             let pressure_enabled = stroke.pressure_enabled;
             let pencil = stroke.tool == Tool::Pencil;
             if distance <= Point::MERGE_DISTANCE {
@@ -527,7 +531,7 @@ impl App {
             }
             let new_pressure = pressure_enabled && (last.pressure - p.pressure).abs() > 0.00001;
             let new_tilt = pencil && last.tilt != p.tilt;
-            if distance <= 0.15 && !new_pressure && !new_tilt {
+            if !new_pressure && !new_tilt {
                 return;
             }
         }
@@ -1430,6 +1434,9 @@ struct PerformanceCounts {
     toolbar_frames: u64,
     canvas_frames: u64,
     toolbar_ui_time: Duration,
+    toolbar_shape_updates: u64,
+    toolbar_shape_time: Duration,
+    toolbar_swap_time: Duration,
     toolbar_present_time: Duration,
     canvas_present_time: Duration,
     canvas_ink_time: Duration,
@@ -1437,6 +1444,8 @@ struct PerformanceCounts {
     canvas_text_geometry_time: Duration,
     canvas_static_text_time: Duration,
     canvas_swap_time: Duration,
+    keyboard_canvas_frames: u64,
+    keyboard_canvas_time: Duration,
     frame_sleeps: u64,
     event_waits: u64,
 }
@@ -1472,7 +1481,7 @@ impl PerformanceMonitor {
         }
         let c = &self.counts;
         eprintln!(
-            "OverInk perf/5s: loops={} events={} window={} motion={} toolbar={} canvas={} toolbar_ui_ms={:.1} toolbar_present_ms={:.1} canvas_present_ms={:.1} ink_ms={:.1} text_ui_ms={:.1} text_geometry_ms={:.1} static_text_ms={:.1} swap_ms={:.1} frame_sleep={} event_wait={}",
+            "OverInk perf/5s: loops={} events={} window={} motion={} toolbar={} canvas={} toolbar_ui_ms={:.1} toolbar_shapes={} toolbar_shape_ms={:.1} toolbar_swap_ms={:.1} toolbar_present_ms={:.1} canvas_present_ms={:.1} ink_ms={:.1} text_ui_ms={:.1} text_geometry_ms={:.1} static_text_ms={:.1} swap_ms={:.1} osk_canvas={} osk_canvas_ms={:.1} frame_sleep={} event_wait={}",
             c.iterations,
             c.events,
             c.window_events,
@@ -1480,6 +1489,9 @@ impl PerformanceMonitor {
             c.toolbar_frames,
             c.canvas_frames,
             c.toolbar_ui_time.as_secs_f64() * 1000.,
+            c.toolbar_shape_updates,
+            c.toolbar_shape_time.as_secs_f64() * 1000.,
+            c.toolbar_swap_time.as_secs_f64() * 1000.,
             c.toolbar_present_time.as_secs_f64() * 1000.,
             c.canvas_present_time.as_secs_f64() * 1000.,
             c.canvas_ink_time.as_secs_f64() * 1000.,
@@ -1487,6 +1499,8 @@ impl PerformanceMonitor {
             c.canvas_text_geometry_time.as_secs_f64() * 1000.,
             c.canvas_static_text_time.as_secs_f64() * 1000.,
             c.canvas_swap_time.as_secs_f64() * 1000.,
+            c.keyboard_canvas_frames,
+            c.keyboard_canvas_time.as_secs_f64() * 1000.,
             c.frame_sleeps,
             c.event_waits,
         );
@@ -1680,8 +1694,8 @@ pub fn run(options: Options) -> Result<(), String> {
     with_autorelease_pool(|| run_inner(options))
 }
 
-const HOVER_FRAME_PERIOD: Duration = Duration::from_millis(22);
-const UI_FRAME_PERIOD: Duration = Duration::from_nanos(16_666_667);
+const HOVER_FRAME_PERIOD: Duration = Duration::from_nanos(1_000_000_000_u64.div_ceil(60));
+const UI_FRAME_PERIOD: Duration = Duration::from_nanos(1_000_000_000_u64.div_ceil(90));
 
 fn run_inner(options: Options) -> Result<(), String> {
     let base = state_dir();
@@ -1694,6 +1708,8 @@ fn run_inner(options: Options) -> Result<(), String> {
     let _runtime =
         with_autorelease_pool(|| Runtime::new(options.x11, preferences.wayland, options.smoke))?;
     let video = crate::sdl::driver();
+    #[cfg(target_os = "windows")]
+    let overlay_order = (!options.smoke).then(crate::native::OverlayOrderMonitor::start);
     let wayland = video == "wayland";
     let window =
         with_autorelease_pool(|| Window::new("OverInk - canvas", 1100, 720, !options.smoke))?;
@@ -1811,11 +1827,22 @@ fn run_inner(options: Options) -> Result<(), String> {
             let mut controller_bounds_changed = false;
             let mut toolbar_color_changed = false;
             let mut mode_changed = false;
+            #[cfg(target_os = "windows")]
+            let mut overlay_order_lost = false;
             // Keep the rest of this event batch modal even if Escape ends the screenshot.
             let screenshot_owns_input = app.screenshot.active();
             let mut event = SDL_Event::default();
             while poll_event(&mut event) {
                 let ty = event_type(&event);
+                #[cfg(target_os = "windows")]
+                if overlay_order
+                    .as_ref()
+                    .is_some_and(|monitor| monitor.changed(ty))
+                {
+                    overlay_order_lost = true;
+                    only_mouse_motion = false;
+                    continue;
+                }
                 let motion = real_mouse_motion(&event);
                 if motion.is_some_and(|motion| motion.state.0 == 0) {
                     saw_passive_mouse_motion = true;
@@ -1889,6 +1916,15 @@ fn run_inner(options: Options) -> Result<(), String> {
                                 | SDL_EVENT_WINDOW_HDR_STATE_CHANGED
                                 | SDL_EVENT_WINDOW_ICCPROF_CHANGED
                         );
+                        #[cfg(target_os = "windows")]
+                        {
+                            overlay_order_lost |= matches!(
+                                ty,
+                                SDL_EVENT_WINDOW_FOCUS_LOST
+                                    | SDL_EVENT_WINDOW_SHOWN
+                                    | SDL_EVENT_WINDOW_RESTORED
+                            );
+                        }
                         if matches!(
                             ty,
                             SDL_EVENT_WINDOW_FOCUS_GAINED | SDL_EVENT_WINDOW_FOCUS_LOST
@@ -1908,6 +1944,17 @@ fn run_inner(options: Options) -> Result<(), String> {
                             canvas.surface_changed();
                             toolbar_dirty = true;
                         }
+                        #[cfg(target_os = "windows")]
+                        {
+                            overlay_order_lost |= matches!(
+                                ty,
+                                SDL_EVENT_WINDOW_FOCUS_LOST
+                                    | SDL_EVENT_WINDOW_FOCUS_GAINED
+                                    | SDL_EVENT_WINDOW_SHOWN
+                                    | SDL_EVENT_WINDOW_RESTORED
+                            );
+                        }
+                        #[cfg(not(target_os = "windows"))]
                         if matches!(ty, SDL_EVENT_WINDOW_SHOWN | SDL_EVENT_WINDOW_FOCUS_GAINED) {
                             canvas.keep_toolbar_above(&toolbar);
                         }
@@ -2311,7 +2358,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                                 Err(error) => app.screenshot.show_error(error),
                             }
                             if canvas.visible {
-                                canvas.window.raise();
+                                canvas.window.focus_keyboard();
                             }
                         }
                     }
@@ -2454,7 +2501,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 {
                     canvas.invalidate(DirtyReason::Overlay);
                     match result {
-                        Ok(true) => canvas.window.raise(),
+                        Ok(true) => canvas.window.focus_keyboard(),
                         Ok(false) => {
                             toolbar_dirty = true;
                             restore_toolbar_focus = true;
@@ -2897,7 +2944,12 @@ fn run_inner(options: Options) -> Result<(), String> {
                 if !toolbar_ime_active {
                     output.platform_output.ime = None;
                 }
-                if let Err(error) = toolbar.update_rounded_shape(&mut toolbar_shape_size) {
+                let rebuilt = toolbar.update_rounded_shape(&mut toolbar_shape_size);
+                if let (Some(start), Some(monitor)) = (toolbar_started, &mut performance) {
+                    monitor.counts.toolbar_shape_time += start.elapsed();
+                    monitor.counts.toolbar_shape_updates += u64::from(matches!(rebuilt, Ok(true)));
+                }
+                if let Err(error) = rebuilt {
                     // Some compositors lack native shape masks. Keep a visible
                     // rounded, alpha-composited UI rather than terminating the
                     // entire application; retry after a real size/DPI change.
@@ -2905,11 +2957,15 @@ fn run_inner(options: Options) -> Result<(), String> {
                 }
                 toolbar_render.begin(&toolbar, [0.; 4])?;
                 gui.paint(&toolbar_render, &toolbar, &toolbar_color, output)?;
+                let swap_started = performance.as_ref().map(|_| Instant::now());
                 toolbar_render.present()?;
                 if let Some(monitor) = &mut performance {
                     monitor.counts.toolbar_frames += 1;
                     if let Some(start) = toolbar_started {
                         monitor.counts.toolbar_present_time += start.elapsed();
+                    }
+                    if let Some(start) = swap_started {
+                        monitor.counts.toolbar_swap_time += start.elapsed();
                     }
                 }
                 tooltips.update(&toolbar, &gui, app.language, &toolbar_color);
@@ -2925,6 +2981,10 @@ fn run_inner(options: Options) -> Result<(), String> {
                 || app.input.text.screen_keyboard_session();
             let mouse = !picker.choosing() && app.mouse_ready();
             let mut unsafe_layer = false;
+            #[cfg(target_os = "windows")]
+            let refresh_stack = !options.smoke
+                && !file_dialog.pending()
+                && (overlay_order_lost || mode_changed || controller_bounds_changed);
             let mut extended_ink_bytes: usize = canvases
                 .iter()
                 .map(canvas::Canvas::extended_ink_bytes)
@@ -2954,7 +3014,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                     visible && screenshot && (cmd.screenshot || !canvas.visible);
                 canvas.show(&toolbar, visible)?;
                 if raise_for_screenshot {
-                    canvas.window.raise();
+                    canvas.window.focus_keyboard();
                 }
                 if visible {
                     if index == active && restore_text_focus && app.input.text.editing() {
@@ -2967,6 +3027,19 @@ fn run_inner(options: Options) -> Result<(), String> {
                         app.status = canvas::failure(error);
                         unsafe_layer = true;
                         break;
+                    }
+                    #[cfg(target_os = "windows")]
+                    if !options.smoke {
+                        // Restore the interactive frame before D3D presents.
+                        if let Err(error) = canvas.apply_input(mouse) {
+                            app.status = canvas::failure(error);
+                            unsafe_layer = true;
+                            break;
+                        }
+                        if refresh_stack {
+                            canvas.window.raise();
+                            canvas.invalidate_if(overlay_order_lost, DirtyReason::Overlay);
+                        }
                     }
                     let frozen = canvas.background.frozen;
                     let history_before = app.history_buttons();
@@ -2988,7 +3061,12 @@ fn run_inner(options: Options) -> Result<(), String> {
                     if painted && let Some(monitor) = &mut performance {
                         monitor.counts.canvas_frames += 1;
                         if let Some(start) = canvas_started {
-                            monitor.counts.canvas_present_time += start.elapsed();
+                            let elapsed = start.elapsed();
+                            monitor.counts.canvas_present_time += elapsed;
+                            if index == active && app.input.text.osk_visible() {
+                                monitor.counts.keyboard_canvas_frames += 1;
+                                monitor.counts.keyboard_canvas_time += elapsed;
+                            }
                         }
                         monitor.counts.canvas_ink_time += breakdown.ink;
                         monitor.counts.canvas_text_ui_time += breakdown.text_ui;
@@ -3003,6 +3081,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                     toolbar_dirty |= frozen != canvas.background.frozen;
                     toolbar_dirty |= history_before != app.history_buttons();
                     toolbar_dirty |= selection_before != app.input.text.selected;
+                    #[cfg(not(target_os = "windows"))]
                     if !options.smoke
                         && let Err(error) = canvas.apply_input(mouse)
                     {
@@ -3020,13 +3099,20 @@ fn run_inner(options: Options) -> Result<(), String> {
                 for canvas in &mut canvases {
                     canvas.show(&toolbar, false)?;
                 }
-            } else if mode_changed || controller_bounds_changed || picker.choosing() {
-                let toolbar_display = toolbar.display_id();
-                if let Some(canvas) = canvases
-                    .iter()
-                    .find(|canvas| canvas.visible && (wayland || canvas.output == toolbar_display))
-                {
-                    canvas.keep_toolbar_above(&toolbar);
+            } else {
+                #[cfg(target_os = "windows")]
+                if refresh_stack && !toolbar_hidden {
+                    // Raise the toolbar last, above all visible canvases.
+                    toolbar.raise();
+                }
+                #[cfg(not(target_os = "windows"))]
+                if mode_changed || controller_bounds_changed || picker.choosing() {
+                    let toolbar_display = toolbar.display_id();
+                    if let Some(canvas) = canvases.iter().find(|canvas| {
+                        canvas.visible && (wayland || canvas.output == toolbar_display)
+                    }) {
+                        canvas.keep_toolbar_above(&toolbar);
+                    }
                 }
             }
             // Only a direct-finger re-tap or the annotation keyboard button
@@ -3213,14 +3299,13 @@ fn run_inner(options: Options) -> Result<(), String> {
                 if pace_hover && saw_passive_mouse_motion {
                     next_hover_frame = Some(iteration_started + HOVER_FRAME_PERIOD);
                 } else {
-                    // Active strokes keep their requested frame rate. UI
-                    // animation and fading trails need at most 60 Hz.
+                    // Active strokes use the configured rate. Cap UI
+                    // animation and fading trails at 90 Hz.
                     let delay = if options.smoke || app.has_contacts() {
                         delay
                     } else {
-                        delay.max(
-                            (iteration_started + UI_FRAME_PERIOD).saturating_duration_since(now),
-                        )
+                        let period = pacer.period.max(UI_FRAME_PERIOD);
+                        delay.max((iteration_started + period).saturating_duration_since(now))
                     };
                     if let Some(monitor) = &mut performance {
                         monitor.counts.frame_sleeps += 1;
