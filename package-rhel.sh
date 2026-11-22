@@ -461,7 +461,12 @@ publish_binary() {
   CARGO_TARGET_DIR="$(mktemp -d)"
 
   if [[ -z "$SDK_WORK_DIR" ]]; then
-    CC="$(command -v clang)" CXX="$(command -v clang++)" \
+    local native_target_key="${rust_target//-/_}"
+    local native_target_upper="${native_target_key^^}"
+    env CC="$(command -v clang)" CXX="$(command -v clang++)" \
+    CMAKE_TOOLCHAIN_FILE="$SCRIPT_DIR/cmake/sdl3-lto-toolchain.cmake" \
+    "CARGO_TARGET_${native_target_upper}_LINKER=$(command -v clang)" \
+    "CARGO_TARGET_${native_target_upper}_RUSTFLAGS=-C link-arg=-fuse-ld=lld" \
     CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS" \
     CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
       cargo build --manifest-path "$PROJECT" --locked --release --target "$rust_target"
@@ -477,11 +482,13 @@ publish_binary() {
   [[ -n "$gcc_dir" ]] || die "crtbeginS.o not found in sysroot for $short"
   gcc_dir="${gcc_dir%/*}"
 
+  local abi_flags=""
+  [[ "$short" != loong64 ]] || abi_flags="-mabi=lp64d"
   local compiler=""
   for compiler in clang clang++; do
     cat > "$SDK_WORK_DIR/cc/$compiler" <<WRAPPER
 #!/bin/sh
-exec "$LLVM_TOOL_BIN/$compiler" --target=$triple --sysroot=$sysroot --gcc-install-dir=$gcc_dir -fuse-ld=lld -Qunused-arguments "\$@"
+exec "$LLVM_TOOL_BIN/$compiler" --target=$triple --sysroot=$sysroot --gcc-install-dir=$gcc_dir -fuse-ld=lld $abi_flags -Qunused-arguments "\$@"
 WRAPPER
     chmod +x "$SDK_WORK_DIR/cc/$compiler"
   done
@@ -513,10 +520,17 @@ set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
 set(SDL_X11_SHARED ON CACHE BOOL "" FORCE)
 set(SDL_WAYLAND_SHARED ON CACHE BOOL "" FORCE)
+include("$SCRIPT_DIR/cmake/sdl3-lto-toolchain.cmake")
 CMAKE
 
   local key="${rust_target//-/_}"
   local upper="${key^^}"
+  local lto_link_args=()
+  if [[ "$short" == loong64 ]]; then
+    # Older LLVM LTO backends can lose the LP64D ABI of Clang bitcode.
+    # These options affect the final LLD LTO backend, not Rust code generation.
+    lto_link_args=("CARGO_TARGET_${upper}_RUSTFLAGS=-C link-arg=-Wl,-plugin-opt=-target-abi=lp64d -C link-arg=-Wl,-plugin-opt=-mattr=+d")
+  fi
 
   env \
     PATH="$LLVM_TOOL_BIN:$SDK_WORK_DIR/host/usr/bin:$PATH" \
@@ -531,6 +545,7 @@ CMAKE
     "CXX_${key}=$SDK_WORK_DIR/cc/clang++" \
     "AR_${key}=$archiver" \
     "CARGO_TARGET_${upper}_LINKER=$SDK_WORK_DIR/cc/clang" \
+    "${lto_link_args[@]}" \
     cargo build --manifest-path "$PROJECT" --locked --release --target "$rust_target"
 }
 
