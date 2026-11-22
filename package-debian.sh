@@ -460,7 +460,7 @@ publish_binary() {
   if [[ -z "$SDK_WORK_DIR" ]]; then
     local native_target_key="${rust_target//-/_}"
     local native_target_upper="${native_target_key^^}"
-    CC="$(command -v clang)" CXX="$(command -v clang++)" \
+    env CC="$(command -v clang)" CXX="$(command -v clang++)" \
     CMAKE_TOOLCHAIN_FILE="$SCRIPT_DIR/cmake/sdl3-lto-toolchain.cmake" \
     "CARGO_TARGET_${native_target_upper}_LINKER=$(command -v clang)" \
     "CARGO_TARGET_${native_target_upper}_RUSTFLAGS=-C link-arg=-fuse-ld=lld" \
