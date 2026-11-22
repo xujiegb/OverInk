@@ -479,11 +479,13 @@ publish_binary() {
   [[ -n "$gcc_dir" ]] || die "crtbeginS.o not found in sysroot for $short"
   gcc_dir="${gcc_dir%/*}"
 
+  local abi_flags=""
+  [[ "$short" != loong64 ]] || abi_flags="-mabi=lp64d"
   local compiler=""
   for compiler in clang clang++; do
     cat > "$SDK_WORK_DIR/cc/$compiler" <<WRAPPER
 #!/bin/sh
-exec "$LLVM_TOOL_BIN/$compiler" --target=$triple --sysroot=$sysroot --gcc-install-dir=$gcc_dir -fuse-ld=lld -Qunused-arguments "\$@"
+exec "$LLVM_TOOL_BIN/$compiler" --target=$triple --sysroot=$sysroot --gcc-install-dir=$gcc_dir -fuse-ld=lld $abi_flags -Qunused-arguments "\$@"
 WRAPPER
     chmod +x "$SDK_WORK_DIR/cc/$compiler"
   done
