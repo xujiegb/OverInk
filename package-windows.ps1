@@ -509,14 +509,13 @@ try {
         Write-Host "Building OverInk $Version for $name ($($a.Triple))"
         Set-MsvcEnvironment $vcvars $a.Vcvars $originalEnvironment
         $env:CMAKE_GENERATOR = 'Ninja'
-        $env:RUSTFLAGS = '-C target-feature=+crt-static -C link-arg=/LTCG -C link-arg=SDL3-static.lib'
+        $env:RUSTFLAGS = '-C target-feature=+crt-static'
         $env:CARGO_TARGET_DIR = Join-Path $root 'target'
         $env:OVERINK_BUILD_VERSION = $Version
         $toolchainFile = Join-Path $work 'static-crt.cmake'
         [System.IO.File]::WriteAllLines($toolchainFile, @(
             'set(CMAKE_POLICY_DEFAULT_CMP0091 NEW)',
-            'set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded" CACHE STRING "" FORCE)',
-            ('include("' + (Join-Path $root 'cmake/sdl3-lto-toolchain.cmake').Replace('\', '/') + '")')
+            'set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded" CACHE STRING "" FORCE)'
         ), [System.Text.Encoding]::ASCII)
         $env:CMAKE_TOOLCHAIN_FILE = $toolchainFile
         $toolchain = "+$RustVersion"
