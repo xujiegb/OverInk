@@ -7,9 +7,8 @@ if(CMAKE_C_COMPILER_ID STREQUAL "MSVC")
 elseif(CMAKE_C_COMPILER_ID MATCHES "^(Clang|AppleClang)$")
   # CMake's default IPO for modern Clang is ThinLTO; force FULL LTO.
   set(CMAKE_C_COMPILE_OPTIONS_IPO "-flto=full")
-  if(CMAKE_CXX_COMPILER_LOADED)
-    set(CMAKE_CXX_COMPILE_OPTIONS_IPO "-flto=full")
-  endif()
+  # SDL is primarily C, but keep any C++ translation units on Full LTO too.
+  set(CMAKE_CXX_COMPILE_OPTIONS_IPO "-flto=full")
   set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
 else()
   message(FATAL_ERROR "OverInk SDL3 Release LTO needs MSVC or Clang, got ${CMAKE_C_COMPILER_ID}")
