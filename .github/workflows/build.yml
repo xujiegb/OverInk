@@ -95,6 +95,7 @@ jobs:
         shell: bash
         env:
           MACOSX_DEPLOYMENT_TARGET: '11.0'
+          CMAKE_TOOLCHAIN_FILE: ${{ github.workspace }}/cmake/sdl3-lto-toolchain.cmake
           OVERINK_TARGET: ${{ matrix.target }}
         run: |
           set -eu
@@ -107,7 +108,7 @@ jobs:
         shell: pwsh
         env:
           OVERINK_TARGET: ${{ matrix.target }}
-          RUSTFLAGS: '-C target-feature=+crt-static'
+          RUSTFLAGS: '-C target-feature=+crt-static -C link-arg=/LTCG'
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
@@ -117,7 +118,8 @@ jobs:
           # SDL's CMake build and Rust must link the same static MSVC CRT.
           $crt = Join-Path $env:RUNNER_TEMP 'overink-static-crt.cmake'
           @('set(CMAKE_POLICY_DEFAULT_CMP0091 NEW)',
-            'set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded" CACHE STRING "")') |
+            'set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded" CACHE STRING "")',
+            ('include("' + (Join-Path $env:GITHUB_WORKSPACE 'cmake/sdl3-lto-toolchain.cmake').Replace('\', '/') + '")')) |
             Set-Content -Encoding ascii $crt
           $env:CMAKE_TOOLCHAIN_FILE = $crt
           cargo fmt --all -- --check
@@ -664,8 +666,11 @@ jobs:
           set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
           set(SDL_X11_SHARED ON CACHE BOOL "" FORCE)
           set(SDL_WAYLAND_SHARED ON CACHE BOOL "" FORCE)
+          include("/src/cmake/sdl3-lto-toolchain.cmake")
           CMAKE
           else
+            export CMAKE_TOOLCHAIN_FILE=/src/cmake/sdl3-lto-toolchain.cmake
+            export "CARGO_TARGET_${upper}_RUSTFLAGS=-C link-arg=-fuse-ld=lld"
             export "CC_$key=$clang_c" "CXX_$key=$clang_cxx"
             export "CARGO_TARGET_${upper}_LINKER=$clang_c"
           fi
@@ -979,8 +984,10 @@ jobs:
             set(SDL_WAYLAND_SHARED ON CACHE BOOL "" FORCE)
             set(SDL_WAYLAND_LIBDECOR OFF CACHE BOOL "" FORCE)
             set(SDL_KMSDRM OFF CACHE BOOL "" FORCE)
+            include("$PWD/cmake/sdl3-lto-toolchain.cmake")
             CMAKE
             else
+              export CMAKE_TOOLCHAIN_FILE="$PWD/cmake/sdl3-lto-toolchain.cmake"
               cargo test --locked --release --target "$target"
               xvfb_dir=$(mktemp -d)
               Xvfb -displayfd 3 -screen 0 3840x2160x24 -nolisten tcp -noreset \
