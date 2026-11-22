@@ -5,6 +5,7 @@ mod damage;
 use super::{
     App, Options,
     ink::{Ink, PaintScope},
+    screenshot::SoftwareSelection,
 };
 use crate::{
     appearance::{Text, text},
@@ -850,18 +851,43 @@ impl Canvas {
                     metrics.text_ui += start.elapsed();
                 }
                 let mesh_started = timings.as_ref().map(|_| Instant::now());
+                let has_text_output = text_output.is_some();
                 if let Some(output) = text_output
                     && let Some(gui) = self.text.as_mut()
                 {
                     gui.paint(&self.render, &self.window, &self.color, output)?;
                 }
                 if page.screenshot.targets(self.window.id) && page.screenshot.selecting() {
+                    let software = (self.render.name == "software"
+                        && !self.render.extended
+                        && !has_text_output
+                        && page.history.text_boxes().is_empty()
+                        && (!self.background.frozen || page.pass)
+                        && page.history.active.is_none()
+                        && page.input.touches.is_empty()
+                        && page.input.pending_erasures.is_empty())
+                    .then(|| Ink::clear_color(page))
+                    .filter(|clear| clear[..3] == [0.; 3] || self.render.software_output_is_rgb8())
+                    .map(|clear| SoftwareSelection {
+                        clear,
+                        scale,
+                        ink: if page.hidden {
+                            None
+                        } else {
+                            self.ink.committed_coverage(
+                                &page.history,
+                                self.window.pixel_size(),
+                                scale,
+                            )
+                        },
+                    });
                     let [r, g, b, _] = crate::toolbar::ACTIVE.to_array();
                     page.screenshot.paint_selection(
                         &self.render,
                         self.window.size(),
                         page.input.canvas_units,
                         self.color.map([r, g, b].map(|v| f32::from(v) / 255.)),
+                        software,
                     )?;
                 }
                 if let (Some(start), Some(metrics)) = (mesh_started, timings.as_deref_mut()) {

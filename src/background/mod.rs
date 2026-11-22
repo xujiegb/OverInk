@@ -94,6 +94,7 @@ impl Image {
             encoding,
         })
     }
+    #[cfg(any(not(target_os = "windows"), test))]
     pub fn crop(mut self, [left, top, right, bottom]: [u32; 4]) -> Result<Self, String> {
         if left >= right || top >= bottom || right > self.width || bottom > self.height {
             return Err("The selection is outside the screenshot".into());

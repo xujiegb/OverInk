@@ -2249,7 +2249,7 @@ fn destroy_owned_surface(raw: NonNull<SDL_Surface>) {
 /// A limited source of new caller-owned SDL surfaces. No borrowed surfaces
 /// or arbitrary native surface pointers may be passed to the safe constructor.
 enum SurfaceSource<'a> {
-    Readback(&'a Renderer),
+    Readback(&'a Renderer, Option<&'a SDL_Rect>),
     #[cfg(test)]
     Test([i32; 2]),
 }
@@ -2259,17 +2259,16 @@ enum SurfaceSource<'a> {
 struct OwnedSurface(NonNull<SDL_Surface>);
 
 impl OwnedSurface {
-    /// Acquire one of the known SDL-created surfaces and copy its dimensions
-    /// before returning to entirely safe test and screenshot code.
-    fn acquire(source: SurfaceSource<'_>) -> Result<(Self, [i32; 2]), String> {
+    /// Acquire an SDL-created surface and copy its dimensions and format.
+    fn acquire(source: SurfaceSource<'_>) -> Result<(Self, [i32; 2], SDL_PixelFormat), String> {
         // SAFETY: Both SDL calls return unique, caller-owned surfaces and
         // the owned guard releases them on all success and failure paths.
         // The readback surface is live while reading its C-layout fields.
         unsafe {
             let raw = match source {
-                SurfaceSource::Readback(renderer) => {
+                SurfaceSource::Readback(renderer, region) => {
                     let renderer = renderer.raw.ok_or("Renderer has been destroyed")?;
-                    SDL_RenderReadPixels(renderer.as_ptr(), ptr::null())
+                    SDL_RenderReadPixels(renderer.as_ptr(), region.map_or(ptr::null(), |rect| rect))
                 }
                 #[cfg(test)]
                 SurfaceSource::Test([width, height]) => {
@@ -2277,14 +2276,13 @@ impl OwnedSurface {
                 }
             };
             let surface = Self(NonNull::new(raw).ok_or_else(error)?);
-            let dimensions = [
-                (*surface.as_non_null().as_ptr()).w,
-                (*surface.as_non_null().as_ptr()).h,
-            ];
+            let details = surface.as_non_null().as_ref();
+            let dimensions = [details.w, details.h];
+            let format = details.format;
             if dimensions[0] <= 0 || dimensions[1] <= 0 {
                 return Err("SDL returned invalid surface dimensions".into());
             }
-            Ok((surface, dimensions))
+            Ok((surface, dimensions, format))
         }
     }
 
@@ -2975,11 +2973,37 @@ impl Renderer {
     /// Write a renderer snapshot to BMP for headless smoke tests.
     /// The returned surface is always destroyed, including on write failures.
     pub fn save_bmp(&self, path: &std::path::Path) -> Result<(), String> {
-        let (surface, _) = OwnedSurface::acquire(SurfaceSource::Readback(self))?;
+        let (surface, ..) = OwnedSurface::acquire(SurfaceSource::Readback(self, None))?;
         let name = cstring(&path.to_string_lossy());
         // The owned surface and filename remain borrowed for the duration of
         // SDL's synchronous save. The native dispatcher keeps the FFI private.
         check(sdl_native(SdlNativeAction::SaveBmp(&surface, &name)).succeeded())
+    }
+
+    /// Probe one pixel on the software target to verify its channel precision.
+    /// The display mode's pixel format can differ from the window's surface.
+    pub fn software_output_is_rgb8(&self) -> bool {
+        let pixel = SDL_Rect {
+            x: 0,
+            y: 0,
+            w: 1,
+            h: 1,
+        };
+        OwnedSurface::acquire(SurfaceSource::Readback(self, Some(&pixel))).is_ok_and(
+            |(_, _, format)| {
+                matches!(
+                    format,
+                    SDL_PIXELFORMAT_XRGB8888
+                        | SDL_PIXELFORMAT_RGBX8888
+                        | SDL_PIXELFORMAT_XBGR8888
+                        | SDL_PIXELFORMAT_BGRX8888
+                        | SDL_PIXELFORMAT_ARGB8888
+                        | SDL_PIXELFORMAT_RGBA8888
+                        | SDL_PIXELFORMAT_ABGR8888
+                        | SDL_PIXELFORMAT_BGRA8888
+                )
+            },
+        )
     }
 
     pub fn hdr(&self) -> (bool, f32) {
@@ -3183,7 +3207,7 @@ impl TestSurface {
         if width <= 0 || height <= 0 {
             return Err("Test surface dimensions must be positive".into());
         }
-        let (surface, dimensions) = OwnedSurface::acquire(SurfaceSource::Test([width, height]))?;
+        let (surface, dimensions, _) = OwnedSurface::acquire(SurfaceSource::Test([width, height]))?;
         Ok(Self {
             surface,
             dimensions,
@@ -3220,7 +3244,8 @@ impl TestSurface {
     }
 
     fn readback(renderer: &Renderer) -> Result<Self, String> {
-        let (surface, dimensions) = OwnedSurface::acquire(SurfaceSource::Readback(renderer))?;
+        let (surface, dimensions, _) =
+            OwnedSurface::acquire(SurfaceSource::Readback(renderer, None))?;
         Ok(Self {
             surface,
             dimensions,

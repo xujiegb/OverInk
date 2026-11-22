@@ -218,6 +218,7 @@ pub(super) struct Crop {
 }
 
 impl Crop {
+    #[cfg(any(not(target_os = "windows"), test))]
     pub(super) fn apply(self, image: Image) -> Result<Image, String> {
         let bounds = self.pixel_bounds([image.width, image.height]);
         image.crop(bounds)

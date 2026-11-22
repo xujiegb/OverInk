@@ -284,6 +284,29 @@ impl Ink {
         self.layer.as_ref().map_or(0, CommittedLayer::bytes)
     }
 
+    pub(super) fn clear_color(app: &App) -> [f32; 4] {
+        if app.hidden {
+            return [0.; 4];
+        }
+        match (app.board, app.pass) {
+            (Some(super::Board::White), false) => [0.97, 0.97, 0.96, 1.],
+            (Some(super::Board::Black), false) => [0., 0., 0., 1.],
+            (_, pass) => [0., 0., 0., if pass { 0. } else { 1. / 255. }],
+        }
+    }
+
+    pub(super) fn committed_coverage(
+        &mut self,
+        history: &History,
+        pixels: [i32; 2],
+        scale: [f32; 2],
+    ) -> Option<SDL_Rect> {
+        if let Some(layer) = &self.layer {
+            return Some(layer.region);
+        }
+        pixel_bounds(self.bounds.get(history)?, pixels, scale, antialias(scale))
+    }
+
     pub fn paint(
         &mut self,
         app: &mut App,
@@ -293,11 +316,7 @@ impl Ink {
         background: &mut Background,
         scope: PaintScope,
     ) -> Result<[f32; 2], String> {
-        let bg = match (app.board, app.pass) {
-            (Some(super::Board::White), false) => [0.97, 0.97, 0.96, 1.],
-            (Some(super::Board::Black), false) => [0., 0., 0., 1.],
-            (_, pass) => [0., 0., 0., if pass { 0. } else { 1. / 255. }],
-        };
+        let bg = Self::clear_color(app);
         let scale = if let Some(rect) = scope.damage {
             let logical = window.size();
             let pixels = window.pixel_size();
@@ -322,7 +341,7 @@ impl Ink {
             color,
             pixels: window.pixel_size(),
             scale,
-            aa: 0.8 / scale[0].max(scale[1]),
+            aa: antialias(scale),
             extended_budget: scope.extended_budget,
         };
         self.painter.queued = 0;
@@ -778,13 +797,19 @@ fn revision_white_scale(layer: &CommittedLayer) -> f32 {
 }
 
 fn dirty_rect(frame: &Frame<'_>, bounds: Bounds) -> Option<SDL_Rect> {
-    let bounds = bounds.padded(frame.aa + 2. / frame.scale[0].min(frame.scale[1]));
-    let min: [i32; 2] = std::array::from_fn(|i| {
-        ((bounds.min[i] * frame.scale[i]).floor() as i32).clamp(0, frame.pixels[i])
-    });
-    let max: [i32; 2] = std::array::from_fn(|i| {
-        ((bounds.max[i] * frame.scale[i]).ceil() as i32).clamp(0, frame.pixels[i])
-    });
+    pixel_bounds(bounds, frame.pixels, frame.scale, frame.aa)
+}
+
+fn antialias(scale: [f32; 2]) -> f32 {
+    0.8 / scale[0].max(scale[1])
+}
+
+fn pixel_bounds(bounds: Bounds, pixels: [i32; 2], scale: [f32; 2], aa: f32) -> Option<SDL_Rect> {
+    let bounds = bounds.padded(aa + 2. / scale[0].min(scale[1]));
+    let min: [i32; 2] =
+        std::array::from_fn(|i| ((bounds.min[i] * scale[i]).floor() as i32).clamp(0, pixels[i]));
+    let max: [i32; 2] =
+        std::array::from_fn(|i| ((bounds.max[i] * scale[i]).ceil() as i32).clamp(0, pixels[i]));
     (min[0] < max[0] && min[1] < max[1]).then_some(SDL_Rect {
         x: min[0],
         y: min[1],
