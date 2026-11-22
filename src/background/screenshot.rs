@@ -66,8 +66,7 @@ impl Job {
         let crop = Crop { region, size };
         #[cfg(target_os = "windows")]
         {
-            super::windows::start(display.id, _hdr, move |image| crop.apply(image))
-                .map(Self::Native)
+            super::windows::start(display.id, _hdr, Some(crop), Ok).map(Self::Native)
         }
         #[cfg(target_os = "macos")]
         {
@@ -76,10 +75,8 @@ impl Job {
             } else {
                 super::SnapshotMode::Sdr
             };
-            super::macos::start(display.bounds, window.pixel_size(), mode, move |image| {
-                crop.apply(image)
-            })
-            .map(Self::Native)
+            super::macos::start(display.bounds, window.pixel_size(), mode, Some(crop), Ok)
+                .map(Self::Native)
         }
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         {
@@ -215,13 +212,13 @@ impl Job {
 }
 
 #[derive(Clone, Copy)]
-struct Crop {
+pub(super) struct Crop {
     region: Rect,
     size: [f32; 2],
 }
 
 impl Crop {
-    fn apply(self, image: Image) -> Result<Image, String> {
+    pub(super) fn apply(self, image: Image) -> Result<Image, String> {
         let bounds = self.pixel_bounds([image.width, image.height]);
         image.crop(bounds)
     }
@@ -333,6 +330,31 @@ impl Crop {
             },
             [size.map(|n| n as u32), native_pixels, fullscreen_pixels],
         ))
+    }
+}
+
+/// Physical bounds shared by the native readback paths and software crop.
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct CaptureArea {
+    pub full: [u32; 2],
+    pub bounds: [u32; 4],
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
+impl CaptureArea {
+    pub fn new([width, height]: [u32; 2], crop: Option<Crop>) -> Result<Self, String> {
+        let full = [width, height];
+        let bounds = crop.map_or([0, 0, width, height], |crop| crop.pixel_bounds(full));
+        if bounds[0] >= bounds[2] || bounds[1] >= bounds[3] {
+            return Err("The selection is outside the screenshot".into());
+        }
+        Ok(Self { full, bounds })
+    }
+
+    pub fn dimensions(self) -> [u32; 2] {
+        let [left, top, right, bottom] = self.bounds;
+        [right - left, bottom - top]
     }
 }
 
@@ -473,6 +495,9 @@ mod tests {
             region: Rect::from_min_max(egui::pos2(1., 2.), egui::pos2(3., 3.)),
             size: [4., 4.],
         };
+        let area = CaptureArea::new([image.width, image.height], Some(crop))?;
+        assert_eq!(area.bounds, [1, 2, 4, 4]);
+        assert_eq!(area.dimensions(), [3, 2]);
         let image = crop.apply(image)?;
         assert_eq!([image.width, image.height], [3, 2]);
         assert_eq!(

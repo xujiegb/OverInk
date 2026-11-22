@@ -1,6 +1,11 @@
 #![forbid(unsafe_code)]
 
-use super::{App, Options, ink::Ink};
+mod damage;
+
+use super::{
+    App, Options,
+    ink::{Ink, PaintScope},
+};
 use crate::{
     appearance::{Text, text},
     background::{self, Background, SnapshotMode},
@@ -194,6 +199,7 @@ pub(super) struct Canvas {
     // SDL destroys textures with their renderer, and renderers with their window.
     pub background: Background,
     ink: Ink,
+    damage: Option<damage::DamageLayer>,
     text: Option<Gui>,
     text_style: Option<(u64, u64)>,
     static_text: Option<StaticTextLayer>,
@@ -256,6 +262,7 @@ impl Canvas {
         Ok(Self {
             background: Background::default(),
             ink: Ink::default(),
+            damage: None,
             text: None,
             text_style: None,
             static_text: None,
@@ -299,6 +306,7 @@ impl Canvas {
     pub fn invalidate(&mut self, reason: DirtyReason) {
         self.dirty.mark(reason);
         if reason == DirtyReason::Surface {
+            self.damage = None;
             self.static_text = None;
             self.static_text_key = None;
         }
@@ -397,6 +405,7 @@ impl Canvas {
     }
 
     pub fn renderer_reset(&mut self) {
+        self.damage = None;
         // Release live SDL texture objects before rebuilding their contents
         // or destroying the old renderer.
         self.ink.reset_textures();
@@ -499,7 +508,7 @@ impl Canvas {
 
     pub fn focus_text_editor(&mut self) {
         if !self.window.input_focused() {
-            self.window.raise();
+            self.window.focus_keyboard();
         }
         self.text
             .get_or_insert_with(Gui::new)
@@ -778,6 +787,7 @@ impl Canvas {
         }
         let on_output = self.on_output(options.smoke);
         if picker_choosing || !on_output && driver() == "wayland" {
+            self.damage = None;
             self.render.begin(
                 &self.window,
                 [0., 0., 0., if picker_choosing { 1. / 255. } else { 0. }],
@@ -801,6 +811,9 @@ impl Canvas {
                     }
                 }
                 page.history.set_size(self.window.size());
+                if self.paint_damaged_overlay(page, timings.as_deref_mut())? {
+                    return Ok(());
+                }
                 let ink_started = timings.as_ref().map(|_| Instant::now());
                 let scale = if page.hidden {
                     self.render.begin(&self.window, [0.; 4])?
@@ -811,7 +824,10 @@ impl Canvas {
                         &self.window,
                         &self.color,
                         &mut self.background,
-                        extended_ink_budget,
+                        PaintScope {
+                            extended_budget: extended_ink_budget,
+                            damage: None,
+                        },
                     )?
                 };
                 if let (Some(start), Some(metrics)) = (ink_started, timings.as_deref_mut()) {

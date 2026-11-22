@@ -524,12 +524,18 @@ impl Background {
         #[cfg(any(target_os = "windows", target_os = "macos"))]
         {
             #[cfg(target_os = "windows")]
-            let job = windows::start(id, self.mode == SnapshotMode::Linear, Snapshot::compress);
+            let job = windows::start(
+                id,
+                self.mode == SnapshotMode::Linear,
+                None,
+                Snapshot::compress,
+            );
             #[cfg(target_os = "macos")]
             let job = macos::start(
                 self.bounds,
                 window.pixel_size(),
                 self.mode,
+                None,
                 Snapshot::compress,
             );
             let _ = id;

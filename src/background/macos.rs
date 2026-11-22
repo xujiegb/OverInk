@@ -1,5 +1,6 @@
 use super::{
     Image, SnapshotMode,
+    screenshot::{CaptureArea, Crop},
     system::{CaptureResult, Job},
 };
 use core_graphics::{access::ScreenCaptureAccess, display::CGDisplay};
@@ -10,7 +11,7 @@ use objc2::{
     runtime::{AnyClass, AnyObject},
     sel,
 };
-use objc2_core_foundation::{CFData, CFRetained, CFType};
+use objc2_core_foundation::{CFData, CFRetained, CFType, CGPoint, CGRect as NativeRect, CGSize};
 use objc2_foundation::{NSArray, NSError};
 use std::{
     ffi::c_void,
@@ -27,6 +28,7 @@ pub fn start<T: Send + 'static>(
     bounds: [i32; 4],
     pixels: [i32; 2],
     mode: SnapshotMode,
+    crop: Option<Crop>,
     prepare: impl FnOnce(Image) -> Result<T, String> + Send + 'static,
 ) -> Result<Job<T>, String> {
     match mode {
@@ -37,10 +39,10 @@ pub fn start<T: Send + 'static>(
             Job::start(
                 move |cancelled| {
                     if sdr_supported() {
-                        screen_capture(bounds, pixels, false, cancelled)
+                        screen_capture(bounds, pixels, false, crop, cancelled)
                     } else {
                         // ScreenCaptureKit's single-frame API requires macOS 14.
-                        sdr_capture(bounds, cancelled)
+                        crop_capture(sdr_capture(bounds, cancelled), crop)
                     }
                 },
                 prepare,
@@ -49,7 +51,7 @@ pub fn start<T: Send + 'static>(
         SnapshotMode::Linear => {
             capture_permission()?;
             Job::start(
-                move |cancelled| screen_capture(bounds, pixels, true, cancelled),
+                move |cancelled| screen_capture(bounds, pixels, true, crop, cancelled),
                 prepare,
             )
         }
@@ -217,10 +219,24 @@ fn apple_silicon() -> bool {
     }
 }
 
+enum ScreenshotReply {
+    Finished(CaptureResult),
+    RetryFullDisplay,
+}
+
+fn crop_capture(result: CaptureResult, crop: Option<Crop>) -> CaptureResult {
+    if let Some(crop) = crop {
+        result?.map(|image| crop.apply(image)).transpose()
+    } else {
+        result
+    }
+}
+
 fn screen_capture(
     bounds: [i32; 4],
     pixels: [i32; 2],
     hdr: bool,
+    crop: Option<Crop>,
     cancelled: &AtomicBool,
 ) -> CaptureResult {
     if hdr && !hdr_supported() {
@@ -230,6 +246,29 @@ fn screen_capture(
         return Err("Invalid macOS screenshot dimensions".into());
     }
     let id = display_id(bounds)?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    match request_screenshot(id, pixels, hdr, crop, cancelled, deadline)? {
+        ScreenshotReply::Finished(result) => result,
+        ScreenshotReply::RetryFullDisplay => {
+            match request_screenshot(id, pixels, hdr, None, cancelled, deadline)? {
+                ScreenshotReply::Finished(result) => crop_capture(result, crop),
+                ScreenshotReply::RetryFullDisplay => Err("Full-screen capture failed".into()),
+            }
+        }
+    }
+}
+
+fn request_screenshot(
+    id: u32,
+    pixels: [i32; 2],
+    hdr: bool,
+    crop: Option<Crop>,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<ScreenshotReply, String> {
+    if cancelled.load(Ordering::Relaxed) {
+        return Ok(ScreenshotReply::Finished(Ok(None)));
+    }
     let (sender, receiver) = mpsc::channel();
     autoreleasepool(|_| -> Result<(), String> {
         let shareable =
@@ -239,12 +278,13 @@ fn screen_capture(
                 autoreleasepool(|_| {
                     if let Some(content) = content {
                         if let Err(error) =
-                            begin_screenshot(content, id, pixels, hdr, sender.clone())
+                            begin_screenshot(content, id, pixels, hdr, crop, sender.clone())
                         {
-                            let _ = sender.send(Err(error));
+                            let _ = sender.send(ScreenshotReply::Finished(Err(error)));
                         }
                     } else {
-                        let _ = sender.send(Err(capture_error(error, hdr)));
+                        let _ =
+                            sender.send(ScreenshotReply::Finished(Err(capture_error(error, hdr))));
                     }
                 });
             },
@@ -255,20 +295,36 @@ fn screen_capture(
         }
         Ok(())
     })?;
-    let deadline = Instant::now() + Duration::from_secs(30);
     while !cancelled.load(Ordering::Relaxed) {
         if Instant::now() >= deadline {
             return Err("The macOS screenshot timed out".into());
         }
         match receiver.recv_timeout(Duration::from_millis(25)) {
-            Ok(result) => return result,
+            Ok(result) => return Ok(result),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 return Err("The macOS screenshot callback disconnected".into());
             }
         }
     }
-    Ok(None)
+    Ok(ScreenshotReply::Finished(Ok(None)))
+}
+
+fn native_region(area: CaptureArea, content: NativeRect, scale: f64) -> Option<NativeRect> {
+    // A backing-size mismatch would imply resampling relative to the
+    // full-display request. Preserve the existing software crop in that case.
+    if !matches!(scale, 1. | 2.)
+        || [content.size.width * scale, content.size.height * scale] != area.full.map(f64::from)
+        || area.dimensions() == area.full
+    {
+        return None;
+    }
+    let [left, top, _, _] = area.bounds.map(f64::from);
+    let [width, height] = area.dimensions().map(f64::from);
+    Some(NativeRect::new(
+        CGPoint::new(left / scale, top / scale),
+        CGSize::new(width / scale, height / scale),
+    ))
 }
 
 fn capture_error(error: Option<&NSError>, hdr: bool) -> String {
@@ -285,7 +341,8 @@ fn begin_screenshot(
     id: u32,
     [width, height]: [i32; 2],
     hdr: bool,
-    sender: mpsc::Sender<CaptureResult>,
+    crop: Option<Crop>,
+    sender: mpsc::Sender<ScreenshotReply>,
 ) -> Result<(), String> {
     let filter_class =
         AnyClass::get(c"SCContentFilter").ok_or("ScreenCaptureKit is unavailable")?;
@@ -318,6 +375,26 @@ fn begin_screenshot(
             msg_send![configuration, new]
         };
         let config = config.ok_or("Cannot configure the macOS screenshot")?;
+        let dimensions = [width as u32, height as u32];
+        let area = CaptureArea::new(dimensions, crop)?;
+        let region = if crop.is_some()
+            && filter_class
+                .instance_method(sel!(pointPixelScale))
+                .is_some()
+            && filter_class.instance_method(sel!(contentRect)).is_some()
+        {
+            let scale: f32 = msg_send![&*filter, pointPixelScale];
+            let content: NativeRect = msg_send![&*filter, contentRect];
+            native_region(area, content, f64::from(scale))
+        } else {
+            None
+        };
+        let [width, height] = if let Some(region) = region {
+            let _: () = msg_send![&*config, setSourceRect: region];
+            area.dimensions()
+        } else {
+            dimensions
+        };
         let _: () = msg_send![&*config, setWidth: width as usize];
         let _: () = msg_send![&*config, setHeight: height as usize];
         let _: () = msg_send![&*config, setShowsCursor: false];
@@ -344,7 +421,17 @@ fn begin_screenshot(
                     } else {
                         Err(capture_error(error, hdr))
                     };
-                    let _ = sender.send(result);
+                    let reply = if region.is_some() {
+                        match result {
+                            Ok(Some(image)) if [image.width, image.height] == [width, height] => {
+                                ScreenshotReply::Finished(Ok(Some(image)))
+                            }
+                            _ => ScreenshotReply::RetryFullDisplay,
+                        }
+                    } else {
+                        ScreenshotReply::Finished(crop_capture(result, crop))
+                    };
+                    let _ = sender.send(reply);
                 });
             },
         );
@@ -459,6 +546,21 @@ fn sdr_capture(bounds: [i32; 4], cancelled: &AtomicBool) -> CaptureResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_rect_is_display_local_and_uses_native_pixels() {
+        let area = CaptureArea {
+            full: [3840, 2160],
+            bounds: [11, 17, 611, 417],
+        };
+        let content = NativeRect::new(CGPoint::new(-1920., 0.), CGSize::new(1920., 1080.));
+        let Some(rect) = native_region(area, content, 2.) else {
+            panic!("expected a native 2x capture region");
+        };
+        assert_eq!([rect.origin.x, rect.origin.y], [5.5, 8.5]);
+        assert_eq!([rect.size.width, rect.size.height], [300., 200.]);
+        assert!(native_region(area, content, 1.).is_none());
+    }
 
     #[test]
     fn sdr_conversion_preserves_top_and_bottom_rows() -> Result<(), String> {

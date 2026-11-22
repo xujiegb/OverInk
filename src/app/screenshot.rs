@@ -239,6 +239,18 @@ pub struct Screenshot {
 }
 
 impl Screenshot {
+    #[cfg(test)]
+    pub(super) fn test_drag(start: Pos2, end: Pos2) -> Self {
+        Self {
+            stage: Stage::Selecting(Some(Drag {
+                pointer: Pointer::Pen(SDL_PenID(1)),
+                start,
+                end,
+            })),
+            ..Self::default()
+        }
+    }
+
     pub fn start(&mut self, window: &Window, hdr: bool) {
         self.target = window.id;
         self.hdr = hdr && hdr_available(window);
@@ -276,6 +288,20 @@ impl Screenshot {
         matches!(self.stage, Stage::Selecting(_))
     }
 
+    pub(super) fn selection_rects(&self, screen: Rect, units: f32) -> Option<[Rect; 2]> {
+        let Stage::Selecting(Some(drag)) = self.stage else {
+            return None;
+        };
+        let outer = Rect::from_two_pos(drag.start, drag.end).intersect(screen);
+        if !outer.is_positive() {
+            return None;
+        }
+        let border = (1.5 * units)
+            .min(outer.width() * 0.5)
+            .min(outer.height() * 0.5);
+        Some([outer, outer.shrink(border)])
+    }
+
     /// Draw the live selection without an egui context or a full-window mesh.
     pub fn paint_selection(
         &self,
@@ -284,9 +310,9 @@ impl Screenshot {
         units: f32,
         accent: [f32; 3],
     ) -> Result<(), String> {
-        let Stage::Selecting(drag) = self.stage else {
+        if !self.selecting() {
             return Ok(());
-        };
+        }
         let screen = Rect::from_min_size(Pos2::ZERO, Vec2::from(size));
         let fill = |rects: &[Rect], [r, g, b, a]: [f32; 4]| {
             let color = SDL_FColor { r, g, b, a };
@@ -317,20 +343,10 @@ impl Screenshot {
             )
         };
         let dim = [0., 0., 0., 76. / 255.];
-        if let Some(drag) = drag {
-            let region = Rect::from_two_pos(drag.start, drag.end).intersect(screen);
-            if !region.is_positive() {
-                return fill(&[screen], dim);
-            }
+        if let Some([region, inner]) = self.selection_rects(screen, units) {
             fill(&outside_selection(screen, region), dim)?;
-            let border = (1.5 * units)
-                .min(region.width() * 0.5)
-                .min(region.height() * 0.5);
             let [r, g, b] = accent;
-            fill(
-                &outside_selection(region, region.shrink(border)),
-                [r, g, b, 1.],
-            )
+            fill(&outside_selection(region, inner), [r, g, b, 1.])
         } else {
             fill(&[screen], dim)
         }
@@ -723,7 +739,7 @@ impl Screenshot {
     }
 }
 
-fn outside_selection(screen: Rect, region: Rect) -> [Rect; 4] {
+pub(super) fn outside_selection(screen: Rect, region: Rect) -> [Rect; 4] {
     [
         Rect::from_min_max(screen.min, pos2(screen.right(), region.top())),
         Rect::from_min_max(pos2(screen.left(), region.bottom()), screen.max),

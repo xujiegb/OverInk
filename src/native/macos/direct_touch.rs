@@ -6,6 +6,11 @@ use crate::sdl::{self, Window};
 use std::{marker::PhantomData, rc::Rc};
 
 unsafe extern "C" {
+    pub(crate) safe fn overink_macos_create_overlay(width: i32, height: i32, flags: u64) -> u32;
+    pub(crate) safe fn overink_macos_raise_overlay(window_id: u32, keyboard: bool) -> bool;
+    pub(crate) safe fn overink_macos_order_toolbar(canvas_id: u32, toolbar_id: u32);
+    pub(crate) safe fn overink_macos_overlay_crosshair(crosshair: bool);
+    pub(crate) safe fn overink_macos_destroy_overlay(window_id: u32) -> bool;
     safe fn overink_macos_install_touch(window_id: u32) -> i32;
     safe fn overink_macos_uninstall_touch(window_id: u32);
 }
@@ -55,7 +60,25 @@ pub extern "C" fn overink_macos_touch_event(
 
 #[cfg(test)]
 mod tests {
-    use super::{overink_macos_install_touch, overink_macos_uninstall_touch};
+    use super::{
+        overink_macos_create_overlay, overink_macos_destroy_overlay, overink_macos_install_touch,
+        overink_macos_raise_overlay, overink_macos_uninstall_touch,
+    };
+
+    #[test]
+    fn off_main_thread_rejects_overlay_calls() -> Result<(), String> {
+        let result = std::thread::spawn(|| {
+            (
+                overink_macos_create_overlay(100, 60, 0),
+                overink_macos_raise_overlay(u32::MAX, false),
+                overink_macos_destroy_overlay(u32::MAX),
+            )
+        })
+        .join()
+        .map_err(|_| "Off-main-thread overlay bridge panicked")?;
+        assert_eq!(result, (0, false, false));
+        Ok(())
+    }
 
     #[test]
     fn off_main_thread_rejects_direct_touch_install() -> Result<(), String> {

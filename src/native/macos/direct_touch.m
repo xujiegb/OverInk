@@ -1,15 +1,242 @@
-// macOS 27 direct-touch bridge. This is the only new AppKit gesture boundary.
-// Cocoa and SDL handles stay inside Objective-C; Rust receives scalar events.
+// AppKit overlay windows and the macOS 27 direct-touch bridge.
+// Cocoa and SDL handles stay inside Objective-C. Rust passes scalar IDs.
 #import <AppKit/AppKit.h>
 #import <objc/runtime.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <math.h>
 
 typedef struct SDL_Window SDL_Window;
+extern uint32_t SDL_CreateProperties(void);
+extern void SDL_DestroyProperties(uint32_t);
+extern bool SDL_SetNumberProperty(uint32_t, const char *, int64_t);
+extern bool SDL_SetPointerProperty(uint32_t, const char *, void *);
+extern SDL_Window *SDL_CreateWindowWithProperties(uint32_t);
+extern uint32_t SDL_GetWindowID(SDL_Window *);
+extern void SDL_DestroyWindow(SDL_Window *);
 extern SDL_Window *SDL_GetWindowFromID(uint32_t);
 extern uint32_t SDL_GetWindowProperties(SDL_Window *);
 extern void *SDL_GetPointerProperty(uint32_t, const char *, void *);
 extern void overink_macos_touch_event(uint32_t, uint64_t, uint32_t, float, float);
+
+static NSWindow *OverInkCocoaWindow(SDL_Window *window) {
+    if (window == NULL) {
+        return nil;
+    }
+    return (__bridge NSWindow *)SDL_GetPointerProperty(
+        SDL_GetWindowProperties(window), "SDL.window.cocoa.window", NULL);
+}
+
+// SDL invalidates each window's cursor rect when the picker or screenshot
+// changes the cursor. External views supply the replacement rect themselves.
+static BOOL OverInkOverlayCrosshair = NO;
+
+void overink_macos_overlay_crosshair(bool crosshair) {
+    if ([NSThread isMainThread]) {
+        OverInkOverlayCrosshair = crosshair;
+    }
+}
+
+// SDL attaches its input listener to external Cocoa windows and views. Supply
+// the first-click and tracking behavior it normally installs on its own view.
+@interface OverInkOverlayView : NSView
+- (void)clearOverlayTracking;
+@end
+
+@implementation OverInkOverlayView {
+    NSTrackingArea *_overlayTracking;
+}
+
+- (BOOL)acceptsFirstMouse:(NSEvent *)event {
+    return YES;
+}
+
+- (BOOL)mouseDownCanMoveWindow {
+    return YES;
+}
+
+- (void)rightMouseDown:(NSEvent *)event {
+    [self.nextResponder rightMouseDown:event];
+}
+
+- (void)resetCursorRects {
+    [super resetCursorRects];
+    [self addCursorRect:self.bounds cursor:OverInkOverlayCrosshair
+        ? NSCursor.crosshairCursor : NSCursor.arrowCursor];
+}
+
+- (void)clearOverlayTracking {
+    if (_overlayTracking != nil) {
+        [self removeTrackingArea:_overlayTracking];
+        _overlayTracking = nil;
+    }
+}
+
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    [self clearOverlayTracking];
+    if (self.nextResponder != nil) {
+        _overlayTracking = [[NSTrackingArea alloc] initWithRect:NSZeroRect
+            options:NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect
+            owner:self.nextResponder userInfo:nil];
+        [self addTrackingArea:_overlayTracking];
+    }
+}
+@end
+
+// SDL 3.4 tracks its native hit-test drag in the window listener. External
+// windows need to tell that same listener when AppKit consumes the mouse-up.
+@protocol OverInkSDLDragListener
+@optional
+- (BOOL)isMoving;
+- (void)windowDidFinishMoving;
+@end
+
+@interface OverInkOverlayPanel : NSPanel
+@end
+
+@implementation OverInkOverlayPanel
+- (BOOL)canBecomeKeyWindow {
+    return YES;
+}
+
+- (BOOL)canBecomeMainWindow {
+    return NO;
+}
+
+- (void)setStyleMask:(NSWindowStyleMask)mask {
+    // SDL can update border/resizable bits after creating the native window.
+    [super setStyleMask:mask | NSWindowStyleMaskNonactivatingPanel];
+}
+
+- (void)sendEvent:(NSEvent *)event {
+    [super sendEvent:event];
+    if (event.type == NSEventTypeLeftMouseUp) {
+        NSObject<OverInkSDLDragListener> *listener = (id)self.delegate;
+        if ([listener respondsToSelector:@selector(isMoving)]
+            && [listener respondsToSelector:@selector(windowDidFinishMoving)]
+            && listener.isMoving) {
+            [listener windowDidFinishMoving];
+        }
+    }
+}
+@end
+
+uint32_t overink_macos_create_overlay(int32_t width, int32_t height, uint64_t flags) {
+    if (![NSThread isMainThread] || width <= 0 || height <= 0) {
+        return 0;
+    }
+    NSRect rect = NSMakeRect(0, 0, width, height);
+    OverInkOverlayPanel *panel;
+    @try {
+        panel = [[OverInkOverlayPanel alloc]
+            initWithContentRect:rect
+            styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskResizable | NSWindowStyleMaskNonactivatingPanel
+            backing:NSBackingStoreBuffered defer:NO];
+    } @catch (NSException *exception) {
+        return 0;
+    }
+    if (panel == nil) {
+        return 0;
+    }
+    panel.releasedWhenClosed = NO;
+    panel.hidesOnDeactivate = NO;
+    panel.colorSpace = NSColorSpace.sRGBColorSpace;
+    panel.tabbingMode = NSWindowTabbingModeDisallowed;
+    NSWindowCollectionBehavior behavior = NSWindowCollectionBehaviorCanJoinAllSpaces
+        | NSWindowCollectionBehaviorFullScreenAuxiliary | NSWindowCollectionBehaviorIgnoresCycle;
+    if (@available(macOS 13.0, *)) {
+        // NSWindowCollectionBehaviorCanJoinAllApplications, including when
+        // building with a macOS 11 SDK that predates Stage Manager.
+        const NSWindowCollectionBehavior canJoinAllApplications = 1UL << 18;
+        behavior |= canJoinAllApplications;
+    }
+    panel.collectionBehavior = behavior;
+    [panel center];
+    OverInkOverlayView *view = [[OverInkOverlayView alloc] initWithFrame:rect];
+    panel.contentView = view;
+
+    uint32_t props = SDL_CreateProperties();
+    SDL_Window *window = NULL;
+    if (props != 0) {
+        if (SDL_SetPointerProperty(props, "SDL.window.create.cocoa.window", (__bridge void *)panel)
+            && SDL_SetNumberProperty(props, "SDL.window.create.width", width)
+            && SDL_SetNumberProperty(props, "SDL.window.create.height", height)
+            && SDL_SetNumberProperty(props, "SDL.window.create.flags", (int64_t)flags)) {
+            window = SDL_CreateWindowWithProperties(props);
+        }
+        SDL_DestroyProperties(props);
+    }
+    if (window == NULL) {
+        [panel close];
+        return 0;
+    }
+    uint32_t id = SDL_GetWindowID(window);
+    if (id == 0) {
+        [view clearOverlayTracking];
+        SDL_DestroyWindow(window);
+        [panel close];
+        return 0;
+    }
+    [view updateTrackingAreas];
+    return id;
+}
+
+bool overink_macos_raise_overlay(uint32_t window_id, bool keyboard) {
+    if (![NSThread isMainThread]) {
+        return false;
+    }
+    NSWindow *panel = OverInkCocoaWindow(SDL_GetWindowFromID(window_id));
+    if (![panel isKindOfClass:OverInkOverlayPanel.class]) {
+        return false;
+    }
+    if (panel.isVisible) {
+        [panel orderFrontRegardless];
+        if (keyboard && !panel.isKeyWindow) {
+            [panel makeKeyWindow];
+        }
+    }
+    return true;
+}
+
+void overink_macos_order_toolbar(uint32_t canvas_id, uint32_t toolbar_id) {
+    if (![NSThread isMainThread]) {
+        return;
+    }
+    NSWindow *canvas = OverInkCocoaWindow(SDL_GetWindowFromID(canvas_id));
+    NSWindow *toolbar = OverInkCocoaWindow(SDL_GetWindowFromID(toolbar_id));
+    if (canvas == nil || toolbar == nil || !toolbar.isVisible) {
+        return;
+    }
+    NSInteger level = canvas.level;
+    if (level < NSIntegerMax) {
+        ++level;
+    }
+    if (toolbar.level != level) {
+        toolbar.level = level;
+    }
+    [toolbar orderWindow:NSWindowAbove relativeTo:canvas.windowNumber];
+}
+
+bool overink_macos_destroy_overlay(uint32_t window_id) {
+    if (![NSThread isMainThread]) {
+        return false;
+    }
+    SDL_Window *window = SDL_GetWindowFromID(window_id);
+    NSWindow *panel = OverInkCocoaWindow(window);
+    if (![panel isKindOfClass:OverInkOverlayPanel.class]) {
+        return false;
+    }
+    // Detach SDL's listener first. SDL does not close an externally supplied
+    // window, so keep the panel alive here until AppKit closes it.
+    NSView *view = panel.contentView;
+    if ([view isKindOfClass:OverInkOverlayView.class]) {
+        [(OverInkOverlayView *)view clearOverlayTracking];
+    }
+    SDL_DestroyWindow(window);
+    [panel close];
+    return true;
+}
 
 // Available starting with macOS 27; declare for older build SDKs while
 // checking at runtime so macOS 11–26 continue to use their original path.
@@ -188,8 +415,7 @@ int32_t overink_macos_install_touch(uint32_t window_id) {
         if (window == NULL) {
             return -1;
         }
-        NSWindow *nsWindow = (__bridge NSWindow *)SDL_GetPointerProperty(
-            SDL_GetWindowProperties(window), "SDL.window.cocoa.window", NULL);
+        NSWindow *nsWindow = OverInkCocoaWindow(window);
         NSView *view = nsWindow.contentView;
         if (view == nil) {
             return -1;
