@@ -509,7 +509,7 @@ try {
         Write-Host "Building OverInk $Version for $name ($($a.Triple))"
         Set-MsvcEnvironment $vcvars $a.Vcvars $originalEnvironment
         $env:CMAKE_GENERATOR = 'Ninja'
-        $env:RUSTFLAGS = '-C target-feature=+crt-static -C link-arg=/LTCG'
+        $env:RUSTFLAGS = '-C target-feature=+crt-static -C link-arg=/LTCG -C link-arg=SDL3-static.lib'
         $env:CARGO_TARGET_DIR = Join-Path $root 'target'
         $env:OVERINK_BUILD_VERSION = $Version
         $toolchainFile = Join-Path $work 'static-crt.cmake'
