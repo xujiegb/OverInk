@@ -525,6 +525,12 @@ CMAKE
 
   local key="${rust_target//-/_}"
   local upper="${key^^}"
+  local lto_link_args=()
+  if [[ "$short" == loong64 ]]; then
+    # Older LLVM LTO backends can lose the LP64D ABI of Clang bitcode.
+    # These options affect the final LLD LTO backend, not Rust code generation.
+    lto_link_args=("CARGO_TARGET_${upper}_RUSTFLAGS=-C link-arg=-Wl,-plugin-opt=-target-abi=lp64d -C link-arg=-Wl,-plugin-opt=-mattr=+d")
+  fi
 
   env \
     PATH="$LLVM_TOOL_BIN:$SDK_WORK_DIR/host/usr/bin:$PATH" \
@@ -539,6 +545,7 @@ CMAKE
     "CXX_${key}=$SDK_WORK_DIR/cc/clang++" \
     "AR_${key}=$archiver" \
     "CARGO_TARGET_${upper}_LINKER=$SDK_WORK_DIR/cc/clang" \
+    "${lto_link_args[@]}" \
     cargo build --manifest-path "$PROJECT" --locked --release --target "$rust_target"
 }
 
