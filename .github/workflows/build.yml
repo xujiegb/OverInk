@@ -632,12 +632,14 @@ jobs:
             [[ -n $gcc_dir ]] || { echo 'Missing target startup files' >&2; exit 1; }
             gcc_dir=${gcc_dir%/*}
             mkdir -p "$sdk/cc"
+            abi_flags=
+            [[ $TARGET_ARCH != loong64 ]] || abi_flags=-mabi=lp64d
             for compiler in clang clang++; do
               driver="$clang_c"
               [[ $compiler != clang++ ]] || driver="$clang_cxx"
               cat > "$sdk/cc/$compiler" <<WRAPPER
           #!/bin/sh
-          exec "$driver" --target=$TARGET_TRIPLE --sysroot=$sysroot --gcc-install-dir=$gcc_dir -fuse-ld=$clang_linker -Qunused-arguments "\$@"
+          exec "$driver" --target=$TARGET_TRIPLE --sysroot=$sysroot --gcc-install-dir=$gcc_dir -fuse-ld=$clang_linker $abi_flags -Qunused-arguments "\$@"
           WRAPPER
               chmod +x "$sdk/cc/$compiler"
             done
