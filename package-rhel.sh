@@ -461,7 +461,12 @@ publish_binary() {
   CARGO_TARGET_DIR="$(mktemp -d)"
 
   if [[ -z "$SDK_WORK_DIR" ]]; then
+    local native_target_key="${rust_target//-/_}"
+    local native_target_upper="${native_target_key^^}"
     CC="$(command -v clang)" CXX="$(command -v clang++)" \
+    CMAKE_TOOLCHAIN_FILE="$SCRIPT_DIR/cmake/sdl3-lto-toolchain.cmake" \
+    "CARGO_TARGET_${native_target_upper}_LINKER=$(command -v clang)" \
+    "CARGO_TARGET_${native_target_upper}_RUSTFLAGS=-C link-arg=-fuse-ld=lld" \
     CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS" \
     CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
       cargo build --manifest-path "$PROJECT" --locked --release --target "$rust_target"
@@ -513,6 +518,7 @@ set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
 set(SDL_X11_SHARED ON CACHE BOOL "" FORCE)
 set(SDL_WAYLAND_SHARED ON CACHE BOOL "" FORCE)
+include("$SCRIPT_DIR/cmake/sdl3-lto-toolchain.cmake")
 CMAKE
 
   local key="${rust_target//-/_}"
