@@ -108,7 +108,7 @@ jobs:
         shell: pwsh
         env:
           OVERINK_TARGET: ${{ matrix.target }}
-          RUSTFLAGS: '-C target-feature=+crt-static -C link-arg=/LTCG'
+          RUSTFLAGS: '-C target-feature=+crt-static -C link-arg=/LTCG -C link-arg=SDL3-static.lib'
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
