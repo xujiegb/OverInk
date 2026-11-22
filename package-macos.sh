@@ -244,7 +244,6 @@ set(CMAKE_OSX_DEPLOYMENT_TARGET "$MACOSX_DEPLOYMENT_TARGET" CACHE STRING "" FORC
 set(CMAKE_OSX_SYSROOT "$sdk" CACHE PATH "" FORCE)
 set(CMAKE_C_COMPILER "$clang" CACHE FILEPATH "" FORCE)
 set(CMAKE_CXX_COMPILER "$clangxx" CACHE FILEPATH "" FORCE)
-include("$root/cmake/sdl3-lto-toolchain.cmake")
 CMAKE
 
   key=$(printf '%s' "$target" | tr '-' '_')
