@@ -324,17 +324,53 @@ pub fn sample(window: &Window, point: ScreenPoint) -> Result<InkColor, String> {
 }
 
 pub fn capture(window: &Window) -> Result<Image, String> {
+    capture_region(window, |[width, height]| [0, 0, width, height])
+}
+
+/// The selection shares the crop rounding used by the other capture backends.
+pub fn capture_region(
+    window: &Window,
+    select: impl FnOnce([u32; 2]) -> [u32; 4],
+) -> Result<Image, String> {
     let connection = crate::x11::connection()?;
     let origin = translate(&connection, window, [0.; 2])?;
     let [w, h] = window.pixel_size();
     let width = u16::try_from(w).map_err(|_| "Invalid X11 desktop capture width")?;
     let height = u16::try_from(h).map_err(|_| "Invalid X11 desktop capture height")?;
-    let (layout, data) = readback(&connection, origin, [width, height])?;
-    let mut image = layout.image([width, height], data)?;
+    let region = select([width.into(), height.into()]);
+    let mut image = read_region(&connection, origin, [width, height], region)?;
     if let Some(profile) = window.icc_profile() {
         image.convert_to_srgb(&profile);
     }
     Ok(image)
+}
+
+fn read_region(
+    connection: &RustConnection,
+    origin: ScreenPoint,
+    [width, height]: [u16; 2],
+    region: [u32; 4],
+) -> Result<Image, String> {
+    let [left, top, right, bottom] = region;
+    if left >= right || top >= bottom || right > u32::from(width) || bottom > u32::from(height) {
+        return Err("The selection is outside the screenshot".into());
+    }
+    let x = i16::try_from(i32::from(origin.pixels[0]) + left as i32);
+    let y = i16::try_from(i32::from(origin.pixels[1]) + top as i32);
+    if let (Ok(x), Ok(y)) = (x, y) {
+        let size = [(right - left) as u16, (bottom - top) as u16];
+        let point = ScreenPoint {
+            pixels: [x, y],
+            ..origin
+        };
+        let (layout, data) = readback(connection, point, size)?;
+        layout.image(size, data)
+    } else {
+        // The X11 request uses signed origins. A large root can contain
+        // pixels beyond that range even though a full-width read is valid.
+        let (layout, data) = readback(connection, origin, [width, height])?;
+        layout.image([width, height], data)?.crop(region)
+    }
 }
 
 #[cfg(test)]
@@ -358,9 +394,39 @@ mod tests {
     #[test]
     #[ignore = "requires an isolated X11 display"]
     fn x11_live_root_capture_reuses_the_reply_buffer() -> Result<(), String> {
+        use x11rb::protocol::xproto::{CreateGCAux, Rectangle};
+
         let connection = crate::x11::connection()?;
         let root = connection.setup().roots.first().ok_or("No X11 screen")?;
         let size = [root.width_in_pixels, root.height_in_pixels];
+        let gc = connection
+            .generate_id()
+            .map_err(|error| error.to_string())?;
+        connection
+            .create_gc(
+                gc,
+                root.root,
+                &CreateGCAux::new().foreground(root.white_pixel),
+            )
+            .map_err(|error| error.to_string())?
+            .check()
+            .map_err(|error| error.to_string())?;
+        let marker = Rectangle {
+            x: 5,
+            y: 11,
+            width: 7,
+            height: 3,
+        };
+        connection
+            .poly_fill_rectangle(root.root, gc, &[marker])
+            .map_err(|error| error.to_string())?
+            .check()
+            .map_err(|error| error.to_string())?;
+        connection
+            .free_gc(gc)
+            .map_err(|error| error.to_string())?
+            .check()
+            .map_err(|error| error.to_string())?;
         let (layout, data) = readback(
             &connection,
             ScreenPoint {
@@ -382,6 +448,43 @@ mod tests {
                 .iter()
                 .all(|pixel| pixel[3] == 255)
         );
+        let region = [3, 7, 21, 28];
+        let direct = read_region(
+            &connection,
+            ScreenPoint {
+                root: root.root,
+                pixels: [0, 0],
+            },
+            size,
+            region,
+        )?;
+        let cropped = image.crop(region)?;
+        assert_eq!(
+            [direct.width, direct.height],
+            [cropped.width, cropped.height]
+        );
+        assert_eq!(direct.rgba, cropped.rgba);
+        Ok(())
+    }
+
+    #[test]
+    fn region_color_conversion_matches_conversion_before_cropping() -> Result<(), String> {
+        let profile = moxcms::ColorProfile::new_display_p3()
+            .encode()
+            .map_err(|error| error.to_string())?;
+        let image = || {
+            let mut image = Image::buffer(9, 5)?;
+            for (i, output) in image.rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                *output = [(i * 17) as u8, (i * 37) as u8, (i * 67) as u8, 255];
+            }
+            Ok::<_, String>(image)
+        };
+        let region = [1, 1, 8, 4];
+        let mut original = image()?;
+        original.convert_to_srgb(&profile);
+        let mut direct = image()?.crop(region)?;
+        direct.convert_to_srgb(&profile);
+        assert_eq!(direct.rgba, original.crop(region)?.rgba);
         Ok(())
     }
 

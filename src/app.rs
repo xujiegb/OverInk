@@ -398,7 +398,10 @@ impl App {
         let now = Instant::now();
         if !starts_segment
             && let Some(last) = trail.back_mut()
-            && last.point.dist(point) <= Point::MERGE_DISTANCE
+            && last
+                .point
+                .distance_within(point, Point::MERGE_DISTANCE)
+                .is_some()
         {
             last.at = now;
             return;
@@ -517,8 +520,9 @@ impl App {
             }
             return;
         }
-        if let Some(last) = stroke.points.last_mut() {
-            let distance = last.dist(p);
+        if let Some(last) = stroke.points.last_mut()
+            && let Some(distance) = last.distance_within(p, 0.15)
+        {
             let pressure_enabled = stroke.pressure_enabled;
             let pencil = stroke.tool == Tool::Pencil;
             if distance <= Point::MERGE_DISTANCE {
@@ -527,7 +531,7 @@ impl App {
             }
             let new_pressure = pressure_enabled && (last.pressure - p.pressure).abs() > 0.00001;
             let new_tilt = pencil && last.tilt != p.tilt;
-            if distance <= 0.15 && !new_pressure && !new_tilt {
+            if !new_pressure && !new_tilt {
                 return;
             }
         }

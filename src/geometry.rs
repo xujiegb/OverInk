@@ -177,7 +177,7 @@ pub fn paper_density(x: i32, y: i32) -> f32 {
 
 fn append_distinct(points: &mut Vec<Point>, p: Point, stroke: &Stroke) {
     if let Some(prev) = points.last_mut()
-        && prev.dist(p) <= Point::MERGE_DISTANCE
+        && prev.distance_within(p, Point::MERGE_DISTANCE).is_some()
     {
         prev.merge_sample(p, stroke.pressure_enabled, stroke.tool == Tool::Pencil);
     } else {

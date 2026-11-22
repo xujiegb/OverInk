@@ -94,6 +94,15 @@ impl Point {
     pub fn dist(self, b: Self) -> f32 {
         (self.x - b.x).hypot(self.y - b.y)
     }
+    pub fn distance_within(self, other: Self, limit: f32) -> Option<f32> {
+        let x = self.x - other.x;
+        let y = self.y - other.y;
+        if x.abs() <= limit && y.abs() <= limit {
+            let distance = x.hypot(y);
+            return (distance <= limit).then_some(distance);
+        }
+        None
+    }
     pub fn merge_sample(&mut self, other: Self, pressure_enabled: bool, pencil: bool) {
         if pressure_enabled {
             self.pressure = self.pressure.max(other.pressure);
@@ -230,7 +239,12 @@ impl Stroke {
 
     pub fn radius(&self, p: Point) -> f32 {
         let scale = if self.pressure_enabled {
-            0.08 + 0.92 * p.pressure.powf(self.pressure_curve)
+            let pressure = if self.pressure_curve == 1. {
+                p.pressure
+            } else {
+                p.pressure.powf(self.pressure_curve)
+            };
+            0.08 + 0.92 * pressure
         } else {
             1.
         };

@@ -195,8 +195,8 @@ impl Job {
                 })
                 .map(Self::Portal);
             }
-            let image = crate::picker_desktop::capture(window)?;
-            Ok(Self::X11(Some(crop.apply(image)?)))
+            crate::picker_desktop::capture_region(window, |size| crop.pixel_bounds(size))
+                .map(|image| Self::X11(Some(image)))
         }
     }
 
@@ -222,19 +222,23 @@ struct Crop {
 
 impl Crop {
     fn apply(self, image: Image) -> Result<Image, String> {
-        let [width, height] = [image.width, image.height];
+        let bounds = self.pixel_bounds([image.width, image.height]);
+        image.crop(bounds)
+    }
+
+    fn pixel_bounds(self, [width, height]: [u32; 2]) -> [u32; 4] {
         let sx = f64::from(width) / f64::from(self.size[0]);
         let sy = f64::from(height) / f64::from(self.size[1]);
         let left = (f64::from(self.region.left()) * sx).floor() as u32;
         let top = (f64::from(self.region.top()) * sy).floor() as u32;
         let right = (f64::from(self.region.right()) * sx).ceil() as u32;
         let bottom = (f64::from(self.region.bottom()) * sy).ceil() as u32;
-        image.crop([
+        [
             left.min(width),
             top.min(height),
             right.min(width),
             bottom.min(height),
-        ])
+        ]
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
