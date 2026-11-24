@@ -2,6 +2,7 @@ use super::*;
 use crate::controller::Rect;
 use libloading::Library;
 use std::{
+    cell::Cell,
     ffi::{CStr, c_char, c_int, c_void},
     ptr::{self, NonNull},
     rc::Rc,
@@ -101,7 +102,8 @@ struct Wayland {
     version: Version,
     _lib: Library,
 }
-#[derive(Default)]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
 struct Globals {
     compositor: u32,
     version: u32,
@@ -109,42 +111,47 @@ struct Globals {
 impl Wayland {
     fn new(w: &Window) -> Result<Self, String> {
         extern "C" fn global(
-            data: Option<NonNull<Globals>>,
+            data: Option<&Cell<Globals>>,
             _registry: Option<NonNull<c_void>>,
             name: u32,
             interface: Option<NonNull<c_char>>,
             version: u32,
         ) {
-            let (Some(mut data), Some(interface)) = (data, interface) else {
+            let (Some(data), Some(interface)) = (data, interface) else {
                 return;
             };
-            // SAFETY: The listener checks both nullable inputs above. The
-            // roundtrip synchronously dispatches callbacks while the Box
-            // holding Globals and the Wayland-owned interface name are live.
+            // SAFETY: Wayland supplies a live, NUL-terminated interface
+            // name during this callback.
             unsafe {
                 if CStr::from_ptr(interface.as_ptr()) == c"wl_compositor" {
-                    let globals = data.as_mut();
-                    globals.compositor = name;
-                    globals.version = version.min(4);
+                    data.set(Globals {
+                        compositor: name,
+                        version: version.min(4),
+                    });
                 }
             }
         }
         extern "C" fn removed(
-            _data: Option<NonNull<Globals>>,
+            data: Option<&Cell<Globals>>,
             _registry: Option<NonNull<c_void>>,
-            _name: u32,
+            name: u32,
         ) {
+            if let Some(data) = data
+                && data.get().compositor == name
+            {
+                data.set(Globals::default());
+            }
         }
         #[repr(C)]
         struct Listener {
             global: extern "C" fn(
-                Option<NonNull<Globals>>,
+                Option<&Cell<Globals>>,
                 Option<NonNull<c_void>>,
                 u32,
                 Option<NonNull<c_char>>,
                 u32,
             ),
-            removed: extern "C" fn(Option<NonNull<Globals>>, Option<NonNull<c_void>>, u32),
+            removed: extern "C" fn(Option<&Cell<Globals>>, Option<NonNull<c_void>>, u32),
         }
         static LISTENER: Listener = Listener { global, removed };
 
@@ -172,13 +179,13 @@ impl Wayland {
             let set_queue: unsafe extern "C" fn(NonNull<c_void>, NonNull<c_void>) = *lib
                 .get(b"wl_proxy_set_queue\0")
                 .map_err(|e| e.to_string())?;
-            // Wayland retains the listener table and user data until the
-            // registry proxy is destroyed. LISTENER is static and Globals is
-            // pinned by its Box across the synchronous registry roundtrip.
+            // LISTENER is static. The registry owns a borrow of the cell
+            // until it is destroyed, and the private queue is dispatched
+            // synchronously on this thread while that borrow is valid.
             let add_listener: unsafe extern "C" fn(
                 NonNull<c_void>,
                 &'static Listener,
-                NonNull<Globals>,
+                &Cell<Globals>,
             ) -> c_int = *lib
                 .get(b"wl_proxy_add_listener\0")
                 .map_err(|e| e.to_string())?;
@@ -222,29 +229,30 @@ impl Wayland {
                     ptr::null_mut::<c_void>(),
                 )
             };
+            let globals = Cell::new(Globals::default());
             let registry = OwnedWaylandHandle::from_native(registry_raw, destroy)
                 .ok_or("No Wayland registry")?;
-            let mut globals = Box::new(Globals::default());
-            if add_listener(registry.raw, &LISTENER, NonNull::from(globals.as_mut())) != 0
+            if add_listener(registry.raw, &LISTENER, &globals) != 0
                 || roundtrip(display, queue.raw) < 0
-                || globals.compositor == 0
             {
-                // Never destroy the callback's userdata before its registry.
-                drop(registry);
+                return Err("Cannot bind Wayland compositor".into());
+            }
+            let chosen = globals.get();
+            if chosen.compositor == 0 {
                 return Err("Cannot bind Wayland compositor".into());
             }
             let compositor_raw = marshal(
                 registry.raw,
                 0,
                 Some(compositor_interface),
-                globals.version,
+                chosen.version,
                 0,
-                globals.compositor,
+                chosen.compositor,
                 c"wl_compositor".as_ptr(),
-                globals.version,
+                chosen.version,
                 ptr::null_mut::<c_void>(),
             );
-            // No further registry dispatch can see the boxed callback data.
+            // End registry dispatch before the local cell goes out of scope.
             drop(registry);
             let compositor = OwnedWaylandHandle::from_native(compositor_raw, destroy)
                 .ok_or("Cannot bind Wayland compositor")?;

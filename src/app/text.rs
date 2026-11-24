@@ -16,7 +16,10 @@ use egui::{
     text::{CCursor, CCursorRange},
     vec2,
 };
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use unicode_segmentation::UnicodeSegmentation;
 
 mod color_wheel;
@@ -1152,11 +1155,12 @@ impl App {
                 acted = true;
             }
         }
+        let selected_srgb = color.srgb8();
         for rgb in PRESETS {
             let preset = InkColor::from_rgb8(rgb);
             let label = format!("{} {}", tr.text("Text color"), preset.hex());
             let response =
-                toolbar::swatch_button(&mut menu, button, rgb, &label, color.srgb8() == rgb)
+                toolbar::swatch_button(&mut menu, button, rgb, &label, selected_srgb == rgb)
                     .on_hover_text(
                         egui::RichText::new(label).size(toolbar::MENU_FONT_SIZE * scale),
                     );
@@ -1326,11 +1330,24 @@ impl App {
     /// Draw immutable committed labels into a retained GPU texture. The
     /// selected label is rendered by the dynamic editor instead, preventing
     /// old text from showing behind a drag/resize/IME draft.
+    pub(super) fn static_text_items(
+        &self,
+        skip_selected: Option<usize>,
+        region: Rect,
+    ) -> impl Iterator<Item = &Arc<TextBox>> {
+        self.history
+            .text_boxes()
+            .iter()
+            .enumerate()
+            .filter_map(move |(index, item)| {
+                (skip_selected != Some(index) && region.intersect(item.text_rect()).is_positive())
+                    .then_some(item)
+            })
+    }
+
     pub(super) fn static_text_ui(&self, ui: &Ui, skip_selected: Option<usize>, region: Rect) {
-        for (index, item) in self.history.text_boxes().iter().enumerate() {
-            if skip_selected != Some(index) && region.intersect(item.text_rect()).is_positive() {
-                draw_text_box(ui, &self.text_fonts, item);
-            }
+        for item in self.static_text_items(skip_selected, region) {
+            draw_text_box(ui, &self.text_fonts, item);
         }
     }
 

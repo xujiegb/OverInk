@@ -47,7 +47,8 @@ pub enum KeyboardSource {
 pub struct Preferences {
     pub language: Option<Language>,
     pub theme: ThemeMode,
-    pub restore_session: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restore_session: Option<bool>,
     pub per_display_windows: bool,
     pub wayland: bool,
     pub keyboard_source: KeyboardSource,
@@ -60,7 +61,7 @@ impl Default for Preferences {
         Self {
             language: None,
             theme: ThemeMode::System,
-            restore_session: true,
+            restore_session: None,
             per_display_windows: false,
             wayland: false,
             keyboard_source: KeyboardSource::OverInk,
@@ -71,6 +72,10 @@ impl Default for Preferences {
 }
 
 impl Preferences {
+    pub fn restores_session(&self) -> bool {
+        self.restore_session == Some(true)
+    }
+
     /// Snapshot the panel controls without copying the owned screenshot path.
     pub fn panel_values(&self) -> Self {
         Self {
@@ -235,14 +240,14 @@ mod tests {
         assert_eq!(default, Preferences::default());
         assert_eq!(default.language, None);
         assert_eq!(default.theme, ThemeMode::System);
-        assert!(default.restore_session);
+        assert!(!default.restores_session());
         assert!(!default.per_display_windows);
         assert!(!default.wayland);
         assert_eq!(default.keyboard_source, KeyboardSource::OverInk);
         let manual = Preferences {
             language: Some(Language::Traditional),
             theme: ThemeMode::Dark,
-            restore_session: false,
+            restore_session: Some(true),
             per_display_windows: true,
             wayland: true,
             keyboard_source: KeyboardSource::System,
@@ -253,6 +258,10 @@ mod tests {
         assert_eq!(serde_json::from_str::<Preferences>(&encoded)?, manual);
         let legacy: Preferences = serde_json::from_str(r#"{"theme":"dark"}"#)?;
         assert_eq!(legacy.keyboard_source, KeyboardSource::OverInk);
+        assert!(!legacy.restores_session());
+        assert_eq!(legacy.restore_session, None);
+        let disabled: Preferences = serde_json::from_str(r#"{"restore_session":false}"#)?;
+        assert_eq!(disabled.restore_session, Some(false));
         Ok(())
     }
 }

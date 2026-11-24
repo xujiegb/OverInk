@@ -480,7 +480,6 @@ mod tests {
         let saved = Preferences {
             language: Some(Language::Traditional),
             per_display_windows: true,
-            restore_session: false,
             wayland: true,
             ..Preferences::default()
         };
