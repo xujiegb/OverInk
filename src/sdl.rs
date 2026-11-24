@@ -2747,6 +2747,7 @@ enum RenderCommand<'a> {
     Clear([f32; 4]),
     ReplaceRect(&'a SDL_FRect, [f32; 4]),
     Clip(Option<&'a SDL_Rect>),
+    Viewport(&'a SDL_Rect),
     Scale([f32; 2]),
     GetColorScale(&'a mut f32),
     SetColorScale(f32),
@@ -2826,6 +2827,9 @@ impl Renderer {
                     renderer.as_ptr(),
                     clip.map_or(ptr::null(), |rect| rect),
                 )),
+                RenderCommand::Viewport(viewport) => {
+                    check(SDL_SetRenderViewport(renderer.as_ptr(), viewport))
+                }
                 RenderCommand::Scale([x, y]) => check(SDL_SetRenderScale(renderer.as_ptr(), x, y)),
                 RenderCommand::GetColorScale(previous) => {
                     check(SDL_GetRenderColorScale(renderer.as_ptr(), previous))
@@ -3038,7 +3042,9 @@ impl Renderer {
         self.run_command(RenderCommand::SetTarget(RenderTarget::Ink(target)))?;
         let result = draw();
         let restore = self.run_command(RenderCommand::SetTarget(RenderTarget::Previous(previous)));
-        unwind_restore.disarm();
+        if restore.is_ok() {
+            unwind_restore.disarm();
+        }
         result.and(restore)
     }
     pub fn set_clip_rect(&self, clip: Option<&SDL_Rect>) {
@@ -3079,13 +3085,19 @@ impl Renderer {
         });
         let result = draw();
         let restore = self.set_render_scale(previous);
-        unwind_restore.disarm();
+        if restore.is_ok() {
+            unwind_restore.disarm();
+        }
         result.and(restore)
     }
 
     /// Set a clip region and return failures (unlike the UI's best-effort clip).
     pub fn try_set_clip_rect(&self, clip: Option<&SDL_Rect>) -> Result<(), String> {
         self.run_command(RenderCommand::Clip(clip))
+    }
+
+    pub(super) fn set_viewport(&self, viewport: &SDL_Rect) -> Result<(), String> {
+        self.run_command(RenderCommand::Viewport(viewport))
     }
 
     /// Temporarily replace SDL's color scale and restore it after drawing.
@@ -3127,7 +3139,9 @@ impl Renderer {
         });
         let result = draw();
         let restore = self.run_command(RenderCommand::SetColorScale(previous));
-        unwind_restore.disarm();
+        if restore.is_ok() {
+            unwind_restore.disarm();
+        }
         result.and(restore)
     }
 

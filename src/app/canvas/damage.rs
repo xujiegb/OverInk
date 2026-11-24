@@ -78,7 +78,6 @@ impl Canvas {
         app: &mut App,
         mut timings: Option<&mut CanvasPaintTimings>,
     ) -> Result<bool, String> {
-        let cached = self.ink.cached_bytes();
         if self.render.name != "software"
             || self.render.extended
             || self.background.frozen
@@ -92,8 +91,12 @@ impl Canvas {
             || !app.input.touches.is_empty()
             || app.screenshot.active()
             || app.history.active.is_none() && app.input.laser.is_empty()
-            || cached < MIN_INK_COMPOSITION_BYTES
         {
+            self.damage = None;
+            return Ok(false);
+        }
+        let cached = self.ink.cached_bytes();
+        if cached < MIN_INK_COMPOSITION_BYTES {
             self.damage = None;
             return Ok(false);
         }
@@ -202,9 +205,13 @@ impl Canvas {
         }
         self.ink.release_unused_layer(app);
         self.animation = !app.input.laser.is_empty();
-        layer.key = key;
-        layer.footprint = Some(footprint);
-        self.damage = Some(layer);
+        // The last fade frame clears the previous trail. It also stops the
+        // animation timer, so release the composition here when drawing ends.
+        if self.animation || app.history.active.is_some() {
+            layer.key = key;
+            layer.footprint = Some(footprint);
+            self.damage = Some(layer);
+        }
         Ok(true)
     }
 }

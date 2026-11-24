@@ -324,6 +324,10 @@ pub struct StrokeBounds {
     well_spaced: bool,
 }
 impl StrokeBounds {
+    pub(crate) fn samples_are_distinct(self) -> bool {
+        self.well_spaced
+    }
+
     fn new(stroke: &Stroke) -> Option<Self> {
         let mut outline = [Point::EMPTY; Stroke::OUTLINE_POINTS];
         let points = stroke.polyline(&mut outline);
@@ -361,10 +365,10 @@ impl StrokeBounds {
     }
 }
 
-const STROKE_BLOCK_SEGMENTS: usize = 128;
+pub(crate) const STROKE_BLOCK_SEGMENTS: usize = 128;
 
 #[derive(Default)]
-struct StrokeIndex {
+pub(crate) struct StrokeIndex {
     bounds: Vec<Option<StrokeBounds>>,
     blocks: BTreeMap<usize, Box<[StrokeBounds]>>,
 }
@@ -391,10 +395,23 @@ impl StrokeIndex {
         self.bounds.push(bounds);
     }
 
-    fn blocks(&self, index: usize) -> &[StrokeBounds] {
+    pub(crate) fn bounds(&self) -> &[Option<StrokeBounds>] {
+        &self.bounds
+    }
+
+    pub(crate) fn blocks(&self, index: usize) -> &[StrokeBounds] {
         self.blocks
             .get(&index)
             .map_or(&[], |blocks| blocks.as_ref())
+    }
+
+    pub(crate) fn coverage(&self, index: usize) -> &[StrokeBounds] {
+        let blocks = self.blocks(index);
+        if blocks.is_empty() {
+            self.bounds[index].as_slice()
+        } else {
+            blocks
+        }
     }
 }
 
@@ -584,7 +601,7 @@ impl History {
         self.point_count
     }
 
-    fn stroke_index(&self) -> Ref<'_, StrokeIndex> {
+    pub(crate) fn stroke_index(&self) -> Ref<'_, StrokeIndex> {
         let first = self.stroke_index.borrow().bounds.len();
         let next = &self.doc.strokes[first..];
         if !next.is_empty() {
@@ -597,7 +614,7 @@ impl History {
     }
 
     pub fn stroke_bounds(&self) -> Ref<'_, [Option<StrokeBounds>]> {
-        Ref::map(self.stroke_index(), |index| index.bounds.as_slice())
+        Ref::map(self.stroke_index(), StrokeIndex::bounds)
     }
 
     pub fn can_undo(&self) -> bool {

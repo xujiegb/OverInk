@@ -8,37 +8,21 @@ pub(crate) use direct_touch::{
 pub use pencil::PencilModeMonitor;
 
 use crate::sdl::*;
-use objc2::{Encoding, RefEncode, msg_send, runtime::AnyObject};
-use objc2_core_foundation::{CFRetained, CFType};
-use std::{ffi::c_void, ptr::NonNull};
+use objc2::{msg_send, runtime::AnyObject};
+use objc2_core_graphics::{CGColorSpace, kCGColorSpaceSRGB};
+use std::ptr::NonNull;
 
 pub fn configure_metal(raw: NonNull<SDL_Renderer>, extended: bool) {
-    #[repr(C)]
-    struct ColorSpace {
-        _opaque: [u8; 0],
-    }
-    // Core Graphics exposes only a pointer to the opaque CGColorSpace.
-    unsafe impl RefEncode for ColorSpace {
-        const ENCODING_REF: Encoding = Encoding::Pointer(&Encoding::Struct("CGColorSpace", &[]));
-    }
-    #[link(name = "CoreGraphics", kind = "framework")]
-    unsafe extern "C" {
-        static kCGColorSpaceSRGB: Option<NonNull<c_void>>;
-        fn CGColorSpaceCreateWithName(name: NonNull<c_void>) -> Option<NonNull<CFType>>;
-    }
+    // SAFETY: The live SDL Metal renderer owns its CAMetalLayer. The layer
+    // selectors use NSUInteger and the Core Graphics color-space type.
     unsafe {
         let layer = SDL_GetRenderMetalLayer(raw.as_ptr()).cast::<AnyObject>();
         if layer.is_null() {
             return;
         }
         let _: () = msg_send![layer, setMaximumDrawableCount: 2_usize];
-        if !extended
-            && let Some(name) = kCGColorSpaceSRGB
-            && let Some(srgb) = CGColorSpaceCreateWithName(name)
-        {
-            let srgb = CFRetained::from_raw(srgb);
-            let color_space = CFRetained::as_ptr(&srgb).cast::<ColorSpace>();
-            let _: () = msg_send![layer, setColorspace: color_space.as_ptr()];
+        if !extended && let Some(srgb) = CGColorSpace::with_name(Some(kCGColorSpaceSRGB)) {
+            let _: () = msg_send![layer, setColorspace: &*srgb];
         }
     }
 }

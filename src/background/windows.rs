@@ -3,7 +3,7 @@ use super::{
     screenshot::{CaptureArea, Crop},
     system::Job,
 };
-use crate::sdl::*;
+use crate::{native::windows_keyboard::Apartment, sdl::*};
 use ::windows::{
     Foundation::TypedEventHandler,
     Graphics::{
@@ -14,6 +14,7 @@ use ::windows::{
         DirectX::{Direct3D11::IDirect3DDevice, DirectXPixelFormat},
     },
     Win32::{
+        Foundation::S_OK,
         Graphics::{
             Direct3D::D3D_DRIVER_TYPE_HARDWARE,
             Direct3D11::{
@@ -31,7 +32,7 @@ use ::windows::{
         System::WinRT::{
             Direct3D11::{CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess},
             Graphics::Capture::IGraphicsCaptureItemInterop,
-            RO_INIT_MULTITHREADED, RO_INIT_SINGLETHREADED, RoInitialize, RoUninitialize,
+            RO_INIT_MULTITHREADED, RO_INIT_SINGLETHREADED,
         },
     },
     core::{IInspectable, Interface, factory},
@@ -51,7 +52,7 @@ pub fn start<T: Send + 'static>(
     display: u32,
     linear: bool,
     crop: Option<Crop>,
-    prepare: impl FnOnce(Image) -> Result<T, String> + Send + 'static,
+    prepare: impl FnOnce(Image, &AtomicBool) -> Result<Option<T>, String> + Send + 'static,
 ) -> Result<Job<T>, String> {
     let handle =
         windows_monitor_handle(display).ok_or("The Windows display handle is unavailable")?;
@@ -69,26 +70,15 @@ pub fn start<T: Send + 'static>(
     )
 }
 
-struct Apartment;
-impl Drop for Apartment {
-    fn drop(&mut self) {
-        unsafe { RoUninitialize() }
-    }
-}
-
 pub fn hdr_supported() -> bool {
     static SUPPORTED: OnceLock<bool> = OnceLock::new();
     *SUPPORTED.get_or_init(|| {
         // SDL may already have initialized the UI thread's COM apartment.
-        let initialized = unsafe {
-            RoInitialize(RO_INIT_SINGLETHREADED)
-                .or_else(|_| RoInitialize(RO_INIT_MULTITHREADED))
-                .is_ok()
-        };
-        if !initialized {
+        let Ok(_apartment) = Apartment::enter(RO_INIT_SINGLETHREADED)
+            .or_else(|_| Apartment::enter(RO_INIT_MULTITHREADED))
+        else {
             return false;
-        }
-        let _apartment = Apartment;
+        };
         GraphicsCaptureSession::IsSupported().unwrap_or(false)
             && factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>().is_ok()
     })
@@ -100,9 +90,11 @@ fn capture(
     linear: bool,
     crop: Option<Crop>,
 ) -> Result<Option<Image>, Box<dyn Error>> {
+    if cancelled.load(Ordering::Relaxed) {
+        return Ok(None);
+    }
+    let _apartment = Apartment::enter(RO_INIT_MULTITHREADED)?;
     unsafe {
-        RoInitialize(RO_INIT_MULTITHREADED)?;
-        let _apartment = Apartment;
         if !GraphicsCaptureSession::IsSupported()? {
             return Err("Windows Graphics Capture is unavailable".into());
         }
@@ -111,11 +103,15 @@ fn capture(
         let size = item.Size()?;
         let area = CaptureArea::new([size.Width.try_into()?, size.Height.try_into()?], crop)?;
         let [width, height] = area.dimensions();
-        let mut image = if linear {
-            Image::hdr_buffer(width, height)?
+        let encoding = if linear {
+            Encoding::LinearRgba16
         } else {
-            Image::buffer(width, height)?
+            Encoding::Srgb8
         };
+        Image::byte_len(width, height, encoding)?;
+        if cancelled.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
         let (mut device, mut context) = (None, None);
         D3D11CreateDevice(
             None,
@@ -141,8 +137,15 @@ fn capture(
         } else {
             DirectXPixelFormat::B8G8R8A8UIntNormalized
         };
-        let pool =
-            Direct3D11CaptureFramePool::CreateFreeThreaded(&capture_device, format, 2, size)?;
+        if cancelled.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        // This job consumes one frame. Keep a single capture buffer when the
+        // driver accepts it and preserve the two-buffer fallback.
+        let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(&capture_device, format, 1, size)
+            .or_else(|_| {
+                Direct3D11CaptureFramePool::CreateFreeThreaded(&capture_device, format, 2, size)
+            })?;
         let session = pool.CreateCaptureSession(&item)?;
         let _ = session.SetIsCursorCaptureEnabled(false);
         let (ready, frames) = mpsc::sync_channel(1);
@@ -161,16 +164,26 @@ fn capture(
                 }
                 match frames.recv_timeout(Duration::from_millis(25)) {
                     Ok(()) => {
-                        let frame = pool.TryGetNextFrame()?;
+                        let frame = match pool.TryGetNextFrame() {
+                            Ok(frame) => frame,
+                            // windows-rs represents an empty WinRT interface
+                            // as an error with a successful HRESULT.
+                            Err(error) if error.code() == S_OK => continue,
+                            Err(error) => return Err(error.into()),
+                        };
                         let copied = (|| {
+                            if cancelled.load(Ordering::Relaxed) {
+                                return Ok(None);
+                            }
                             if frame.ContentSize()? != size {
                                 return Err("The display size changed during capture".into());
                             }
-                            copy_frame(&device, &context, &frame, &mut image, area)
+                            let mut image = Image::allocate(width, height, encoding)?;
+                            copy_frame(&device, &context, &frame, &mut image, area)?;
+                            Ok::<_, Box<dyn Error>>(Some(image))
                         })();
                         let _ = frame.Close();
-                        copied?;
-                        return Ok(Some(image));
+                        return copied;
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
                     Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -233,14 +246,15 @@ fn copy_frame(
         context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
         let stride = mapped.RowPitch as usize;
         let pixels = mapped.pData.cast::<u8>();
-        let result = stride
-            .checked_mul(image.height as usize)
+        let result = image
+            .capture_row_layout(stride)
+            .map(|(_, len)| len)
             .filter(|size| !pixels.is_null() && *size <= isize::MAX as usize)
             .ok_or_else(|| "Invalid mapped desktop frame".to_string())
             .and_then(|size| {
                 // SAFETY: D3D11 Map returned a live staging allocation.
-                // The checked pitch/height are within the readable mapped
-                // region; Unmap runs only after both row copies finish.
+                // The checked length ends at the last readable pixel.
+                // Unmap runs only after the row copy finishes.
                 // This is the single boundary producing a borrowed slice.
                 let mapped = std::slice::from_raw_parts(pixels, size);
                 let mut copy = |offset: usize, row: &mut [u8]| {

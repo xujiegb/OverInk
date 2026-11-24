@@ -390,12 +390,12 @@ impl Canvas {
         app.input.canvas_units = gui::window_units(&self.window);
     }
 
-    pub fn keep_toolbar_above(&self, toolbar: &Window) {
+    pub fn keep_toolbar_above(&mut self, toolbar: &Window) {
         if toolbar.hidden() {
             return;
         }
         if self.output == toolbar.display_id() || driver() == "wayland" {
-            native::keep_controller_above(&self.window, toolbar, &self.native);
+            native::keep_controller_above(&self.window, toolbar, &mut self.native);
         }
     }
 

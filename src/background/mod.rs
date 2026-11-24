@@ -7,6 +7,8 @@ mod system;
 #[cfg(target_os = "windows")]
 mod windows;
 use crate::{icc::ColorManager, sdl::*};
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::Read,
@@ -38,17 +40,11 @@ pub struct Image {
     encoding: Encoding,
 }
 impl Image {
-    #[cfg(any(
-        target_os = "linux",
-        target_os = "freebsd",
-        target_os = "macos",
-        target_os = "windows",
-        test
-    ))]
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos", test))]
     pub fn buffer(width: u32, height: u32) -> Result<Self, String> {
         Self::allocate(width, height, Encoding::Srgb8)
     }
-    #[cfg(any(target_os = "windows", target_os = "macos", test))]
+    #[cfg(any(target_os = "macos", test))]
     fn hdr_buffer(width: u32, height: u32) -> Result<Self, String> {
         Self::allocate(width, height, Encoding::LinearRgba16)
     }
@@ -117,28 +113,30 @@ impl Image {
     }
 
     #[cfg(any(target_os = "windows", target_os = "macos", test))]
+    fn capture_row_layout(&self, stride: usize) -> Option<(usize, usize)> {
+        let row_bytes = (self.width as usize).checked_mul(self.encoding.bytes_per_pixel())?;
+        let height = self.height as usize;
+        if row_bytes == 0 || row_bytes > stride || row_bytes.checked_mul(height)? != self.rgba.len()
+        {
+            return None;
+        }
+        let needed = (height.checked_sub(1)?)
+            .checked_mul(stride)?
+            .checked_add(row_bytes)?;
+        Some((row_bytes, needed))
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "macos", test))]
     fn copy_hdr_rows(
         &mut self,
         len: usize,
         stride: usize,
         mut copy: impl FnMut(usize, &mut [u8]),
     ) -> Result<(), String> {
-        let row_bytes = (self.width as usize)
-            .checked_mul(8)
-            .ok_or("Invalid HDR capture row width")?;
-        let height = self.height as usize;
-        let needed = height
-            .checked_sub(1)
-            .and_then(|last| last.checked_mul(stride))
-            .and_then(|offset| offset.checked_add(row_bytes));
-        if row_bytes == 0
-            || self.encoding != Encoding::LinearRgba16
-            || row_bytes.checked_mul(height) != Some(self.rgba.len())
-            || stride < row_bytes
-            || needed.is_none_or(|size| size > len)
-        {
-            return Err("Invalid HDR capture row pitch".into());
-        }
+        let (row_bytes, _) = self
+            .capture_row_layout(stride)
+            .filter(|&(_, needed)| self.encoding == Encoding::LinearRgba16 && needed <= len)
+            .ok_or("Invalid HDR capture row pitch")?;
         for (y, row) in self.rgba.chunks_exact_mut(row_bytes).enumerate() {
             copy(y * stride, row);
             for pixel in row.as_chunks_mut::<8>().0 {
@@ -158,21 +156,10 @@ impl Image {
         stride: usize,
         mut copy: impl FnMut(usize, &mut [u8]),
     ) -> Result<(), String> {
-        let row_bytes = (self.width as usize)
-            .checked_mul(4)
-            .ok_or("Invalid SDR capture row width")?;
-        let needed = (self.height as usize)
-            .checked_sub(1)
-            .and_then(|last| last.checked_mul(stride))
-            .and_then(|offset| offset.checked_add(row_bytes));
-        if row_bytes == 0
-            || self.encoding != Encoding::Srgb8
-            || row_bytes.checked_mul(self.height as usize) != Some(self.rgba.len())
-            || stride < row_bytes
-            || needed.is_none_or(|size| size > len)
-        {
-            return Err("Invalid SDR capture row pitch".into());
-        }
+        let (row_bytes, _) = self
+            .capture_row_layout(stride)
+            .filter(|&(_, needed)| self.encoding == Encoding::Srgb8 && needed <= len)
+            .ok_or("Invalid SDR capture row pitch")?;
         for (y, row) in self.rgba.chunks_exact_mut(row_bytes).enumerate() {
             copy(y * stride, row);
             for pixel in row.as_chunks_mut::<4>().0 {
@@ -226,6 +213,46 @@ struct Snapshot {
     compressed: bool,
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+struct SnapshotOutput<'a> {
+    bytes: Vec<u8>,
+    raw_len: usize,
+    cancelled: &'a AtomicBool,
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+impl std::io::Write for SnapshotOutput<'_> {
+    fn write(&mut self, chunk: &[u8]) -> std::io::Result<usize> {
+        use std::io::{Error, ErrorKind};
+        if self.cancelled.load(Ordering::Relaxed) {
+            return Err(Error::from(ErrorKind::BrokenPipe));
+        }
+        if chunk.is_empty() {
+            return Ok(0);
+        }
+        let needed = self
+            .bytes
+            .len()
+            .checked_add(chunk.len())
+            .filter(|&len| len < self.raw_len)
+            .ok_or_else(|| Error::from(ErrorKind::StorageFull))?;
+        let capacity = self.bytes.capacity();
+        if needed > capacity {
+            // Keep geometric growth below the size of the original image.
+            let capacity = capacity.saturating_mul(2).max(needed).min(self.raw_len - 1);
+            self.bytes
+                .try_reserve_exact(capacity - self.bytes.len())
+                .map_err(|_| Error::from(ErrorKind::OutOfMemory))?;
+        }
+        self.bytes.extend_from_slice(chunk);
+        Ok(chunk.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 impl From<Image> for Snapshot {
     fn from(image: Image) -> Self {
         Self {
@@ -240,20 +267,44 @@ impl From<Image> for Snapshot {
 
 impl Snapshot {
     #[cfg(any(target_os = "macos", target_os = "windows", test))]
-    fn compress(image: Image) -> Result<Self, String> {
-        use std::io::Write;
+    fn compress(image: Image, cancelled: &AtomicBool) -> Result<Option<Self>, String> {
+        use std::io::{ErrorKind, Write};
         let mut snapshot = Self::from(image);
-        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
-        encoder
-            .write_all(&snapshot.bytes)
-            .map_err(|e| e.to_string())?;
-        let mut compressed = encoder.finish().map_err(|e| e.to_string())?;
-        if compressed.len() < snapshot.bytes.len() {
-            compressed.shrink_to_fit();
-            snapshot.bytes = compressed;
-            snapshot.compressed = true;
+        let output = SnapshotOutput {
+            bytes: Vec::new(),
+            raw_len: snapshot.bytes.len(),
+            cancelled,
+        };
+        let mut encoder = flate2::write::ZlibEncoder::new(output, flate2::Compression::fast());
+        // Check input as well as output, since a flat image may produce no
+        // compressed bytes for a long time. Interrupted would make write_all retry.
+        let packed = snapshot
+            .bytes
+            .chunks(SNAPSHOT_UPLOAD_BYTES)
+            .try_for_each(|chunk| {
+                if cancelled.load(Ordering::Relaxed) {
+                    return Err(ErrorKind::BrokenPipe.into());
+                }
+                encoder.write_all(chunk)
+            })
+            .and_then(|()| encoder.finish());
+        if cancelled.load(Ordering::Relaxed) {
+            return Ok(None);
         }
-        Ok(snapshot)
+        match packed {
+            Ok(SnapshotOutput { bytes, .. }) => {
+                snapshot.bytes = bytes;
+                snapshot.bytes.shrink_to_fit();
+                snapshot.compressed = true;
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::StorageFull | ErrorKind::OutOfMemory
+                ) => {}
+            Err(error) => return Err(error.to_string()),
+        }
+        Ok(Some(snapshot))
     }
 
     fn upload_rows(
@@ -734,7 +785,7 @@ mod tests {
         };
         bg.freeze();
         assert!(bg.pending());
-        let snapshot = Snapshot::compress(Image::hdr_buffer(128, 128)?)?;
+        let snapshot = compress_snapshot(Image::hdr_buffer(128, 128)?)?;
         assert!(bg.finish_capture(Ok(Some(snapshot))).is_ok());
         assert!(bg.frozen && !bg.pending());
         assert_eq!(bg.images[&7].encoding, Encoding::LinearRgba16);
@@ -764,7 +815,7 @@ mod tests {
         for bytes in image.rgba.as_chunks_mut::<8>().0 {
             bytes.copy_from_slice(pixel.as_flattened());
         }
-        let snapshot = Snapshot::compress(image)?;
+        let snapshot = compress_snapshot(image)?;
         assert!(snapshot.compressed);
         assert_eq!(snapshot.encoding, Encoding::LinearRgba16);
         assert!(snapshot.bytes.len() < SNAPSHOT_UPLOAD_BYTES);
@@ -787,6 +838,44 @@ mod tests {
             assert_eq!(next_row, height as usize);
             assert_eq!(uploads, 3);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn incompressible_snapshot_keeps_the_original_channels() -> TestResult {
+        let mut image = Image::hdr_buffer(128, 128)?;
+        let mut random = 1_u32;
+        for bytes in image.rgba.as_chunks_mut::<4>().0 {
+            random ^= random << 13;
+            random ^= random >> 17;
+            random ^= random << 5;
+            *bytes = random.to_ne_bytes();
+        }
+        let original = image.rgba.to_vec();
+        let snapshot = compress_snapshot(image)?;
+        assert!(!snapshot.compressed);
+        assert_eq!(snapshot.bytes, original);
+        Ok(())
+    }
+
+    fn compress_snapshot(image: Image) -> Result<Snapshot, String> {
+        Snapshot::compress(image, &AtomicBool::new(false))?.ok_or("Unexpected cancellation".into())
+    }
+
+    #[test]
+    fn cancelled_snapshot_stops_writing_and_returns_no_frame() -> TestResult {
+        use std::io::Write;
+        let cancelled = AtomicBool::new(false);
+        let mut output = SnapshotOutput {
+            bytes: Vec::new(),
+            raw_len: 1024,
+            cancelled: &cancelled,
+        };
+        output.write_all(&[7; 64])?;
+        cancelled.store(true, Ordering::Relaxed);
+        assert!(output.write_all(&[8; 64]).is_err());
+        assert_eq!(output.bytes, [7; 64]);
+        assert!(Snapshot::compress(Image::hdr_buffer(1, 1)?, &cancelled)?.is_none());
         Ok(())
     }
 
