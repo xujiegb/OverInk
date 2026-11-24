@@ -44,7 +44,7 @@ libloading = "0.9"
 async-channel = "2"
 futures-lite = "2"
 x11rb = { version = "0.14.0", default-features = false, features = ["randr", "shape"] }
-zbus = { version = "=6.3.0", default-features = false, features = ["default-rt", "proxy", "service"] }
+zbus = { version = "=6.5.0", default-features = false, features = ["default-rt", "proxy", "service"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = "=0.25.0"
