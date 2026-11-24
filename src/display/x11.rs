@@ -18,6 +18,7 @@ pub(super) struct Randr {
     areas: Option<Vec<[i32; 4]>>,
     watch: bool,
     dirty: bool,
+    disconnected: bool,
 }
 
 impl Randr {
@@ -41,6 +42,7 @@ impl Randr {
             areas: None,
             watch,
             dirty: true,
+            disconnected: false,
         })
     }
 
@@ -49,6 +51,9 @@ impl Randr {
     }
 
     pub(super) fn poll(&mut self) -> bool {
+        if self.disconnected {
+            return false;
+        }
         loop {
             match self.connection.poll_for_event() {
                 Ok(Some(Event::RandrNotify(_) | Event::RandrScreenChangeNotify(_))) => {
@@ -57,8 +62,9 @@ impl Randr {
                 Ok(Some(_)) => {}
                 Ok(None) => break,
                 Err(_) => {
-                    self.watch = false;
-                    break;
+                    self.disconnected = true;
+                    self.areas = None;
+                    return true;
                 }
             }
         }
@@ -67,6 +73,9 @@ impl Randr {
     }
 
     pub(super) fn active_areas(&mut self) -> Option<&[[i32; 4]]> {
+        if self.disconnected {
+            return None;
+        }
         if self.dirty {
             self.areas = self.query_areas();
             self.dirty = self.areas.is_none();

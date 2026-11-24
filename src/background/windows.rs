@@ -111,11 +111,12 @@ fn capture(
         let size = item.Size()?;
         let area = CaptureArea::new([size.Width.try_into()?, size.Height.try_into()?], crop)?;
         let [width, height] = area.dimensions();
-        let mut image = if linear {
-            Image::hdr_buffer(width, height)?
+        let encoding = if linear {
+            Encoding::LinearRgba16
         } else {
-            Image::buffer(width, height)?
+            Encoding::Srgb8
         };
+        Image::byte_len(width, height, encoding)?;
         let (mut device, mut context) = (None, None);
         D3D11CreateDevice(
             None,
@@ -141,8 +142,12 @@ fn capture(
         } else {
             DirectXPixelFormat::B8G8R8A8UIntNormalized
         };
-        let pool =
-            Direct3D11CaptureFramePool::CreateFreeThreaded(&capture_device, format, 2, size)?;
+        // This job consumes one frame. Keep a single capture buffer when the
+        // driver accepts it and preserve the two-buffer fallback.
+        let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(&capture_device, format, 1, size)
+            .or_else(|_| {
+                Direct3D11CaptureFramePool::CreateFreeThreaded(&capture_device, format, 2, size)
+            })?;
         let session = pool.CreateCaptureSession(&item)?;
         let _ = session.SetIsCursorCaptureEnabled(false);
         let (ready, frames) = mpsc::sync_channel(1);
@@ -166,11 +171,12 @@ fn capture(
                             if frame.ContentSize()? != size {
                                 return Err("The display size changed during capture".into());
                             }
-                            copy_frame(&device, &context, &frame, &mut image, area)
+                            let mut image = Image::allocate(width, height, encoding)?;
+                            copy_frame(&device, &context, &frame, &mut image, area)?;
+                            Ok::<_, Box<dyn Error>>(image)
                         })();
                         let _ = frame.Close();
-                        copied?;
-                        return Ok(Some(image));
+                        return copied.map(Some);
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
                     Err(mpsc::RecvTimeoutError::Disconnected) => {

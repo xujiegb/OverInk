@@ -3,7 +3,9 @@ use super::{
     screenshot::{CaptureArea, Crop},
     system::{CaptureResult, Job},
 };
-use core_graphics::{access::ScreenCaptureAccess, display::CGDisplay};
+use core_graphics::{
+    access::ScreenCaptureAccess, display::CGDisplay, geometry::CGPoint as DisplayPoint,
+};
 use libloading::Library;
 use objc2::{
     msg_send,
@@ -11,7 +13,9 @@ use objc2::{
     runtime::{AnyClass, AnyObject},
     sel,
 };
-use objc2_core_foundation::{CFData, CFRetained, CFType, CGPoint, CGRect as NativeRect, CGSize};
+use objc2_core_foundation::{
+    CFData, CFRetained, CFString, CFType, CGPoint, CGRect as NativeRect, CGSize,
+};
 use objc2_foundation::{NSArray, NSError};
 use std::{
     ffi::c_void,
@@ -61,40 +65,8 @@ pub fn start<T: Send + 'static>(
     }
 }
 
-#[repr(C)]
-struct Point {
-    x: f64,
-    y: f64,
-}
-
-#[repr(C)]
-struct Size {
-    width: f64,
-    height: f64,
-}
-
-#[repr(C)]
-struct CGRect {
-    origin: Point,
-    size: Size,
-}
-
-// The only permitted array count is one. The ABI-compatible repr(u32)
-// prevents safe Rust callers from requesting more elements than the single
-// initialized output slot provided to Core Graphics.
-#[repr(u32)]
-enum SingleDisplay {
-    One = 1,
-}
-
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
-    safe fn CGGetDisplaysWithPoint(
-        point: Point,
-        max: SingleDisplay,
-        displays: &mut u32,
-        count: &mut u32,
-    ) -> i32;
     fn CGColorSpaceCreateWithName(name: NonNull<c_void>) -> Option<NonNull<CFType>>;
     fn CGBitmapContextCreate(
         data: NonNull<c_void>,
@@ -105,7 +77,7 @@ unsafe extern "C" {
         color_space: NonNull<CFType>,
         bitmap_info: u32,
     ) -> Option<NonNull<CFType>>;
-    fn CGContextDrawImage(context: NonNull<CFType>, rect: CGRect, image: NonNull<c_void>);
+    fn CGContextDrawImage(context: NonNull<CFType>, rect: NativeRect, image: NonNull<c_void>);
     #[cfg(test)]
     fn CGBitmapContextCreateImage(context: NonNull<CFType>) -> Option<NonNull<CFType>>;
     fn CGImageGetWidth(image: NonNull<c_void>) -> usize;
@@ -115,29 +87,24 @@ unsafe extern "C" {
     fn CGImageGetBytesPerRow(image: NonNull<c_void>) -> usize;
     fn CGImageGetBitmapInfo(image: NonNull<c_void>) -> u32;
     fn CGImageGetColorSpace(image: NonNull<c_void>) -> Option<NonNull<c_void>>;
-    fn CGColorSpaceGetName(space: NonNull<c_void>) -> Option<NonNull<c_void>>;
+    fn CGColorSpaceGetName(space: NonNull<c_void>) -> Option<NonNull<CFString>>;
     fn CGImageGetDataProvider(image: NonNull<c_void>) -> Option<NonNull<c_void>>;
     fn CGDataProviderCopyData(provider: NonNull<c_void>) -> Option<NonNull<CFData>>;
     // CoreGraphics constants are nullable C object pointers.
-    static kCGColorSpaceExtendedLinearSRGB: Option<NonNull<c_void>>;
+    static kCGColorSpaceExtendedLinearSRGB: Option<NonNull<CFString>>;
     static kCGColorSpaceSRGB: Option<NonNull<c_void>>;
 }
 
-#[link(name = "CoreFoundation", kind = "framework")]
-unsafe extern "C" {
-    fn CFEqual(left: NonNull<c_void>, right: NonNull<c_void>) -> u8;
-}
-
 fn display_id([x, y, w, h]: [i32; 4]) -> Result<u32, String> {
-    let center = Point {
-        x: f64::from(x) + f64::from(w) / 2.,
-        y: f64::from(y) + f64::from(h) / 2.,
-    };
-    let (mut id, mut count) = (0, 0);
-    if CGGetDisplaysWithPoint(center, SingleDisplay::One, &mut id, &mut count) != 0 || count == 0 {
-        return Err("Cannot find the selected macOS display".into());
-    }
-    Ok(id)
+    let center = DisplayPoint::new(
+        f64::from(x) + f64::from(w) / 2.,
+        f64::from(y) + f64::from(h) / 2.,
+    );
+    CGDisplay::displays_with_point(center, 1)
+        .ok()
+        .filter(|(_, count)| *count > 0)
+        .and_then(|(displays, _)| displays.first().copied())
+        .ok_or_else(|| "Cannot find the selected macOS display".into())
 }
 
 fn screen_capture_kit() -> Result<(), String> {
@@ -401,8 +368,9 @@ fn begin_screenshot(
         let _: () = msg_send![&*config, setCapturesAudio: false];
         if hdr {
             let _: () = msg_send![&*config, setPixelFormat: u32::from_be_bytes(*b"RGhA")];
-            let space = kCGColorSpaceExtendedLinearSRGB
-                .map_or(ptr::null(), |name| name.as_ptr().cast_const());
+            let space = kCGColorSpaceExtendedLinearSRGB.map_or(ptr::null(), |name| {
+                name.as_ptr().cast::<c_void>().cast_const()
+            });
             let _: () = msg_send![&*config, setColorSpaceName: space];
         } else {
             let _: () = msg_send![&*config, setPixelFormat: u32::from_be_bytes(*b"BGRA")];
@@ -412,6 +380,13 @@ fn begin_screenshot(
         let completion = block2::RcBlock::new(
             move |image: Option<NonNull<c_void>>, error: Option<&NSError>| {
                 autoreleasepool(|_| {
+                    if let (Some(image), Some(_)) = (image, region)
+                        && [CGImageGetWidth(image), CGImageGetHeight(image)]
+                            != [width as usize, height as usize]
+                    {
+                        let _ = sender.send(ScreenshotReply::RetryFullDisplay);
+                        return;
+                    }
                     let result = if let Some(image) = image {
                         if hdr {
                             copy_screenshot(image).map(Some)
@@ -423,9 +398,7 @@ fn begin_screenshot(
                     };
                     let reply = if region.is_some() {
                         match result {
-                            Ok(Some(image)) if [image.width, image.height] == [width, height] => {
-                                ScreenshotReply::Finished(Ok(Some(image)))
-                            }
+                            Ok(Some(image)) => ScreenshotReply::Finished(Ok(Some(image))),
                             _ => ScreenshotReply::RetryFullDisplay,
                         }
                     } else {
@@ -460,7 +433,7 @@ fn copy_screenshot(image: NonNull<c_void>) -> Result<Image, String> {
         let name = CGImageGetColorSpace(image).and_then(|space| CGColorSpaceGetName(space));
         let expected =
             kCGColorSpaceExtendedLinearSRGB.ok_or("Extended linear sRGB is unavailable")?;
-        if !name.is_some_and(|name| CFEqual(name, expected) != 0) {
+        if !name.is_some_and(|name| name.as_ref() == expected.as_ref()) {
             return Err("The HDR screenshot did not use extended linear sRGB".into());
         }
         let width = u32::try_from(CGImageGetWidth(image)).map_err(|_| "Capture is too large")?;
@@ -514,13 +487,10 @@ fn copy_sdr_screenshot(image: NonNull<c_void>) -> Result<Image, String> {
         // Flipping the CTM here would invert the output scanlines.
         CGContextDrawImage(
             CFRetained::as_ptr(&context),
-            CGRect {
-                origin: Point { x: 0., y: 0. },
-                size: Size {
-                    width: width as f64,
-                    height: height as f64,
-                },
-            },
+            NativeRect::new(
+                CGPoint::new(0., 0.),
+                CGSize::new(width as f64, height as f64),
+            ),
             image,
         );
         Ok(snapshot)

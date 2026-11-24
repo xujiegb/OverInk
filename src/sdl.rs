@@ -3038,7 +3038,9 @@ impl Renderer {
         self.run_command(RenderCommand::SetTarget(RenderTarget::Ink(target)))?;
         let result = draw();
         let restore = self.run_command(RenderCommand::SetTarget(RenderTarget::Previous(previous)));
-        unwind_restore.disarm();
+        if restore.is_ok() {
+            unwind_restore.disarm();
+        }
         result.and(restore)
     }
     pub fn set_clip_rect(&self, clip: Option<&SDL_Rect>) {

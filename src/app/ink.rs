@@ -34,6 +34,8 @@ const CACHE_POINTS: usize = 8192;
 const CACHE_ALIGNMENT: i32 = 128;
 const INK_TILE_EDGE: i32 = 512;
 const MAX_INK_TILES: usize = 32;
+const INK_BAND_HEIGHT: i32 = 32;
+const MAX_INK_BANDS: usize = 128;
 const REPLAY_WINDOW: Duration = Duration::from_millis(900);
 const EXPENSIVE_REPLAY: Duration = Duration::from_micros(500);
 const CACHE_IDLE_EXPIRY: Duration = Duration::from_secs(20);
@@ -150,6 +152,7 @@ struct LayerPlanKey {
 struct LayerPlan {
     key: LayerPlanKey,
     tiles: Vec<SDL_Rect>,
+    bands: Vec<SDL_Rect>,
 }
 
 #[derive(Default)]
@@ -541,10 +544,13 @@ impl Ink {
             ],
         };
         if self.plan.as_ref().is_none_or(|plan| plan.key != key) {
-            self.plan = Some(LayerPlan {
-                key,
-                tiles: occupied_tiles(frame, &app.history, region),
-            });
+            let tiles = occupied_tiles(frame, &app.history, region);
+            let bands = if renderer.name == "software" && tiles.len() == 1 {
+                ink_bands(frame, &app.history, region)
+            } else {
+                Vec::new()
+            };
+            self.plan = Some(LayerPlan { key, tiles, bands });
             self.unavailable_at = None;
         }
         let Some(plan) = self.plan.as_ref() else {
@@ -675,20 +681,38 @@ impl Ink {
             // texture, so its stored RGB is already premultiplied by alpha.
             return renderer.with_pixel_scale(frame.scale, || {
                 renderer.with_color_scale(revision_white_scale(layer), || {
-                    layer.tiles.iter().try_for_each(|tile| {
-                        let SDL_Rect { x, y, w, h } = tile.region;
-                        let destination = SDL_FRect {
-                            x: x as f32,
-                            y: y as f32,
-                            w: w as f32,
-                            h: h as f32,
-                        };
-                        tile.texture.draw(renderer, None, Some(&destination))
-                    })
+                    layer
+                        .tiles
+                        .iter()
+                        .try_for_each(|tile| tile.draw(renderer, &plan.bands))
                 })
             });
         }
         self.painter.history(frame, app, 0, None, 1.)
+    }
+}
+
+impl InkTile {
+    fn draw(&self, renderer: &Renderer, bands: &[SDL_Rect]) -> Result<(), String> {
+        let rect = |SDL_Rect { x, y, w, h }| SDL_FRect {
+            x: x as f32,
+            y: y as f32,
+            w: w as f32,
+            h: h as f32,
+        };
+        if bands.is_empty() {
+            return self.texture.draw(renderer, None, Some(&rect(self.region)));
+        }
+        for &band in bands {
+            let source = rect(SDL_Rect {
+                x: band.x - self.region.x,
+                y: band.y - self.region.y,
+                ..band
+            });
+            self.texture
+                .draw(renderer, Some(&source), Some(&rect(band)))?;
+        }
+        Ok(())
     }
 }
 
@@ -720,9 +744,68 @@ fn intersects(a: SDL_Rect, b: SDL_Rect) -> bool {
     a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
 }
 
+// Keep the same retained texture and blend only areas that can contain ink.
+// Bands are disjoint in device pixels, so no pixel is blended twice.
+fn ink_bands(frame: &Frame<'_>, history: &History, region: SDL_Rect) -> Vec<SDL_Rect> {
+    let count = (region.h - 1) / INK_BAND_HEIGHT + 1;
+    if count as usize > MAX_INK_BANDS || rect_area(region) <= i64::from(INK_TILE_EDGE).pow(2) {
+        return Vec::new();
+    }
+    let mut spans = [[i32::MAX, 0]; MAX_INK_BANDS];
+    let paths = history.stroke_bounds();
+    for (stroke, bounds) in history.strokes().iter().zip(paths.iter()) {
+        let Some(area) = bounds
+            .as_ref()
+            .and_then(|bounds| dirty_rect(frame, bounds.path.padded(stroke.max_radius() * 2.)))
+        else {
+            continue;
+        };
+        let left = area.x.max(region.x);
+        let right = (area.x + area.w).min(region.x + region.w);
+        let top = area.y.max(region.y) - region.y;
+        let bottom = (area.y + area.h).min(region.y + region.h) - region.y;
+        if left < right && top < bottom {
+            for span in &mut spans
+                [(top / INK_BAND_HEIGHT) as usize..=((bottom - 1) / INK_BAND_HEIGHT) as usize]
+            {
+                span[0] = span[0].min(left);
+                span[1] = span[1].max(right);
+            }
+        }
+    }
+    let mut bands: Vec<SDL_Rect> = Vec::new();
+    for (row, &[left, right]) in spans[..count as usize].iter().enumerate() {
+        if left >= right {
+            continue;
+        }
+        let offset = row as i32 * INK_BAND_HEIGHT;
+        let y = region.y + offset;
+        let w = right - left;
+        let h = INK_BAND_HEIGHT.min(region.h - offset);
+        if let Some(last) = bands.last_mut()
+            && last.x == left
+            && last.w == w
+            && last.y + last.h == y
+        {
+            last.h += h;
+        } else {
+            bands.push(SDL_Rect { x: left, y, w, h });
+        }
+    }
+    // Leave dense pages on the single blit path.
+    let painted = bands.iter().copied().map(rect_area).sum::<i64>();
+    if painted * 4 >= rect_area(region) * 3 {
+        bands.clear();
+    }
+    bands
+}
+
+fn rect_area(rect: SDL_Rect) -> i64 {
+    i64::from(rect.w) * i64::from(rect.h)
+}
+
 fn occupied_tiles(frame: &Frame<'_>, history: &History, region: SDL_Rect) -> Vec<SDL_Rect> {
-    let pixels = |rect: SDL_Rect| i64::from(rect.w) * i64::from(rect.h);
-    if pixels(region) <= i64::from(INK_TILE_EDGE) * i64::from(INK_TILE_EDGE) {
+    if rect_area(region) <= i64::from(INK_TILE_EDGE).pow(2) {
         return vec![region];
     }
     let mut occupied = BTreeSet::new();
@@ -759,8 +842,8 @@ fn occupied_tiles(frame: &Frame<'_>, history: &History, region: SDL_Rect) -> Vec
         })
         .filter(|tile| tile.w > 0 && tile.h > 0)
         .collect();
-    let tiled_pixels = tiles.iter().copied().map(pixels).sum::<i64>();
-    if tiles.is_empty() || tiled_pixels * 4 >= pixels(region) * 3 {
+    let tiled_pixels = tiles.iter().copied().map(rect_area).sum::<i64>();
+    if tiles.is_empty() || tiled_pixels * 4 >= rect_area(region) * 3 {
         vec![region]
     } else {
         tiles
@@ -1476,6 +1559,7 @@ mod tests {
             plan: Some(LayerPlan {
                 key: plan.key,
                 tiles: vec![plan.key.region],
+                bands: Vec::new(),
             }),
             ..Ink::default()
         };
@@ -1491,6 +1575,47 @@ mod tests {
             difference.is_none(),
             "Tiled output differs at index {difference:?}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn sparse_bands_match_the_full_software_blit_after_append() -> TestResult {
+        let sparse = TestCanvas::new([960, 720])?;
+        let mut app = app();
+        for y in (16..660).step_by(64) {
+            for x in (8..840).step_by(100) {
+                let (x, y) = (x as f32, y as f32);
+                commit(
+                    &mut app,
+                    Tool::Pen,
+                    [70, 150, 220],
+                    &[[x, y], [x + 55., y + 3.]],
+                );
+            }
+        }
+        let frame = sparse.frame();
+        let mut ink = Ink::default();
+        for color in [[0., 0., 0., 0.], [0.9, 0.6, 0.3, 1.]] {
+            sparse.renderer.clear(color)?;
+            ink.committed(&frame, &mut app)?;
+            let layer = ink.layer.as_ref().ok_or("No ink layer")?;
+            let plan = ink.plan.as_ref().ok_or("No ink plan")?;
+            assert_eq!(plan.tiles.len(), 1);
+            assert!(!plan.bands.is_empty());
+            // Compare both blits of the same texture over the same backdrop.
+            let expected = sparse.pixels()?;
+            sparse.renderer.clear(color)?;
+            for tile in &layer.tiles {
+                tile.draw(&sparse.renderer, &[])?;
+            }
+            assert!(expected == sparse.pixels()?);
+            commit(
+                &mut app,
+                Tool::Arrow,
+                [220, 120, 50],
+                &[[320., 630.], [680., 620.]],
+            );
+        }
         Ok(())
     }
 

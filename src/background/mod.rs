@@ -38,17 +38,11 @@ pub struct Image {
     encoding: Encoding,
 }
 impl Image {
-    #[cfg(any(
-        target_os = "linux",
-        target_os = "freebsd",
-        target_os = "macos",
-        target_os = "windows",
-        test
-    ))]
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos", test))]
     pub fn buffer(width: u32, height: u32) -> Result<Self, String> {
         Self::allocate(width, height, Encoding::Srgb8)
     }
-    #[cfg(any(target_os = "windows", target_os = "macos", test))]
+    #[cfg(any(target_os = "macos", test))]
     fn hdr_buffer(width: u32, height: u32) -> Result<Self, String> {
         Self::allocate(width, height, Encoding::LinearRgba16)
     }
