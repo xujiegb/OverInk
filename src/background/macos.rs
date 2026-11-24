@@ -107,17 +107,15 @@ fn display_id([x, y, w, h]: [i32; 4]) -> Result<u32, String> {
         .ok_or_else(|| "Cannot find the selected macOS display".into())
 }
 
-fn screen_capture_kit() -> Result<(), String> {
+fn screen_capture_kit_loaded() -> bool {
     // Load on demand so earlier macOS versions can still launch OverInk.
-    static FRAMEWORK: OnceLock<Result<Library, String>> = OnceLock::new();
+    static FRAMEWORK: OnceLock<Option<Library>> = OnceLock::new();
     FRAMEWORK
         .get_or_init(|| unsafe {
             Library::new("/System/Library/Frameworks/ScreenCaptureKit.framework/ScreenCaptureKit")
-                .map_err(|error| format!("ScreenCaptureKit is unavailable: {error}"))
+                .ok()
         })
-        .as_ref()
-        .map(|_| ())
-        .map_err(Clone::clone)
+        .is_some()
 }
 
 fn capture_permission() -> Result<(), String> {
@@ -137,7 +135,7 @@ fn capture_permission() -> Result<(), String> {
 }
 
 fn sdr_supported() -> bool {
-    screen_capture_kit().is_ok()
+    screen_capture_kit_loaded()
         && AnyClass::get(c"SCShareableContent").is_some()
         && AnyClass::get(c"SCStreamConfiguration").is_some()
         && AnyClass::get(c"SCScreenshotManager").is_some_and(|manager| {
@@ -150,7 +148,7 @@ fn sdr_supported() -> bool {
 pub fn hdr_supported() -> bool {
     static SUPPORTED: OnceLock<bool> = OnceLock::new();
     *SUPPORTED.get_or_init(|| {
-        if !apple_silicon() || screen_capture_kit().is_err() {
+        if !apple_silicon() || !screen_capture_kit_loaded() {
             return false;
         }
         let Some(configuration) = AnyClass::get(c"SCStreamConfiguration") else {

@@ -223,15 +223,20 @@ pub fn prepare_samples(
 pub fn mesh_ranges(
     samples: &[Point],
     chunk: usize,
-    visible: impl Fn(Point, Point) -> bool,
+    visible: Option<impl Fn(Point, Point) -> bool>,
 ) -> impl Iterator<Item = RangeInclusive<usize>> {
     let end = samples.len().saturating_sub(1);
-    let mut first = 0;
+    let mut first = 0usize;
     let mut dot = samples.len() == 1;
     std::iter::from_fn(move || {
         if std::mem::take(&mut dot) {
             return Some(0..=0);
         }
+        let Some(visible) = &visible else {
+            let start = first;
+            first = first.saturating_add(chunk).min(end);
+            return (first > start).then_some(start..=first);
+        };
         while first < end && !visible(samples[first], samples[first + 1]) {
             first += 1;
         }

@@ -111,28 +111,30 @@ impl Image {
     }
 
     #[cfg(any(target_os = "windows", target_os = "macos", test))]
+    fn capture_row_layout(&self, stride: usize) -> Option<(usize, usize)> {
+        let row_bytes = (self.width as usize).checked_mul(self.encoding.bytes_per_pixel())?;
+        let height = self.height as usize;
+        if row_bytes == 0 || row_bytes > stride || row_bytes.checked_mul(height)? != self.rgba.len()
+        {
+            return None;
+        }
+        let needed = (height.checked_sub(1)?)
+            .checked_mul(stride)?
+            .checked_add(row_bytes)?;
+        Some((row_bytes, needed))
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "macos", test))]
     fn copy_hdr_rows(
         &mut self,
         len: usize,
         stride: usize,
         mut copy: impl FnMut(usize, &mut [u8]),
     ) -> Result<(), String> {
-        let row_bytes = (self.width as usize)
-            .checked_mul(8)
-            .ok_or("Invalid HDR capture row width")?;
-        let height = self.height as usize;
-        let needed = height
-            .checked_sub(1)
-            .and_then(|last| last.checked_mul(stride))
-            .and_then(|offset| offset.checked_add(row_bytes));
-        if row_bytes == 0
-            || self.encoding != Encoding::LinearRgba16
-            || row_bytes.checked_mul(height) != Some(self.rgba.len())
-            || stride < row_bytes
-            || needed.is_none_or(|size| size > len)
-        {
-            return Err("Invalid HDR capture row pitch".into());
-        }
+        let (row_bytes, _) = self
+            .capture_row_layout(stride)
+            .filter(|&(_, needed)| self.encoding == Encoding::LinearRgba16 && needed <= len)
+            .ok_or("Invalid HDR capture row pitch")?;
         for (y, row) in self.rgba.chunks_exact_mut(row_bytes).enumerate() {
             copy(y * stride, row);
             for pixel in row.as_chunks_mut::<8>().0 {
@@ -152,21 +154,10 @@ impl Image {
         stride: usize,
         mut copy: impl FnMut(usize, &mut [u8]),
     ) -> Result<(), String> {
-        let row_bytes = (self.width as usize)
-            .checked_mul(4)
-            .ok_or("Invalid SDR capture row width")?;
-        let needed = (self.height as usize)
-            .checked_sub(1)
-            .and_then(|last| last.checked_mul(stride))
-            .and_then(|offset| offset.checked_add(row_bytes));
-        if row_bytes == 0
-            || self.encoding != Encoding::Srgb8
-            || row_bytes.checked_mul(self.height as usize) != Some(self.rgba.len())
-            || stride < row_bytes
-            || needed.is_none_or(|size| size > len)
-        {
-            return Err("Invalid SDR capture row pitch".into());
-        }
+        let (row_bytes, _) = self
+            .capture_row_layout(stride)
+            .filter(|&(_, needed)| self.encoding == Encoding::Srgb8 && needed <= len)
+            .ok_or("Invalid SDR capture row pitch")?;
         for (y, row) in self.rgba.chunks_exact_mut(row_bytes).enumerate() {
             copy(y * stride, row);
             for pixel in row.as_chunks_mut::<4>().0 {

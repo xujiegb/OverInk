@@ -382,8 +382,11 @@ impl Passthrough {
         if self.applied == Some(region) {
             return Ok(());
         }
-        match &self.backend {
+        match &mut self.backend {
             Backend::X11(connection) => {
+                if !crate::x11::connection_is_cached(connection) {
+                    *connection = crate::x11::shape_connection()?;
+                }
                 let id = w.x11_window_number().ok_or("No X11 window")?;
                 let size = w.pixel_size();
                 let hole = hole.and_then(|area| area.pixels(w).clipped(size));

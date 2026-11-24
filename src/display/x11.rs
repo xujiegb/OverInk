@@ -62,6 +62,7 @@ impl Randr {
                 Ok(Some(_)) => {}
                 Ok(None) => break,
                 Err(_) => {
+                    crate::x11::forget_connection(&self.connection);
                     self.disconnected = true;
                     self.areas = None;
                     return true;

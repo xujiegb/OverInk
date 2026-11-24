@@ -33,6 +33,18 @@ pub fn connection() -> Result<Rc<RustConnection>, String> {
     })
 }
 
+pub fn forget_connection(connection: &Rc<RustConnection>) {
+    CONNECTION.with_borrow_mut(|cached| {
+        if cached.ptr_eq(&Rc::downgrade(connection)) {
+            *cached = Weak::new();
+        }
+    });
+}
+
+pub fn connection_is_cached(connection: &Rc<RustConnection>) -> bool {
+    CONNECTION.with_borrow(|cached| cached.ptr_eq(&Rc::downgrade(connection)))
+}
+
 pub fn shape_connection() -> Result<Rc<RustConnection>, String> {
     let connection = connection()?;
     let version = connection

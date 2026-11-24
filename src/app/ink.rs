@@ -128,6 +128,7 @@ struct LayerRevision {
 struct InkTile {
     texture: Texture,
     region: SDL_Rect,
+    fresh: bool,
 }
 
 struct CommittedLayer {
@@ -152,7 +153,6 @@ struct LayerPlanKey {
 struct LayerPlan {
     key: LayerPlanKey,
     tiles: Vec<SDL_Rect>,
-    bands: Vec<SDL_Rect>,
 }
 
 #[derive(Default)]
@@ -197,7 +197,7 @@ struct InkClip {
 }
 
 impl InkClip {
-    fn new(region: SDL_Rect, target: SDL_Rect, scale: [f32; 2]) -> Self {
+    fn new(region: SDL_Rect, origin: [i32; 2], scale: [f32; 2]) -> Self {
         Self {
             bounds: Bounds {
                 min: [region.x as f32 / scale[0], region.y as f32 / scale[1]],
@@ -206,7 +206,7 @@ impl InkClip {
                     (region.y + region.h) as f32 / scale[1],
                 ],
             },
-            origin: [target.x, target.y],
+            origin,
         }
     }
 
@@ -544,109 +544,90 @@ impl Ink {
             ],
         };
         if self.plan.as_ref().is_none_or(|plan| plan.key != key) {
-            let tiles = occupied_tiles(frame, &app.history, region);
-            let bands = if renderer.name == "software" && tiles.len() == 1 {
-                ink_bands(frame, &app.history, region)
-            } else {
-                Vec::new()
-            };
-            self.plan = Some(LayerPlan { key, tiles, bands });
+            let mut tiles = occupied_tiles(frame, &app.history, region);
+            if renderer.name == "software" && tiles.len() == 1 {
+                let bands = ink_bands(frame, &app.history, region);
+                if !bands.is_empty() {
+                    tiles = bands;
+                }
+            }
+            self.plan = Some(LayerPlan { key, tiles });
             self.unavailable_at = None;
         }
         let Some(plan) = self.plan.as_ref() else {
             return self.painter.history(frame, app, 0, None, 1.);
         };
-        let bytes = plan
-            .tiles
-            .iter()
-            .map(|tile| layer_bytes([tile.w, tile.h], format))
-            .sum::<usize>();
-        if renderer.extended && bytes > frame.extended_budget {
+        if renderer.extended
+            && plan
+                .tiles
+                .iter()
+                .map(|tile| layer_bytes([tile.w, tile.h], format))
+                .sum::<usize>()
+                > frame.extended_budget
+        {
             self.layer = None;
             self.activity = ReplayActivity::default();
             return self.painter.history(frame, app, 0, None, 1.);
         }
-        if self.layer.as_ref().is_some_and(|layer| {
-            layer.region != region || !layer.tiles.iter().map(|tile| &tile.region).eq(&plan.tiles)
-        }) {
-            self.layer = None;
-        }
         if self.unavailable_at == Some(target) {
             return self.painter.history(frame, app, 0, None, 1.);
         }
-        if self.layer.is_none() {
-            let tiles: Result<Vec<_>, String> = plan
-                .tiles
-                .iter()
-                .map(|&region| {
-                    let texture = Texture::with_format(
-                        renderer,
-                        [region.w, region.h],
-                        SDL_TEXTUREACCESS_TARGET,
-                        SDL_BLENDMODE_BLEND_PREMULTIPLIED,
-                        format,
-                    )?;
-                    Ok(InkTile { texture, region })
-                })
-                .collect();
-            match tiles {
-                Ok(tiles) => {
-                    self.layer = Some(CommittedLayer {
-                        tiles,
-                        region,
-                        surface: frame.pixels,
-                        format,
-                        revision: None,
-                        count: 0,
-                        append: 0,
-                        erase: 0,
-                    });
-                }
-                Err(_) => {
-                    self.activity = ReplayActivity::default();
-                    self.unavailable_at = Some(target);
-                }
-            }
+        let layer = self.layer.get_or_insert_with(|| CommittedLayer {
+            tiles: Vec::new(),
+            region,
+            surface: frame.pixels,
+            format,
+            revision: None,
+            count: 0,
+            append: 0,
+            erase: 0,
+        });
+        let layout_changed = !layer.tiles.iter().map(|tile| &tile.region).eq(&plan.tiles);
+        if layout_changed && layer.resize(renderer, &plan.tiles).is_err() {
+            self.layer = None;
+            self.activity = ReplayActivity::default();
+            self.unavailable_at = Some(target);
+            return self.painter.history(frame, app, 0, None, 1.);
         }
-        if let Some(layer) = &mut self.layer {
-            let revision = LayerRevision {
-                scale: frame.scale,
-                color: frame.color.revision,
-                history: app.history.ink_revision(),
-                white: if renderer.extended {
-                    renderer.sdr_white_point().max(f32::MIN_POSITIVE)
-                } else {
-                    0.
-                },
-            };
-            let erase = app.history.erase_revision();
-            let append = app.history.append_revision();
-            let replaced = layer.erase != erase;
-            let rebuild = layer.revision.as_ref() != Some(&revision)
-                || replaced && layer.append != append
-                || !replaced && layer.count > count;
-            let first = if replaced { count } else { layer.count };
-            layer.count = count;
-            layer.append = append;
-            layer.erase = erase;
-            if rebuild || damage.is_some() || first < count {
-                let mut changed = damage;
-                if !rebuild && first < count {
-                    let bounds = app.history.stroke_bounds();
-                    for (stroke, bounds) in
-                        app.history.strokes()[first..].iter().zip(&bounds[first..])
-                    {
-                        if let Some(bounds) = bounds {
-                            Bounds::include(
-                                &mut changed,
-                                bounds.path.padded(stroke.max_radius() * 2.),
-                            );
-                        }
+        layer.region = region;
+        let revision = LayerRevision {
+            scale: frame.scale,
+            color: frame.color.revision,
+            history: app.history.ink_revision(),
+            white: if renderer.extended {
+                renderer.sdr_white_point().max(f32::MIN_POSITIVE)
+            } else {
+                0.
+            },
+        };
+        let erase = app.history.erase_revision();
+        let append = app.history.append_revision();
+        let replaced = layer.erase != erase;
+        let rebuild = layer.revision.as_ref() != Some(&revision)
+            || replaced && layer.append != append
+            || !replaced && layer.count > count;
+        let first = if replaced { count } else { layer.count };
+        layer.count = count;
+        layer.append = append;
+        layer.erase = erase;
+        if rebuild || layout_changed || damage.is_some() || first < count {
+            let mut changed = damage;
+            if !rebuild && first < count {
+                let bounds = app.history.stroke_bounds();
+                for (stroke, bounds) in app.history.strokes()[first..].iter().zip(&bounds[first..])
+                {
+                    if let Some(bounds) = bounds {
+                        Bounds::include(&mut changed, bounds.path.padded(stroke.max_radius() * 2.));
                     }
                 }
-                let changed = changed.and_then(|bounds| dirty_rect(frame, bounds));
-                let result = layer.tiles.iter().try_for_each(|tile| {
-                    if !rebuild && changed.is_none_or(|area| !intersects(area, tile.region)) {
+            }
+            let changed = changed.and_then(|bounds| dirty_rect(frame, bounds));
+            let result = layer
+                .tiles
+                .iter_mut()
+                .try_for_each(|tile| -> Result<(), String> {
+                    let tile_rebuild = rebuild || tile.fresh;
+                    if !tile_rebuild && changed.is_none_or(|area| !intersects(area, tile.region)) {
                         return Ok(());
                     }
                     renderer.with_target(&tile.texture, || {
@@ -662,61 +643,74 @@ impl Ink {
                             frame,
                             app,
                             tile.region,
-                            (!rebuild).then_some(first),
+                            (!tile_rebuild).then_some(first),
                             damage,
                             white,
                         )
-                    })
+                    })?;
+                    tile.fresh = false;
+                    Ok(())
                 });
-                self.painter.queued = 0;
-                if result.is_err() {
-                    self.invalidate_layer();
-                    self.unavailable_at = Some(target);
-                    return self.painter.history(frame, app, 0, None, 1.);
-                }
-                layer.revision = Some(revision);
+            self.painter.queued = 0;
+            if result.is_err() {
+                self.invalidate_layer();
+                self.unavailable_at = Some(target);
+                return self.painter.history(frame, app, 0, None, 1.);
             }
-
-            // The history was painted with source-over into a transparent
-            // texture, so its stored RGB is already premultiplied by alpha.
-            return renderer.with_pixel_scale(frame.scale, || {
-                renderer.with_color_scale(revision_white_scale(layer), || {
-                    layer
-                        .tiles
-                        .iter()
-                        .try_for_each(|tile| tile.draw(renderer, &plan.bands))
-                })
-            });
+            layer.revision = Some(revision);
         }
-        self.painter.history(frame, app, 0, None, 1.)
+
+        // The history was painted with source-over into a transparent
+        // texture, so its stored RGB is already premultiplied by alpha.
+        renderer.with_pixel_scale(frame.scale, || {
+            renderer.with_color_scale(revision_white_scale(layer), || {
+                layer.tiles.iter().try_for_each(|tile| tile.draw(renderer))
+            })
+        })
     }
 }
 
 impl InkTile {
-    fn draw(&self, renderer: &Renderer, bands: &[SDL_Rect]) -> Result<(), String> {
-        let rect = |SDL_Rect { x, y, w, h }| SDL_FRect {
+    fn draw(&self, renderer: &Renderer) -> Result<(), String> {
+        let SDL_Rect { x, y, w, h } = self.region;
+        let destination = SDL_FRect {
             x: x as f32,
             y: y as f32,
             w: w as f32,
             h: h as f32,
         };
-        if bands.is_empty() {
-            return self.texture.draw(renderer, None, Some(&rect(self.region)));
-        }
-        for &band in bands {
-            let source = rect(SDL_Rect {
-                x: band.x - self.region.x,
-                y: band.y - self.region.y,
-                ..band
-            });
-            self.texture
-                .draw(renderer, Some(&source), Some(&rect(band)))?;
-        }
-        Ok(())
+        self.texture.draw(renderer, None, Some(&destination))
     }
 }
 
 impl CommittedLayer {
+    fn resize(&mut self, renderer: &Renderer, regions: &[SDL_Rect]) -> Result<(), String> {
+        let mut old = std::mem::take(&mut self.tiles);
+        // Free obsolete targets before allocating their replacements.
+        old.retain(|tile| regions.contains(&tile.region));
+        self.tiles = regions
+            .iter()
+            .map(|&region| {
+                if let Some(index) = old.iter().position(|tile| tile.region == region) {
+                    return Ok(old.swap_remove(index));
+                }
+                let texture = Texture::with_format(
+                    renderer,
+                    [region.w, region.h],
+                    SDL_TEXTUREACCESS_TARGET,
+                    SDL_BLENDMODE_BLEND_PREMULTIPLIED,
+                    self.format,
+                )?;
+                Ok(InkTile {
+                    texture,
+                    region,
+                    fresh: true,
+                })
+            })
+            .collect::<Result<_, String>>()?;
+        Ok(())
+    }
+
     fn bytes(&self) -> usize {
         self.tiles
             .iter()
@@ -744,8 +738,8 @@ fn intersects(a: SDL_Rect, b: SDL_Rect) -> bool {
     a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
 }
 
-// Keep the same retained texture and blend only areas that can contain ink.
-// Bands are disjoint in device pixels, so no pixel is blended twice.
+// Store only bands that can contain ink. Bands are disjoint in device
+// pixels, so no pixel is blended twice.
 fn ink_bands(frame: &Frame<'_>, history: &History, region: SDL_Rect) -> Vec<SDL_Rect> {
     let count = (region.h - 1) / INK_BAND_HEIGHT + 1;
     if count as usize > MAX_INK_BANDS || rect_area(region) <= i64::from(INK_TILE_EDGE).pow(2) {
@@ -794,7 +788,7 @@ fn ink_bands(frame: &Frame<'_>, history: &History, region: SDL_Rect) -> Vec<SDL_
     }
     // Leave dense pages on the single blit path.
     let painted = bands.iter().copied().map(rect_area).sum::<i64>();
-    if painted * 4 >= rect_area(region) * 3 {
+    if bands.len() > MAX_INK_TILES || painted * 4 >= rect_area(region) * 3 {
         bands.clear();
     }
     bands
@@ -943,7 +937,21 @@ impl StrokePainter {
     ) -> Result<(), String> {
         let renderer = frame.renderer;
         renderer.set_render_scale([1.; 2])?;
-        let clip = Some(InkClip::new(target, target, frame.scale));
+        let origin = if renderer.name == "software" {
+            // SDL truncates software vertices before applying the viewport.
+            // Keep pixel coordinates in the full frame until that point so
+            // vertices left of a tile retain the same edge coverage.
+            renderer.set_viewport(&SDL_Rect {
+                x: -target.x,
+                y: -target.y,
+                w: frame.pixels[0],
+                h: frame.pixels[1],
+            })?;
+            [0; 2]
+        } else {
+            [target.x, target.y]
+        };
+        let clip = Some(InkClip::new(target, origin, frame.scale));
         let Some(first) = first else {
             renderer.clear([0.; 4])?;
             return self.history(frame, app, 0, clip, white);
@@ -960,8 +968,8 @@ impl StrokePainter {
                 return Ok(());
             }
             let local = SDL_Rect {
-                x: left - target.x,
-                y: top - target.y,
+                x: left - origin[0],
+                y: top - origin[1],
                 w: width,
                 h: height,
             };
@@ -979,7 +987,7 @@ impl StrokePainter {
                     w: width,
                     h: height,
                 },
-                target,
+                origin,
                 frame.scale,
             );
             let result = clear_rect(renderer, rect)
@@ -1120,11 +1128,9 @@ impl StrokePainter {
         mut live: Option<&mut LiveRibbon>,
     ) -> Result<(), String> {
         let margin = stroke.max_radius() * 2. + frame.aa;
-        let visible = |a, b| {
-            stroke.tool == Tool::Arrow
-                || region
-                    .is_none_or(|region| region.intersects(Bounds::between(a, b).padded(margin)))
-        };
+        let visible = region
+            .filter(|_| stroke.tool != Tool::Arrow)
+            .map(|region| move |a, b| region.intersects(Bounds::between(a, b).padded(margin)));
         let scale = if region.is_some() {
             frame.scale
         } else {
@@ -1307,7 +1313,9 @@ impl StrokePainter {
                             tile.intersects(bounds)
                                 && region.is_none_or(|region| region.intersects(bounds))
                         };
-                        for range in geometry::mesh_ranges(&self.samples, MESH_SEGMENTS, visible) {
+                        for range in
+                            geometry::mesh_ranges(&self.samples, MESH_SEGMENTS, Some(visible))
+                        {
                             self.mesh
                                 .update(stroke, &self.samples, range, frame.aa, false);
                             set_vertices(
@@ -1559,7 +1567,6 @@ mod tests {
             plan: Some(LayerPlan {
                 key: plan.key,
                 tiles: vec![plan.key.region],
-                bands: Vec::new(),
             }),
             ..Ink::default()
         };
@@ -1579,7 +1586,7 @@ mod tests {
     }
 
     #[test]
-    fn sparse_bands_match_the_full_software_blit_after_append() -> TestResult {
+    fn sparse_bands_preserve_pixels_and_use_less_memory_after_edits() -> TestResult {
         let sparse = TestCanvas::new([960, 720])?;
         let mut app = app();
         for y in (16..660).step_by(64) {
@@ -1593,29 +1600,120 @@ mod tests {
                 );
             }
         }
-        let frame = sparse.frame();
+        let mut frame = sparse.frame();
         let mut ink = Ink::default();
-        for color in [[0., 0., 0., 0.], [0.9, 0.6, 0.3, 1.]] {
-            sparse.renderer.clear(color)?;
-            ink.committed(&frame, &mut app)?;
-            let layer = ink.layer.as_ref().ok_or("No ink layer")?;
-            let plan = ink.plan.as_ref().ok_or("No ink plan")?;
-            assert_eq!(plan.tiles.len(), 1);
-            assert!(!plan.bands.is_empty());
-            // Compare both blits of the same texture over the same backdrop.
-            let expected = sparse.pixels()?;
-            sparse.renderer.clear(color)?;
-            for tile in &layer.tiles {
-                tile.draw(&sparse.renderer, &[])?;
+        for edit in 0..4 {
+            match edit {
+                1 => commit(
+                    &mut app,
+                    Tool::Arrow,
+                    [220, 120, 50],
+                    &[[320., 630.], [680., 620.]],
+                ),
+                2 => app.erase_sample(1, Point::new(50., 80., 1., [0.; 2])),
+                3 => {
+                    app.reset_contacts();
+                    frame.scale = [1.25, 1.5];
+                    frame.aa = antialias(frame.scale);
+                }
+                _ => {}
             }
-            assert!(expected == sparse.pixels()?);
-            commit(
-                &mut app,
-                Tool::Arrow,
-                [220, 120, 50],
-                &[[320., 630.], [680., 620.]],
-            );
+            for color in [[0.; 4], [0.9, 0.6, 0.3, 1.]] {
+                sparse.renderer.clear(color)?;
+                ink.committed(&frame, &mut app)?;
+                let plan = ink.plan.as_ref().ok_or("No ink plan")?;
+                let region = plan.key.region;
+                assert!(plan.tiles.len() > 1);
+                assert!(
+                    ink.cached_bytes() < layer_bytes([region.w, region.h], SDL_PIXELFORMAT_RGBA32)
+                );
+                let actual = sparse.pixels()?;
+                sparse.renderer.clear(color)?;
+                let texture = Texture::new(
+                    &sparse.renderer,
+                    [region.w, region.h],
+                    SDL_TEXTUREACCESS_TARGET,
+                    SDL_BLENDMODE_BLEND_PREMULTIPLIED,
+                )?;
+                sparse.renderer.with_target(&texture, || {
+                    StrokePainter::default().repaint_layer(&frame, &app, region, None, None, 1.)
+                })?;
+                sparse.renderer.with_pixel_scale(frame.scale, || {
+                    InkTile {
+                        texture,
+                        region,
+                        fresh: false,
+                    }
+                    .draw(&sparse.renderer)
+                })?;
+                assert!(
+                    actual == sparse.pixels()?,
+                    "Pixels differ after edit {edit} over {color:?}"
+                );
+            }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn software_tile_offsets_preserve_fractional_strokes() -> TestResult {
+        let canvas = TestCanvas::new([256, 192])?;
+        let mut frame = canvas.frame();
+        frame.scale = [1.25, 1.5];
+        frame.aa = antialias(frame.scale);
+        let mut app = app();
+        for (tool, points) in [
+            (Tool::Pen, [[65.2, 31.3], [110.7, 63.6], [152.4, 94.1]]),
+            (Tool::Pencil, [[63.4, 81.1], [114.8, 57.4], [171.2, 45.6]]),
+            (Tool::Marker, [[70.7, 97.9], [106.4, 75.7], [167.2, 100.4]]),
+        ] {
+            commit(&mut app, tool, [185, 72, 223], &points);
+        }
+        let draw = |regions: &[SDL_Rect]| -> Result<Vec<[u8; 4]>, String> {
+            let renderer = &canvas.renderer;
+            renderer.clear([0.2, 0.14, 0.4, 0.5])?;
+            let mut painter = StrokePainter::default();
+            for &region in regions {
+                let texture = Texture::new(
+                    renderer,
+                    [region.w, region.h],
+                    SDL_TEXTUREACCESS_TARGET,
+                    SDL_BLENDMODE_BLEND_PREMULTIPLIED,
+                )?;
+                renderer.with_target(&texture, || {
+                    painter.repaint_layer(&frame, &app, region, None, None, 1.)
+                })?;
+                InkTile {
+                    texture,
+                    region,
+                    fresh: false,
+                }
+                .draw(renderer)?;
+            }
+            canvas.pixels()
+        };
+        let full = SDL_Rect {
+            x: 0,
+            y: 0,
+            w: 256,
+            h: 192,
+        };
+        let split = [
+            SDL_Rect { w: 128, ..full },
+            SDL_Rect {
+                x: 128,
+                w: 128,
+                ..full
+            },
+        ];
+        let reference = draw(&[full])?;
+        let actual = draw(&split)?;
+        let changed = reference
+            .iter()
+            .zip(actual)
+            .filter(|(a, b)| **a != *b)
+            .count();
+        assert_eq!(changed, 0);
         Ok(())
     }
 
