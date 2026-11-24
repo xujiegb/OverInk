@@ -14,11 +14,13 @@ use crate::{
     display::Display,
     gui::{self, Gui},
     icc::ColorManager,
+    model::TextBox,
     native::{self, Passthrough},
     sdl::*,
 };
 use std::{
     collections::BTreeSet,
+    sync::{Arc, Weak},
     time::{Duration, Instant},
 };
 
@@ -164,6 +166,16 @@ struct StaticTextKey {
     theme: egui::Theme,
 }
 
+impl StaticTextKey {
+    fn same_raster(self, next: Self) -> bool {
+        Self {
+            text_revision: next.text_revision,
+            selected: next.selected,
+            ..self
+        } == next
+    }
+}
+
 struct StaticTextLayer {
     gui: Option<Gui>,
     built_at: Instant,
@@ -174,6 +186,19 @@ struct StaticTextTile {
     texture: InkTexture,
     pixels: [i32; 4],
     destination: egui::Rect,
+    items: Box<[Weak<TextBox>]>,
+}
+
+impl StaticTextTile {
+    fn matches_items<'a>(&self, items: impl Iterator<Item = &'a Arc<TextBox>>) -> bool {
+        let mut previous = self.items.iter();
+        items.into_iter().all(|item| {
+            previous
+                .next()
+                .and_then(Weak::upgrade)
+                .is_some_and(|old| Arc::ptr_eq(&old, item))
+        }) && previous.next().is_none()
+    }
 }
 
 #[derive(Default)]
@@ -293,15 +318,23 @@ impl Canvas {
         self.visible && self.animation
     }
 
-    pub fn trim_idle_gpu_cache(&mut self, now: Instant) {
-        self.ink.release_idle_layer(now);
-        if let Some(layer) = &mut self.static_text
-            && now.saturating_duration_since(layer.built_at) >= STATIC_TEXT_ATLAS_IDLE
-        {
-            // The baked textures still contain the labels. Rasterizing the
-            // next edit can recreate the CPU and SDL glyph atlases on demand.
-            layer.gui = None;
-        }
+    pub fn trim_idle_gpu_cache(&mut self, now: Instant) -> Option<Instant> {
+        let ink = self.ink.release_idle_layer(now);
+        let atlas = self
+            .static_text
+            .as_mut()
+            .filter(|layer| layer.gui.is_some())
+            .and_then(|layer| {
+                let deadline = layer.built_at + STATIC_TEXT_ATLAS_IDLE;
+                if now < deadline {
+                    return Some(deadline);
+                }
+                // The baked textures still contain the labels. Rasterizing the
+                // next edit can recreate the CPU and SDL glyph atlases on demand.
+                layer.gui = None;
+                None
+            });
+        ink.into_iter().chain(atlas).min()
     }
 
     pub fn invalidate(&mut self, reason: DirtyReason) {
@@ -653,7 +686,11 @@ impl Canvas {
             return StaticTextPaint::Uncached;
         }
 
-        let (previous_gui, mut old_tiles) = match previous_layer.zip(previous) {
+        let mut built_at = previous_layer
+            .as_ref()
+            .map_or_else(Instant::now, |layer| layer.built_at);
+        let can_reuse = previous.is_some_and(|old| old.same_raster(key));
+        let (mut gui, mut old_tiles) = match previous_layer.zip(previous) {
             Some((layer, previous)) if previous.style.1 == key.style.1 => {
                 if previous.style.0 != key.style.0
                     && let Some(gui) = &layer.gui
@@ -669,10 +706,6 @@ impl Canvas {
             }
             _ => (None, Vec::new()),
         };
-        let mut gui = previous_gui.unwrap_or_else(|| Gui::with_fonts(app.text_fonts.definitions()));
-        if gui.ctx.theme() != theme {
-            gui.ctx.set_theme(theme);
-        }
         let dx = key.logical_size[0] / key.full_pixels[0] as f32;
         let dy = key.logical_size[1] / key.full_pixels[1] as f32;
         old_tiles.retain(|tile| {
@@ -682,13 +715,30 @@ impl Canvas {
                 .any(|&[_, _, width, height]| [w, h] == [width, height])
         });
         let mut tiles = Vec::with_capacity(regions.len());
-        for region @ [x, y, width, height] in regions {
+        for (index, &region @ [x, y, width, height]) in regions.iter().enumerate() {
             let size = [width, height];
-            let texture = if let Some(index) = old_tiles
-                .iter()
-                .position(|tile| tile.texture.dimensions() == size)
+            let destination = egui::Rect::from_min_max(
+                egui::pos2(x as f32 * dx, y as f32 * dy),
+                egui::pos2((x + width) as f32 * dx, (y + height) as f32 * dy),
+            );
+            let existing = old_tiles.iter().position(|tile| tile.pixels == region);
+            // Weak references identify immutable labels without keeping an
+            // edited or removed text string alive just for the texture cache.
+            if can_reuse
+                && let Some(existing) = existing
+                && old_tiles[existing].matches_items(app.static_text_items(selected, destination))
             {
-                old_tiles.swap_remove(index).texture
+                tiles.push(old_tiles.swap_remove(existing));
+                continue;
+            }
+            let reusable = existing.or_else(|| {
+                old_tiles.iter().position(|tile| {
+                    tile.texture.dimensions() == size
+                        && (!can_reuse || !regions[index + 1..].contains(&tile.pixels))
+                })
+            });
+            let texture = if let Some(old) = reusable {
+                old_tiles.swap_remove(old).texture
             } else {
                 let Ok(texture) = InkTexture::with_format(
                     &self.render,
@@ -701,10 +751,10 @@ impl Canvas {
                 };
                 texture
             };
-            let destination = egui::Rect::from_min_max(
-                egui::pos2(x as f32 * dx, y as f32 * dy),
-                egui::pos2((x + width) as f32 * dx, (y + height) as f32 * dy),
-            );
+            let gui = gui.get_or_insert_with(|| Gui::with_fonts(app.text_fonts.definitions()));
+            if gui.ctx.theme() != theme {
+                gui.ctx.set_theme(theme);
+            }
             let paint = self.render.with_target(&texture, || {
                 self.render.try_set_clip_rect(None)?;
                 self.render.clear([0.; 4])?;
@@ -717,15 +767,20 @@ impl Canvas {
             if paint.is_err() {
                 return StaticTextPaint::Uncached;
             }
+            built_at = Instant::now();
             tiles.push(StaticTextTile {
                 texture,
                 pixels: region,
                 destination,
+                items: app
+                    .static_text_items(selected, destination)
+                    .map(Arc::downgrade)
+                    .collect(),
             });
         }
         self.static_text = Some(StaticTextLayer {
-            gui: Some(gui),
-            built_at: Instant::now(),
+            gui,
+            built_at,
             tiles,
         });
         self.draw_static_text(scale)

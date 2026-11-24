@@ -16,7 +16,10 @@ use egui::{
     text::{CCursor, CCursorRange},
     vec2,
 };
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use unicode_segmentation::UnicodeSegmentation;
 
 mod color_wheel;
@@ -1327,11 +1330,24 @@ impl App {
     /// Draw immutable committed labels into a retained GPU texture. The
     /// selected label is rendered by the dynamic editor instead, preventing
     /// old text from showing behind a drag/resize/IME draft.
+    pub(super) fn static_text_items(
+        &self,
+        skip_selected: Option<usize>,
+        region: Rect,
+    ) -> impl Iterator<Item = &Arc<TextBox>> {
+        self.history
+            .text_boxes()
+            .iter()
+            .enumerate()
+            .filter_map(move |(index, item)| {
+                (skip_selected != Some(index) && region.intersect(item.text_rect()).is_positive())
+                    .then_some(item)
+            })
+    }
+
     pub(super) fn static_text_ui(&self, ui: &Ui, skip_selected: Option<usize>, region: Rect) {
-        for (index, item) in self.history.text_boxes().iter().enumerate() {
-            if skip_selected != Some(index) && region.intersect(item.text_rect()).is_positive() {
-                draw_text_box(ui, &self.text_fonts, item);
-            }
+        for item in self.static_text_items(skip_selected, region) {
+            draw_text_box(ui, &self.text_fonts, item);
         }
     }
 

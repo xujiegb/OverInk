@@ -3284,9 +3284,10 @@ fn run_inner(options: Options) -> Result<(), String> {
             }
             // Release adaptive ink caches even when no canvas needs another frame.
             let now = Instant::now();
-            for canvas in &mut canvases {
-                canvas.trim_idle_gpu_cache(now);
-            }
+            let cache_deadline = canvases
+                .iter_mut()
+                .filter_map(|canvas| canvas.trim_idle_gpu_cache(now))
+                .min();
             frame += 1;
             if options.smoke && frame >= 3 {
                 let path = state_dir();
@@ -3353,6 +3354,9 @@ fn run_inner(options: Options) -> Result<(), String> {
                         .min(AUTOSAVE_INTERVAL.saturating_sub(now.duration_since(app.last_save)));
                 }
                 if let Some(deadline) = text_focus.deadline {
+                    timeout = timeout.min(deadline.saturating_duration_since(now));
+                }
+                if let Some(deadline) = cache_deadline {
                     timeout = timeout.min(deadline.saturating_duration_since(now));
                 }
                 if !toolbar_hidden && let Some(at) = toolbar_repaint_at {

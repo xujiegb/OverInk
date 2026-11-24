@@ -14,7 +14,6 @@ const MIN_INK_COMPOSITION_BYTES: usize = 4 * 1024 * 1024;
 #[derive(Clone, Copy, PartialEq)]
 struct CompositionKey {
     pixels: [i32; 2],
-    scale: [f32; 2],
     ink: [u64; 3],
     color: u64,
     units: f32,
@@ -123,7 +122,6 @@ impl Canvas {
         }
         let key = CompositionKey {
             pixels,
-            scale,
             ink: [
                 app.history.ink_revision(),
                 app.history.append_revision(),

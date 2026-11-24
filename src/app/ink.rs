@@ -265,14 +265,13 @@ impl Ink {
         self.bounds = InkBounds::default();
     }
 
-    pub fn release_idle_layer(&mut self, now: Instant) {
-        if self
-            .activity
-            .last_use
-            .is_some_and(|last| now.duration_since(last) >= CACHE_IDLE_EXPIRY)
-        {
-            self.invalidate_layer();
+    pub fn release_idle_layer(&mut self, now: Instant) -> Option<Instant> {
+        let deadline = self.activity.last_use? + CACHE_IDLE_EXPIRY;
+        if now < deadline {
+            return Some(deadline);
         }
+        self.invalidate_layer();
+        None
     }
 
     pub fn reset_textures(&mut self) {
@@ -2267,9 +2266,12 @@ mod tests {
         let last = start + Duration::from_secs(1);
         ink.activity.observe(last, EXPENSIVE_REPLAY);
         assert_eq!(ink.activity.last_use, Some(last));
-        ink.release_idle_layer(last + CACHE_IDLE_EXPIRY - Duration::from_millis(1));
+        assert_eq!(
+            ink.release_idle_layer(last + CACHE_IDLE_EXPIRY - Duration::from_millis(1)),
+            Some(last + CACHE_IDLE_EXPIRY)
+        );
         assert_eq!(ink.activity.last_use, Some(last));
-        ink.release_idle_layer(last + CACHE_IDLE_EXPIRY);
+        assert_eq!(ink.release_idle_layer(last + CACHE_IDLE_EXPIRY), None);
         assert!(ink.activity.last_use.is_none());
         ink.activity
             .observe(last + CACHE_IDLE_EXPIRY, EXPENSIVE_REPLAY);
