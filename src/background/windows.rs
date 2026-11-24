@@ -52,7 +52,7 @@ pub fn start<T: Send + 'static>(
     display: u32,
     linear: bool,
     crop: Option<Crop>,
-    prepare: impl FnOnce(Image) -> Result<T, String> + Send + 'static,
+    prepare: impl FnOnce(Image, &AtomicBool) -> Result<Option<T>, String> + Send + 'static,
 ) -> Result<Job<T>, String> {
     let handle =
         windows_monitor_handle(display).ok_or("The Windows display handle is unavailable")?;

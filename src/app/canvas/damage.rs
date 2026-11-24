@@ -205,9 +205,13 @@ impl Canvas {
         }
         self.ink.release_unused_layer(app);
         self.animation = !app.input.laser.is_empty();
-        layer.key = key;
-        layer.footprint = Some(footprint);
-        self.damage = Some(layer);
+        // The last fade frame clears the previous trail. It also stops the
+        // animation timer, so release the composition here when drawing ends.
+        if self.animation || app.history.active.is_some() {
+            layer.key = key;
+            layer.footprint = Some(footprint);
+            self.damage = Some(layer);
+        }
         Ok(true)
     }
 }

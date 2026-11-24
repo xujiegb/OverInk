@@ -365,7 +365,7 @@ impl StrokeBounds {
     }
 }
 
-const STROKE_BLOCK_SEGMENTS: usize = 128;
+pub(crate) const STROKE_BLOCK_SEGMENTS: usize = 128;
 
 #[derive(Default)]
 pub(crate) struct StrokeIndex {
@@ -395,7 +395,11 @@ impl StrokeIndex {
         self.bounds.push(bounds);
     }
 
-    fn blocks(&self, index: usize) -> &[StrokeBounds] {
+    pub(crate) fn bounds(&self) -> &[Option<StrokeBounds>] {
+        &self.bounds
+    }
+
+    pub(crate) fn blocks(&self, index: usize) -> &[StrokeBounds] {
         self.blocks
             .get(&index)
             .map_or(&[], |blocks| blocks.as_ref())
@@ -610,7 +614,7 @@ impl History {
     }
 
     pub fn stroke_bounds(&self) -> Ref<'_, [Option<StrokeBounds>]> {
-        Ref::map(self.stroke_index(), |index| index.bounds.as_slice())
+        Ref::map(self.stroke_index(), StrokeIndex::bounds)
     }
 
     pub fn can_undo(&self) -> bool {

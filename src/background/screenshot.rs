@@ -66,7 +66,8 @@ impl Job {
         let crop = Crop { region, size };
         #[cfg(target_os = "windows")]
         {
-            super::windows::start(display.id, _hdr, Some(crop), Ok).map(Self::Native)
+            super::windows::start(display.id, _hdr, Some(crop), |image, _| Ok(Some(image)))
+                .map(Self::Native)
         }
         #[cfg(target_os = "macos")]
         {
@@ -75,8 +76,14 @@ impl Job {
             } else {
                 super::SnapshotMode::Sdr
             };
-            super::macos::start(display.bounds, window.pixel_size(), mode, Some(crop), Ok)
-                .map(Self::Native)
+            super::macos::start(
+                display.bounds,
+                window.pixel_size(),
+                mode,
+                Some(crop),
+                |image, _| Ok(Some(image)),
+            )
+            .map(Self::Native)
         }
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         {

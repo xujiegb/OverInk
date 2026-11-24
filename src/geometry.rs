@@ -220,28 +220,34 @@ pub fn prepare_samples(
     }
 }
 
+/// Join consecutive visible segments in draw order. A zero skip means the
+/// segment is visible; a positive skip can exclude a whole indexed block.
 pub fn mesh_ranges(
-    samples: &[Point],
+    sample_count: usize,
     chunk: usize,
-    visible: Option<impl Fn(Point, Point) -> bool>,
+    skip: Option<impl Fn(usize) -> usize>,
 ) -> impl Iterator<Item = RangeInclusive<usize>> {
-    let end = samples.len().saturating_sub(1);
+    let end = sample_count.saturating_sub(1);
     let mut first = 0usize;
-    let mut dot = samples.len() == 1;
+    let mut dot = sample_count == 1;
     std::iter::from_fn(move || {
         if std::mem::take(&mut dot) {
             return Some(0..=0);
         }
-        let Some(visible) = &visible else {
+        let Some(skip) = &skip else {
             let start = first;
             first = first.saturating_add(chunk).min(end);
             return (first > start).then_some(start..=first);
         };
-        while first < end && !visible(samples[first], samples[first + 1]) {
-            first += 1;
+        while first < end {
+            let count = skip(first);
+            if count == 0 {
+                break;
+            }
+            first = (first + count).min(end);
         }
         let start = first;
-        while first < end && first - start < chunk && visible(samples[first], samples[first + 1]) {
+        while first < end && first - start < chunk && skip(first) == 0 {
             first += 1;
         }
         (first > start).then_some(start..=first)

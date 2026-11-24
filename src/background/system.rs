@@ -19,7 +19,7 @@ pub struct Job<T> {
 impl<T: Send + 'static> Job<T> {
     pub fn start(
         capture: impl FnOnce(&Arc<AtomicBool>) -> CaptureResult + Send + 'static,
-        prepare: impl FnOnce(Image) -> Result<T, String> + Send + 'static,
+        prepare: impl FnOnce(Image, &AtomicBool) -> Result<Option<T>, String> + Send + 'static,
     ) -> Result<Self, String> {
         let (sender, receiver) = mpsc::channel();
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -28,10 +28,10 @@ impl<T: Send + 'static> Job<T> {
             .name("overink-desktop-capture".into())
             .spawn(move || {
                 let result = capture(&flag).and_then(|image| {
-                    image
-                        .filter(|_| !flag.load(Ordering::Relaxed))
-                        .map(prepare)
-                        .transpose()
+                    match image.filter(|_| !flag.load(Ordering::Relaxed)) {
+                        Some(image) => prepare(image, &flag),
+                        None => Ok(None),
+                    }
                 });
                 let _ = sender.send(result);
             })

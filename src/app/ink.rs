@@ -8,7 +8,10 @@ use crate::{
     controller::Rect,
     geometry::{self, Mesh},
     icc::ColorManager,
-    model::{Bounds, Erasure, History, Point, PointSpan, Stroke, Tool},
+    model::{
+        Bounds, Erasure, History, Point, PointSpan, STROKE_BLOCK_SEGMENTS, Stroke, StrokeBounds,
+        Tool,
+    },
     sdl::*,
 };
 use std::{
@@ -73,6 +76,7 @@ struct RibbonBatch {
 struct RibbonInput<'a> {
     paper: bool,
     borrowed_samples: Option<&'a [Point]>,
+    blocks: &'a [StrokeBounds],
 }
 
 #[derive(Default)]
@@ -1025,9 +1029,9 @@ impl StrokePainter {
         region: Option<InkClip>,
         white: f32,
     ) -> Result<(), String> {
-        let bounds = region.map(|_| app.history.stroke_bounds());
+        let paths = region.map(|_| app.history.stroke_index());
         for (index, stroke) in app.history.strokes().iter().enumerate().skip(first) {
-            let stroke_bounds = bounds.as_ref().and_then(|bounds| bounds.get(index));
+            let stroke_bounds = paths.as_ref().and_then(|paths| paths.bounds().get(index));
             if let Some(region) = region
                 && stroke_bounds.is_some_and(|entry| {
                     entry.as_ref().is_none_or(|bounds| {
@@ -1059,7 +1063,7 @@ impl StrokePainter {
                     && stroke_bounds
                         .copied()
                         .flatten()
-                        .is_some_and(crate::model::StrokeBounds::samples_are_distinct)
+                        .is_some_and(StrokeBounds::samples_are_distinct)
                 {
                     // The stroke index already verified the spacing of the
                     // original samples. A plain pen needs no subdivisions.
@@ -1075,6 +1079,7 @@ impl StrokePainter {
                             RibbonInput {
                                 paper: false,
                                 borrowed_samples: Some(&stroke.points),
+                                blocks: paths.as_ref().map_or(&[], |paths| paths.blocks(index)),
                             },
                             None,
                         )
@@ -1164,7 +1169,7 @@ impl StrokePainter {
                 region,
                 RibbonInput {
                     paper: use_paper,
-                    borrowed_samples: None,
+                    ..RibbonInput::default()
                 },
                 live,
             )
@@ -1183,9 +1188,21 @@ impl StrokePainter {
         let use_paper = input.paper;
         let samples = input.borrowed_samples.unwrap_or(&self.samples);
         let margin = stroke.max_radius() * 2. + frame.aa;
-        let visible = region
-            .filter(|_| stroke.tool != Tool::Arrow)
-            .map(|region| move |a, b| region.intersects(Bounds::between(a, b).padded(margin)));
+        let skip = region.filter(|_| stroke.tool != Tool::Arrow).map(|region| {
+            move |segment: usize| {
+                if segment.is_multiple_of(STROKE_BLOCK_SEGMENTS)
+                    && input
+                        .blocks
+                        .get(segment / STROKE_BLOCK_SEGMENTS)
+                        .is_some_and(|block| !region.intersects(block.path.padded(margin)))
+                {
+                    return STROKE_BLOCK_SEGMENTS;
+                }
+                usize::from(!region.intersects(
+                    Bounds::between(samples[segment], samples[segment + 1]).padded(margin),
+                ))
+            }
+        });
         let scale = if region.is_some() {
             frame.scale
         } else {
@@ -1212,7 +1229,8 @@ impl StrokePainter {
             );
         }
         let paper = if use_paper { self.paper.as_ref() } else { None };
-        for (index, range) in geometry::mesh_ranges(samples, MESH_SEGMENTS, visible).enumerate() {
+        for (index, range) in geometry::mesh_ranges(samples.len(), MESH_SEGMENTS, skip).enumerate()
+        {
             if let Some(batch) = live.as_ref().and_then(|cache| cache.batches.get(index)) {
                 #[cfg(test)]
                 {
@@ -1359,15 +1377,19 @@ impl StrokePainter {
                     renderer.with_target(mask, || {
                         renderer.set_render_scale([1., 1.])?;
                         renderer.clear([1., 1., 1., 0.])?;
-                        let visible = |a, b| {
+                        let skip = |segment: usize| {
                             // Include the ribbon's miter and antialias coverage.
                             // Only tessellate segments that can reach this tile.
-                            let bounds = Bounds::between(a, b).padded(margin);
-                            tile.intersects(bounds)
-                                && region.is_none_or(|region| region.intersects(bounds))
+                            let bounds =
+                                Bounds::between(self.samples[segment], self.samples[segment + 1])
+                                    .padded(margin);
+                            usize::from(
+                                !(tile.intersects(bounds)
+                                    && region.is_none_or(|region| region.intersects(bounds))),
+                            )
                         };
                         for range in
-                            geometry::mesh_ranges(&self.samples, MESH_SEGMENTS, Some(visible))
+                            geometry::mesh_ranges(self.samples.len(), MESH_SEGMENTS, Some(skip))
                         {
                             self.mesh
                                 .update(stroke, &self.samples, range, frame.aa, false);
@@ -1613,19 +1635,22 @@ mod tests {
         ));
         for close_samples in [false, true] {
             let mut app = app();
-            let mut points: Vec<_> = (0..600)
+            let mut points: Vec<_> = (0..1024)
                 .map(|i| {
+                    // The first and last blocks stay outside the tile. The
+                    // middle blocks cross its left and right edges.
+                    let x = if (384..640).contains(&i) { 6. } else { 180. };
                     Point::new(
-                        (i % 116) as f32 + 6.,
-                        (i / 116) as f32 * 12. + 8.,
+                        x + (i % 128) as f32,
+                        (i / 128) as f32 * 8. + 8.,
                         (i % 11) as f32 / 10.,
                         [0.; 2],
                     )
                 })
                 .collect();
             if close_samples {
-                let point = points[128];
-                points.insert(128, Point::new(point.x - 0.02, point.y, 0.9, [0.; 2]));
+                let point = points[512];
+                points.insert(512, Point::new(point.x - 0.02, point.y, 0.9, [0.; 2]));
             }
             app.history.active = Some(Stroke {
                 tool: Tool::Pen,

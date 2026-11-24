@@ -7,6 +7,8 @@ mod system;
 #[cfg(target_os = "windows")]
 mod windows;
 use crate::{icc::ColorManager, sdl::*};
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::Read,
@@ -212,15 +214,19 @@ struct Snapshot {
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
-struct SnapshotOutput {
+struct SnapshotOutput<'a> {
     bytes: Vec<u8>,
     raw_len: usize,
+    cancelled: &'a AtomicBool,
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
-impl std::io::Write for SnapshotOutput {
+impl std::io::Write for SnapshotOutput<'_> {
     fn write(&mut self, chunk: &[u8]) -> std::io::Result<usize> {
         use std::io::{Error, ErrorKind};
+        if self.cancelled.load(Ordering::Relaxed) {
+            return Err(Error::from(ErrorKind::BrokenPipe));
+        }
         if chunk.is_empty() {
             return Ok(0);
         }
@@ -261,18 +267,31 @@ impl From<Image> for Snapshot {
 
 impl Snapshot {
     #[cfg(any(target_os = "macos", target_os = "windows", test))]
-    fn compress(image: Image) -> Result<Self, String> {
+    fn compress(image: Image, cancelled: &AtomicBool) -> Result<Option<Self>, String> {
         use std::io::{ErrorKind, Write};
         let mut snapshot = Self::from(image);
         let output = SnapshotOutput {
             bytes: Vec::new(),
             raw_len: snapshot.bytes.len(),
+            cancelled,
         };
         let mut encoder = flate2::write::ZlibEncoder::new(output, flate2::Compression::fast());
-        match encoder
-            .write_all(&snapshot.bytes)
-            .and_then(|()| encoder.finish())
-        {
+        // Check input as well as output, since a flat image may produce no
+        // compressed bytes for a long time. Interrupted would make write_all retry.
+        let packed = snapshot
+            .bytes
+            .chunks(SNAPSHOT_UPLOAD_BYTES)
+            .try_for_each(|chunk| {
+                if cancelled.load(Ordering::Relaxed) {
+                    return Err(ErrorKind::BrokenPipe.into());
+                }
+                encoder.write_all(chunk)
+            })
+            .and_then(|()| encoder.finish());
+        if cancelled.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        match packed {
             Ok(SnapshotOutput { bytes, .. }) => {
                 snapshot.bytes = bytes;
                 snapshot.bytes.shrink_to_fit();
@@ -285,7 +304,7 @@ impl Snapshot {
                 ) => {}
             Err(error) => return Err(error.to_string()),
         }
-        Ok(snapshot)
+        Ok(Some(snapshot))
     }
 
     fn upload_rows(
@@ -766,7 +785,7 @@ mod tests {
         };
         bg.freeze();
         assert!(bg.pending());
-        let snapshot = Snapshot::compress(Image::hdr_buffer(128, 128)?)?;
+        let snapshot = compress_snapshot(Image::hdr_buffer(128, 128)?)?;
         assert!(bg.finish_capture(Ok(Some(snapshot))).is_ok());
         assert!(bg.frozen && !bg.pending());
         assert_eq!(bg.images[&7].encoding, Encoding::LinearRgba16);
@@ -796,7 +815,7 @@ mod tests {
         for bytes in image.rgba.as_chunks_mut::<8>().0 {
             bytes.copy_from_slice(pixel.as_flattened());
         }
-        let snapshot = Snapshot::compress(image)?;
+        let snapshot = compress_snapshot(image)?;
         assert!(snapshot.compressed);
         assert_eq!(snapshot.encoding, Encoding::LinearRgba16);
         assert!(snapshot.bytes.len() < SNAPSHOT_UPLOAD_BYTES);
@@ -833,9 +852,30 @@ mod tests {
             *bytes = random.to_ne_bytes();
         }
         let original = image.rgba.to_vec();
-        let snapshot = Snapshot::compress(image)?;
+        let snapshot = compress_snapshot(image)?;
         assert!(!snapshot.compressed);
         assert_eq!(snapshot.bytes, original);
+        Ok(())
+    }
+
+    fn compress_snapshot(image: Image) -> Result<Snapshot, String> {
+        Snapshot::compress(image, &AtomicBool::new(false))?.ok_or("Unexpected cancellation".into())
+    }
+
+    #[test]
+    fn cancelled_snapshot_stops_writing_and_returns_no_frame() -> TestResult {
+        use std::io::Write;
+        let cancelled = AtomicBool::new(false);
+        let mut output = SnapshotOutput {
+            bytes: Vec::new(),
+            raw_len: 1024,
+            cancelled: &cancelled,
+        };
+        output.write_all(&[7; 64])?;
+        cancelled.store(true, Ordering::Relaxed);
+        assert!(output.write_all(&[8; 64]).is_err());
+        assert_eq!(output.bytes, [7; 64]);
+        assert!(Snapshot::compress(Image::hdr_buffer(1, 1)?, &cancelled)?.is_none());
         Ok(())
     }
 
