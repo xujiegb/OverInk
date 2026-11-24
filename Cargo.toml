@@ -14,7 +14,7 @@ headless-check = ["sdl3-sys/sdl-unix-console-build"]
 egui = { version = "=0.37.0", features = ["default_fonts"] }
 base64 = "0.23"
 epaint = { version = "=0.37.0", features = ["color_fonts"] }
-harfrust = "=0.16.0"
+harfrust = "=0.16.1"
 sdl3-sys = { version = "=0.7.3", default-features = false, features = ["build-from-source-static", "no-default-subsystems", "sdl-video", "sdl-render", "sdl-dialog"] }
 skrifa = "=0.50.0"
 unicode-segmentation = "1"
@@ -27,7 +27,7 @@ png = "0.18"
 tempfile = "3"
 
 [build-dependencies]
-cc = "=1.11.2"
+cc = "=1.11.3"
 
 [profile.release]
 lto = "fat"
@@ -44,7 +44,7 @@ libloading = "0.9"
 async-channel = "2"
 futures-lite = "2"
 x11rb = { version = "0.14.0", default-features = false, features = ["randr", "shape"] }
-zbus = { version = "=6.3.0", default-features = false, features = ["default-rt", "proxy", "service"] }
+zbus = { version = "=6.5.0", default-features = false, features = ["default-rt", "proxy", "service"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = "=0.25.0"

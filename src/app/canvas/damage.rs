@@ -99,19 +99,21 @@ impl Canvas {
             self.damage = None;
             return Ok(false);
         }
+        let pixels = self.window.pixel_size();
+        let bytes = crate::app::ink::layer_bytes(pixels, SDL_PIXELFORMAT_RGBA32);
         let size = self.window.size();
-        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::from(size));
+        if pixels.iter().any(|&value| value <= 0)
+            || pixels.map(|value| value as f32) != size
+            || bytes.saturating_add(cached) > MAX_COMPOSITION_BYTES
+        {
+            self.damage = None;
+            return Ok(false);
+        }
         let Some(footprint) = active_ink_bounds(app) else {
             self.damage = None;
             return Ok(false);
         };
-        let pixels = self.window.pixel_size();
-        let scale = std::array::from_fn(|axis| pixels[axis] as f32 / size[axis]);
-        let bytes = crate::app::ink::layer_bytes(pixels, SDL_PIXELFORMAT_RGBA32);
-        if scale != [1.; 2] || bytes.saturating_add(cached) > MAX_COMPOSITION_BYTES {
-            self.damage = None;
-            return Ok(false);
-        }
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::from(size));
         let previous = self.damage.as_ref().and_then(|layer| layer.footprint);
         let dirty = previous.map_or(footprint, |previous| footprint.union(previous));
         // A full-size texture copy costs more than a small direct draw.

@@ -379,6 +379,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn hdr_region_readback_matches_full_crop_with_padded_rows() -> Result<(), String> {
+        let full = [5, 4];
+        let stride = 48;
+        // The last row ends at the final pixel, without trailing padding.
+        let mut pixels = [0x55_u8; 184];
+        for y in 0..4 {
+            for x in 0..5 {
+                let offset = y * stride + x * 8;
+                let channels = [0x4800_u16, 0xb800, 0x4000 + (y * 5 + x) as u16, 0];
+                for (dst, value) in pixels[offset..offset + 8]
+                    .as_chunks_mut::<2>()
+                    .0
+                    .iter_mut()
+                    .zip(channels)
+                {
+                    *dst = value.to_ne_bytes();
+                }
+            }
+        }
+        let crop = Crop {
+            region: Rect::from_min_max(egui::pos2(1.2, 1.1), egui::pos2(3.3, 3.7)),
+            size: [5., 4.],
+        };
+        let reference = crop.apply(Image::from_hdr_capture(&pixels, stride, full, None)?)?;
+        let region = Image::from_hdr_capture(&pixels, stride, full, Some(crop))?;
+        assert_eq!([region.width, region.height], [3, 3]);
+        assert_eq!(region.rgba, reference.rgba);
+        assert!(Image::from_hdr_capture(&pixels[..183], stride, full, Some(crop)).is_err());
+        assert!(Image::from_hdr_capture(&pixels, 39, full, Some(crop)).is_err());
+        Ok(())
+    }
+
+    #[test]
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     fn portal_crop_uses_the_monitor_origin_and_expected_desktop_sizes() -> Result<(), String> {
         let display = |id, bounds| Display {
