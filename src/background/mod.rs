@@ -116,13 +116,10 @@ impl Image {
     fn capture_row_layout(&self, stride: usize) -> Option<(usize, usize)> {
         let row_bytes = (self.width as usize).checked_mul(self.encoding.bytes_per_pixel())?;
         let height = self.height as usize;
-        if row_bytes == 0 || row_bytes > stride || row_bytes.checked_mul(height)? != self.rgba.len()
-        {
+        if row_bytes.checked_mul(height)? != self.rgba.len() {
             return None;
         }
-        let needed = (height.checked_sub(1)?)
-            .checked_mul(stride)?
-            .checked_add(row_bytes)?;
+        let needed = capture_row_span(row_bytes, height, stride)?;
         Some((row_bytes, needed))
     }
 
@@ -146,6 +143,31 @@ impl Image {
             }
         }
         Ok(())
+    }
+
+    #[cfg(any(target_os = "macos", test))]
+    fn from_hdr_capture(
+        pixels: &[u8],
+        stride: usize,
+        full: [u32; 2],
+        crop: Option<screenshot::Crop>,
+    ) -> Result<Self, String> {
+        let [width, height] = full;
+        let encoding = Encoding::LinearRgba16;
+        Self::byte_len(width, height, encoding)?;
+        let bytes = encoding.bytes_per_pixel();
+        capture_row_span(width as usize * bytes, height as usize, stride)
+            .filter(|&needed| needed <= pixels.len())
+            .ok_or("Invalid HDR capture row pitch")?;
+        let area = screenshot::CaptureArea::new(full, crop)?;
+        let [left, top, ..] = area.bounds;
+        let [width, height] = area.dimensions();
+        let pixels = &pixels[top as usize * stride + left as usize * bytes..];
+        let mut image = Self::hdr_buffer(width, height)?;
+        image.copy_hdr_rows(pixels.len(), stride, |offset, row| {
+            row.copy_from_slice(&pixels[offset..offset + row.len()]);
+        })?;
+        Ok(image)
     }
     // WGC supplies BGRA8 for SDR monitors. Validate the mapped D3D11 pitch
     // before copying; the snapshot format consumed by SDL remains opaque RGBA8.
@@ -201,6 +223,17 @@ impl Image {
     pub fn convert_to_srgb(&mut self, profile: &[u8]) {
         crate::icc::convert_rgba8_to_srgb(&mut self.rgba, profile);
     }
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
+fn capture_row_span(row_bytes: usize, height: usize, stride: usize) -> Option<usize> {
+    if row_bytes == 0 || row_bytes > stride {
+        return None;
+    }
+    height
+        .checked_sub(1)?
+        .checked_mul(stride)?
+        .checked_add(row_bytes)
 }
 
 // Keep the original channels available for a renderer reset without retaining

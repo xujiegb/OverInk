@@ -13,7 +13,7 @@ use objc2::{
     runtime::{AnyClass, AnyObject},
     sel,
 };
-use objc2_core_foundation::{CGPoint, CGRect as NativeRect, CGSize};
+use objc2_core_foundation::{CFString, CGPoint, CGRect as NativeRect, CGSize};
 use objc2_core_graphics::{
     CGBitmapContextCreate, CGColorSpace, CGContext, CGDataProvider, CGImage,
     kCGColorSpaceExtendedLinearSRGB, kCGColorSpaceSRGB,
@@ -194,11 +194,11 @@ fn screen_capture(
     }
     let id = display_id(bounds)?;
     let deadline = Instant::now() + Duration::from_secs(30);
-    match request_screenshot(id, pixels, hdr, crop, cancelled, deadline)? {
+    match request_screenshot(id, pixels, hdr, crop, true, cancelled, deadline)? {
         ScreenshotReply::Finished(result) => result,
         ScreenshotReply::RetryFullDisplay => {
-            match request_screenshot(id, pixels, hdr, None, cancelled, deadline)? {
-                ScreenshotReply::Finished(result) => crop_capture(result, crop),
+            match request_screenshot(id, pixels, hdr, crop, false, cancelled, deadline)? {
+                ScreenshotReply::Finished(result) => result,
                 ScreenshotReply::RetryFullDisplay => Err("Full-screen capture failed".into()),
             }
         }
@@ -210,6 +210,7 @@ fn request_screenshot(
     pixels: [i32; 2],
     hdr: bool,
     crop: Option<Crop>,
+    try_region: bool,
     cancelled: &Arc<AtomicBool>,
     deadline: Instant,
 ) -> Result<ScreenshotReply, String> {
@@ -235,7 +236,9 @@ fn request_screenshot(
                         content
                             .ok_or_else(|| capture_error(error, hdr))
                             .and_then(|content| {
-                                begin_screenshot(content, id, pixels, hdr, crop, &pending)
+                                begin_screenshot(
+                                    content, id, pixels, hdr, crop, try_region, &pending,
+                                )
                             });
                     if let Err(error) = result {
                         let _ = pending.sender.send(ScreenshotReply::Finished(Err(error)));
@@ -300,6 +303,7 @@ fn begin_screenshot(
     [width, height]: [i32; 2],
     hdr: bool,
     crop: Option<Crop>,
+    try_region: bool,
     pending: &Arc<PendingScreenshot>,
 ) -> Result<(), String> {
     let filter_class =
@@ -335,7 +339,8 @@ fn begin_screenshot(
         let config = config.ok_or("Cannot configure the macOS screenshot")?;
         let dimensions = [width as u32, height as u32];
         let area = CaptureArea::new(dimensions, crop)?;
-        let region = if crop.is_some()
+        let region = if try_region
+            && crop.is_some()
             && filter_class
                 .instance_method(sel!(pointPixelScale))
                 .is_some()
@@ -368,6 +373,7 @@ fn begin_screenshot(
             return Ok(());
         }
         let pending = Arc::clone(pending);
+        let pixel_crop = if region.is_some() { None } else { crop };
         let completion =
             block2::RcBlock::new(move |image: Option<&CGImage>, error: Option<&NSError>| {
                 autoreleasepool(|_| {
@@ -384,9 +390,9 @@ fn begin_screenshot(
                     }
                     let result = if let Some(image) = image {
                         if hdr {
-                            copy_screenshot(image).map(Some)
+                            copy_screenshot(image, space, pixel_crop).map(Some)
                         } else {
-                            copy_sdr_screenshot(image).map(Some)
+                            crop_capture(copy_sdr_screenshot(image).map(Some), pixel_crop)
                         }
                     } else {
                         Err(capture_error(error, hdr))
@@ -397,7 +403,7 @@ fn begin_screenshot(
                             _ => ScreenshotReply::RetryFullDisplay,
                         }
                     } else {
-                        ScreenshotReply::Finished(crop_capture(result, crop))
+                        ScreenshotReply::Finished(result)
                     };
                     let _ = pending.sender.send(reply);
                 });
@@ -408,45 +414,41 @@ fn begin_screenshot(
     Ok(())
 }
 
-fn copy_screenshot(image: &CGImage) -> Result<Image, String> {
-    // SAFETY: The named color space constant is available on this capture
-    // path, and CopyData returns a new immutable CFData.
-    unsafe {
-        let bitmap = CGImage::bitmap_info(Some(image)).bits();
-        let float_components = bitmap & (1 << 8) != 0;
-        let alpha_last = matches!(bitmap & 0x1f, 1 | 3 | 5);
-        let little_endian = matches!(bitmap & 0x7000, 0 | 0x1000);
-        if CGImage::bits_per_component(Some(image)) != 16
-            || CGImage::bits_per_pixel(Some(image)) != 64
-            || !float_components
-            || !alpha_last
-            || !little_endian
-        {
-            return Err("ScreenCaptureKit did not return an FP16 HDR screenshot".into());
-        }
-        let space = CGImage::color_space(Some(image));
-        if CGColorSpace::name(space.as_deref()).as_deref() != Some(kCGColorSpaceExtendedLinearSRGB)
-        {
-            return Err("The HDR screenshot did not use extended linear sRGB".into());
-        }
-        let width =
-            u32::try_from(CGImage::width(Some(image))).map_err(|_| "Capture is too large")?;
-        let height =
-            u32::try_from(CGImage::height(Some(image))).map_err(|_| "Capture is too large")?;
-        let mut snapshot = Image::hdr_buffer(width, height)?;
-        let provider =
-            CGImage::data_provider(Some(image)).ok_or("The HDR screenshot has no pixel data")?;
-        let data = CGDataProvider::data(Some(&provider)).ok_or("Cannot read the HDR screenshot")?;
-        let pixels = data.as_bytes_unchecked();
-        snapshot.copy_hdr_rows(
-            pixels.len(),
-            CGImage::bytes_per_row(Some(image)),
-            |offset, row| {
-                row.copy_from_slice(&pixels[offset..offset + row.len()]);
-            },
-        )?;
-        Ok(snapshot)
+fn copy_screenshot(
+    image: &CGImage,
+    expected: &CFString,
+    crop: Option<Crop>,
+) -> Result<Image, String> {
+    let bitmap = CGImage::bitmap_info(Some(image)).bits();
+    let float_components = bitmap & (1 << 8) != 0;
+    let alpha_last = matches!(bitmap & 0x1f, 1 | 3 | 5);
+    let little_endian = matches!(bitmap & 0x7000, 0 | 0x1000);
+    if CGImage::bits_per_component(Some(image)) != 16
+        || CGImage::bits_per_pixel(Some(image)) != 64
+        || !float_components
+        || !alpha_last
+        || !little_endian
+    {
+        return Err("ScreenCaptureKit did not return an FP16 HDR screenshot".into());
     }
+    let space = CGImage::color_space(Some(image));
+    if CGColorSpace::name(space.as_deref()).as_deref() != Some(expected) {
+        return Err("The HDR screenshot did not use extended linear sRGB".into());
+    }
+    let width = u32::try_from(CGImage::width(Some(image))).map_err(|_| "Capture is too large")?;
+    let height = u32::try_from(CGImage::height(Some(image))).map_err(|_| "Capture is too large")?;
+    Image::byte_len(width, height, super::Encoding::LinearRgba16)?;
+    let provider =
+        CGImage::data_provider(Some(image)).ok_or("The HDR screenshot has no pixel data")?;
+    let data = CGDataProvider::data(Some(&provider)).ok_or("Cannot read the HDR screenshot")?;
+    // SAFETY: CopyData returns an immutable CFData that is owned here.
+    let pixels = unsafe { data.as_bytes_unchecked() };
+    Image::from_hdr_capture(
+        pixels,
+        CGImage::bytes_per_row(Some(image)),
+        [width, height],
+        crop,
+    )
 }
 
 fn copy_sdr_screenshot(image: &CGImage) -> Result<Image, String> {
