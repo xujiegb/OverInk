@@ -249,7 +249,7 @@ impl App {
         let mut pages = Pages::new(displays.get(display).map(|d| d.id));
         pages.sync(&mut history, &displays);
         let mut status = Self::mouse_mode_status();
-        if preferences.restore_session && save_path.exists() {
+        if preferences.restores_session() && save_path.exists() {
             match pages.load(&mut history, &save_path, true) {
                 Ok(0) => {}
                 Ok(pending) => status = pending_pages(pending),
@@ -1328,15 +1328,21 @@ impl App {
         }
     }
     fn finish_session(&mut self) -> Result<(), String> {
-        self.finish_all_contacts();
-        if !self.preferences.restore_session {
-            self.remove_resume_file()
-                .map_err(|e| format!("Clearing the last session on exit: {e}"))
-        } else if self.pages.needs_save(&self.history) {
-            self.save_session()
-                .map_err(|e| format!("Autosave on exit: {e}"))
-        } else {
-            Ok(())
+        match self.preferences.restore_session {
+            Some(true) => {
+                self.finish_all_contacts();
+                if self.pages.needs_save(&self.history) {
+                    self.save_session()
+                        .map_err(|e| format!("Autosave on exit: {e}"))?;
+                }
+                Ok(())
+            }
+            Some(false) => self
+                .remove_resume_file()
+                .map_err(|e| format!("Clearing the last session on exit: {e}")),
+            // Upgrades can have a saved file from the old implicit default.
+            // Leave it available for recovery until the user makes a choice.
+            None => Ok(()),
         }
     }
     fn load(&mut self) {
@@ -1614,8 +1620,17 @@ fn update_preferences(
     }
     app.language = app.preferences.language.unwrap_or_else(Language::system);
     if previous.restore_session != app.preferences.restore_session {
-        let result = if app.preferences.restore_session {
-            app.save_session()
+        let result = if app.preferences.restores_session() {
+            // A saved file from the previous implicit default may still
+            // exist. Preserve it when enabling recovery on a fresh canvas.
+            if previous.restore_session.is_none()
+                && app.save_path.is_file()
+                && !app.pages.needs_save(&app.history)
+            {
+                Ok(())
+            } else {
+                app.save_session()
+            }
         } else {
             app.remove_resume_file()
         };
@@ -2462,7 +2477,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                     toolbar_dirty = true;
                 }
                 if removed
-                    && app.preferences.restore_session
+                    && app.preferences.restores_session()
                     && app.pages.needs_save(&app.history)
                     && let Err(error) = app.save_session()
                 {
@@ -3255,7 +3270,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 restore_toolbar_focus = false;
             }
             if !options.smoke
-                && app.preferences.restore_session
+                && app.preferences.restores_session()
                 && app.last_save.elapsed() >= AUTOSAVE_INTERVAL
                 && !app.has_contacts()
             {
@@ -3333,7 +3348,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                     timeout = timeout
                         .min(X11_DISPLAY_POLL.saturating_sub(now.duration_since(last_displays)));
                 }
-                if app.preferences.restore_session && !options.smoke && !app.has_contacts() {
+                if app.preferences.restores_session() && !options.smoke && !app.has_contacts() {
                     timeout = timeout
                         .min(AUTOSAVE_INTERVAL.saturating_sub(now.duration_since(app.last_save)));
                 }
@@ -4330,10 +4345,7 @@ mod touch_tests {
             0,
             vec![screen(10, 0, 60.)],
             state.path(),
-            Preferences {
-                restore_session: false,
-                ..Preferences::default()
-            },
+            Preferences::default(),
         );
         assert!(app.pass);
         assert!(!app.wait_for_mouse_up);
@@ -4476,7 +4488,7 @@ mod touch_tests {
     }
 
     #[test]
-    fn disabling_session_recovery_discards_the_cache_and_keeps_manual_saves()
+    fn session_recovery_is_opt_in_and_respects_explicit_settings()
     -> Result<(), Box<dyn std::error::Error>> {
         let state = std::env::temp_dir().join(format!(
             "overink-session-test-{}-{}",
@@ -4485,8 +4497,12 @@ mod touch_tests {
                 .duration_since(std::time::UNIX_EPOCH)?
                 .as_nanos(),
         ));
-        let displays = vec![screen(10, 0, 60.0), screen(20, 1920, 120.0)];
-        let mut a = App::new(true, 0, displays.clone(), &state, Preferences::default());
+        let displays = || vec![screen(10, 0, 60.0), screen(20, 1920, 120.0)];
+        let opted_in = || Preferences {
+            restore_session: Some(true),
+            ..Preferences::default()
+        };
+        let mut a = App::new(true, 0, displays(), &state, opted_in());
         a.use_tool(Tool::Pen);
         add_ink(&mut a, &[120.]);
         a.select_page(20);
@@ -4496,17 +4512,33 @@ mod touch_tests {
         assert!(a.save_path.is_file());
         assert!(Path::new(&a.path).is_file());
 
-        let resumed = App::new(true, 1, displays.clone(), &state, Preferences::default());
+        let resumed = App::new(true, 1, displays(), &state, opted_in());
         assert_eq!(resumed.history.strokes()[0].points[0].x, 440.);
+        let old_session = std::fs::read(&a.save_path)?;
+        let mut default_off = App::new(true, 1, displays(), &state, Preferences::default());
+        assert!(default_off.history.strokes().is_empty());
+        default_off.finish_session()?;
+        assert_eq!(std::fs::read(&a.save_path)?, old_session);
+        let previous = default_off.preferences.panel_values();
+        default_off.preferences.restore_session = Some(true);
+        update_preferences(
+            &mut default_off,
+            &state.join("ui.json"),
+            previous,
+            false,
+            false,
+        );
+        default_off.finish_session()?;
+        assert_eq!(std::fs::read(&a.save_path)?, old_session);
         Preferences {
-            restore_session: false,
+            restore_session: Some(false),
             ..Preferences::default()
         }
         .save(&state.join("ui.json"))?;
         let mut private = App::new(
             true,
             1,
-            displays,
+            displays(),
             &state,
             Preferences::load(&state.join("ui.json")),
         );
@@ -4530,10 +4562,7 @@ mod touch_tests {
             0,
             vec![screen(10, 0, 60.)],
             &state,
-            Preferences {
-                restore_session: false,
-                ..Preferences::default()
-            },
+            Preferences::default(),
         );
         assert!(!state.exists());
         app.use_tool(Tool::Pen);

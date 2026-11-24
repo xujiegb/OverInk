@@ -8,7 +8,7 @@ pub(crate) use direct_touch::{
 pub use pencil::PencilModeMonitor;
 
 use crate::sdl::*;
-use objc2::{msg_send, runtime::AnyObject};
+use objc2::{msg_send, rc::Retained, runtime::AnyObject};
 use objc2_core_graphics::{CGColorSpace, kCGColorSpaceSRGB};
 use std::ptr::NonNull;
 
@@ -39,14 +39,13 @@ pub fn remove_metal_view(window: &Window) {
     // Check the intermediate contentView before messaging it.
     unsafe {
         let ns = ns.as_non_null().as_ptr().cast::<AnyObject>();
-        let content: Option<NonNull<AnyObject>> = NonNull::new(msg_send![ns, contentView]);
+        let content: Option<Retained<AnyObject>> = msg_send![ns, contentView];
         let Some(content) = content else {
             return;
         };
-        let metal: Option<NonNull<AnyObject>> =
-            NonNull::new(msg_send![content.as_ptr(), viewWithTag: tag]);
+        let metal: Option<Retained<AnyObject>> = msg_send![&*content, viewWithTag: tag];
         if let Some(metal) = metal {
-            let _: () = msg_send![metal.as_ptr(), removeFromSuperview];
+            let _: () = msg_send![&*metal, removeFromSuperview];
         }
     }
 }

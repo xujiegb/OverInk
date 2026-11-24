@@ -756,12 +756,17 @@ impl App {
         }
         ui.separator();
         ui.label(RichText::new(tr.text("Session")).strong());
-        commands.preferences |= ui
+        let mut restore_session = self.preferences.restores_session();
+        if ui
             .checkbox(
-                &mut self.preferences.restore_session,
+                &mut restore_session,
                 tr.text("Keep ink for the next launch"),
             )
-            .changed();
+            .changed()
+        {
+            self.preferences.restore_session = Some(restore_session);
+            commands.preferences = true;
+        }
         ui.add(egui::TextEdit::singleline(&mut self.path).desired_width(f32::INFINITY));
         ui.horizontal(|ui| {
             if ui.button(tr.text("Save")).clicked() {

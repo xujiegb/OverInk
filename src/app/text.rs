@@ -1152,11 +1152,12 @@ impl App {
                 acted = true;
             }
         }
+        let selected_srgb = color.srgb8();
         for rgb in PRESETS {
             let preset = InkColor::from_rgb8(rgb);
             let label = format!("{} {}", tr.text("Text color"), preset.hex());
             let response =
-                toolbar::swatch_button(&mut menu, button, rgb, &label, color.srgb8() == rgb)
+                toolbar::swatch_button(&mut menu, button, rgb, &label, selected_srgb == rgb)
                     .on_hover_text(
                         egui::RichText::new(label).size(toolbar::MENU_FONT_SIZE * scale),
                     );

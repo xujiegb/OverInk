@@ -374,16 +374,26 @@ impl Ink {
             .values()
             .flat_map(|finger| finger.fragments.iter().chain(finger.stroke.iter()));
         for stroke in app.history.active.iter().chain(touches) {
-            if !live_used && LiveRibbon::eligible(stroke) {
+            let live = if !live_used && LiveRibbon::eligible(stroke) {
+                live_used = true;
+                Some(&mut self.live)
+            } else {
+                None
+            };
+            if stroke.tool == Tool::Pen {
+                // App::append already merged neighboring points for pointer
+                // and touch input. Pressure updates leave coordinates intact.
+                self.painter
+                    .distinct_pen(&frame, stroke, None, 1., &[], live)?;
+            } else if live.is_some() {
                 self.painter.path(
                     &frame,
                     stroke,
                     PointSpan::new(&stroke.points),
                     None,
                     1.,
-                    Some(&mut self.live),
+                    live,
                 )?;
-                live_used = true;
             } else {
                 self.painter.stroke(&frame, stroke)?;
             }
@@ -1065,25 +1075,8 @@ impl StrokePainter {
                         .flatten()
                         .is_some_and(StrokeBounds::samples_are_distinct)
                 {
-                    // The stroke index already verified the spacing of the
-                    // original samples. A plain pen needs no subdivisions.
-                    let rgb = frame
-                        .color
-                        .map(stroke.color.output_rgb(frame.renderer.extended));
-                    frame.renderer.with_color_scale(white, || {
-                        self.draw_ribbon(
-                            frame,
-                            stroke,
-                            rgb,
-                            region,
-                            RibbonInput {
-                                paper: false,
-                                borrowed_samples: Some(&stroke.points),
-                                blocks: paths.as_ref().map_or(&[], |paths| paths.blocks(index)),
-                            },
-                            None,
-                        )
-                    })?;
+                    let blocks = paths.as_ref().map_or(&[][..], |paths| paths.blocks(index));
+                    self.distinct_pen(frame, stroke, region, white, blocks, None)?;
                 } else {
                     self.stroke_in(frame, stroke, region, white)?;
                 }
@@ -1095,6 +1088,37 @@ impl StrokePainter {
 
     fn stroke(&mut self, frame: &Frame<'_>, stroke: &Stroke) -> Result<(), String> {
         self.stroke_in(frame, stroke, None, 1.)
+    }
+
+    fn distinct_pen(
+        &mut self,
+        frame: &Frame<'_>,
+        stroke: &Stroke,
+        region: Option<InkClip>,
+        white: f32,
+        blocks: &[StrokeBounds],
+        live: Option<&mut LiveRibbon>,
+    ) -> Result<(), String> {
+        if stroke.points.is_empty() || stroke.opacity <= 0. {
+            return Ok(());
+        }
+        let rgb = frame
+            .color
+            .map(stroke.color.output_rgb(frame.renderer.extended));
+        frame.renderer.with_color_scale(white, || {
+            self.draw_ribbon(
+                frame,
+                stroke,
+                rgb,
+                region,
+                RibbonInput {
+                    borrowed_samples: Some(&stroke.points),
+                    blocks,
+                    ..RibbonInput::default()
+                },
+                live,
+            )
+        })
     }
 
     fn paint_laser_segment(
@@ -1581,22 +1605,24 @@ mod tests {
             opacity: 0.6,
             pressure_curve: 1.,
             pressure_enabled: true,
-            points: (0..2300)
-                .map(|index| {
-                    Point::new(
-                        (index % 150) as f32 + 12.,
-                        (index / 150) as f32 * 4. + 12.,
-                        (index % 17) as f32 / 16.,
-                        [0.; 2],
-                    )
-                })
-                .collect(),
+            points: Vec::new(),
         };
+        for index in 0..2300 {
+            let x = (index % 150) as f32 + 12.;
+            let y = (index / 150) as f32 * 4. + 12.;
+            App::append(
+                &mut stroke,
+                Point::new(x, y, (index % 17) as f32 / 16., [0.; 2]),
+                true,
+            );
+            App::append(&mut stroke, Point::new(x + 0.02, y, 0.16, [0.; 2]), true);
+        }
+        assert_eq!(stroke.points.len(), 2300);
         let mut live = LiveRibbon::default();
         let mut painter = StrokePainter::default();
         for step in 0..3 {
             if step == 1 {
-                stroke.points.push(Point::new(112., 77., 0.4, [0.; 2]));
+                App::append(&mut stroke, Point::new(112., 77., 0.4, [0.; 2]), true);
             }
             if step == 2 {
                 stroke.points[1025].pressure = 0.;
@@ -1605,15 +1631,16 @@ mod tests {
             StrokePainter::default().stroke(&direct.frame(), &stroke)?;
             incremental.renderer.clear([0.; 4])?;
             painter.queued = 0;
-            painter.path(
+            painter.distinct_pen(
                 &incremental.frame(),
                 &stroke,
-                PointSpan::new(&stroke.points),
                 None,
                 1.,
+                &[],
                 Some(&mut live),
             )?;
             assert_eq!(live.batches.len(), 2);
+            assert!(painter.samples.is_empty());
             assert_eq!(incremental.pixels()?, direct.pixels()?);
         }
         Ok(())
