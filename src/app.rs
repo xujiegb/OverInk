@@ -3108,7 +3108,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 #[cfg(not(target_os = "windows"))]
                 if mode_changed || controller_bounds_changed || picker.choosing() {
                     let toolbar_display = toolbar.display_id();
-                    if let Some(canvas) = canvases.iter().find(|canvas| {
+                    if let Some(canvas) = canvases.iter_mut().find(|canvas| {
                         canvas.visible && (wayland || canvas.output == toolbar_display)
                     }) {
                         canvas.keep_toolbar_above(&toolbar);

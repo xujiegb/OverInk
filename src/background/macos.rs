@@ -21,7 +21,7 @@ use std::{
     ffi::c_void,
     ptr::{self, NonNull},
     sync::{
-        OnceLock,
+        Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
@@ -189,6 +189,18 @@ enum ScreenshotReply {
     RetryFullDisplay,
 }
 
+struct PendingScreenshot {
+    sender: mpsc::Sender<ScreenshotReply>,
+    cancelled: Arc<AtomicBool>,
+    deadline: Instant,
+}
+
+impl PendingScreenshot {
+    fn active(&self) -> bool {
+        !self.cancelled.load(Ordering::Relaxed) && Instant::now() < self.deadline
+    }
+}
+
 fn crop_capture(result: CaptureResult, crop: Option<Crop>) -> CaptureResult {
     if let Some(crop) = crop {
         result?.map(|image| crop.apply(image)).transpose()
@@ -202,7 +214,7 @@ fn screen_capture(
     pixels: [i32; 2],
     hdr: bool,
     crop: Option<Crop>,
-    cancelled: &AtomicBool,
+    cancelled: &Arc<AtomicBool>,
 ) -> CaptureResult {
     if hdr && !hdr_supported() {
         return Err("HDR screenshots require macOS 15 or later on Apple silicon".into());
@@ -228,28 +240,35 @@ fn request_screenshot(
     pixels: [i32; 2],
     hdr: bool,
     crop: Option<Crop>,
-    cancelled: &AtomicBool,
+    cancelled: &Arc<AtomicBool>,
     deadline: Instant,
 ) -> Result<ScreenshotReply, String> {
     if cancelled.load(Ordering::Relaxed) {
         return Ok(ScreenshotReply::Finished(Ok(None)));
     }
     let (sender, receiver) = mpsc::channel();
+    let pending = Arc::new(PendingScreenshot {
+        sender,
+        cancelled: Arc::clone(cancelled),
+        deadline,
+    });
     autoreleasepool(|_| -> Result<(), String> {
         let shareable =
             AnyClass::get(c"SCShareableContent").ok_or("ScreenCaptureKit is unavailable")?;
         let completion = block2::RcBlock::new(
             move |content: Option<&AnyObject>, error: Option<&NSError>| {
                 autoreleasepool(|_| {
-                    if let Some(content) = content {
-                        if let Err(error) =
-                            begin_screenshot(content, id, pixels, hdr, crop, sender.clone())
-                        {
-                            let _ = sender.send(ScreenshotReply::Finished(Err(error)));
-                        }
-                    } else {
-                        let _ =
-                            sender.send(ScreenshotReply::Finished(Err(capture_error(error, hdr))));
+                    if !pending.active() {
+                        return;
+                    }
+                    let result =
+                        content
+                            .ok_or_else(|| capture_error(error, hdr))
+                            .and_then(|content| {
+                                begin_screenshot(content, id, pixels, hdr, crop, &pending)
+                            });
+                    if let Err(error) = result {
+                        let _ = pending.sender.send(ScreenshotReply::Finished(Err(error)));
                     }
                 });
             },
@@ -267,6 +286,10 @@ fn request_screenshot(
         match receiver.recv_timeout(Duration::from_millis(25)) {
             Ok(result) => return Ok(result),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) if cancelled.load(Ordering::Relaxed) => break,
+            Err(mpsc::RecvTimeoutError::Disconnected) if Instant::now() >= deadline => {
+                return Err("The macOS screenshot timed out".into());
+            }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 return Err("The macOS screenshot callback disconnected".into());
             }
@@ -307,7 +330,7 @@ fn begin_screenshot(
     [width, height]: [i32; 2],
     hdr: bool,
     crop: Option<Crop>,
-    sender: mpsc::Sender<ScreenshotReply>,
+    pending: &Arc<PendingScreenshot>,
 ) -> Result<(), String> {
     let filter_class =
         AnyClass::get(c"SCContentFilter").ok_or("ScreenCaptureKit is unavailable")?;
@@ -375,14 +398,21 @@ fn begin_screenshot(
             let space = kCGColorSpaceSRGB.map_or(ptr::null(), |name| name.as_ptr().cast_const());
             let _: () = msg_send![&*config, setColorSpaceName: space];
         }
+        if !pending.active() {
+            return Ok(());
+        }
+        let pending = Arc::clone(pending);
         let completion = block2::RcBlock::new(
             move |image: Option<NonNull<c_void>>, error: Option<&NSError>| {
                 autoreleasepool(|_| {
+                    if !pending.active() {
+                        return;
+                    }
                     if let (Some(image), Some(_)) = (image, region)
                         && [CGImageGetWidth(image), CGImageGetHeight(image)]
                             != [width as usize, height as usize]
                     {
-                        let _ = sender.send(ScreenshotReply::RetryFullDisplay);
+                        let _ = pending.sender.send(ScreenshotReply::RetryFullDisplay);
                         return;
                     }
                     let result = if let Some(image) = image {
@@ -402,7 +432,7 @@ fn begin_screenshot(
                     } else {
                         ScreenshotReply::Finished(crop_capture(result, crop))
                     };
-                    let _ = sender.send(reply);
+                    let _ = pending.sender.send(reply);
                 });
             },
         );

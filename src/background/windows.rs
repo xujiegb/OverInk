@@ -90,6 +90,9 @@ fn capture(
     linear: bool,
     crop: Option<Crop>,
 ) -> Result<Option<Image>, Box<dyn Error>> {
+    if cancelled.load(Ordering::Relaxed) {
+        return Ok(None);
+    }
     let _apartment = Apartment::enter(RO_INIT_MULTITHREADED)?;
     unsafe {
         if !GraphicsCaptureSession::IsSupported()? {
@@ -106,6 +109,9 @@ fn capture(
             Encoding::Srgb8
         };
         Image::byte_len(width, height, encoding)?;
+        if cancelled.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
         let (mut device, mut context) = (None, None);
         D3D11CreateDevice(
             None,
@@ -131,6 +137,9 @@ fn capture(
         } else {
             DirectXPixelFormat::B8G8R8A8UIntNormalized
         };
+        if cancelled.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
         // This job consumes one frame. Keep a single capture buffer when the
         // driver accepts it and preserve the two-buffer fallback.
         let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(&capture_device, format, 1, size)

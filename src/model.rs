@@ -364,7 +364,7 @@ impl StrokeBounds {
 const STROKE_BLOCK_SEGMENTS: usize = 128;
 
 #[derive(Default)]
-struct StrokeIndex {
+pub(crate) struct StrokeIndex {
     bounds: Vec<Option<StrokeBounds>>,
     blocks: BTreeMap<usize, Box<[StrokeBounds]>>,
 }
@@ -395,6 +395,15 @@ impl StrokeIndex {
         self.blocks
             .get(&index)
             .map_or(&[], |blocks| blocks.as_ref())
+    }
+
+    pub(crate) fn coverage(&self, index: usize) -> &[StrokeBounds] {
+        let blocks = self.blocks(index);
+        if blocks.is_empty() {
+            self.bounds[index].as_slice()
+        } else {
+            blocks
+        }
     }
 }
 
@@ -584,7 +593,7 @@ impl History {
         self.point_count
     }
 
-    fn stroke_index(&self) -> Ref<'_, StrokeIndex> {
+    pub(crate) fn stroke_index(&self) -> Ref<'_, StrokeIndex> {
         let first = self.stroke_index.borrow().bounds.len();
         let next = &self.doc.strokes[first..];
         if !next.is_empty() {

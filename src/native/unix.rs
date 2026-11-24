@@ -351,6 +351,13 @@ enum Backend {
     Unavailable(String),
 }
 
+fn refresh_x11(connection: &mut Rc<RustConnection>) -> Result<(), String> {
+    if !crate::x11::connection_is_cached(connection) {
+        *connection = crate::x11::shape_connection()?;
+    }
+    Ok(())
+}
+
 pub struct Passthrough {
     backend: Backend,
     applied: Option<InputRegion>,
@@ -384,9 +391,7 @@ impl Passthrough {
         }
         match &mut self.backend {
             Backend::X11(connection) => {
-                if !crate::x11::connection_is_cached(connection) {
-                    *connection = crate::x11::shape_connection()?;
-                }
+                refresh_x11(connection)?;
                 let id = w.x11_window_number().ok_or("No X11 window")?;
                 let size = w.pixel_size();
                 let hole = hole.and_then(|area| area.pixels(w).clipped(size));
@@ -402,9 +407,10 @@ impl Passthrough {
     pub fn invalidate(&mut self) {
         self.applied = None;
     }
-    pub fn raise_controller(&self, w: &Window) {
-        if let Backend::X11(connection) = &self.backend
+    pub fn raise_controller(&mut self, w: &Window) {
+        if let Backend::X11(connection) = &mut self.backend
             && let Some(id) = w.x11_window_number()
+            && refresh_x11(connection).is_ok()
         {
             crate::x11::raise(connection, id);
         }

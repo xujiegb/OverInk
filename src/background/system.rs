@@ -18,12 +18,12 @@ pub struct Job<T> {
 }
 impl<T: Send + 'static> Job<T> {
     pub fn start(
-        capture: impl FnOnce(&AtomicBool) -> CaptureResult + Send + 'static,
+        capture: impl FnOnce(&Arc<AtomicBool>) -> CaptureResult + Send + 'static,
         prepare: impl FnOnce(Image) -> Result<T, String> + Send + 'static,
     ) -> Result<Self, String> {
         let (sender, receiver) = mpsc::channel();
         let cancelled = Arc::new(AtomicBool::new(false));
-        let flag = cancelled.clone();
+        let flag = Arc::clone(&cancelled);
         thread::Builder::new()
             .name("overink-desktop-capture".into())
             .spawn(move || {

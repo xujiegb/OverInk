@@ -233,7 +233,7 @@ impl Passthrough {
 }
 
 #[deny(clippy::undocumented_unsafe_blocks)]
-pub fn keep_controller_above(canvas: &Window, controller: &Window, _native: &Passthrough) {
+pub fn keep_controller_above(canvas: &Window, controller: &Window, _native: &mut Passthrough) {
     let _ = canvas;
     #[cfg(target_os = "windows")]
     {

@@ -746,14 +746,7 @@ fn ink_bands(frame: &Frame<'_>, history: &History, region: SDL_Rect) -> Vec<SDL_
         return Vec::new();
     }
     let mut spans = [[i32::MAX, 0]; MAX_INK_BANDS];
-    let paths = history.stroke_bounds();
-    for (stroke, bounds) in history.strokes().iter().zip(paths.iter()) {
-        let Some(area) = bounds
-            .as_ref()
-            .and_then(|bounds| dirty_rect(frame, bounds.path.padded(stroke.max_radius() * 2.)))
-        else {
-            continue;
-        };
+    visit_ink_regions(frame, history, |area| {
         let left = area.x.max(region.x);
         let right = (area.x + area.w).min(region.x + region.w);
         let top = area.y.max(region.y) - region.y;
@@ -766,7 +759,8 @@ fn ink_bands(frame: &Frame<'_>, history: &History, region: SDL_Rect) -> Vec<SDL_
                 span[1] = span[1].max(right);
             }
         }
-    }
+        true
+    });
     let mut bands: Vec<SDL_Rect> = Vec::new();
     for (row, &[left, right]) in spans[..count as usize].iter().enumerate() {
         if left >= right {
@@ -798,27 +792,46 @@ fn rect_area(rect: SDL_Rect) -> i64 {
     i64::from(rect.w) * i64::from(rect.h)
 }
 
+fn visit_ink_regions(
+    frame: &Frame<'_>,
+    history: &History,
+    mut visit: impl FnMut(SDL_Rect) -> bool,
+) -> bool {
+    let index = history.stroke_index();
+    for (i, stroke) in history.strokes().iter().enumerate() {
+        let margin = stroke.max_radius() * 2.;
+        // Neighboring blocks overlap at their shared endpoint. Bounding each
+        // block separately keeps diagonal strokes from filling their entire
+        // bounding rectangle, while retaining the joins and antialias fringe.
+        for block in index.coverage(i) {
+            if let Some(pixels) = dirty_rect(frame, block.path.padded(margin))
+                && !visit(pixels)
+            {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 fn occupied_tiles(frame: &Frame<'_>, history: &History, region: SDL_Rect) -> Vec<SDL_Rect> {
     if rect_area(region) <= i64::from(INK_TILE_EDGE).pow(2) {
         return vec![region];
     }
     let mut occupied = BTreeSet::new();
-    let bounds = history.stroke_bounds();
-    for (stroke, bounds) in history.strokes().iter().zip(bounds.iter()) {
-        let Some(rect) = bounds
-            .as_ref()
-            .and_then(|bounds| dirty_rect(frame, bounds.path.padded(stroke.max_radius() * 2.)))
-        else {
-            continue;
-        };
+    let fits = visit_ink_regions(frame, history, |rect| {
         for row in rect.y / INK_TILE_EDGE..=(rect.y + rect.h - 1) / INK_TILE_EDGE {
             for column in rect.x / INK_TILE_EDGE..=(rect.x + rect.w - 1) / INK_TILE_EDGE {
                 occupied.insert((row, column));
                 if occupied.len() > MAX_INK_TILES {
-                    return vec![region];
+                    return false;
                 }
             }
         }
+        true
+    });
+    if !fits {
+        return vec![region];
     }
     let tiles: Vec<_> = occupied
         .into_iter()
@@ -1714,6 +1727,71 @@ mod tests {
             .filter(|(a, b)| **a != *b)
             .count();
         assert_eq!(changed, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn diagonal_strokes_allocate_near_the_path_and_preserve_pixels() -> TestResult {
+        let canvas = TestCanvas::new([3840, 2160])?;
+        let mut frame = canvas.frame();
+        frame.scale = [1.25, 1.5];
+        frame.aa = antialias(frame.scale);
+        let mut app = app();
+        app.history.append(
+            [Tool::Pen, Tool::Pencil, Tool::Marker]
+                .into_iter()
+                .enumerate()
+                .map(|(offset, tool)| Stroke {
+                    tool,
+                    color: InkColor::from_rgb8([95, 161, 232]),
+                    width: 14.,
+                    opacity: 0.5,
+                    pressure_curve: 1.,
+                    pressure_enabled: true,
+                    points: (0..1600)
+                        .map(|i| {
+                            let t = i as f32 / 1599.;
+                            Point::new(
+                                8. + t * 3020.,
+                                12. + t * 1380. + (t * 60.).sin() * 11. + offset as f32 * 8.,
+                                0.65 + (t * 90.).sin() * 0.35,
+                                [15., 22.],
+                            )
+                        })
+                        .collect(),
+                }),
+        );
+
+        let renderer = &canvas.renderer;
+        let mut ink = Ink::default();
+        // Force the retained path so this fixture compares its allocations
+        // rather than the idle replay heuristic.
+        ink.activity.last_use = Some(Instant::now());
+        renderer.clear([0.; 4])?;
+        ink.committed(&frame, &mut app)?;
+        let plan = ink.plan.as_ref().ok_or("No sparse plan")?;
+        let region = plan.key.region;
+        assert!(plan.tiles.len() > 1);
+        let full_bytes = layer_bytes([region.w, region.h], SDL_PIXELFORMAT_RGBA32);
+        assert!(
+            ink.cached_bytes() * 4 < full_bytes * 3,
+            "{} tiles allocate {} of {full_bytes} bytes",
+            plan.tiles.len(),
+            ink.cached_bytes()
+        );
+        let sparse = canvas.pixels()?;
+
+        let mut full = Ink {
+            plan: Some(LayerPlan {
+                key: plan.key,
+                tiles: vec![region],
+            }),
+            ..Ink::default()
+        };
+        full.activity.last_use = Some(Instant::now());
+        renderer.clear([0.; 4])?;
+        full.committed(&frame, &mut app)?;
+        assert!(sparse == canvas.pixels()?);
         Ok(())
     }
 
