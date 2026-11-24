@@ -211,6 +211,42 @@ struct Snapshot {
     compressed: bool,
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+struct SnapshotOutput {
+    bytes: Vec<u8>,
+    raw_len: usize,
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+impl std::io::Write for SnapshotOutput {
+    fn write(&mut self, chunk: &[u8]) -> std::io::Result<usize> {
+        use std::io::{Error, ErrorKind};
+        if chunk.is_empty() {
+            return Ok(0);
+        }
+        let needed = self
+            .bytes
+            .len()
+            .checked_add(chunk.len())
+            .filter(|&len| len < self.raw_len)
+            .ok_or_else(|| Error::from(ErrorKind::StorageFull))?;
+        let capacity = self.bytes.capacity();
+        if needed > capacity {
+            // Keep geometric growth below the size of the original image.
+            let capacity = capacity.saturating_mul(2).max(needed).min(self.raw_len - 1);
+            self.bytes
+                .try_reserve_exact(capacity - self.bytes.len())
+                .map_err(|_| Error::from(ErrorKind::OutOfMemory))?;
+        }
+        self.bytes.extend_from_slice(chunk);
+        Ok(chunk.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 impl From<Image> for Snapshot {
     fn from(image: Image) -> Self {
         Self {
@@ -226,17 +262,28 @@ impl From<Image> for Snapshot {
 impl Snapshot {
     #[cfg(any(target_os = "macos", target_os = "windows", test))]
     fn compress(image: Image) -> Result<Self, String> {
-        use std::io::Write;
+        use std::io::{ErrorKind, Write};
         let mut snapshot = Self::from(image);
-        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
-        encoder
+        let output = SnapshotOutput {
+            bytes: Vec::new(),
+            raw_len: snapshot.bytes.len(),
+        };
+        let mut encoder = flate2::write::ZlibEncoder::new(output, flate2::Compression::fast());
+        match encoder
             .write_all(&snapshot.bytes)
-            .map_err(|e| e.to_string())?;
-        let mut compressed = encoder.finish().map_err(|e| e.to_string())?;
-        if compressed.len() < snapshot.bytes.len() {
-            compressed.shrink_to_fit();
-            snapshot.bytes = compressed;
-            snapshot.compressed = true;
+            .and_then(|()| encoder.finish())
+        {
+            Ok(SnapshotOutput { bytes, .. }) => {
+                snapshot.bytes = bytes;
+                snapshot.bytes.shrink_to_fit();
+                snapshot.compressed = true;
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::StorageFull | ErrorKind::OutOfMemory
+                ) => {}
+            Err(error) => return Err(error.to_string()),
         }
         Ok(snapshot)
     }
@@ -772,6 +819,23 @@ mod tests {
             assert_eq!(next_row, height as usize);
             assert_eq!(uploads, 3);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn incompressible_snapshot_keeps_the_original_channels() -> TestResult {
+        let mut image = Image::hdr_buffer(128, 128)?;
+        let mut random = 1_u32;
+        for bytes in image.rgba.as_chunks_mut::<4>().0 {
+            random ^= random << 13;
+            random ^= random >> 17;
+            random ^= random << 5;
+            *bytes = random.to_ne_bytes();
+        }
+        let original = image.rgba.to_vec();
+        let snapshot = Snapshot::compress(image)?;
+        assert!(!snapshot.compressed);
+        assert_eq!(snapshot.bytes, original);
         Ok(())
     }
 

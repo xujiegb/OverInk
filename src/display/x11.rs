@@ -24,19 +24,7 @@ pub(super) struct Randr {
 impl Randr {
     pub(super) fn connect() -> Option<Self> {
         let connection = crate::x11::connection().ok()?;
-        let version = connection.randr_query_version(1, 3).ok()?.reply().ok()?;
-        let screens = &connection.setup().roots;
-        if (version.major_version, version.minor_version) < (1, 3)
-            || !(1..=MAX_SCREENS).contains(&screens.len())
-        {
-            return None;
-        }
-        let mask = NotifyMask::SCREEN_CHANGE | NotifyMask::CRTC_CHANGE | NotifyMask::OUTPUT_CHANGE;
-        let watch = screens.iter().all(|screen| {
-            connection
-                .randr_select_input(screen.root, mask)
-                .is_ok_and(|request| request.check().is_ok())
-        });
+        let watch = Self::watch(&connection)?;
         Some(Self {
             connection,
             areas: None,
@@ -46,13 +34,41 @@ impl Randr {
         })
     }
 
+    fn watch(connection: &RustConnection) -> Option<bool> {
+        let version = connection.randr_query_version(1, 3).ok()?.reply().ok()?;
+        let screens = &connection.setup().roots;
+        if (version.major_version, version.minor_version) < (1, 3)
+            || !(1..=MAX_SCREENS).contains(&screens.len())
+        {
+            return None;
+        }
+        let mask = NotifyMask::SCREEN_CHANGE | NotifyMask::CRTC_CHANGE | NotifyMask::OUTPUT_CHANGE;
+        Some(screens.iter().all(|screen| {
+            connection
+                .randr_select_input(screen.root, mask)
+                .is_ok_and(|request| request.check().is_ok())
+        }))
+    }
+
     pub(super) fn invalidate(&mut self) {
         self.dirty = true;
     }
 
     pub(super) fn poll(&mut self) -> bool {
         if self.disconnected {
-            return false;
+            // Shape or capture may have reconnected. Retry registration once
+            // per replacement connection without opening sockets while idle.
+            if let Some(connection) = crate::x11::cached_connection()
+                && !Rc::ptr_eq(&self.connection, &connection)
+            {
+                self.connection = connection;
+                if let Some(watch) = Self::watch(&self.connection) {
+                    self.watch = watch;
+                    self.disconnected = false;
+                    self.dirty = true;
+                }
+            }
+            return !self.disconnected;
         }
         loop {
             match self.connection.poll_for_event() {
@@ -157,5 +173,21 @@ mod tests {
         assert_eq!(active_area(&reply), Some(None));
         reply.status = SetConfig::INVALID_CONFIG_TIME;
         assert_eq!(active_area(&reply), None);
+    }
+
+    #[test]
+    #[ignore = "requires an isolated X11 display with RandR 1.3"]
+    fn x11_live_randr_registers_again_after_connection_replacement() -> Result<(), String> {
+        let mut watcher = Randr::connect().ok_or("No RandR watcher")?;
+        crate::x11::forget_connection(&watcher.connection);
+        watcher.disconnected = true;
+        assert!(!watcher.poll());
+        assert!(crate::x11::cached_connection().is_none());
+        let replacement = crate::x11::connection()?;
+        assert!(watcher.poll());
+        assert!(Rc::ptr_eq(&replacement, &watcher.connection));
+        assert!(watcher.watch);
+        assert!(watcher.active_areas().is_some());
+        Ok(())
     }
 }

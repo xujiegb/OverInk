@@ -41,6 +41,10 @@ pub fn forget_connection(connection: &Rc<RustConnection>) {
     });
 }
 
+pub fn cached_connection() -> Option<Rc<RustConnection>> {
+    CONNECTION.with_borrow(Weak::upgrade)
+}
+
 pub fn connection_is_cached(connection: &Rc<RustConnection>) -> bool {
     CONNECTION.with_borrow(|cached| cached.ptr_eq(&Rc::downgrade(connection)))
 }

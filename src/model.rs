@@ -324,6 +324,10 @@ pub struct StrokeBounds {
     well_spaced: bool,
 }
 impl StrokeBounds {
+    pub(crate) fn samples_are_distinct(self) -> bool {
+        self.well_spaced
+    }
+
     fn new(stroke: &Stroke) -> Option<Self> {
         let mut outline = [Point::EMPTY; Stroke::OUTLINE_POINTS];
         let points = stroke.polyline(&mut outline);

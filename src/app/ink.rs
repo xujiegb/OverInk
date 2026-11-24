@@ -70,6 +70,12 @@ struct RibbonBatch {
 }
 
 #[derive(Default)]
+struct RibbonInput<'a> {
+    paper: bool,
+    borrowed_samples: Option<&'a [Point]>,
+}
+
+#[derive(Default)]
 struct LiveRibbon {
     style: Option<RibbonStyle>,
     samples: Vec<Point>,
@@ -1021,16 +1027,13 @@ impl StrokePainter {
     ) -> Result<(), String> {
         let bounds = region.map(|_| app.history.stroke_bounds());
         for (index, stroke) in app.history.strokes().iter().enumerate().skip(first) {
+            let stroke_bounds = bounds.as_ref().and_then(|bounds| bounds.get(index));
             if let Some(region) = region
-                && bounds
-                    .as_ref()
-                    .and_then(|bounds| bounds.get(index))
-                    .is_some_and(|entry| {
-                        entry.as_ref().is_none_or(|bounds| {
-                            !region
-                                .intersects(bounds.path.padded(stroke.max_radius() * 2. + frame.aa))
-                        })
+                && stroke_bounds.is_some_and(|entry| {
+                    entry.as_ref().is_none_or(|bounds| {
+                        !region.intersects(bounds.path.padded(stroke.max_radius() * 2. + frame.aa))
                     })
+                })
             {
                 continue;
             }
@@ -1051,7 +1054,34 @@ impl StrokePainter {
                     }
                 },
             ) {
-                self.stroke_in(frame, stroke, region, white)?;
+                if stroke.tool == Tool::Pen
+                    && stroke.opacity > 0.
+                    && stroke_bounds
+                        .copied()
+                        .flatten()
+                        .is_some_and(crate::model::StrokeBounds::samples_are_distinct)
+                {
+                    // The stroke index already verified the spacing of the
+                    // original samples. A plain pen needs no subdivisions.
+                    let rgb = frame
+                        .color
+                        .map(stroke.color.output_rgb(frame.renderer.extended));
+                    frame.renderer.with_color_scale(white, || {
+                        self.draw_ribbon(
+                            frame,
+                            stroke,
+                            rgb,
+                            region,
+                            RibbonInput {
+                                paper: false,
+                                borrowed_samples: Some(&stroke.points),
+                            },
+                            None,
+                        )
+                    })?;
+                } else {
+                    self.stroke_in(frame, stroke, region, white)?;
+                }
             }
             result?;
         }
@@ -1068,7 +1098,7 @@ impl StrokePainter {
         laser: &Stroke,
         rgb: [f32; 3],
     ) -> Result<(), String> {
-        self.draw_ribbon(frame, laser, rgb, None, false, None)?;
+        self.draw_ribbon(frame, laser, rgb, None, RibbonInput::default(), None)?;
         self.samples.clear();
         Ok(())
     }
@@ -1127,7 +1157,17 @@ impl StrokePainter {
             }
         }
         renderer.with_color_scale(white, || {
-            self.draw_ribbon(frame, stroke, rgb, region, use_paper, live)
+            self.draw_ribbon(
+                frame,
+                stroke,
+                rgb,
+                region,
+                RibbonInput {
+                    paper: use_paper,
+                    borrowed_samples: None,
+                },
+                live,
+            )
         })
     }
 
@@ -1137,9 +1177,11 @@ impl StrokePainter {
         stroke: &Stroke,
         rgb: [f32; 3],
         region: Option<InkClip>,
-        use_paper: bool,
+        input: RibbonInput<'_>,
         mut live: Option<&mut LiveRibbon>,
     ) -> Result<(), String> {
+        let use_paper = input.paper;
+        let samples = input.borrowed_samples.unwrap_or(&self.samples);
         let margin = stroke.max_radius() * 2. + frame.aa;
         let visible = region
             .filter(|_| stroke.tool != Tool::Arrow)
@@ -1166,13 +1208,11 @@ impl StrokePainter {
                     pressure: stroke.pressure_enabled,
                     paper: use_paper,
                 },
-                &self.samples,
+                samples,
             );
         }
         let paper = if use_paper { self.paper.as_ref() } else { None };
-        for (index, range) in
-            geometry::mesh_ranges(&self.samples, MESH_SEGMENTS, visible).enumerate()
-        {
+        for (index, range) in geometry::mesh_ranges(samples, MESH_SEGMENTS, visible).enumerate() {
             if let Some(batch) = live.as_ref().and_then(|cache| cache.batches.get(index)) {
                 #[cfg(test)]
                 {
@@ -1189,7 +1229,7 @@ impl StrokePainter {
             }
             let through_neighbor = *range.end() + 2;
             self.mesh
-                .update(stroke, &self.samples, range, frame.aa, !use_paper);
+                .update(stroke, samples, range, frame.aa, !use_paper);
             set_vertices(
                 &self.mesh,
                 &mut self.vertices,
@@ -1212,11 +1252,11 @@ impl StrokePainter {
             )?;
             if let Some(cache) = &mut live
                 && index < LIVE_PREFIX_BATCHES
-                && through_neighbor <= self.samples.len()
+                && through_neighbor <= samples.len()
             {
                 cache
                     .samples
-                    .extend_from_slice(&self.samples[cache.samples.len()..through_neighbor]);
+                    .extend_from_slice(&samples[cache.samples.len()..through_neighbor]);
                 cache.batches.push(RibbonBatch {
                     vertices: std::mem::take(&mut self.vertices),
                     indices: std::mem::take(&mut self.mesh.indices),
@@ -1553,6 +1593,62 @@ mod tests {
             )?;
             assert_eq!(live.batches.len(), 2);
             assert_eq!(incremental.pixels()?, direct.pixels()?);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn clipped_history_matches_prepared_pen_samples_with_and_without_merges() -> TestResult {
+        let direct = TestCanvas::new([128, 96])?;
+        let replay = TestCanvas::new([128, 96])?;
+        let region = Some(InkClip::new(
+            SDL_Rect {
+                x: 24,
+                y: 8,
+                w: 80,
+                h: 80,
+            },
+            [0; 2],
+            [1.; 2],
+        ));
+        for close_samples in [false, true] {
+            let mut app = app();
+            let mut points: Vec<_> = (0..600)
+                .map(|i| {
+                    Point::new(
+                        (i % 116) as f32 + 6.,
+                        (i / 116) as f32 * 12. + 8.,
+                        (i % 11) as f32 / 10.,
+                        [0.; 2],
+                    )
+                })
+                .collect();
+            if close_samples {
+                let point = points[128];
+                points.insert(128, Point::new(point.x - 0.02, point.y, 0.9, [0.; 2]));
+            }
+            app.history.active = Some(Stroke {
+                tool: Tool::Pen,
+                color: InkColor::from_rgb8([80, 160, 240]),
+                width: 4.,
+                opacity: 0.6,
+                pressure_curve: 1.,
+                pressure_enabled: true,
+                points,
+            });
+            app.history.commit();
+            let stroke = app
+                .history
+                .strokes()
+                .first()
+                .ok_or("Missing committed stroke")?;
+            direct.renderer.clear([0.; 4])?;
+            replay.renderer.clear([0.; 4])?;
+            StrokePainter::default().stroke_in(&direct.frame(), stroke, region, 1.)?;
+            let mut painter = StrokePainter::default();
+            painter.history(&replay.frame(), &app, 0, region, 1.)?;
+            assert_eq!(painter.samples.is_empty(), !close_samples);
+            assert_eq!(replay.pixels()?, direct.pixels()?);
         }
         Ok(())
     }
