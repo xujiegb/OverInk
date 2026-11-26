@@ -152,7 +152,9 @@ cleanup() {
         git -C "$SCRIPT_DIR" worktree remove --force "$WORKTREE" >/dev/null 2>&1 ||
             printf '[WARN] Could not unregister temporary worktree: %s\n' "$WORKTREE" >&2
     fi
-    [ -z "$WORK" ] || rm -rf -- "$WORK"
+    if [ -n "$WORK" ] && ! rm -rf -- "$WORK"; then
+        printf '[WARN] Could not fully remove temporary build directory: %s\n' "$WORK" >&2
+    fi
 }
 
 choose_channel() {
@@ -303,7 +305,7 @@ extract_pkgbase_sysroot() {
         fetch -qo "$SDK/$archive" "$snapshot/Latest/$archive"
     [ "$(sha256 -q "$SDK/$archive")" = "$expected" ] || die "Invalid FreeBSD 16 pkgbase snapshot checksum"
     mkdir -p "$SDK/pkgbase"
-    tar -xf "$SDK/$archive" -C "$SDK/pkgbase"
+    tar --no-fflags -xf "$SDK/$archive" -C "$SDK/pkgbase"
     rm -f "$SDK/$archive"
     # The release archive is a pkg repository, with packages below All/.
     # Exclude debug, tests, lib32, and kernel payloads; include all remaining
@@ -314,19 +316,20 @@ extract_pkgbase_sysroot() {
         case "${package##*/}" in
             FreeBSD-*-dbg-*|FreeBSD-*-lib32-*|FreeBSD-*-tests-*|FreeBSD-tests-*|FreeBSD-kernel-*) continue ;;
         esac
-        # Only materialize compiler inputs and a shell for ELF validation.
-        # bsdtar matches archive paths with or without a leading ./ or /.
-        tar -xf "$package" -C "$root" \
-            --include 'usr/include/*' --include 'usr/lib/*' \
-            --include 'usr/libdata/*' --include 'lib/*' \
-            --include 'libexec/*' --include 'bin/sh' \
-            --include './usr/include/*' --include './usr/lib/*' \
-            --include './usr/libdata/*' --include './lib/*' \
-            --include './libexec/*' --include './bin/sh' \
-            --include '/usr/include/*' --include '/usr/lib/*' \
-            --include '/usr/libdata/*' --include '/lib/*' \
-            --include '/libexec/*' --include '/bin/sh' \
-            --exclude '+*'
+        # Each component contains only a subset of the sysroot. bsdtar
+        # errors when any --include pattern has no match, so list the real
+        # members first and extract only names actually present.
+        tar -tf "$package" > "$SDK/package-members"
+        awk '{
+            name=$0
+            sub(/^(\.\/|\/)+/, "", name)
+            if (name ~ /^(usr\/(include|lib|libdata)|lib|libexec)\// ||
+                name == "bin/sh")
+                print $0
+        }' "$SDK/package-members" > "$SDK/sysroot-members"
+        if [ -s "$SDK/sysroot-members" ]; then
+            tar --no-fflags -xf "$package" -C "$root" -T "$SDK/sysroot-members"
+        fi
     done < "$SDK/base-packages"
     [ -f "$root/usr/include/sys/param.h" ] || die "FreeBSD 16 pkgbase development headers missing"
     [ -f "$root/usr/lib/crt1.o" ] || die "FreeBSD 16 pkgbase startup objects missing"
@@ -363,7 +366,7 @@ prepare_target_sdk() {
         expected=$(awk '$1 == "base.txz" {print $2}' "$SDK/MANIFEST")
         [ -n "$expected" ] || die "Missing base.txz checksum"
         [ "$(sha256 -q "$SDK/base.txz")" = "$expected" ] || die "Invalid FreeBSD base checksum"
-        tar -xf "$SDK/base.txz" -C "$sysroot"
+        tar --no-fflags -xf "$SDK/base.txz" -C "$sysroot"
         rm -f "$SDK/base.txz"
     fi
     TARGET_OSVERSION=$(awk '$1 == "#define" && $2 == "__FreeBSD_version" {print $3; exit}' "$sysroot/usr/include/sys/param.h")
@@ -424,7 +427,12 @@ set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
 set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY BOTH)
 set(CMAKE_LIBRARY_PATH /usr/local/lib)
-set(HAVE_XKBLIB_H ON CACHE INTERNAL "Cross-checked XKB header")
+set(SDL_VIDEO_DRIVER_X11_HAS_XKBLIB ON CACHE INTERNAL "Cross-checked XKB header")
+# Host dbus.pc exposes ABI-specific headers and host libraries. The portable
+# FreeBSD builds use Rust zbus for desktop portals; do not enable SDL's
+# optional D-Bus/IBus integration from a mismatched host catalogue.
+set(SDL_DBUS OFF CACHE BOOL "" FORCE)
+set(SDL_IBUS OFF CACHE BOOL "" FORCE)
 set(SDL_X11_SHARED ON CACHE BOOL "" FORCE)
 set(SDL_WAYLAND_SHARED ON CACHE BOOL "" FORCE)
 set(SDL_WAYLAND_LIBDECOR OFF CACHE BOOL "" FORCE)
@@ -509,7 +517,12 @@ build_binary() {
         cargo_run test --locked --release --target "$TARGET"
     fi
     if [ "$BUILD_STD" = yes ]; then
-        RUSTC_BOOTSTRAP=1 CARGO_PROFILE_RELEASE_PANIC=abort cargo_run build \
+        # FreeBSD sh does not reliably propagate temporary assignments on
+        # shell function calls to child processes. Export within this target's
+        # subshell and invoke the selected toolchain directly, as in CI.
+        export RUSTC_BOOTSTRAP=1
+        export CARGO_PROFILE_RELEASE_PANIC=abort
+        rustup run "$RUST_VERSION" cargo build \
             -Z build-std=std,panic_abort --locked --release --target "$TARGET"
     else
         cargo_run build --locked --release --target "$TARGET"
