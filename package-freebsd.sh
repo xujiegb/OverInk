@@ -30,7 +30,7 @@ Usage: sh package-freebsd.sh [version | --buildfrom 1|2|3] [--arch ARCH]
   --buildfrom 1   latest stable release (default)
   --buildfrom 2   latest pre-release
   --buildfrom 3   current source checkout, including local changes
-  --arch ARCH     native amd64/x64, aarch64/arm64, i386, powerpc64le or riscv64
+  --arch ARCH     x64/amd64, arm64/aarch64, i386, ppc64le, riscv64 or all
   --no-install-deps  use already installed build/runtime dependencies
 
 Environment:
@@ -40,8 +40,11 @@ Environment:
   CARGO_BUILD_JOBS         parallel build jobs (default: 2)
   OVERINK_RUN_TESTS=1      run Cargo release tests before packaging
 
-Each invocation builds from a new target directory. Cross-architecture packages
-must be built on a matching FreeBSD host/VM with a working native Rust toolchain.
+Each target builds from a new target directory. Cross builds use verified
+FreeBSD release base archives and target pkg repository metadata.
+--arch all builds x64, arm64 and i386 (official Ports package sets).
+For cross powerpc64le/riscv64, provide a trusted target repository with
+OVERINK_PKG_REPOS_DIR (a directory containing pkg repository configuration).
 EOF
 }
 
@@ -92,6 +95,7 @@ normalize_arch() {
         i386|i686|x86) printf '%s\n' i386 ;;
         powerpc64le|ppc64le|ppc64el) printf '%s\n' powerpc64le ;;
         riscv64|riscv64gc) printf '%s\n' riscv64 ;;
+        all) printf '%s\n' all ;;
         *) return 1 ;;
     esac
 }
@@ -99,19 +103,37 @@ normalize_arch() {
 detect_environment() {
     [ "$(uname -s)" = FreeBSD ] || die "This script only supports FreeBSD."
     HOST_ARCH=$(normalize_arch "$(uname -p)") || die "Unsupported FreeBSD architecture: $(uname -p)"
-    if [ -n "$ARCH_OVERRIDE" ]; then
-        requested=$(normalize_arch "$ARCH_OVERRIDE") || die "Unsupported --arch: $ARCH_OVERRIDE (native builds only)"
-        [ "$requested" = "$HOST_ARCH" ] || die "Requested $requested, but this is $HOST_ARCH. Use a matching FreeBSD VM/host."
-    fi
-    case "$HOST_ARCH" in
-        amd64) TARGET=x86_64-unknown-freebsd; MACHINE='X86-64' ;;
-        aarch64) TARGET=aarch64-unknown-freebsd; MACHINE='AArch64' ;;
-        i386) TARGET=i686-unknown-freebsd; MACHINE='80386' ;;
-        powerpc64le) TARGET=powerpc64le-unknown-freebsd; MACHINE='PowerPC64' ;;
-        riscv64) TARGET=riscv64gc-unknown-freebsd; MACHINE='RISC-V' ;;
-    esac
-    printf '[*] FreeBSD %s (%s, %s)\n' "$(uname -r)" "$HOST_ARCH" "$TARGET"
+    REQUESTED=$(normalize_arch "${ARCH_OVERRIDE:-$HOST_ARCH}") || die "Unsupported --arch: $ARCH_OVERRIDE"
+    printf '[*] FreeBSD %s (%s)\n' "$(uname -r)" "$HOST_ARCH"
 }
+
+describe_target() {
+    PACKAGE_ARCH="$1"
+    case "$PACKAGE_ARCH" in
+        amd64) TARGET=x86_64-unknown-freebsd; CPU=x86_64; MACHINE='X86-64'; LAYOUT=amd64/amd64; RELEASE=15.1 ;;
+        aarch64) TARGET=aarch64-unknown-freebsd; CPU=aarch64; MACHINE='AArch64'; LAYOUT=arm64/aarch64; RELEASE=15.1 ;;
+        i386) TARGET=i686-unknown-freebsd; CPU=i686; MACHINE='80386'; LAYOUT=i386/i386; RELEASE=14.4 ;;
+        powerpc64le) TARGET=powerpc64le-unknown-freebsd; CPU=powerpc64le; MACHINE='PowerPC64'; LAYOUT=powerpc/powerpc64le; RELEASE=15.1 ;;
+        riscv64) TARGET=riscv64gc-unknown-freebsd; CPU=riscv64; MACHINE='RISC-V'; LAYOUT=riscv/riscv64; RELEASE=15.1 ;;
+        *) die "Unsupported target: $PACKAGE_ARCH" ;;
+    esac
+    NATIVE=no
+    if [ "$PACKAGE_ARCH" = "$HOST_ARCH" ]; then
+        NATIVE=yes
+        ABI=$(pkg config ABI)
+        case "$ABI" in FreeBSD:*:"$PACKAGE_ARCH") ;; *) die "Unexpected host ABI: $ABI" ;; esac
+    else
+        ABI="FreeBSD:${RELEASE%%.*}:$PACKAGE_ARCH"
+        case "$PACKAGE_ARCH" in
+            powerpc64le|riscv64)
+                [ -n "${OVERINK_PKG_REPOS_DIR:-}" ] ||
+                    die "No official Ports package set for $ABI; specify a trusted OVERINK_PKG_REPOS_DIR."
+                ;;
+        esac
+    fi
+    printf '[*] Target %s (%s, native=%s)\n' "$TARGET" "$ABI" "$NATIVE"
+}
+
 
 install_dependencies() {
     if [ "$INSTALL_DEPS" = yes ]; then
@@ -121,9 +143,9 @@ install_dependencies() {
         # Fixed list of package names, intentionally expanded into arguments.
         # shellcheck disable=SC2086
         as_root pkg install -y git curl jq ca_root_nss cmake ninja pkgconf \
-            wayland-protocols $RUNTIME_DEPS
+            python3 wayland-protocols $RUNTIME_DEPS
     fi
-    for tool in pkg git curl jq cmake ninja pkgconf readelf cc c++; do
+    for tool in pkg git curl jq cmake ninja pkgconf readelf cc c++ python3; do
         command -v "$tool" >/dev/null 2>&1 || die "Missing build tool: $tool"
     done
     pkg -N >/dev/null 2>&1 || die "Bootstrap pkg before building."
@@ -250,26 +272,135 @@ prepare_rust() {
     [ -n "$actual" ] || die "Unable to determine Rust version"
     [ "$(pkg version -t "$actual" "$RUST_VERSION")" != '<' ] ||
         die "Rust $actual is older than required $RUST_VERSION. Install a suitable native toolchain."
-    host=$(rustc_run -vV | sed -n 's/^host: //p')
-    [ "$host" = "$TARGET" ] || die "Rust host $host does not match $TARGET."
+    RUST_HOST=$(rustc_run -vV | sed -n 's/^host: //p')
+    [ -n "$RUST_HOST" ] || die "Could not identify Rust host."
     cargo_run --version
+}
+
+target_pkg() {
+    pkg -o "ABI=$ABI" -o "OSVERSION=$TARGET_OSVERSION" \
+        -o "PKG_DBDIR=$SDK/pkgdb" -o "PKG_CACHEDIR=$SDK/pkgcache" \
+        -o "REPOS_DIR=${OVERINK_PKG_REPOS_DIR:-$SDK/repos}" "$@"
+}
+
+prepare_target_sdk() {
+    SDK="$WORK/sdk-$PACKAGE_ARCH"
+    mkdir -p "$SDK"
+    BUILD_STD=no
+    if [ "$NATIVE" = yes ]; then
+        [ "$RUST_HOST" = "$TARGET" ] || die "Rust host $RUST_HOST does not match $TARGET"
+        return
+    fi
+    [ "$RUST_MODE" = rustup ] || die "Cross builds require rustup and rust-src."
+    if rustup target list --toolchain "$RUST_VERSION" | awk '{print $1}' | grep -qx "$TARGET"; then
+        rustup target add --toolchain "$RUST_VERSION" "$TARGET"
+    else
+        rustc_run --print target-list | grep -qx "$TARGET" || die "Unknown Rust target: $TARGET"
+        rustup component add --toolchain "$RUST_VERSION" rust-src
+        BUILD_STD=yes
+    fi
+
+    sysroot="$SDK/sysroot"
+    mkdir -p "$sysroot" "$SDK/pkgdb" "$SDK/pkgcache" "$SDK/repos"
+    url="https://download.freebsd.org/releases/$LAYOUT/$RELEASE-RELEASE"
+    fetch -qo "$SDK/MANIFEST" "$url/MANIFEST"
+    fetch -qo "$SDK/base.txz" "$url/base.txz"
+    expected=$(awk '$1 == "base.txz" {print $2}' "$SDK/MANIFEST")
+    [ -n "$expected" ] || die "Missing base.txz checksum"
+    [ "$(sha256 -q "$SDK/base.txz")" = "$expected" ] || die "Invalid FreeBSD base checksum"
+    tar -xf "$SDK/base.txz" -C "$sysroot"
+    rm -f "$SDK/base.txz"
+    TARGET_OSVERSION=$(awk '$1 == "#define" && $2 == "__FreeBSD_version" {print $3; exit}' "$sysroot/usr/include/sys/param.h")
+    case "$TARGET_OSVERSION" in ""|*[!0-9]*) die "Invalid target OSVERSION" ;; esac
+    # Match the existing FreeBSD build job: SDL dynamically loads graphics
+    # libraries at runtime; native headers are shared across these ABIs.
+    mkdir -p "$sysroot/usr/local/include"
+    for header in /usr/local/include/X11 /usr/local/include/xcb /usr/local/include/wayland*.h \
+        /usr/local/include/xkbcommon /usr/local/include/GL /usr/local/include/EGL \
+        /usr/local/include/GLES* /usr/local/include/KHR; do
+        if [ -e "$header" ]; then cp -RL "$header" "$sysroot/usr/local/include/"; fi
+    done
+    python3 - "$sysroot" <<'PY'
+import os, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+for directory, dirs, files in os.walk(root, followlinks=False):
+    for name in dirs + files:
+        path = pathlib.Path(directory) / name
+        if path.is_symlink():
+            target = os.readlink(path)
+            if target.startswith('/'):
+                path.unlink()
+                path.symlink_to(os.path.relpath(root / target.lstrip('/'), path.parent))
+PY
+    extra=
+    if [ "$CPU" = riscv64 ]; then extra='-march=rv64gc -mabi=lp64d'; fi
+    for compiler in clang clang++; do
+        cat > "$SDK/$compiler" <<EOF
+#!/bin/sh
+exec /usr/bin/$compiler --target=$CPU-unknown-freebsd$RELEASE --sysroot="$sysroot" -fuse-ld=lld -Qunused-arguments $extra "\$@"
+EOF
+        chmod +x "$SDK/$compiler"
+    done
+    printf '#include <X11/XKBlib.h>\n' |
+        "$SDK/clang" -isystem "$sysroot/usr/local/include" -x c -fsyntax-only -
+    key=$(printf '%s' "$TARGET" | tr '-' '_')
+    upper=$(printf '%s' "$key" | tr '[:lower:]' '[:upper:]')
+    export "CC_$key=$SDK/clang" "CXX_$key=$SDK/clang++" "AR_$key=ar"
+    export "CARGO_TARGET_${upper}_LINKER=$SDK/clang"
+    export PKG_CONFIG_ALLOW_CROSS=1
+    export PKG_CONFIG_SYSROOT_DIR="$sysroot"
+    export PKG_CONFIG_LIBDIR=/usr/local/libdata/pkgconfig:/usr/local/lib/pkgconfig:/usr/local/share/pkgconfig
+    export CMAKE_TOOLCHAIN_FILE="$SDK/toolchain.cmake"
+    cat > "$CMAKE_TOOLCHAIN_FILE" <<EOF
+set(CMAKE_SYSTEM_NAME FreeBSD)
+set(CMAKE_SYSTEM_PROCESSOR $CPU)
+set(CMAKE_SYSROOT "$sysroot")
+set(CMAKE_C_COMPILER "$SDK/clang")
+set(CMAKE_CXX_COMPILER "$SDK/clang++")
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY BOTH)
+set(CMAKE_LIBRARY_PATH /usr/local/lib)
+set(HAVE_XKBLIB_H ON CACHE INTERNAL "Cross-checked XKB header")
+set(SDL_X11_SHARED ON CACHE BOOL "" FORCE)
+set(SDL_WAYLAND_SHARED ON CACHE BOOL "" FORCE)
+set(SDL_WAYLAND_LIBDECOR OFF CACHE BOOL "" FORCE)
+set(SDL_KMSDRM OFF CACHE BOOL "" FORCE)
+EOF
+    # Fetch signed target repository metadata separately from the host database.
+    # No target packages are installed into the running FreeBSD system.
+    cat > "$SDK/repos/OverInk.conf" <<EOF
+OverInk: {
+  url: "pkg+https://pkg.FreeBSD.org/$ABI/quarterly",
+  mirror_type: "srv",
+  signature_type: "fingerprints",
+  fingerprints: "/usr/share/keys/pkg",
+  enabled: yes
+}
+EOF
+    target_pkg update -f
 }
 
 build_binary() {
     # New target directory on every invocation, no compiler-result cache.
-    export CARGO_TARGET_DIR="$WORK/target"
+    export CARGO_TARGET_DIR="$WORK/target-$PACKAGE_ARCH"
     export CARGO_BUILD_JOBS
     export CARGO_INCREMENTAL=0
     export RUSTC_WRAPPER=
     export RUSTC_WORKSPACE_WRAPPER=
     export OVERINK_BUILD_VERSION="$VERSION"
     export CMAKE_PREFIX_PATH=/usr/local
-    unset CARGO_BUILD_TARGET CMAKE_TOOLCHAIN_FILE PKG_CONFIG_SYSROOT_DIR PKG_CONFIG_LIBDIR
+    unset CARGO_BUILD_TARGET
     cd "$SOURCE"
-    if [ "${OVERINK_RUN_TESTS:-0}" = 1 ]; then
+    if [ "$NATIVE" = yes ] && [ "${OVERINK_RUN_TESTS:-0}" = 1 ]; then
         cargo_run test --locked --release --target "$TARGET"
     fi
-    cargo_run build --locked --release --target "$TARGET"
+    if [ "$BUILD_STD" = yes ]; then
+        RUSTC_BOOTSTRAP=1 CARGO_PROFILE_RELEASE_PANIC=abort cargo_run build \
+            -Z build-std=std,panic_abort --locked --release --target "$TARGET"
+    else
+        cargo_run build --locked --release --target "$TARGET"
+    fi
     BINARY="$CARGO_TARGET_DIR/$TARGET/release/overink"
     [ -s "$BINARY" ] || die "Missing fresh executable: $BINARY"
     readelf -h "$BINARY" | grep -iE "Machine:.*$MACHINE" ||
@@ -280,12 +411,20 @@ build_binary() {
     [ -n "$config" ] || die "Missing SDL build configuration"
     grep -q '^#define SDL_VIDEO_DRIVER_X11 1' "$config" || die "X11 backend is disabled"
     grep -q '^#define SDL_VIDEO_DRIVER_WAYLAND 1' "$config" || die "Wayland backend is disabled"
-    OVERINK_STATE_DIR="$WORK/smoke" "$BINARY" --smoke-test
+    if [ "$NATIVE" = yes ]; then
+        OVERINK_STATE_DIR="$WORK/smoke" "$BINARY" --smoke-test
+    else
+        grep -q '^#define SDL_VIDEO_DRIVER_X11_DYNAMIC "libX11\.so' "$config" || die "X11 must load dynamically"
+        grep -q '^#define SDL_VIDEO_DRIVER_WAYLAND_DYNAMIC "libwayland-client\.so' "$config" || die "Wayland must load dynamically"
+        if readelf -d "$BINARY" | grep -E 'NEEDED.*(libX|libwayland|libxkbcommon|libEGL|libGL)'; then
+            die "Cross binary links host graphics libraries"
+        fi
+    fi
 }
 
 stage_assets() {
-    STAGE="$WORK/stage"
-    META="$WORK/meta"
+    STAGE="$WORK/stage-$PACKAGE_ARCH"
+    META="$WORK/meta-$PACKAGE_ARCH"
     mkdir -p "$META" "$STAGE/usr/local/bin" \
         "$STAGE/usr/local/share/applications" \
         "$STAGE/usr/local/share/icons/hicolor/256x256/apps" \
@@ -312,12 +451,15 @@ EOF
 }
 
 write_metadata() {
-    ABI=$(pkg config ABI)
-    case "$ABI" in FreeBSD:*:"$HOST_ARCH") ;; *) die "Unexpected pkg ABI: $ABI" ;; esac
-    # Resolve real names, versions and Ports origins from this target's pkg DB.
+    # Resolve names, origins and versions from the correct target package set.
     : > "$META/dependencies"
     for dep in $RUNTIME_DEPS; do
-        row=$(pkg query '%n %o %v' "$dep") || die "Missing runtime package: $dep"
+        if [ "$NATIVE" = yes ]; then
+            row=$(pkg query '%n %o %v' "$dep") || die "Missing runtime package: $dep"
+        else
+            row=$(target_pkg rquery -U '%n %o %v' "$dep") || die "Missing $ABI package: $dep"
+        fi
+        [ "$(printf '%s\n' "$row" | wc -l | tr -d ' ')" = 1 ] || die "Ambiguous package: $dep"
         [ -n "$row" ] || die "Missing runtime package: $dep"
         printf '%s\n' "$row" >> "$META/dependencies"
     done
@@ -340,14 +482,16 @@ write_metadata() {
 }
 
 package_binary() {
-    mkdir -p "$WORK/out"
-    pkg create -r "$STAGE" -m "$META" -p "$META/pkg-plist" -f tzst -o "$WORK/out"
-    archive="$WORK/out/overink-$PKG_VERSION.pkg"
+    mkdir -p "$WORK/out-$PACKAGE_ARCH"
+    if [ "$NATIVE" = yes ]; then
+        pkg create -r "$STAGE" -m "$META" -p "$META/pkg-plist" -f tzst -o "$WORK/out-$PACKAGE_ARCH"
+    else
+        target_pkg create -r "$STAGE" -m "$META" -p "$META/pkg-plist" -f tzst -o "$WORK/out-$PACKAGE_ARCH"
+    fi
+    archive="$WORK/out-$PACKAGE_ARCH/overink-$PKG_VERSION.pkg"
     [ -s "$archive" ] || die "Missing generated pkg: $archive"
-    [ "$(pkg query -F "$archive" '%n %v')" = "overink $PKG_VERSION" ] ||
-        die "Incorrect package name/version"
-    tar -xOf "$archive" +COMPACT_MANIFEST | jq -e --arg abi "$ABI" \
-        '.abi == $abi and (.deps | has("desktop-file-utils") and has("xdg-utils"))' >/dev/null ||
+    tar -xOf "$archive" +COMPACT_MANIFEST | jq -e --arg abi "$ABI" --arg version "$PKG_VERSION" \
+        '.name == "overink" and .version == $version and .abi == $abi and (.deps | has("desktop-file-utils") and has("xdg-utils"))' >/dev/null ||
         die "Incorrect package ABI or missing desktop dependencies"
     tar -tf "$archive" | grep -Eq '(^|/)usr/local/bin/overink$' ||
         die "Package missing executable"
@@ -376,10 +520,23 @@ main() {
     install_dependencies
     resolve_source
     prepare_rust
-    build_binary
-    stage_assets
-    write_metadata
-    package_binary
+    if [ "$REQUESTED" = all ]; then
+        targets="amd64 aarch64 i386"
+    else
+        targets="$REQUESTED"
+    fi
+    for arch in $targets; do
+        # A subshell isolates target-specific compiler variables and pkg ABI.
+        (
+            unset CMAKE_TOOLCHAIN_FILE PKG_CONFIG_SYSROOT_DIR PKG_CONFIG_LIBDIR PKG_CONFIG_ALLOW_CROSS
+            describe_target "$arch"
+            prepare_target_sdk
+            build_binary
+            stage_assets
+            write_metadata
+            package_binary
+        )
+    done
 }
 
 main "$@"
