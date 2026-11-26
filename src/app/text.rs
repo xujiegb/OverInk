@@ -1357,6 +1357,7 @@ impl App {
         interactive: bool,
         composing: bool,
         keep_editor_open: bool,
+        keyboard_work_area: Option<Rect>,
         cached_static_text: &StaticTextPaint,
     ) {
         self.input.text.hovered_control = None;
@@ -1388,6 +1389,7 @@ impl App {
         }
         if interactive {
             let screen = ui.clip_rect();
+            let safe = osk::Keyboard::safe_area(screen, keyboard_work_area);
             let mut menus = self.text_menus(screen);
             if self.input.text.color_wheel.is_some() {
                 let escape = !composing
@@ -1405,7 +1407,7 @@ impl App {
                 }
             }
             if self.input.text.editing() {
-                self.text_editor(ui, composing, keep_editor_open, menus);
+                self.text_editor(ui, composing, keep_editor_open, menus, safe);
             } else if let Some(item) =
                 selected.and_then(|index| self.history.text_boxes().get(index))
             {
@@ -1470,10 +1472,9 @@ impl App {
                     self.input
                         .text
                         .osk
-                        .rect_near(screen, anchor, self.input.canvas_units)
+                        .rect_near(safe, anchor, self.input.canvas_units)
             {
-                let scale = osk::Keyboard::layout_scale(screen, self.input.canvas_units);
-                let safe = osk::Keyboard::safe_area(screen);
+                let scale = osk::Keyboard::layout_scale(safe, self.input.canvas_units);
                 let minimum = self.input.text.osk.minimum_size(safe.size(), scale);
                 let mut action = None;
                 let window = egui::Window::new(egui::RichText::new("OverInk").size(12. * scale))
@@ -1683,6 +1684,7 @@ impl App {
         composing: bool,
         keep_editor_open: bool,
         menus: Option<TextMenus>,
+        keyboard_area: Rect,
     ) {
         let wheel_open = self.input.text.color_wheel.is_some();
         let context_rect = self.text_context_rect(ui.clip_rect());
@@ -1691,7 +1693,7 @@ impl App {
             .text
             .osk
             .rect_near(
-                ui.clip_rect(),
+                keyboard_area,
                 self.input
                     .text
                     .draft
@@ -2024,6 +2026,7 @@ mod tests {
                 true,
                 composing,
                 toolbar_focused,
+                None,
                 &StaticTextPaint::Uncached,
             )
         });
