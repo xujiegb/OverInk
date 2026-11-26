@@ -32,7 +32,22 @@ impl SystemJob<Image> {
         require_screen_target: bool,
         prepare: impl FnOnce(Image) -> Result<Image, String> + Send + 'static,
     ) -> Result<Self, String> {
+        Self::screenshot_preflight(require_screen_target, move || Ok(prepare))
+    }
+
+    /// Resolve compositor geometry on the capture worker before requesting pixels.
+    pub(crate) fn screenshot_preflight<F>(
+        require_screen_target: bool,
+        preflight: impl FnOnce() -> Result<F, String> + Send + 'static,
+    ) -> Result<Self, String>
+    where
+        F: FnOnce(Image) -> Result<Image, String> + Send + 'static,
+    {
         Self::spawn("overink-screenshot-portal", move |cancelled| {
+            let prepare = preflight()?;
+            if cancelled.is_closed() {
+                return Ok(None);
+            }
             let values = zbus::block_on(request("Screenshot", require_screen_target, cancelled))
                 .map_err(|error| format!("Screen capture: {error}"))?;
             let Some(mut values) = values else {

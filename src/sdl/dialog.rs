@@ -60,8 +60,10 @@ pub struct FileDialog {
 impl FileDialog {
     pub fn new() -> Self {
         Self {
+            request: None,
             wake: super::register_user_event(),
-            ..Self::default()
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            cancel: None,
         }
     }
 
