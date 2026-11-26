@@ -49,6 +49,10 @@ jobs:
           components: rustfmt
       - name: Check Rust formatting before matrix builds
         run: cargo fmt --all -- --check
+      - name: Check standalone FreeBSD package script syntax
+        run: |
+          sh -n package-freebsd.sh
+          sh package-freebsd.sh --help
 
   desktop:
     needs: prepare

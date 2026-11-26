@@ -38,7 +38,8 @@ Environment:
   OVERINK_PACKAGE_VERSION  package current source using this version
   RUST_VERSION             override source Cargo.toml rust-version
   CARGO_BUILD_JOBS         parallel build jobs (default: 2)
-  OVERINK_RUN_TESTS=1      run Cargo release tests before packaging
+  OVERINK_RUN_TESTS=1      run Cargo release tests before packaging (native only)
+  OVERINK_PKG_REPOS_DIR    trusted target repository configuration for cross builds
 
 Each target builds from a new target directory. Cross builds use verified
 FreeBSD release base archives and target pkg repository metadata.
@@ -500,7 +501,11 @@ package_binary() {
     output="$OUTPUT_DIR/$abi_dir/overink-$PKG_VERSION.pkg"
     mv -f "$archive" "$output"
     printf '\n[OK] %s\n' "$output"
-    printf 'Install: sudo pkg install "%s"\n' "$output"
+    if [ "$NATIVE" = yes ]; then
+        printf 'Install: sudo pkg install "%s"\n' "$output"
+    else
+        printf 'Install on %s: sudo pkg install overink-%s.pkg\n' "$ABI" "$PKG_VERSION"
+    fi
 }
 
 main() {
