@@ -402,8 +402,8 @@ impl Keyboard {
 
     pub fn set_window_rect(&mut self, rect: Rect, pointer_down: bool) {
         // Track actual window movement/resize, not key or emoji gestures.
-        self.geometry_dragged = pointer_down
-            && self.window_rect.is_some_and(|previous| previous != rect);
+        self.geometry_dragged =
+            pointer_down && self.window_rect.is_some_and(|previous| previous != rect);
         self.window_rect = Some(rect);
     }
 

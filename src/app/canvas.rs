@@ -1018,7 +1018,7 @@ impl Canvas {
             !app.screenshot.active() && !app.picking && app.tool.is_text() && !app.pass;
         let editing = interactive && app.input.text.editing();
         let keyboard_visible = editing && !app.hidden && app.input.text.osk_visible();
-        let keyboard_dragged = app.input.text.osk.take_geometry_dragged();
+        let keyboard_dragged = app.input.text.take_osk_geometry_dragged();
         let keyboard_work_area = self.keyboard_work_area(keyboard_visible, keyboard_dragged);
         if !app.touch_enabled {
             self.cancel_text_touches(app);

@@ -255,6 +255,10 @@ impl TextInput {
         self.osk.visible && self.editing()
     }
 
+    pub(super) fn take_osk_geometry_dragged(&mut self) -> bool {
+        self.osk.take_geometry_dragged()
+    }
+
     pub fn screen_keyboard_session(&self) -> bool {
         self.screen_keyboard_session && self.editing()
     }
