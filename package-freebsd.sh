@@ -43,9 +43,10 @@ Environment:
 
 Each target builds from a new target directory. Cross builds use verified
 FreeBSD release base archives and target pkg repository metadata.
---arch all builds x64, arm64 and i386 (official Ports package sets).
-For cross powerpc64le/riscv64, provide a trusted target repository with
-OVERINK_PKG_REPOS_DIR (a directory containing pkg repository configuration).
+--arch all builds x64, arm64, i386, ppc64le and riscv64.
+Cross ppc64le uses FreeBSD 16.0-CURRENT and its official latest Ports repo.
+Cross riscv64 uses FreeBSD 15.1 and the signed anyvm community Ports repo.
+OVERINK_PKG_REPOS_DIR can override the default target repository.
 EOF
 }
 
@@ -114,7 +115,7 @@ describe_target() {
         amd64) TARGET=x86_64-unknown-freebsd; CPU=x86_64; MACHINE='X86-64'; LAYOUT=amd64/amd64; RELEASE=15.1 ;;
         aarch64) TARGET=aarch64-unknown-freebsd; CPU=aarch64; MACHINE='AArch64'; LAYOUT=arm64/aarch64; RELEASE=15.1 ;;
         i386) TARGET=i686-unknown-freebsd; CPU=i686; MACHINE='80386'; LAYOUT=i386/i386; RELEASE=14.4 ;;
-        powerpc64le) TARGET=powerpc64le-unknown-freebsd; CPU=powerpc64le; MACHINE='PowerPC64'; LAYOUT=powerpc/powerpc64le; RELEASE=15.1 ;;
+        powerpc64le) TARGET=powerpc64le-unknown-freebsd; CPU=powerpc64le; MACHINE='PowerPC64'; LAYOUT=powerpc/powerpc64le; RELEASE=16.0 ;;
         riscv64) TARGET=riscv64gc-unknown-freebsd; CPU=riscv64; MACHINE='RISC-V'; LAYOUT=riscv/riscv64; RELEASE=15.1 ;;
         *) die "Unsupported target: $PACKAGE_ARCH" ;;
     esac
@@ -125,12 +126,6 @@ describe_target() {
         case "$ABI" in FreeBSD:*:"$PACKAGE_ARCH") ;; *) die "Unexpected host ABI: $ABI" ;; esac
     else
         ABI="FreeBSD:${RELEASE%%.*}:$PACKAGE_ARCH"
-        case "$PACKAGE_ARCH" in
-            powerpc64le|riscv64)
-                [ -n "${OVERINK_PKG_REPOS_DIR:-}" ] ||
-                    die "No official Ports package set for $ABI; specify a trusted OVERINK_PKG_REPOS_DIR."
-                ;;
-        esac
     fi
     printf '[*] Target %s (%s, native=%s)\n' "$TARGET" "$ABI" "$NATIVE"
 }
@@ -303,7 +298,11 @@ prepare_target_sdk() {
 
     sysroot="$SDK/sysroot"
     mkdir -p "$sysroot" "$SDK/pkgdb" "$SDK/pkgcache" "$SDK/repos"
-    url="https://download.freebsd.org/releases/$LAYOUT/$RELEASE-RELEASE"
+    if [ "$PACKAGE_ARCH" = powerpc64le ]; then
+        url="https://download.freebsd.org/snapshots/$LAYOUT/$RELEASE-CURRENT"
+    else
+        url="https://download.freebsd.org/releases/$LAYOUT/$RELEASE-RELEASE"
+    fi
     fetch -qo "$SDK/MANIFEST" "$url/MANIFEST"
     fetch -qo "$SDK/base.txz" "$url/base.txz"
     expected=$(awk '$1 == "base.txz" {print $2}' "$SDK/MANIFEST")
@@ -313,6 +312,13 @@ prepare_target_sdk() {
     rm -f "$SDK/base.txz"
     TARGET_OSVERSION=$(awk '$1 == "#define" && $2 == "__FreeBSD_version" {print $3; exit}' "$sysroot/usr/include/sys/param.h")
     case "$TARGET_OSVERSION" in ""|*[!0-9]*) die "Invalid target OSVERSION" ;; esac
+    [ "$((TARGET_OSVERSION / 100000))" = "${RELEASE%%.*}" ] ||
+        die "Sysroot FreeBSD major version does not match $ABI"
+    # Verify both the CPU and endianness of the downloaded base, not only its URL.
+    readelf -h "$sysroot/bin/sh" | grep -iE "Machine:.*$MACHINE" ||
+        die "Incorrect sysroot machine for $ABI"
+    readelf -h "$sysroot/bin/sh" | grep -iE 'Data:.*little endian' ||
+        die "Incorrect sysroot byte order for $ABI"
     # Match the existing FreeBSD build job: SDL dynamically loads graphics
     # libraries at runtime; native headers are shared across these ABIs.
     mkdir -p "$sysroot/usr/local/include"
@@ -368,19 +374,69 @@ set(SDL_WAYLAND_SHARED ON CACHE BOOL "" FORCE)
 set(SDL_WAYLAND_LIBDECOR OFF CACHE BOOL "" FORCE)
 set(SDL_KMSDRM OFF CACHE BOOL "" FORCE)
 EOF
-    # Fetch signed target repository metadata separately from the host database.
-    # No target packages are installed into the running FreeBSD system.
-    cat > "$SDK/repos/OverInk.conf" <<EOF
+    prepare_target_repository
+}
+
+prepare_target_repository() {
+    # Keep catalogues and signing keys out of the host package database.
+    if [ -z "${OVERINK_PKG_REPOS_DIR:-}" ]; then
+        case "$PACKAGE_ARCH" in
+            riscv64)
+                # anyvm publishes signed, numbered shards. Pin the public key
+                # from its documented fingerprint and accept only the expected
+                # repository URLs and signature settings from its index config.
+                index=https://github.com/anyvm-org/freebsd-pkg-repo/releases/download/idx-FreeBSD-15-riscv64
+                curl -fsSL --retry 3 "$index/repo.pub" -o "$SDK/anyvm.pub"
+                [ "$(sha256 -q "$SDK/anyvm.pub")" = a9e2f84083b916f0f9f2bda18ebf9cc581cfb28aaadb6827836f1ddc672a3040 ] ||
+                    die "Unexpected anyvm repository signing key"
+                curl -fsSL --retry 3 "$index/anyvm.conf" -o "$SDK/anyvm.conf"
+                python3 - "$SDK" <<'PY'
+import pathlib
+import re
+import sys
+
+root = pathlib.Path(sys.argv[1])
+config = (root / "anyvm.conf").read_text(encoding="ascii")
+pattern = re.compile(
+    r'anyvm-(\d{3}):\s*\{\s*'
+    r'url:\s*"https://github\.com/anyvm-org/freebsd-pkg-repo/releases/download/'
+    r'pkg-FreeBSD-15-riscv64-\1",\s*enabled:\s*yes,\s*'
+    r'signature_type:\s*"pubkey",\s*'
+    r'pubkey:\s*"/usr/local/etc/pkg/keys/anyvm\.pub"\s*\}'
+)
+shards = pattern.findall(config)
+if not shards or pattern.sub("", config).strip() or len(set(shards)) != len(shards):
+    raise SystemExit("Unexpected anyvm repository configuration")
+# Generate our own config rather than installing externally supplied UCL.
+import json
+with (root / "repos" / "anyvm.conf").open("w", encoding="ascii") as out:
+    for shard in shards:
+        out.write(
+            f'anyvm-{shard}: {{\n'
+            f'  url: "https://github.com/anyvm-org/freebsd-pkg-repo/releases/download/pkg-FreeBSD-15-riscv64-{shard}",\n'
+            '  enabled: yes,\n  signature_type: "pubkey",\n'
+            f'  pubkey: {json.dumps(str(root / "anyvm.pub"))}\n}}\n'
+        )
+PY
+                ;;
+            *)
+                channel=quarterly
+                [ "$PACKAGE_ARCH" != powerpc64le ] || channel=latest
+                cat > "$SDK/repos/OverInk.conf" <<EOF
 OverInk: {
-  url: "pkg+https://pkg.FreeBSD.org/$ABI/quarterly",
+  url: "pkg+https://pkg.FreeBSD.org/$ABI/$channel",
   mirror_type: "srv",
   signature_type: "fingerprints",
   fingerprints: "/usr/share/keys/pkg",
   enabled: yes
 }
 EOF
+                ;;
+        esac
+    fi
     target_pkg update -f
 }
+
 
 build_binary() {
     # New target directory on every invocation, no compiler-result cache.
@@ -406,6 +462,7 @@ build_binary() {
     [ -s "$BINARY" ] || die "Missing fresh executable: $BINARY"
     readelf -h "$BINARY" | grep -iE "Machine:.*$MACHINE" ||
         die "Incorrect ELF architecture"
+    readelf -h "$BINARY" | grep -iE 'Data:.*little endian' || die "Incorrect ELF byte order"
     readelf -n "$BINARY" | grep -E 'FreeBSD[[:space:]].*NT_FREEBSD_ABI_TAG' ||
         die "Missing FreeBSD ELF ABI note"
     config=$(find "$CARGO_TARGET_DIR/$TARGET/release/build" -name SDL_build_config.h -print -quit)
@@ -458,7 +515,8 @@ write_metadata() {
         if [ "$NATIVE" = yes ]; then
             row=$(pkg query '%n %o %v' "$dep") || die "Missing runtime package: $dep"
         else
-            row=$(target_pkg rquery -U '%n %o %v' "$dep") || die "Missing $ABI package: $dep"
+            rows=$(target_pkg rquery -U '%n %o %v' "$dep") || die "Missing $ABI package: $dep"
+            row=$(printf '%s\n' "$rows" | LC_ALL=C sort -u)
         fi
         [ "$(printf '%s\n' "$row" | wc -l | tr -d ' ')" = 1 ] || die "Ambiguous package: $dep"
         [ -n "$row" ] || die "Missing runtime package: $dep"
@@ -526,7 +584,7 @@ main() {
     resolve_source
     prepare_rust
     if [ "$REQUESTED" = all ]; then
-        targets="amd64 aarch64 i386"
+        targets="amd64 aarch64 i386 powerpc64le riscv64"
     else
         targets="$REQUESTED"
     fi
