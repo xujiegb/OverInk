@@ -49,6 +49,10 @@ jobs:
           components: rustfmt
       - name: Check Rust formatting before matrix builds
         run: cargo fmt --all -- --check
+      - name: Check standalone FreeBSD package script syntax
+        run: |
+          sh -n package-freebsd.sh
+          sh package-freebsd.sh --help
 
   desktop:
     needs: prepare
@@ -1031,10 +1035,56 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  package-freebsd:
+    needs: prepare
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+    name: FreeBSD PKG · ${{ matrix.arch }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {arch: x64, abi: 'FreeBSD:15:amd64'}
+          - {arch: arm64, abi: 'FreeBSD:15:aarch64'}
+          - {arch: i386, abi: 'FreeBSD:14:i386'}
+    env:
+      OVERINK_PACKAGE_VERSION: ${{ needs.prepare.outputs.version }}
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: vmactions/freebsd-vm@v1
+        with:
+          arch: x86_64
+          release: '15.1'
+          usesh: true
+          sync: scp
+          envs: RUST_VERSION OVERINK_PACKAGE_VERSION CARGO_BUILD_JOBS
+          mem: 8192
+          cpu: 3
+          run: |
+            set -eu
+            export OVERINK_OUTPUT_DIR="$PWD/pkg-output"
+            sh package-freebsd.sh --buildfrom 3 --arch '${{ matrix.arch }}'
+            mkdir -p dist
+            abi_dir=$(printf '%s' '${{ matrix.abi }}' | tr ':' '-')
+            set -- "$OVERINK_OUTPUT_DIR/$abi_dir/"*.pkg
+            test "$#" -eq 1
+            test -s "$1"
+            tar -xOf "$1" +COMPACT_MANIFEST | jq -e --arg abi '${{ matrix.abi }}' '.abi == $abi'
+            cp "$1" dist/
+      - uses: actions/upload-artifact@v7
+        with:
+          name: OverInk-pkg-freebsd-${{ matrix.arch }}
+          path: dist/*.pkg
+          if-no-files-found: error
+
   publish:
     name: Publish ${{ needs.prepare.outputs.tag }}
     if: github.event_name == 'workflow_dispatch'
-    needs: [prepare, desktop, package-macos, package-windows, linux, freebsd, package-deb, package-rpm]
+    needs: [prepare, desktop, package-macos, package-windows, linux, freebsd, package-deb, package-rpm, package-freebsd]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -1059,8 +1109,8 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
           artifact_dirs=(release-input/OverInk-*)
-          if (( ${#artifact_dirs[@]} != 36 )); then
-            echo "::error::Expected 36 build artifacts. Found ${#artifact_dirs[@]}."
+          if (( ${#artifact_dirs[@]} != 39 )); then
+            echo "::error::Expected 39 build artifacts. Found ${#artifact_dirs[@]}."
             exit 1
           fi
           mkdir release-assets
@@ -1073,7 +1123,7 @@ jobs:
             fi
             archive=${archives[0]}
             case "$archive" in
-              *.zip|*.tar.gz|*.deb|*.rpm|*.dmg|*.exe) ;;
+              *.zip|*.tar.gz|*.deb|*.rpm|*.dmg|*.exe|*.pkg) ;;
               *) echo "::error::Unexpected package $archive."; exit 1 ;;
             esac
             test -s "$archive"
@@ -1091,6 +1141,10 @@ jobs:
                 ;;
               OverInk-deb-*) dest="OverInk-$RELEASE_VERSION-linux-debian-${name#OverInk-deb-}.deb" ;;
               OverInk-rpm-*) dest="OverInk-$RELEASE_VERSION-linux-rhel-${name#OverInk-rpm-}.rpm" ;;
+              OverInk-pkg-freebsd-*)
+                [[ $file == "overink-$RELEASE_VERSION.pkg" ]] || { echo "::error::Unexpected PKG name: $file"; exit 1; }
+                dest="OverInk-$RELEASE_VERSION-freebsd-${name#OverInk-pkg-freebsd-}.pkg"
+                ;;
               *) dest="OverInk-$RELEASE_VERSION-${file#OverInk-}" ;;
             esac
             cp -- "$archive" "release-assets/$dest"
