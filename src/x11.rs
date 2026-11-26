@@ -195,6 +195,19 @@ mod tests {
                 &CreateWindowAux::new(),
             )?
             .check()?;
+        keep_composited(id)?;
+        let atom = connection
+            .intern_atom(false, b"_NET_WM_BYPASS_COMPOSITOR")?
+            .reply()?
+            .atom;
+        let property = connection
+            .get_property(false, id, atom, AtomEnum::CARDINAL, 0, 1)?
+            .reply()?;
+        assert_eq!(
+            property.value32().and_then(|mut values| values.next()),
+            Some(2)
+        );
+
         let bounds = [800, 600];
         let hole = Rect {
             x: 4,

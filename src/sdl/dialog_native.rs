@@ -11,9 +11,9 @@ use super::{
 use super::{dialog::complete, error};
 #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 use sdl3_sys::dialog::*;
-use std::{ffi::CStr, path::PathBuf};
 #[cfg(any(test, not(any(target_os = "linux", target_os = "freebsd"))))]
 use std::ffi::{c_char, c_int, c_void};
+use std::{ffi::CStr, path::PathBuf};
 #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 use std::{ffi::CString, path::Path, ptr};
 
