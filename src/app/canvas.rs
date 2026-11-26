@@ -231,6 +231,7 @@ pub(super) struct Canvas {
     static_text: Option<StaticTextLayer>,
     static_text_key: Option<StaticTextKey>,
     pub text_repaint_at: Option<Instant>,
+    keyboard_work_area: Option<(Instant, Option<egui::Rect>)>,
     pub render: Renderer,
     native: Passthrough,
     // Must drop before the SDL window; AppKit owns this view-attached monitor.
@@ -294,6 +295,7 @@ impl Canvas {
             static_text: None,
             static_text_key: None,
             text_repaint_at: None,
+            keyboard_work_area: None,
             render,
             native,
             #[cfg(target_os = "macos")]
@@ -433,6 +435,7 @@ impl Canvas {
     }
 
     pub fn surface_changed(&mut self) {
+        self.keyboard_work_area = None;
         self.color.refresh(&self.window, self.render.extended);
         self.background.invalidate_texture();
         self.invalidate(DirtyReason::Surface);
@@ -968,6 +971,40 @@ impl Canvas {
         Ok(true)
     }
 
+    /// Query only while the embedded keyboard is open. SDL's Cocoa
+    /// backend uses NSScreen.visibleFrame (Dock and menu bar), while X11
+    /// and Windows expose the desktop's actual work area. Native Wayland
+    /// cannot reliably report a toplevel's global position; its maximized
+    /// canvas already follows the compositor's placement.
+    fn keyboard_work_area(&mut self, visible: bool) -> Option<egui::Rect> {
+        if !visible {
+            self.keyboard_work_area = None;
+            return None;
+        }
+        if let Some((checked, area)) = self.keyboard_work_area
+            && checked.elapsed() < Duration::from_millis(250)
+        {
+            return area;
+        }
+        let area = (|| {
+            if driver() == "wayland" {
+                return None;
+            }
+            let id = self.window.display_id()?;
+            let bounds = usable_display_bounds(id)?;
+            let origin = self.window.position().ok()?;
+            work_area_in_canvas(origin, bounds)
+        })();
+        self.keyboard_work_area = Some((Instant::now(), area));
+        area
+    }
+
+    pub fn invalidate_keyboard_work_area(&mut self) {
+        if self.keyboard_work_area.take().is_some() {
+            self.invalidate(DirtyReason::Overlay);
+        }
+    }
+
     fn text_frame(
         &mut self,
         app: &mut App,
@@ -979,6 +1016,8 @@ impl Canvas {
         let interactive =
             !app.screenshot.active() && !app.picking && app.tool.is_text() && !app.pass;
         let editing = interactive && app.input.text.editing();
+        let keyboard_work_area =
+            self.keyboard_work_area(editing && !app.hidden && app.input.text.osk_visible());
         if !app.touch_enabled {
             self.cancel_text_touches(app);
         }
@@ -1047,6 +1086,7 @@ impl Canvas {
                     interactive,
                     composing,
                     keep_editor_open,
+                    keyboard_work_area,
                     cached_static_text,
                 );
             }
@@ -1067,6 +1107,7 @@ impl Canvas {
     }
 
     fn stop_text_input(&mut self, interactive: bool) {
+        self.keyboard_work_area = None;
         if interactive {
             if let Some(gui) = &mut self.text {
                 gui.sync_text_input(&self.window, false);
@@ -1079,6 +1120,19 @@ impl Canvas {
             self.text_style = None;
         }
     }
+}
+
+/// SDL display and canvas positions use the same logical coordinates.
+fn work_area_in_canvas([x, y]: [i32; 2], [left, top, w, h]: [i32; 4]) -> Option<egui::Rect> {
+    if w <= 0 || h <= 0 {
+        return None;
+    }
+    let left = (i64::from(left) - i64::from(x)) as f32;
+    let top = (i64::from(top) - i64::from(y)) as f32;
+    Some(egui::Rect::from_min_size(
+        egui::pos2(left, top),
+        egui::vec2(w as f32, h as f32),
+    ))
 }
 
 // Replacing a queued SDL mouse move must still mark the screenshot UI dirty.
@@ -1164,8 +1218,23 @@ pub(super) fn failure(error: impl ToString) -> crate::appearance::Status {
 
 #[cfg(test)]
 mod screenshot_input_tests {
-    use super::{DirtyReason, DirtyReasons, screenshot_input_changed, static_text_regions};
+    use super::{
+        DirtyReason, DirtyReasons, screenshot_input_changed, static_text_regions, work_area_in_canvas,
+    };
     use egui::{Event, Rect, pos2, vec2};
+
+    #[test]
+    fn keyboard_work_area_translates_negative_and_offset_monitor_origins() {
+        assert_eq!(
+            work_area_in_canvas([-1920, -100], [-1840, -76, 1840, 1056]),
+            Some(Rect::from_min_size(pos2(80., 24.), vec2(1840., 1056.))),
+        );
+        assert_eq!(
+            work_area_in_canvas([1920, 300], [1920, 324, 1680, 950]),
+            Some(Rect::from_min_size(pos2(0., 24.), vec2(1680., 950.))),
+        );
+        assert!(work_area_in_canvas([0, 0], [0, 0, 0, 1080]).is_none());
+    }
 
     #[test]
     fn static_text_uses_pixel_aligned_bounds_instead_of_full_canvas() {

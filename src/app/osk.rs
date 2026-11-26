@@ -342,34 +342,28 @@ impl Keyboard {
             && self.page != Page::Emoji
             && self.hovered_key.is_some_and(|rect| rect.contains(pos))
     }
-    /// Usable keyboard area, shared by initial placement and egui's
-    /// draggable-window constraint. Do not maintain separate Dock insets
-    /// that can diverge after window resizes or display transitions.
-    pub fn safe_area(screen: Rect) -> Rect {
-        let inset_x = (screen.width() * 0.025).clamp(8., 28.);
-        let inset_y = (screen.height() * 0.10).clamp(24., 120.);
-        screen.shrink2(vec2(inset_x, inset_y))
+    /// Intersect the native work area with the actual canvas. If the
+    /// compositor cannot report a usable area, do not invent panel insets.
+    pub fn safe_area(screen: Rect, work_area: Option<Rect>) -> Rect {
+        work_area
+            .map(|area| screen.intersect(area))
+            .filter(|area| area.is_positive() && area.is_finite())
+            .unwrap_or(screen)
     }
 
     /// Use the main toolbar's exact window-fit scale, with canvas_units as
     /// the sole HiDPI source on every operating system.
     pub fn layout_scale(screen: Rect, units: f32) -> f32 {
-        crate::toolbar::menu_scale(Self::safe_area(screen), vec2(600., 247.), units)
+        crate::toolbar::menu_scale(screen, vec2(600., 247.), units)
     }
 
     /// Geometry uses the canvas's single UI scale; never branch by platform
     /// or query macOS/Windows pixel density again inside the keyboard.
-    pub fn rect_near(&self, screen: Rect, anchor: Option<Rect>, units: f32) -> Option<Rect> {
-        if !self.visible || screen.width() < 280. || screen.height() < 200. {
+    pub fn rect_near(&self, safe: Rect, anchor: Option<Rect>, units: f32) -> Option<Rect> {
+        if !self.visible || safe.width() < 280. || safe.height() < 200. {
             return None;
         }
-        // Keep a bottom work-area inset so an always-visible macOS Dock does
-        // not cover the initial keyboard position on a fullscreen SDL canvas.
-        let safe = Self::safe_area(screen);
-        if safe.width() < 240. || safe.height() < 145. {
-            return None;
-        }
-        let scale = Self::layout_scale(screen, units);
+        let scale = Self::layout_scale(safe, units);
         let size = (vec2(600., 247.) * scale).min(safe.size());
         let width = size.x;
         let height = size.y;
@@ -392,6 +386,7 @@ impl Keyboard {
         } else {
             safe.bottom() - height
         };
+        let y = y.clamp(safe.top(), safe.bottom() - height);
         Some(Rect::from_min_size(pos2(x, y), size))
     }
 
@@ -1271,19 +1266,22 @@ mod tests {
         let mut keyboard = Keyboard::default();
         keyboard.open();
         let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(1920., 1080.));
+        let safe = Keyboard::safe_area(
+            screen,
+            Some(Rect::from_min_max(pos2(0., 24.), pos2(1920., 980.))),
+        );
         let top_text = Rect::from_min_size(pos2(900., 80.), vec2(200., 80.));
-        let below = keyboard.rect_near(screen, Some(top_text), 1.);
+        let below = keyboard.rect_near(safe, Some(top_text), 1.);
         let Some(below) = below else {
             panic!("Expected keyboard below text");
         };
         assert!(below.top() >= top_text.bottom());
         let bottom_text = Rect::from_min_size(pos2(900., 910.), vec2(200., 60.));
-        let Some(above) = keyboard.rect_near(screen, Some(bottom_text), 1.) else {
+        let Some(above) = keyboard.rect_near(safe, Some(bottom_text), 1.) else {
             panic!("Expected keyboard above text");
         };
         assert!(above.bottom() <= bottom_text.top());
-        assert!(above.bottom() <= screen.bottom() - 100.);
-        assert!(screen.contains_rect(above));
+        assert!(safe.contains_rect(above));
     }
 
     #[test]
@@ -1301,7 +1299,31 @@ mod tests {
         assert_eq!(scaled.size(), vec2(1200., 494.));
         assert_eq!(Keyboard::layout_scale(screen, 1.), 1.);
         assert_eq!(Keyboard::layout_scale(screen, 2.), 2.);
-        assert!(Keyboard::safe_area(screen).contains_rect(scaled));
+        assert!(Keyboard::safe_area(screen, None).contains_rect(scaled));
+    }
+
+    #[test]
+    fn keyboard_uses_actual_panel_edges_without_fixed_padding() {
+        let mut keyboard = Keyboard::default();
+        keyboard.open();
+        let screen = Rect::from_min_max(pos2(0., 0.), pos2(1720., 1084.));
+        for work in [
+            Rect::from_min_max(pos2(0., 0.), pos2(1720., 1040.)),
+            Rect::from_min_max(pos2(80., 24.), pos2(1720., 1084.)),
+            Rect::from_min_max(pos2(0., 24.), pos2(1640., 1084.)),
+            screen,
+        ] {
+            let safe = Keyboard::safe_area(screen, Some(work));
+            assert_eq!(safe, work);
+            let Some(rect) = keyboard.rect_near(safe, None, 1.) else {
+                panic!("Expected keyboard inside actual work area");
+            };
+            assert_eq!(rect.bottom(), work.bottom());
+            assert!(work.contains_rect(rect));
+        }
+        assert_eq!(Keyboard::safe_area(screen, None), screen);
+        let outside = Rect::from_min_size(pos2(2000., 2000.), vec2(100., 100.));
+        assert_eq!(Keyboard::safe_area(screen, Some(outside)), screen);
     }
 
     #[test]

@@ -1881,6 +1881,9 @@ fn run_inner(options: Options) -> Result<(), String> {
                 if (SDL_EVENT_DISPLAY_FIRST..=SDL_EVENT_DISPLAY_LAST).contains(&ty) {
                     topology_dirty = !options.smoke;
                     topology.invalidate();
+                    for canvas in &mut canvases {
+                        canvas.invalidate_keyboard_work_area();
+                    }
                     if ty == SDL_EVENT_DISPLAY_REMOVED
                         && let Some(display) = removed_display_id(&event)
                     {
@@ -1956,6 +1959,9 @@ fn run_inner(options: Options) -> Result<(), String> {
                     {
                         topology_dirty |= ty == SDL_EVENT_WINDOW_DISPLAY_CHANGED && !options.smoke;
                         canvas.guard_dirty |= bounds_changed;
+                        if bounds_changed {
+                            canvas.invalidate_keyboard_work_area();
+                        }
                         canvas.invalidate_if(redraw, DirtyReason::Overlay);
                         if surface_changed {
                             canvas.surface_changed();
