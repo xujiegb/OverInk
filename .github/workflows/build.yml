@@ -1048,7 +1048,7 @@ jobs:
           - {arch: x64, abi: 'FreeBSD:15:amd64'}
           - {arch: arm64, abi: 'FreeBSD:15:aarch64'}
           - {arch: i386, abi: 'FreeBSD:14:i386'}
-          - {arch: ppc64le, abi: 'FreeBSD:16:powerpc64le'}
+          - {arch: ppc64le, abi: 'FreeBSD:15:powerpc64le'}
           - {arch: riscv64, abi: 'FreeBSD:15:riscv64'}
     env:
       OVERINK_PACKAGE_VERSION: ${{ needs.prepare.outputs.version }}
@@ -1146,10 +1146,7 @@ jobs:
               OverInk-pkg-freebsd-*)
                 [[ $file == "overink-$RELEASE_VERSION.pkg" ]] || { echo "::error::Unexpected PKG name: $file"; exit 1; }
                 arch=${name#OverInk-pkg-freebsd-}
-                case "$arch" in
-                  ppc64le) dest="OverInk-$RELEASE_VERSION-freebsd16-ppc64le.pkg" ;;
-                  *) dest="OverInk-$RELEASE_VERSION-freebsd-$arch.pkg" ;;
-                esac
+                dest="OverInk-$RELEASE_VERSION-freebsd-$arch.pkg"
                 ;;
               *) dest="OverInk-$RELEASE_VERSION-${file#OverInk-}" ;;
             esac
