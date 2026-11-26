@@ -971,18 +971,19 @@ impl Canvas {
         Ok(true)
     }
 
-    /// Query only while the embedded keyboard is open. SDL's Cocoa
+    /// Query on opening, after geometry invalidation, or during actual
+    /// keyboard movement/resize (at most every 250ms). SDL's Cocoa
     /// backend uses NSScreen.visibleFrame (Dock and menu bar), while X11
     /// and Windows expose the desktop's actual work area. Native Wayland
     /// cannot reliably report a toplevel's global position; its maximized
     /// canvas already follows the compositor's placement.
-    fn keyboard_work_area(&mut self, visible: bool) -> Option<egui::Rect> {
+    fn keyboard_work_area(&mut self, visible: bool, dragged: bool) -> Option<egui::Rect> {
         if !visible {
             self.keyboard_work_area = None;
             return None;
         }
         if let Some((checked, area)) = self.keyboard_work_area
-            && checked.elapsed() < Duration::from_millis(250)
+            && (!dragged || checked.elapsed() < Duration::from_millis(250))
         {
             return area;
         }
@@ -1016,8 +1017,9 @@ impl Canvas {
         let interactive =
             !app.screenshot.active() && !app.picking && app.tool.is_text() && !app.pass;
         let editing = interactive && app.input.text.editing();
-        let keyboard_work_area =
-            self.keyboard_work_area(editing && !app.hidden && app.input.text.osk_visible());
+        let keyboard_visible = editing && !app.hidden && app.input.text.osk_visible();
+        let keyboard_dragged = app.input.text.osk.take_geometry_dragged();
+        let keyboard_work_area = self.keyboard_work_area(keyboard_visible, keyboard_dragged);
         if !app.touch_enabled {
             self.cancel_text_touches(app);
         }
@@ -1095,6 +1097,9 @@ impl Canvas {
             }
         });
         self.text_repaint_at = gui::repaint_at(&output);
+        if !app.input.text.osk_visible() {
+            self.keyboard_work_area = None;
+        }
         if !focused {
             output.platform_output.ime = None;
         }
@@ -1219,7 +1224,8 @@ pub(super) fn failure(error: impl ToString) -> crate::appearance::Status {
 #[cfg(test)]
 mod screenshot_input_tests {
     use super::{
-        DirtyReason, DirtyReasons, screenshot_input_changed, static_text_regions, work_area_in_canvas,
+        DirtyReason, DirtyReasons, screenshot_input_changed, static_text_regions,
+        work_area_in_canvas,
     };
     use egui::{Event, Rect, pos2, vec2};
 

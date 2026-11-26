@@ -1505,7 +1505,11 @@ impl App {
                         action = self.input.text.osk.ui(keyboard_ui, keys, scale);
                     });
                 if let Some(window) = window {
-                    self.input.text.osk.set_window_rect(window.response.rect);
+                    let pointer_down = ui.input(|input| input.pointer.any_down());
+                    self.input
+                        .text
+                        .osk
+                        .set_window_rect(window.response.rect, pointer_down);
                 }
                 if let Some(action) = action {
                     // Keys use non-focusable interactions; never request egui
