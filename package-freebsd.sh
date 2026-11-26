@@ -44,7 +44,9 @@ Environment:
 Each target builds from a new target directory. Cross builds use verified
 FreeBSD release base archives and target pkg repository metadata.
 --arch all builds x64, arm64, i386, ppc64le and riscv64.
-Cross ppc64le uses FreeBSD 16.0-CURRENT and its official latest Ports repo.
+Cross ppc64le uses FreeBSD 16.0-CURRENT. If its official latest Ports
+repository is unavailable, derive dependency metadata from the official
+Ports tree, without claiming that prebuilt dependencies exist.
 Cross riscv64 uses FreeBSD 15.1 and the signed anyvm community Ports repo.
 OVERINK_PKG_REPOS_DIR can override the default target repository.
 EOF
@@ -498,7 +500,53 @@ EOF
                 ;;
         esac
     fi
-    target_pkg update -f
+    DEPENDENCY_SOURCE=repository
+    if target_pkg update -f; then
+        return
+    fi
+    if [ "$PACKAGE_ARCH" != powerpc64le ] || [ -n "${OVERINK_PKG_REPOS_DIR:-}" ]; then
+        die "Cannot update target Ports repository for $ABI"
+    fi
+    # The FreeBSD 16 powerpc64le pkgbase snapshot is independent of Ports.
+    # Official Ports policy is best effort; no binary catalogue may exist.
+    # Read real target-specific port metadata instead of borrowing another
+    # ABI's versions or silently dropping runtime dependencies.
+    printf '[WARN] No usable official %s Ports catalogue; using official Ports source metadata.\n' "$ABI" >&2
+    PORTS_TREE="$SDK/ports"
+    git clone --depth 1 --single-branch --branch main \
+        https://git.freebsd.org/ports.git "$PORTS_TREE"
+    PORTS_REVISION=$(git -C "$PORTS_TREE" rev-parse HEAD)
+    [ -n "$PORTS_REVISION" ] || die "Cannot identify Ports source revision"
+    mkdir -p "$SDK/ports-options"
+    DEPENDENCY_SOURCE="ports:$PORTS_REVISION"
+    printf '[*] Dependency metadata: FreeBSD Ports %s (binary availability not verified)\n' "$PORTS_REVISION"
+}
+
+ports_dependency() {
+    dep="$1"
+    # The installed native package tells us its canonical Ports origin only.
+    # All version/name checks below evaluate that port for the target ABI.
+    origin=$(pkg query '%o' "$dep") || die "Cannot determine Ports origin for $dep"
+    printf '%s\n' "$origin" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9_.+-]*/[A-Za-z0-9][A-Za-z0-9_.+-]*$' ||
+        die "Invalid Ports origin for $dep: $origin"
+    [ -f "$PORTS_TREE/$origin/Makefile" ] || die "Missing Ports recipe: $origin"
+    values=$(make -C "$PORTS_TREE/$origin" \
+        "PORTSDIR=$PORTS_TREE" "PORT_DBDIR=$SDK/ports-options" \
+        __MAKE_CONF=/dev/null "ARCH=$PACKAGE_ARCH" "MACHINE_ARCH=$PACKAGE_ARCH" \
+        MACHINE=powerpc OPSYS=FreeBSD "OSVERSION=$TARGET_OSVERSION" \
+        "OSREL=$RELEASE" "_OSRELEASE=$RELEASE-CURRENT" "CROSS_SYSROOT=$sysroot" \
+        BATCH=yes -V PKGBASE -V PKGORIGIN -V PKGVERSION -V IGNORE) ||
+        die "Cannot evaluate target Ports recipe: $origin"
+    name=$(printf '%s\n' "$values" | sed -n '1p')
+    port_origin=$(printf '%s\n' "$values" | sed -n '2p')
+    version=$(printf '%s\n' "$values" | sed -n '3p')
+    ignored=$(printf '%s\n' "$values" | sed -n '4,$p')
+    [ "$name" = "$dep" ] && [ "$port_origin" = "$origin" ] ||
+        die "Unexpected target package identity: $origin ($name, $port_origin)"
+    printf '%s\n' "$version" | grep -Eq '^[0-9A-Za-z][0-9A-Za-z.+_,~]*$' ||
+        die "Invalid target Ports version for $dep: $version"
+    [ -z "$ignored" ] || die "Target Ports recipe is marked unavailable: $origin: $ignored"
+    printf '%s %s %s\n' "$name" "$port_origin" "$version"
 }
 
 
@@ -578,11 +626,17 @@ EOF
 }
 
 write_metadata() {
-    # Resolve names, origins and versions from the correct target package set.
+    # Resolve names, origins and versions from the target repository, or the
+    # explicitly recorded official Ports source revision on PPC64LE.
+    if [ "$NATIVE" = yes ]; then
+        DEPENDENCY_SOURCE=installed
+    fi
     : > "$META/dependencies"
     for dep in $RUNTIME_DEPS; do
         if [ "$NATIVE" = yes ]; then
             row=$(pkg query '%n %o %v' "$dep") || die "Missing runtime package: $dep"
+        elif [ "$DEPENDENCY_SOURCE" != repository ]; then
+            row=$(ports_dependency "$dep") || die "Cannot determine target metadata for $dep"
         else
             rows=$(target_pkg rquery -U '%n %o %v' "$dep") || die "Missing $ABI package: $dep"
             row=$(printf '%s\n' "$rows" | LC_ALL=C sort -u)
@@ -594,13 +648,15 @@ write_metadata() {
     jq -Rn '[inputs | split(" ") | {key: .[0], value: {origin: .[1], version: .[2]}}] | from_entries' \
         < "$META/dependencies" > "$META/deps.json"
     jq -n --arg version "$PKG_VERSION" --arg abi "$ABI" --arg url "$REPO_URL" \
+        --arg dependency_source "$DEPENDENCY_SOURCE" \
         --slurpfile deps "$META/deps.json" '{
         name: "overink", version: $version, origin: "graphics/overink",
         comment: "Pressure-sensitive desktop annotation with egui and native SDL3 input",
         desc: "OverInk supports native stylus pressure, multi-touch drawing and click-through overlays.",
         maintainer: "noreply@github.com", www: $url, prefix: "/usr/local",
         abi: $abi, categories: ["graphics"], licenselogic: "and",
-        licenses: ["BSD3CLAUSE", "OFL11", "CC-BY-SA-4.0"], deps: $deps[0]
+        licenses: ["BSD3CLAUSE", "OFL11", "CC-BY-SA-4.0"], deps: $deps[0],
+        annotations: {"overink_dependency_source": $dependency_source}
     }' > "$META/+MANIFEST"
     {
         printf '%s\n' '@owner root' '@group wheel'
@@ -628,6 +684,9 @@ package_binary() {
     output="$OUTPUT_DIR/$abi_dir/overink-$PKG_VERSION.pkg"
     mv -f "$archive" "$output"
     printf '\n[OK] %s\n' "$output"
+    case "$DEPENDENCY_SOURCE" in
+        ports:*) printf '[WARN] Runtime dependencies must be provided by a compatible Ports build or PKG repository.\n' >&2 ;;
+    esac
     if [ "$NATIVE" = yes ]; then
         printf 'Install: sudo pkg install "%s"\n' "$output"
     else
