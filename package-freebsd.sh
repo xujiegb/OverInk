@@ -44,7 +44,7 @@ Environment:
 Each target builds from a new target directory. Cross builds use verified
 FreeBSD release base archives and target pkg repository metadata.
 --arch all builds x64, arm64, i386, ppc64le and riscv64.
-Cross ppc64le uses FreeBSD 16.0-CURRENT. If its official latest Ports
+Cross ppc64le uses FreeBSD 15.1. If its official latest Ports
 repository is unavailable, derive dependency metadata from the official
 Ports tree, without claiming that prebuilt dependencies exist.
 Cross riscv64 uses FreeBSD 15.1 and the signed anyvm community Ports repo.
@@ -117,7 +117,7 @@ describe_target() {
         amd64) TARGET=x86_64-unknown-freebsd; CPU=x86_64; MACHINE='X86-64'; LAYOUT=amd64/amd64; RELEASE=15.1 ;;
         aarch64) TARGET=aarch64-unknown-freebsd; CPU=aarch64; MACHINE='AArch64'; LAYOUT=arm64/aarch64; RELEASE=15.1 ;;
         i386) TARGET=i686-unknown-freebsd; CPU=i686; MACHINE='80386'; LAYOUT=i386/i386; RELEASE=14.4 ;;
-        powerpc64le) TARGET=powerpc64le-unknown-freebsd; CPU=powerpc64le; MACHINE='PowerPC64'; LAYOUT=powerpc/powerpc64le; RELEASE=16.0 ;;
+        powerpc64le) TARGET=powerpc64le-unknown-freebsd; CPU=powerpc64le; MACHINE='PowerPC64'; LAYOUT=powerpc/powerpc64le; RELEASE=15.1 ;;
         riscv64) TARGET=riscv64gc-unknown-freebsd; CPU=riscv64; MACHINE='RISC-V'; LAYOUT=riscv/riscv64; RELEASE=15.1 ;;
         *) die "Unsupported target: $PACKAGE_ARCH" ;;
     esac
@@ -283,63 +283,6 @@ target_pkg() {
         -o "REPOS_DIR=${OVERINK_PKG_REPOS_DIR:-$SDK/repos}" "$@"
 }
 
-# FreeBSD 16 CURRENT publishes a pkgbase repository snapshot, not base.txz.
-# Extract only the target files needed for compilation, without installing
-# packages, executing target binaries, or changing the host's package DB.
-extract_pkgbase_sysroot() {
-    root="$1"
-    snapshot="https://download.freebsd.org/snapshots/PKGBASE-REPOS/16.0-CURRENT/powerpc64le"
-    fetch -qo "$SDK/CHECKSUM.SHA256" "$snapshot/Latest/CHECKSUM.SHA256"
-    # The filename contains the snapshot date, revision and build number.
-    # Read it from the official checksum instead of guessing a rolling URL.
-    record=$(awk '/^SHA256 \(FreeBSD-16[.]0-CURRENT-powerpc-powerpc64le-pkgbase-repo-[0-9]+-[0-9a-f]+-[0-9]+[.]tar\) = [0-9a-f]+$/ {
-        name=$2; sub(/^\(/, "", name); sub(/\)$/, "", name); print name, $4
-    }' "$SDK/CHECKSUM.SHA256")
-    set -- $record
-    [ "$#" -eq 2 ] || die "Unexpected FreeBSD 16 pkgbase checksum format"
-    archive="$1"
-    expected="$2"
-    [ "${#expected}" -eq 64 ] || die "Invalid pkgbase SHA256"
-    stamp=$(printf '%s\n' "$archive" | sed -E 's/^FreeBSD-16[.]0-CURRENT-powerpc-powerpc64le-pkgbase-repo-([0-9]{8})-.*/\1/')
-    printf '%s\n' "$stamp" | grep -Eq '^[0-9]{8}$' || die "Invalid pkgbase snapshot date"
-    # Prefer the dated directory to prevent Latest changing between requests.
-    fetch -qo "$SDK/$archive" "$snapshot/$stamp/$archive" ||
-        fetch -qo "$SDK/$archive" "$snapshot/Latest/$archive"
-    [ "$(sha256 -q "$SDK/$archive")" = "$expected" ] || die "Invalid FreeBSD 16 pkgbase snapshot checksum"
-    mkdir -p "$SDK/pkgbase"
-    tar --no-fflags -xf "$SDK/$archive" -C "$SDK/pkgbase"
-    rm -f "$SDK/$archive"
-    # The release archive is a pkg repository, with packages below All/.
-    # Exclude debug, tests, lib32, and kernel payloads; include all remaining
-    # base packages because headers and shared libraries are split by component.
-    find "$SDK/pkgbase" -type f -name 'FreeBSD-*.pkg' | LC_ALL=C sort > "$SDK/base-packages"
-    [ -s "$SDK/base-packages" ] || die "No base packages found in snapshot"
-    while IFS= read -r package; do
-        case "${package##*/}" in
-            FreeBSD-*-dbg-*|FreeBSD-*-lib32-*|FreeBSD-*-tests-*|FreeBSD-tests-*|FreeBSD-kernel-*) continue ;;
-        esac
-        # Each component contains only a subset of the sysroot. bsdtar
-        # errors when any --include pattern has no match, so list the real
-        # members first and extract only names actually present.
-        tar -tf "$package" > "$SDK/package-members"
-        awk '{
-            name=$0
-            sub(/^(\.\/|\/)+/, "", name)
-            if (name ~ /^(usr\/(include|lib|libdata)|lib|libexec)\// ||
-                name == "bin/sh")
-                print $0
-        }' "$SDK/package-members" > "$SDK/sysroot-members"
-        if [ -s "$SDK/sysroot-members" ]; then
-            tar --no-fflags -xf "$package" -C "$root" -T "$SDK/sysroot-members"
-        fi
-    done < "$SDK/base-packages"
-    [ -f "$root/usr/include/sys/param.h" ] || die "FreeBSD 16 pkgbase development headers missing"
-    [ -f "$root/usr/lib/crt1.o" ] || die "FreeBSD 16 pkgbase startup objects missing"
-    [ -f "$root/bin/sh" ] || die "FreeBSD 16 pkgbase shell missing"
-    rm -rf "$SDK/pkgbase"
-    printf '[*] Verified FreeBSD 16 pkgbase snapshot: %s\n' "$archive"
-}
-
 prepare_target_sdk() {
     SDK="$WORK/sdk-$PACKAGE_ARCH"
     mkdir -p "$SDK"
@@ -359,18 +302,14 @@ prepare_target_sdk() {
 
     sysroot="$SDK/sysroot"
     mkdir -p "$sysroot" "$SDK/pkgdb" "$SDK/pkgcache" "$SDK/repos"
-    if [ "$PACKAGE_ARCH" = powerpc64le ]; then
-        extract_pkgbase_sysroot "$sysroot"
-    else
-        url="https://download.freebsd.org/releases/$LAYOUT/$RELEASE-RELEASE"
-        fetch -qo "$SDK/MANIFEST" "$url/MANIFEST"
-        fetch -qo "$SDK/base.txz" "$url/base.txz"
-        expected=$(awk '$1 == "base.txz" {print $2}' "$SDK/MANIFEST")
-        [ -n "$expected" ] || die "Missing base.txz checksum"
-        [ "$(sha256 -q "$SDK/base.txz")" = "$expected" ] || die "Invalid FreeBSD base checksum"
-        tar --no-fflags -xf "$SDK/base.txz" -C "$sysroot"
-        rm -f "$SDK/base.txz"
-    fi
+    url="https://download.freebsd.org/releases/$LAYOUT/$RELEASE-RELEASE"
+    fetch -qo "$SDK/MANIFEST" "$url/MANIFEST"
+    fetch -qo "$SDK/base.txz" "$url/base.txz"
+    expected=$(awk '$1 == "base.txz" {print $2}' "$SDK/MANIFEST")
+    [ -n "$expected" ] || die "Missing base.txz checksum"
+    [ "$(sha256 -q "$SDK/base.txz")" = "$expected" ] || die "Invalid FreeBSD base checksum"
+    tar --no-fflags -xf "$SDK/base.txz" -C "$sysroot"
+    rm -f "$SDK/base.txz"
     TARGET_OSVERSION=$(awk '$1 == "#define" && $2 == "__FreeBSD_version" {print $3; exit}' "$sysroot/usr/include/sys/param.h")
     case "$TARGET_OSVERSION" in ""|*[!0-9]*) die "Invalid target OSVERSION" ;; esac
     [ "$((TARGET_OSVERSION / 100000))" = "${RELEASE%%.*}" ] ||
@@ -507,7 +446,7 @@ EOF
     if [ "$PACKAGE_ARCH" != powerpc64le ] || [ -n "${OVERINK_PKG_REPOS_DIR:-}" ]; then
         die "Cannot update target Ports repository for $ABI"
     fi
-    # The FreeBSD 16 powerpc64le pkgbase snapshot is independent of Ports.
+    # The FreeBSD release base archive is independent of Ports.
     # Official Ports policy is best effort; no binary catalogue may exist.
     # Read real target-specific port metadata instead of borrowing another
     # ABI's versions or silently dropping runtime dependencies.
@@ -534,7 +473,7 @@ ports_dependency() {
         "PORTSDIR=$PORTS_TREE" "PORT_DBDIR=$SDK/ports-options" \
         __MAKE_CONF=/dev/null "ARCH=$PACKAGE_ARCH" "MACHINE_ARCH=$PACKAGE_ARCH" \
         MACHINE=powerpc OPSYS=FreeBSD "OSVERSION=$TARGET_OSVERSION" \
-        "OSREL=$RELEASE" "_OSRELEASE=$RELEASE-CURRENT" "CROSS_SYSROOT=$sysroot" \
+        "OSREL=$RELEASE" "_OSRELEASE=$RELEASE-RELEASE" "CROSS_SYSROOT=$sysroot" \
         BATCH=yes -V PKGBASE -V PKGORIGIN -V PKGVERSION -V IGNORE) ||
         die "Cannot evaluate target Ports recipe: $origin"
     name=$(printf '%s\n' "$values" | sed -n '1p')
