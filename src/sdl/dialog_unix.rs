@@ -320,101 +320,12 @@ fn download_path(config: &[u8], home: &Path) -> Option<PathBuf> {
         match byte {
             b'\\' => {
                 let escaped = bytes.next()?;
-                if !matches!(escaped, b'\\' | b'"' | b' -> Result<PathBuf, String> {
-    // The native chooser writes one newline, not arbitrary whitespace.
-    if bytes.last() == Some(&b'\n') {
-        bytes.pop();
-    }
-    if bytes.contains(&0) {
-        return Err("File chooser returned an invalid path".into());
-    }
-    let path = PathBuf::from(OsString::from_vec(bytes));
-    if !path.is_absolute() {
-        return Err("File chooser did not return an absolute path".into());
-    }
-    Ok(path)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn xdg_downloads_preserve_custom_paths_without_shell_expansion() {
-        let home = Path::new("/home/user");
-        assert_eq!(
-            download_path(b"XDG_DOWNLOAD_DIR=\"$HOME/My Downloads\"\n", home),
-            Some(home.join("My Downloads"))
-        );
-        assert_eq!(
-            download_path(b"XDG_DOWNLOAD_DIR=\"/data/downloads\"", home),
-            Some(PathBuf::from("/data/downloads"))
-        );
-        assert_eq!(
-            download_path(b"XDG_DOWNLOAD_DIR=\"$HOME\"", home),
-            Some(home.to_path_buf())
-        );
-        assert!(download_path(b"XDG_DOWNLOAD_DIR=\"$HOME/$(command)\"", home).is_none());
-        assert!(download_path(b"XDG_DOWNLOAD_DIR=\"relative\"", home).is_none());
-    }
-
-    #[test]
-    fn chooser_preserves_path_bytes_and_spaces() -> Result<(), String> {
-        let path = selected_path(b"/tmp/a \xff.png\n".to_vec())?;
-        assert_eq!(path.as_os_str().as_bytes(), b"/tmp/a \xff.png");
-        assert_eq!(
-            selected_path(b"/tmp/name\n\n".to_vec())?
-                .as_os_str()
-                .as_bytes(),
-            b"/tmp/name\n"
-        );
-        assert!(selected_path(b"relative.png\n".to_vec()).is_err());
-        assert!(selected_path(b"/tmp/a\0.png\n".to_vec()).is_err());
-        assert!(selected_path(Vec::new()).is_err());
-        Ok(())
-    }
-}
- | b'`') {
+                if !matches!(escaped, b'\\' | b'"' | b'$' | b'`') {
                     path.push(b'\\');
                 }
                 path.push(escaped);
             }
-            b'"' | b' -> Result<PathBuf, String> {
-    // The native chooser writes one newline, not arbitrary whitespace.
-    if bytes.last() == Some(&b'\n') {
-        bytes.pop();
-    }
-    if bytes.contains(&0) {
-        return Err("File chooser returned an invalid path".into());
-    }
-    let path = PathBuf::from(OsString::from_vec(bytes));
-    if !path.is_absolute() {
-        return Err("File chooser did not return an absolute path".into());
-    }
-    Ok(path)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn chooser_preserves_path_bytes_and_spaces() -> Result<(), String> {
-        let path = selected_path(b"/tmp/a \xff.png\n".to_vec())?;
-        assert_eq!(path.as_os_str().as_bytes(), b"/tmp/a \xff.png");
-        assert_eq!(
-            selected_path(b"/tmp/name\n\n".to_vec())?
-                .as_os_str()
-                .as_bytes(),
-            b"/tmp/name\n"
-        );
-        assert!(selected_path(b"relative.png\n".to_vec()).is_err());
-        assert!(selected_path(b"/tmp/a\0.png\n".to_vec()).is_err());
-        assert!(selected_path(Vec::new()).is_err());
-        Ok(())
-    }
-}
- | b'`' | 0 => return None,
+            b'"' | b'$' | b'`' | 0 => return None,
             _ => path.push(byte),
         }
     }

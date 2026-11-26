@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 
-use super::Window;
 #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 use super::dialog_native as native;
+use super::Window;
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},

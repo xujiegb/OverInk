@@ -191,12 +191,16 @@ impl Job {
                 if driver() == "wayland" && crate::kwin::active() && !window.hidden() {
                     // KWin knows the real client origin, including panel offsets.
                     // Query before capture, off the SDL thread.
-                    let display = display.clone();
+                    let display_id = display.id;
                     let displays = _displays.to_vec();
                     return crate::picker::portal::SystemJob::screenshot_preflight(multi, move || {
+                        let display = displays
+                            .iter()
+                            .find(|display| display.id == display_id)
+                            .ok_or("The screenshot display is unavailable")?;
                         let (crop, sizes) = match crate::kwin::canvas_geometry() {
                             Ok(location) => crop.for_portal(
-                                &display,
+                                display,
                                 &displays,
                                 pixels,
                                 density,
