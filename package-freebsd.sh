@@ -40,12 +40,15 @@ Environment:
   CARGO_BUILD_JOBS         parallel build jobs (default: 2)
   OVERINK_RUN_TESTS=1      run Cargo release tests before packaging (native only)
   OVERINK_PKG_REPOS_DIR    trusted target repository configuration for cross builds
+  OVERINK_PORTS_DIR        existing official Ports checkout for source metadata
+  OVERINK_PORTS_REF        Ports branch/tag to fetch (default: current quarterly)
 
 Each target builds from a new target directory. Cross builds use verified
 FreeBSD release base archives and target pkg repository metadata.
---arch all builds x64, arm64 and i386 (official Ports package sets).
-For cross powerpc64le/riscv64, provide a trusted target repository with
-OVERINK_PKG_REPOS_DIR (a directory containing pkg repository configuration).
+--arch all builds x64, arm64, i386, ppc64le and riscv64.
+On architectures without official binary packages, read dependency metadata
+from the official Ports tree. Runtime dependencies must be installed from
+Ports or a compatible package repository on the destination system.
 EOF
 }
 
@@ -119,20 +122,23 @@ describe_target() {
         *) die "Unsupported target: $PACKAGE_ARCH" ;;
     esac
     NATIVE=no
+    DEP_SOURCE=repository
     if [ "$PACKAGE_ARCH" = "$HOST_ARCH" ]; then
         NATIVE=yes
         ABI=$(pkg config ABI)
         case "$ABI" in FreeBSD:*:"$PACKAGE_ARCH") ;; *) die "Unexpected host ABI: $ABI" ;; esac
+        DEP_SOURCE=installed
     else
         ABI="FreeBSD:${RELEASE%%.*}:$PACKAGE_ARCH"
         case "$PACKAGE_ARCH" in
             powerpc64le|riscv64)
-                [ -n "${OVERINK_PKG_REPOS_DIR:-}" ] ||
-                    die "No official Ports package set for $ABI; specify a trusted OVERINK_PKG_REPOS_DIR."
+                if [ -z "${OVERINK_PKG_REPOS_DIR:-}" ]; then
+                    DEP_SOURCE=ports
+                fi
                 ;;
         esac
     fi
-    printf '[*] Target %s (%s, native=%s)\n' "$TARGET" "$ABI" "$NATIVE"
+    printf '[*] Target %s (%s, native=%s, dependency metadata=%s)\n' "$TARGET" "$ABI" "$NATIVE" "$DEP_SOURCE"
 }
 
 
@@ -368,6 +374,12 @@ set(SDL_WAYLAND_SHARED ON CACHE BOOL "" FORCE)
 set(SDL_WAYLAND_LIBDECOR OFF CACHE BOOL "" FORCE)
 set(SDL_KMSDRM OFF CACHE BOOL "" FORCE)
 EOF
+    # Tier 2 architectures may have no official binary Ports repository.
+    # Resolve dependency metadata without querying a nonexistent repository.
+    if [ "$DEP_SOURCE" = ports ]; then
+        prepare_ports_metadata
+        return
+    fi
     # Fetch signed target repository metadata separately from the host database.
     # No target packages are installed into the running FreeBSD system.
     cat > "$SDK/repos/OverInk.conf" <<EOF
@@ -380,6 +392,69 @@ OverInk: {
 }
 EOF
     target_pkg update -f
+}
+
+# These are the upstream Ports origins of the explicitly declared runtime
+# dependencies. Do not copy dependency versions from the amd64 package DB.
+port_origin() {
+    case "$1" in
+        libX11|libXext|libXi|libXrandr|libXcursor|libXfixes|libXrender|libXScrnSaver|libXtst|libxcb|libxkbcommon)
+            printf 'x11/%s\n' "$1" ;;
+        libglvnd|wayland|mesa-libs) printf 'graphics/%s\n' "$1" ;;
+        dbus|desktop-file-utils|xdg-utils) printf 'devel/%s\n' "$1" ;;
+        hicolor-icon-theme) printf 'misc/%s\n' "$1" ;;
+        *) die "No Ports origin for runtime dependency: $1" ;;
+    esac
+}
+
+prepare_ports_metadata() {
+    if [ -n "${OVERINK_PORTS_DIR:-}" ]; then
+        PORTS=$(CDPATH= cd -- "$OVERINK_PORTS_DIR" && pwd)
+    else
+        PORTS="$SDK/ports"
+        if [ -z "${OVERINK_PORTS_REF:-}" ]; then
+            year=$(date -u +%Y)
+            month=$(date -u +%m | sed 's/^0//')
+            quarter=$(( (month - 1) / 3 + 1 ))
+            OVERINK_PORTS_REF="${year}Q${quarter}"
+        fi
+        # Only fetch the Ports framework and relevant port directories.
+        # The GitHub mirror belongs to the FreeBSD Project.
+        git clone --depth 1 --filter=blob:none --sparse \
+            --branch "$OVERINK_PORTS_REF" \
+            https://github.com/freebsd/freebsd-ports.git "$PORTS"
+        origins="Mk Templates Tools graphics/mesa-dri"
+        for dep in $RUNTIME_DEPS; do
+            origins="$origins $(port_origin "$dep")"
+        done
+        # shellcheck disable=SC2086
+        git -C "$PORTS" sparse-checkout set $origins
+    fi
+    [ -f "$PORTS/Mk/bsd.port.mk" ] || die "Incomplete Ports tree: $PORTS"
+    printf '[*] Ports metadata source: %s\n' "$(git -C "$PORTS" rev-parse HEAD 2>/dev/null || printf '%s' "$PORTS")"
+    case "$PACKAGE_ARCH" in
+        powerpc64le) TARGET_MACHINE=powerpc ;;
+        riscv64) TARGET_MACHINE=riscv ;;
+        *) die "Unexpected Ports metadata target: $PACKAGE_ARCH" ;;
+    esac
+}
+
+port_dependency() {
+    dep="$1"
+    origin=$(port_origin "$dep")
+    [ -f "$PORTS/$origin/Makefile" ] || die "Missing Ports origin: $origin"
+    # Query the default target port's expanded metadata only. No dependency
+    # binaries are built or installed on the host by this command.
+    values=$(make -C "$PORTS/$origin" -V PKGBASE -V PKGVERSION \
+        PORTSDIR="$PORTS" ARCH="$PACKAGE_ARCH" MACHINE_ARCH="$PACKAGE_ARCH" \
+        MACHINE="$TARGET_MACHINE" OPSYS=FreeBSD OSVERSION="$TARGET_OSVERSION" \
+        OSREL="$RELEASE" BATCH=yes __MAKE_CONF=/dev/null)
+    name=$(printf '%s\n' "$values" | sed -n '1p')
+    version=$(printf '%s\n' "$values" | sed -n '2p')
+    [ "$name" = "$dep" ] || die "Unexpected Ports package name: $origin ($name)"
+    printf '%s\n' "$version" | grep -Eq '^[0-9][0-9A-Za-z._+,~-]*$' ||
+        die "Invalid Ports package version: $origin ($version)"
+    printf '%s %s %s\n' "$name" "$origin" "$version"
 }
 
 build_binary() {
@@ -455,11 +530,12 @@ write_metadata() {
     # Resolve names, origins and versions from the correct target package set.
     : > "$META/dependencies"
     for dep in $RUNTIME_DEPS; do
-        if [ "$NATIVE" = yes ]; then
-            row=$(pkg query '%n %o %v' "$dep") || die "Missing runtime package: $dep"
-        else
-            row=$(target_pkg rquery -U '%n %o %v' "$dep") || die "Missing $ABI package: $dep"
-        fi
+        case "$DEP_SOURCE" in
+            installed) row=$(pkg query '%n %o %v' "$dep") || die "Missing runtime package: $dep" ;;
+            repository) row=$(target_pkg rquery -U '%n %o %v' "$dep") || die "Missing $ABI package: $dep" ;;
+            ports) row=$(port_dependency "$dep") || die "Cannot resolve target Ports metadata: $dep" ;;
+            *) die "Unknown dependency metadata source: $DEP_SOURCE" ;;
+        esac
         [ "$(printf '%s\n' "$row" | wc -l | tr -d ' ')" = 1 ] || die "Ambiguous package: $dep"
         [ -n "$row" ] || die "Missing runtime package: $dep"
         printf '%s\n' "$row" >> "$META/dependencies"
@@ -504,6 +580,9 @@ package_binary() {
     if [ "$NATIVE" = yes ]; then
         printf 'Install: sudo pkg install "%s"\n' "$output"
     else
+        if [ "$DEP_SOURCE" = ports ]; then
+            printf '[NOTE] %s needs runtime dependencies installed from Ports or a compatible repository.\n' "$ABI"
+        fi
         printf 'Install on %s: sudo pkg install overink-%s.pkg\n' "$ABI" "$PKG_VERSION"
     fi
 }
@@ -526,7 +605,7 @@ main() {
     resolve_source
     prepare_rust
     if [ "$REQUESTED" = all ]; then
-        targets="amd64 aarch64 i386"
+        targets="amd64 aarch64 i386 powerpc64le riscv64"
     else
         targets="$REQUESTED"
     fi
