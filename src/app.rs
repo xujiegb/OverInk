@@ -1879,8 +1879,13 @@ fn run_inner(options: Options) -> Result<(), String> {
                     toolbar_dirty = true;
                 }
                 if (SDL_EVENT_DISPLAY_FIRST..=SDL_EVENT_DISPLAY_LAST).contains(&ty) {
-                    topology_dirty = !options.smoke;
-                    topology.invalidate();
+                    // Dock, taskbar and panel changes do not alter display
+                    // topology. Only invalidate the cached keyboard constraint;
+                    // avoid rediscovering displays or reconciling ink canvases.
+                    if ty != SDL_EVENT_DISPLAY_USABLE_BOUNDS_CHANGED {
+                        topology_dirty = !options.smoke;
+                        topology.invalidate();
+                    }
                     for canvas in &mut canvases {
                         canvas.invalidate_keyboard_work_area();
                     }
