@@ -193,26 +193,29 @@ impl Job {
                     // Query before capture, off the SDL thread.
                     let display_id = display.id;
                     let displays = _displays.to_vec();
-                    return crate::picker::portal::SystemJob::screenshot_preflight(multi, move || {
-                        let display = displays
-                            .iter()
-                            .find(|display| display.id == display_id)
-                            .ok_or("The screenshot display is unavailable")?;
-                        let (crop, sizes) = match crate::kwin::canvas_geometry() {
-                            Ok(location) => crop.for_portal(
-                                display,
-                                &displays,
-                                pixels,
-                                density,
-                                None,
-                                Some(location),
-                            )?,
-                            Err(error) => {
-                                mapping.map_err(|original| format!("{original}: {error}"))?
-                            }
-                        };
-                        Ok(move |image| crop.apply_portal(image, sizes))
-                    })
+                    return crate::picker::portal::SystemJob::screenshot_preflight(
+                        multi,
+                        move || {
+                            let display = displays
+                                .iter()
+                                .find(|display| display.id == display_id)
+                                .ok_or("The screenshot display is unavailable")?;
+                            let (crop, sizes) = match crate::kwin::canvas_geometry() {
+                                Ok(location) => crop.for_portal(
+                                    display,
+                                    &displays,
+                                    pixels,
+                                    density,
+                                    None,
+                                    Some(location),
+                                )?,
+                                Err(error) => {
+                                    mapping.map_err(|original| format!("{original}: {error}"))?
+                                }
+                            };
+                            Ok(move |image| crop.apply_portal(image, sizes))
+                        },
+                    )
                     .map(Self::Portal);
                 }
                 let (crop, sizes) = mapping?;
