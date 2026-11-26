@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
-use super::{Window, dialog_native as native};
+use super::Window;
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+use super::dialog_native as native;
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -22,13 +24,13 @@ struct Callback {
 
 // Cocoa can access the SDL parent from the sheet completion handler, and
 // Windows can look up its native handle from a worker thread.
-#[cfg(any(test, not(any(target_os = "linux", target_os = "freebsd"))))]
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 pub const USE_WINDOW_PARENT: bool = !cfg!(any(windows, target_os = "macos"));
 
 /// The screenshot selection is a fullscreen, always-on-top canvas. A native
 /// save chooser must not be modal to that canvas: the canvas must be hidden
 /// before the chooser opens so it cannot obscure or intercept the chooser.
-#[cfg(any(test, not(any(target_os = "linux", target_os = "freebsd"))))]
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 pub(super) const fn use_window_parent(kind: DialogKind) -> bool {
     USE_WINDOW_PARENT && !matches!(kind, DialogKind::ScreenshotFile)
 }
@@ -149,14 +151,19 @@ pub(super) fn complete(id: usize, value: impl FnOnce() -> ResultPath) {
 }
 
 pub fn downloads() -> Option<PathBuf> {
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    return super::dialog_unix::downloads();
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     native::downloads()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     use std::ptr;
 
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     #[test]
     fn screenshot_save_dialog_does_not_parent_fullscreen_overlay() {
         assert!(!use_window_parent(DialogKind::ScreenshotFile));
@@ -176,7 +183,7 @@ mod tests {
         assert!(dialog.poll().is_none());
 
         std::thread::spawn(move || {
-            complete(id, || native::path_from_c(c"截图.png").map(Some));
+            complete(id, || Ok(Some(PathBuf::from("截图.png"))));
             complete(id, || panic!("A duplicate callback must be ignored"));
         })
         .join()
@@ -216,6 +223,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     #[test]
     fn native_callback_copies_selected_path() -> Result<(), String> {
         let mut dialog = FileDialog::default();
@@ -230,6 +238,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     #[test]
     fn native_callback_cancellation_is_owned_and_consumed_once() -> Result<(), String> {
         let mut dialog = FileDialog::default();
@@ -246,6 +255,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     #[test]
     fn native_callback_error_returns_a_result_not_a_pending_dialog() -> Result<(), String> {
         let mut dialog = FileDialog::default();
@@ -261,6 +271,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     #[test]
     fn handles_non_utf8_paths_with_platform_encoding() -> Result<(), String> {
         let path = c"\xff";

@@ -2,22 +2,18 @@
 //! the initial location for the duration of the native show call.
 #![deny(clippy::undocumented_unsafe_blocks)]
 
-#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 use super::{
     Window,
-    dialog::{DialogKind, use_window_parent},
+    dialog::{DialogKind, complete, use_window_parent},
+    error,
 };
-#[cfg(any(test, not(any(target_os = "linux", target_os = "freebsd"))))]
-use super::{dialog::complete, error};
-#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 use sdl3_sys::dialog::*;
-#[cfg(any(test, not(any(target_os = "linux", target_os = "freebsd"))))]
-use std::ffi::{c_char, c_int, c_void};
-use std::{ffi::CStr, path::PathBuf};
-#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-use std::{ffi::CString, path::Path, ptr};
+use std::{
+    ffi::{CStr, CString, c_char, c_int, c_void},
+    path::{Path, PathBuf},
+    ptr,
+};
 
-#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 const PNG_FILTER: &SDL_DialogFileFilter = &SDL_DialogFileFilter {
     name: c"PNG".as_ptr(),
     pattern: c"png".as_ptr(),
@@ -25,7 +21,6 @@ const PNG_FILTER: &SDL_DialogFileFilter = &SDL_DialogFileFilter {
 
 /// Called from SDL, potentially on a different thread or before show returns.
 /// Userdata is an opaque numeric ID, never a pointer to Rust-owned storage.
-#[cfg(any(test, not(any(target_os = "linux", target_os = "freebsd"))))]
 pub(super) extern "C" fn chosen(user: *mut c_void, files: *const *const c_char, _filter: c_int) {
     complete(user.addr(), || {
         if files.is_null() {
@@ -43,7 +38,6 @@ pub(super) extern "C" fn chosen(user: *mut c_void, files: *const *const c_char, 
     });
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 pub(super) fn show(id: usize, kind: DialogKind, window: &Window, location: Option<&Path>) {
     // No pointer to owned Rust state survives the SDL callback. An ID is
     // encoded as pointer metadata but is only converted back to an integer.
@@ -86,7 +80,6 @@ pub(super) fn downloads() -> Option<PathBuf> {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 fn location_to_c(path: &Path) -> Option<CString> {
     #[cfg(any(windows, target_os = "macos"))]
     let bytes = path.to_str()?.as_bytes();
