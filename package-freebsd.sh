@@ -178,6 +178,8 @@ resolve_source() {
                 die "Unable to resolve a pre-release; use an explicit version or --buildfrom 3." ;;
             3) ;;
         esac
+    elif [ "$BUILD_FROM" = 1 ] || [ "$BUILD_FROM" = 2 ]; then
+        die "Release selection requires a Git checkout; use --buildfrom 3 for a source archive."
     fi
     if [ -n "$tag" ]; then
         git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 ||
@@ -201,7 +203,7 @@ resolve_source() {
     printf '%s\n' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.+~-][0-9A-Za-z.+~-]+)?$' ||
         die "Invalid package version: $VERSION"
     # pkg versions cannot contain hyphens (name-version delimiter).
-    PKG_VERSION=$(printf '%s' "$VERSION" | tr '+-~' '...')
+    PKG_VERSION=$(printf '%s' "$VERSION" | sed 's/[-+~]/./g')
     REQUIRED_RUST=$(manifest_field rust-version)
     RUST_VERSION="${RUST_VERSION:-${REQUIRED_RUST:-1.100.0}}"
     printf '%s\n' "$RUST_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' ||
