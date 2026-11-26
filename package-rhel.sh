@@ -642,7 +642,7 @@ Source0:        __PKGROOT__.tar.gz
 
 Requires:       libX11, libXext, libXi, libXrandr, libXcursor, libXfixes, libXrender, libXtst
 Requires:       libwayland-client, libxkbcommon, mesa-libEGL, mesa-libGL
-Requires:       desktop-file-utils, hicolor-icon-theme
+Requires:       desktop-file-utils, xdg-utils, hicolor-icon-theme
 
 %description
 OverInk pressure-sensitive desktop annotation.

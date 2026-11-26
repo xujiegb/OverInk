@@ -22,11 +22,13 @@ struct Callback {
 
 // Cocoa can access the SDL parent from the sheet completion handler, and
 // Windows can look up its native handle from a worker thread.
+#[cfg(any(test, not(any(target_os = "linux", target_os = "freebsd"))))]
 pub const USE_WINDOW_PARENT: bool = !cfg!(any(windows, target_os = "macos"));
 
 /// The screenshot selection is a fullscreen, always-on-top canvas. A native
 /// save chooser must not be modal to that canvas: the canvas must be hidden
 /// before the chooser opens so it cannot obscure or intercept the chooser.
+#[cfg(any(test, not(any(target_os = "linux", target_os = "freebsd"))))]
 pub(super) const fn use_window_parent(kind: DialogKind) -> bool {
     USE_WINDOW_PARENT && !matches!(kind, DialogKind::ScreenshotFile)
 }
@@ -51,6 +53,8 @@ fn callbacks() -> MutexGuard<'static, Callbacks> {
 pub struct FileDialog {
     request: Option<(usize, DialogKind)>,
     wake: u32,
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    cancel: Option<async_channel::Sender<()>>,
 }
 
 impl FileDialog {
@@ -91,6 +95,14 @@ impl FileDialog {
         let Some(id) = self.begin(kind) else {
             return false;
         };
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        {
+            let _ = window;
+            let (cancel, cancelled) = async_channel::bounded(1);
+            self.cancel = Some(cancel);
+            super::dialog_unix::show(id, kind, location, cancelled);
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
         native::show(id, kind, window, location);
         true
     }
@@ -101,12 +113,20 @@ impl FileDialog {
         let result = callbacks.results.get_mut(&id)?.result.take()?;
         callbacks.results.remove(&id);
         self.request = None;
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        if let Some(cancel) = self.cancel.take() {
+            cancel.close();
+        }
         Some((kind, result))
     }
 }
 
 impl Drop for FileDialog {
     fn drop(&mut self) {
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        if let Some(cancel) = self.cancel.take() {
+            cancel.close();
+        }
         if let Some((id, _)) = self.request {
             callbacks().results.remove(&id);
         }

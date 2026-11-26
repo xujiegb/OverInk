@@ -279,7 +279,7 @@ impl<T> Drop for SystemJob<T> {
     }
 }
 
-fn local_file(uri: &str) -> Result<PathBuf, String> {
+pub(crate) fn local_file(uri: &str) -> Result<PathBuf, String> {
     use std::os::unix::ffi::OsStringExt as _;
     let path = uri
         .strip_prefix("file://")
