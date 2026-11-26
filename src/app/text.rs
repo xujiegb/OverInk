@@ -255,10 +255,6 @@ impl TextInput {
         self.osk.visible && self.editing()
     }
 
-    pub(super) fn take_osk_geometry_dragged(&mut self) -> bool {
-        self.osk.take_geometry_dragged()
-    }
-
     pub fn screen_keyboard_session(&self) -> bool {
         self.screen_keyboard_session && self.editing()
     }
@@ -1509,11 +1505,7 @@ impl App {
                         action = self.input.text.osk.ui(keyboard_ui, keys, scale);
                     });
                 if let Some(window) = window {
-                    let pointer_down = ui.input(|input| input.pointer.any_down());
-                    self.input
-                        .text
-                        .osk
-                        .set_window_rect(window.response.rect, pointer_down);
+                    self.input.text.osk.set_window_rect(window.response.rect);
                 }
                 if let Some(action) = action {
                     // Keys use non-focusable interactions; never request egui

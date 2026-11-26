@@ -221,6 +221,40 @@ impl StaticTextPaint {
     }
 }
 
+// Cache unavailable work areas too: native Wayland and some window managers
+// cannot expose global usable bounds. Only an explicit invalidation may retry.
+#[derive(Default)]
+enum KeyboardWorkArea {
+    #[default]
+    Unqueried,
+    Unavailable,
+    Available(egui::Rect),
+}
+
+impl KeyboardWorkArea {
+    fn resolve(
+        &mut self,
+        visible: bool,
+        query: impl FnOnce() -> Option<egui::Rect>,
+    ) -> Option<egui::Rect> {
+        if !visible {
+            self.invalidate();
+            return None;
+        }
+        if matches!(self, Self::Unqueried) {
+            *self = query().map_or(Self::Unavailable, Self::Available);
+        }
+        match self {
+            Self::Available(area) => Some(*area),
+            Self::Unqueried | Self::Unavailable => None,
+        }
+    }
+
+    fn invalidate(&mut self) -> bool {
+        !matches!(std::mem::take(self), Self::Unqueried)
+    }
+}
+
 pub(super) struct Canvas {
     // SDL destroys textures with their renderer, and renderers with their window.
     pub background: Background,
@@ -231,7 +265,7 @@ pub(super) struct Canvas {
     static_text: Option<StaticTextLayer>,
     static_text_key: Option<StaticTextKey>,
     pub text_repaint_at: Option<Instant>,
-    keyboard_work_area: Option<(Instant, Option<egui::Rect>)>,
+    keyboard_work_area: KeyboardWorkArea,
     pub render: Renderer,
     native: Passthrough,
     // Must drop before the SDL window; AppKit owns this view-attached monitor.
@@ -295,7 +329,7 @@ impl Canvas {
             static_text: None,
             static_text_key: None,
             text_repaint_at: None,
-            keyboard_work_area: None,
+            keyboard_work_area: KeyboardWorkArea::default(),
             render,
             native,
             #[cfg(target_os = "macos")]
@@ -435,7 +469,7 @@ impl Canvas {
     }
 
     pub fn surface_changed(&mut self) {
-        self.keyboard_work_area = None;
+        self.keyboard_work_area.invalidate();
         self.color.refresh(&self.window, self.render.extended);
         self.background.invalidate_texture();
         self.invalidate(DirtyReason::Surface);
@@ -971,37 +1005,25 @@ impl Canvas {
         Ok(true)
     }
 
-    /// Query on opening, after geometry invalidation, or during actual
-    /// keyboard movement/resize (at most every 250ms). SDL's Cocoa
-    /// backend uses NSScreen.visibleFrame (Dock and menu bar), while X11
-    /// and Windows expose the desktop's actual work area. Native Wayland
-    /// cannot reliably report a toplevel's global position; its maximized
-    /// canvas already follows the compositor's placement.
-    fn keyboard_work_area(&mut self, visible: bool, dragged: bool) -> Option<egui::Rect> {
-        if !visible {
-            self.keyboard_work_area = None;
-            return None;
-        }
-        if let Some((checked, area)) = self.keyboard_work_area
-            && (!dragged || checked.elapsed() < Duration::from_millis(250))
-        {
-            return area;
-        }
-        let area = (|| {
+    /// Query only on opening or native geometry invalidation. SDL Cocoa
+    /// uses NSScreen.visibleFrame, including the real Dock and menu bar.
+    /// Native Wayland uses the compositor-placed canvas instead of
+    /// guessing a global position or reserving arbitrary margins.
+    fn keyboard_work_area(&mut self, visible: bool) -> Option<egui::Rect> {
+        let window = &self.window;
+        self.keyboard_work_area.resolve(visible, || {
             if driver() == "wayland" {
                 return None;
             }
-            let id = self.window.display_id()?;
+            let id = window.display_id()?;
             let bounds = usable_display_bounds(id)?;
-            let origin = self.window.position().ok()?;
+            let origin = window.position().ok()?;
             work_area_in_canvas(origin, bounds)
-        })();
-        self.keyboard_work_area = Some((Instant::now(), area));
-        area
+        })
     }
 
     pub fn invalidate_keyboard_work_area(&mut self) {
-        if self.keyboard_work_area.take().is_some() {
+        if self.keyboard_work_area.invalidate() {
             self.invalidate(DirtyReason::Overlay);
         }
     }
@@ -1018,8 +1040,7 @@ impl Canvas {
             !app.screenshot.active() && !app.picking && app.tool.is_text() && !app.pass;
         let editing = interactive && app.input.text.editing();
         let keyboard_visible = editing && !app.hidden && app.input.text.osk_visible();
-        let keyboard_dragged = app.input.text.take_osk_geometry_dragged();
-        let keyboard_work_area = self.keyboard_work_area(keyboard_visible, keyboard_dragged);
+        let keyboard_work_area = self.keyboard_work_area(keyboard_visible);
         if !app.touch_enabled {
             self.cancel_text_touches(app);
         }
@@ -1098,7 +1119,7 @@ impl Canvas {
         });
         self.text_repaint_at = gui::repaint_at(&output);
         if !app.input.text.osk_visible() {
-            self.keyboard_work_area = None;
+            self.keyboard_work_area.invalidate();
         }
         if !focused {
             output.platform_output.ime = None;
@@ -1112,7 +1133,7 @@ impl Canvas {
     }
 
     fn stop_text_input(&mut self, interactive: bool) {
-        self.keyboard_work_area = None;
+        self.keyboard_work_area.invalidate();
         if interactive {
             if let Some(gui) = &mut self.text {
                 gui.sync_text_input(&self.window, false);
@@ -1224,10 +1245,33 @@ pub(super) fn failure(error: impl ToString) -> crate::appearance::Status {
 #[cfg(test)]
 mod screenshot_input_tests {
     use super::{
-        DirtyReason, DirtyReasons, screenshot_input_changed, static_text_regions,
-        work_area_in_canvas,
+        DirtyReason, DirtyReasons, KeyboardWorkArea, screenshot_input_changed,
+        static_text_regions, work_area_in_canvas,
     };
     use egui::{Event, Rect, pos2, vec2};
+
+    #[test]
+    fn keyboard_work_area_is_queried_only_on_open_or_invalidation() {
+        let mut cache = KeyboardWorkArea::default();
+        let first = Rect::from_min_size(pos2(0., 24.), vec2(1920., 990.));
+        let second = Rect::from_min_size(pos2(80., 24.), vec2(1840., 1056.));
+
+        assert_eq!(cache.resolve(false, || panic!("Keyboard is closed")), None);
+        assert_eq!(cache.resolve(true, || Some(first)), Some(first));
+        for _ in 0..120 {
+            assert_eq!(cache.resolve(true, || panic!("Cached area")), Some(first));
+        }
+
+        assert!(cache.invalidate());
+        assert_eq!(cache.resolve(true, || Some(second)), Some(second));
+        assert_eq!(cache.resolve(false, || panic!("Keyboard is closed")), None);
+        assert!(!cache.invalidate());
+
+        assert_eq!(cache.resolve(true, || None), None);
+        assert_eq!(cache.resolve(true, || panic!("Cached unavailable area")), None);
+        assert!(cache.invalidate());
+        assert_eq!(cache.resolve(true, || Some(first)), Some(first));
+    }
 
     #[test]
     fn keyboard_work_area_translates_negative_and_offset_monitor_origins() {

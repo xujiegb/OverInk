@@ -41,7 +41,6 @@ pub(super) struct Keyboard {
     emoji_display: f32,
     // Actual egui Window geometry for pointer-focus protection and resizing.
     window_rect: Option<Rect>,
-    geometry_dragged: bool,
     // Last hovered key is stable while the mouse stays inside its bounds.
     // Avoid re-tessellating the fullscreen canvas for intra-key motion.
     hovered_key: Option<Rect>,
@@ -335,7 +334,6 @@ impl Keyboard {
     pub fn close(&mut self) {
         self.visible = false;
         self.window_rect = None;
-        self.geometry_dragged = false;
         self.hovered_key = None;
     }
 
@@ -400,15 +398,8 @@ impl Keyboard {
         self.window_rect
     }
 
-    pub fn set_window_rect(&mut self, rect: Rect, pointer_down: bool) {
-        // Track actual window movement/resize, not key or emoji gestures.
-        self.geometry_dragged =
-            pointer_down && self.window_rect.is_some_and(|previous| previous != rect);
+    pub fn set_window_rect(&mut self, rect: Rect) {
         self.window_rect = Some(rect);
-    }
-
-    pub fn take_geometry_dragged(&mut self) -> bool {
-        std::mem::take(&mut self.geometry_dragged)
     }
 
     pub fn minimum_size(&self, available: egui::Vec2, units: f32) -> egui::Vec2 {
@@ -1309,26 +1300,6 @@ mod tests {
         assert_eq!(Keyboard::layout_scale(screen, 1.), 1.);
         assert_eq!(Keyboard::layout_scale(screen, 2.), 2.);
         assert!(Keyboard::safe_area(screen, None).contains_rect(scaled));
-    }
-
-    #[test]
-    fn work_area_refresh_tracks_window_drag_not_key_presses() {
-        let mut keyboard = Keyboard::default();
-        keyboard.open();
-        let rect = Rect::from_min_size(pos2(20., 30.), vec2(600., 247.));
-        keyboard.set_window_rect(rect, true);
-        assert!(!keyboard.take_geometry_dragged());
-        keyboard.set_window_rect(rect, true);
-        assert!(!keyboard.take_geometry_dragged());
-        keyboard.set_window_rect(rect.translate(vec2(10., 0.)), true);
-        assert!(keyboard.take_geometry_dragged());
-        assert!(!keyboard.take_geometry_dragged());
-        keyboard.set_window_rect(rect, false);
-        assert!(!keyboard.take_geometry_dragged());
-        keyboard.set_window_rect(rect.expand(10.), true);
-        assert!(keyboard.take_geometry_dragged());
-        keyboard.close();
-        assert!(!keyboard.take_geometry_dragged());
     }
 
     #[test]
