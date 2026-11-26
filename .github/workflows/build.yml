@@ -1048,6 +1048,8 @@ jobs:
           - {arch: x64, abi: 'FreeBSD:15:amd64'}
           - {arch: arm64, abi: 'FreeBSD:15:aarch64'}
           - {arch: i386, abi: 'FreeBSD:14:i386'}
+          - {arch: ppc64le, abi: 'FreeBSD:16:powerpc64le'}
+          - {arch: riscv64, abi: 'FreeBSD:15:riscv64'}
     env:
       OVERINK_PACKAGE_VERSION: ${{ needs.prepare.outputs.version }}
       CARGO_BUILD_JOBS: '2'
@@ -1109,8 +1111,8 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
           artifact_dirs=(release-input/OverInk-*)
-          if (( ${#artifact_dirs[@]} != 39 )); then
-            echo "::error::Expected 39 build artifacts. Found ${#artifact_dirs[@]}."
+          if (( ${#artifact_dirs[@]} != 41 )); then
+            echo "::error::Expected 41 build artifacts. Found ${#artifact_dirs[@]}."
             exit 1
           fi
           mkdir release-assets
@@ -1143,7 +1145,11 @@ jobs:
               OverInk-rpm-*) dest="OverInk-$RELEASE_VERSION-linux-rhel-${name#OverInk-rpm-}.rpm" ;;
               OverInk-pkg-freebsd-*)
                 [[ $file == "overink-$RELEASE_VERSION.pkg" ]] || { echo "::error::Unexpected PKG name: $file"; exit 1; }
-                dest="OverInk-$RELEASE_VERSION-freebsd-${name#OverInk-pkg-freebsd-}.pkg"
+                arch=${name#OverInk-pkg-freebsd-}
+                case "$arch" in
+                  ppc64le) dest="OverInk-$RELEASE_VERSION-freebsd16-ppc64le.pkg" ;;
+                  *) dest="OverInk-$RELEASE_VERSION-freebsd-$arch.pkg" ;;
+                esac
                 ;;
               *) dest="OverInk-$RELEASE_VERSION-${file#OverInk-}" ;;
             esac
