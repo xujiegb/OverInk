@@ -1,7 +1,10 @@
 //! SDL is owned by the main thread. Window/renderer pointers never cross threads.
 #![deny(clippy::undocumented_unsafe_blocks)]
 pub mod dialog;
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 mod dialog_native;
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+mod dialog_unix;
 pub use sdl3_sys::{
     blendmode::*, clipboard::*, error::*, events::*, hints::*, init::*, keyboard::*, keycode::*,
     locale::*, mouse::*, pen::*, pixels::*, properties::*, rect::*, render::*, stdinc::*,
@@ -1937,14 +1940,21 @@ impl Window {
 
     pub fn new(title: &str, w: i32, h: i32, overlay: bool) -> Result<Self, String> {
         let title = cstring(title);
-        Self::construct(WindowCreation::Main(&title, w, h, overlay))
+        let window = Self::construct(WindowCreation::Main(&title, w, h, overlay))?;
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        if overlay && driver() == "x11" {
+            // SDL defaults to bypassing compositing for normal X11 windows.
+            // Set the opposite request before mapping an alpha overlay.
+            let id = window.x11_window_number().ok_or("No X11 overlay window")?;
+            crate::x11::keep_composited(id)?;
+        }
+        Ok(window)
     }
 
     /// Controller windows need a transparent back buffer for a native rounded
     /// alpha/hit-test mask. Canvas windows continue to use their original path.
     pub fn toolbar(title: &str, w: i32, h: i32) -> Result<Self, String> {
-        let title = cstring(title);
-        Self::construct(WindowCreation::Main(&title, w, h, true))
+        Self::new(title, w, h, true)
     }
 
     pub fn tooltip(parent: &Self, x: i32, y: i32, w: i32, h: i32) -> Result<Self, String> {

@@ -20,6 +20,8 @@ mod gui;
 mod icc;
 mod icc_native;
 mod keyboard;
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+mod kwin;
 mod language;
 mod model;
 mod native;

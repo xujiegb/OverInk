@@ -186,16 +186,41 @@ impl Job {
                         )
                     })
                 };
-                let (crop, sizes) =
-                    crop.for_portal(display, _displays, pixels, density, usable, location)?;
+                let mapping =
+                    crop.for_portal(display, _displays, pixels, density, usable, location);
+                if driver() == "wayland" && crate::kwin::active() && !window.hidden() {
+                    // KWin knows the real client origin, including panel offsets.
+                    // Query before capture, off the SDL thread.
+                    let display_id = display.id;
+                    let displays = _displays.to_vec();
+                    return crate::picker::portal::SystemJob::screenshot_preflight(
+                        multi,
+                        move || {
+                            let display = displays
+                                .iter()
+                                .find(|display| display.id == display_id)
+                                .ok_or("The screenshot display is unavailable")?;
+                            let (crop, sizes) = match crate::kwin::canvas_geometry() {
+                                Ok(location) => crop.for_portal(
+                                    display,
+                                    &displays,
+                                    pixels,
+                                    density,
+                                    None,
+                                    Some(location),
+                                )?,
+                                Err(error) => {
+                                    mapping.map_err(|original| format!("{original}: {error}"))?
+                                }
+                            };
+                            Ok(move |image| crop.apply_portal(image, sizes))
+                        },
+                    )
+                    .map(Self::Portal);
+                }
+                let (crop, sizes) = mapping?;
                 return crate::picker::portal::SystemJob::screenshot(multi, move |image| {
-                    if !sizes.contains(&[image.width, image.height]) {
-                        return Err(
-                            "The portal screenshot dimensions do not match the selected desktop"
-                                .into(),
-                        );
-                    }
-                    crop.apply(image)
+                    crop.apply_portal(image, sizes)
                 })
                 .map(Self::Portal);
             }
@@ -244,6 +269,16 @@ impl Crop {
             right.min(width),
             bottom.min(height),
         ]
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    fn apply_portal(self, image: Image, sizes: [[u32; 2]; 3]) -> Result<Image, String> {
+        if !sizes.contains(&[image.width, image.height]) {
+            return Err(
+                "The portal screenshot dimensions do not match the selected desktop".into(),
+            );
+        }
+        self.apply(image)
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]

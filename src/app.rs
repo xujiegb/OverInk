@@ -1726,6 +1726,8 @@ fn run_inner(options: Options) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     let overlay_order = (!options.smoke).then(crate::native::OverlayOrderMonitor::start);
     let wayland = video == "wayland";
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    let mut place_kwin_toolbar = wayland && !options.smoke && crate::kwin::active();
     let window =
         with_autorelease_pool(|| Window::new("OverInk - canvas", 1100, 720, !options.smoke))?;
     let mut topology = crate::display::Topology::new(&video);
@@ -2974,6 +2976,11 @@ fn run_inner(options: Options) -> Result<(), String> {
                 gui.paint(&toolbar_render, &toolbar, &toolbar_color, output)?;
                 let swap_started = performance.as_ref().map(|_| Instant::now());
                 toolbar_render.present()?;
+                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                if std::mem::take(&mut place_kwin_toolbar) {
+                    // The first buffer maps the native Wayland toplevel.
+                    crate::kwin::place_toolbar();
+                }
                 if let Some(monitor) = &mut performance {
                     monitor.counts.toolbar_frames += 1;
                     if let Some(start) = toolbar_started {

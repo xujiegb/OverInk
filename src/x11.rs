@@ -9,9 +9,13 @@ use x11rb::{
     connection::Connection,
     protocol::{
         shape::{ConnectionExt as _, SK, SO},
-        xproto::{ClipOrdering, ConfigureWindowAux, ConnectionExt as _, Rectangle, StackMode},
+        xproto::{
+            AtomEnum, ClipOrdering, ConfigureWindowAux, ConnectionExt as _, PropMode, Rectangle,
+            StackMode,
+        },
     },
     rust_connection::RustConnection,
+    wrapper::ConnectionExt as _,
 };
 
 thread_local! {
@@ -47,6 +51,22 @@ pub fn cached_connection() -> Option<Rc<RustConnection>> {
 
 pub fn connection_is_cached(connection: &Rc<RustConnection>) -> bool {
     CONNECTION.with_borrow(|cached| cached.ptr_eq(&Rc::downgrade(connection)))
+}
+
+/// Request compositing for an alpha overlay before the window is mapped.
+pub fn keep_composited(id: u32) -> Result<(), String> {
+    let connection = connection()?;
+    let atom = connection
+        .intern_atom(false, b"_NET_WM_BYPASS_COMPOSITOR")
+        .map_err(|error| error.to_string())?
+        .reply()
+        .map_err(|error| error.to_string())?
+        .atom;
+    connection
+        .change_property32(PropMode::REPLACE, id, atom, AtomEnum::CARDINAL, &[2])
+        .map_err(|error| error.to_string())?
+        .check()
+        .map_err(|error| format!("Cannot request X11 overlay compositing: {error}"))
 }
 
 pub fn shape_connection() -> Result<Rc<RustConnection>, String> {
@@ -175,6 +195,19 @@ mod tests {
                 &CreateWindowAux::new(),
             )?
             .check()?;
+        keep_composited(id)?;
+        let atom = connection
+            .intern_atom(false, b"_NET_WM_BYPASS_COMPOSITOR")?
+            .reply()?
+            .atom;
+        let property = connection
+            .get_property(false, id, atom, AtomEnum::CARDINAL, 0, 1)?
+            .reply()?;
+        assert_eq!(
+            property.value32().and_then(|mut values| values.next()),
+            Some(2)
+        );
+
         let bounds = [800, 600];
         let hole = Rect {
             x: 4,
