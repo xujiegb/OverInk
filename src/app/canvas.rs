@@ -1245,8 +1245,8 @@ pub(super) fn failure(error: impl ToString) -> crate::appearance::Status {
 #[cfg(test)]
 mod screenshot_input_tests {
     use super::{
-        DirtyReason, DirtyReasons, KeyboardWorkArea, screenshot_input_changed,
-        static_text_regions, work_area_in_canvas,
+        DirtyReason, DirtyReasons, KeyboardWorkArea, screenshot_input_changed, static_text_regions,
+        work_area_in_canvas,
     };
     use egui::{Event, Rect, pos2, vec2};
 
@@ -1268,7 +1268,10 @@ mod screenshot_input_tests {
         assert!(!cache.invalidate());
 
         assert_eq!(cache.resolve(true, || None), None);
-        assert_eq!(cache.resolve(true, || panic!("Cached unavailable area")), None);
+        assert_eq!(
+            cache.resolve(true, || panic!("Cached unavailable area")),
+            None
+        );
         assert!(cache.invalidate());
         assert_eq!(cache.resolve(true, || Some(first)), Some(first));
     }
