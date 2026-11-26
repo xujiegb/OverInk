@@ -672,6 +672,17 @@ impl Runtime {
                     )
                 })?;
             }
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            if backend == Some(c"x11") {
+                // Match the verified X11 workaround before creating any
+                // window. SDL may recreate the XID when choosing a renderer;
+                // do not let its default compositor bypass return.
+                check(SDL_SetHintWithPriority(
+                    SDL_HINT_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR,
+                    c"0".as_ptr(),
+                    SDL_HINT_OVERRIDE,
+                ))?;
+            }
             // Avoid a second mouse/touch stroke synthesized from the same pen packet.
             SDL_SetHint(SDL_HINT_PEN_MOUSE_EVENTS, c"0".as_ptr());
             SDL_SetHint(SDL_HINT_PEN_TOUCH_EVENTS, c"0".as_ptr());
@@ -1942,13 +1953,19 @@ impl Window {
         let title = cstring(title);
         let window = Self::construct(WindowCreation::Main(&title, w, h, overlay))?;
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        if overlay && driver() == "x11" {
-            // SDL defaults to bypassing compositing for normal X11 windows.
-            // Set the opposite request before mapping an alpha overlay.
-            let id = window.x11_window_number().ok_or("No X11 overlay window")?;
-            crate::x11::keep_composited(id)?;
+        if overlay {
+            window.keep_x11_composited()?;
         }
         Ok(window)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    fn keep_x11_composited(&self) -> Result<(), String> {
+        if driver() == "x11" {
+            let id = self.x11_window_number().ok_or("No X11 overlay window")?;
+            crate::x11::keep_composited(id)?;
+        }
+        Ok(())
     }
 
     /// Controller windows need a transparent back buffer for a native rounded
@@ -2105,6 +2122,12 @@ impl Window {
         self.scale() / self.pixel_density()
     }
     pub fn show(&self, show: bool) -> Result<(), String> {
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        if show && self.hidden() && self.transparent() {
+            // The renderer may have recreated the native window after the
+            // constructor. Apply the explicit no-bypass policy to its live XID.
+            self.keep_x11_composited()?;
+        }
         self.run_command(WindowCommand::Show(show))
     }
     pub fn display_id(&self) -> Option<u32> {
