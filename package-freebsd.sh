@@ -279,6 +279,62 @@ target_pkg() {
         -o "REPOS_DIR=${OVERINK_PKG_REPOS_DIR:-$SDK/repos}" "$@"
 }
 
+# FreeBSD 16 CURRENT publishes a pkgbase repository snapshot, not base.txz.
+# Extract only the target files needed for compilation, without installing
+# packages, executing target binaries, or changing the host's package DB.
+extract_pkgbase_sysroot() {
+    root="$1"
+    snapshot="https://download.freebsd.org/snapshots/PKGBASE-REPOS/16.0-CURRENT/powerpc64le"
+    fetch -qo "$SDK/CHECKSUM.SHA256" "$snapshot/Latest/CHECKSUM.SHA256"
+    # The filename contains the snapshot date, revision and build number.
+    # Read it from the official checksum instead of guessing a rolling URL.
+    record=$(awk '/^SHA256 \(FreeBSD-16[.]0-CURRENT-powerpc-powerpc64le-pkgbase-repo-[0-9]+-[0-9a-f]+-[0-9]+[.]tar\) = [0-9a-f]+$/ {
+        name=$2; sub(/^\(/, "", name); sub(/\)$/, "", name); print name, $4
+    }' "$SDK/CHECKSUM.SHA256")
+    set -- $record
+    [ "$#" -eq 2 ] || die "Unexpected FreeBSD 16 pkgbase checksum format"
+    archive="$1"
+    expected="$2"
+    [ "${#expected}" -eq 64 ] || die "Invalid pkgbase SHA256"
+    stamp=$(printf '%s\n' "$archive" | sed -E 's/^FreeBSD-16[.]0-CURRENT-powerpc-powerpc64le-pkgbase-repo-([0-9]{8})-.*/\1/')
+    printf '%s\n' "$stamp" | grep -Eq '^[0-9]{8}$' || die "Invalid pkgbase snapshot date"
+    # Prefer the dated directory to prevent Latest changing between requests.
+    fetch -qo "$SDK/$archive" "$snapshot/$stamp/$archive" ||
+        fetch -qo "$SDK/$archive" "$snapshot/Latest/$archive"
+    [ "$(sha256 -q "$SDK/$archive")" = "$expected" ] || die "Invalid FreeBSD 16 pkgbase snapshot checksum"
+    mkdir -p "$SDK/pkgbase"
+    tar -xf "$SDK/$archive" -C "$SDK/pkgbase"
+    rm -f "$SDK/$archive"
+    # The release archive is a pkg repository, with packages below All/.
+    # Exclude debug, tests, lib32, and kernel payloads; include all remaining
+    # base packages because headers and shared libraries are split by component.
+    find "$SDK/pkgbase" -type f -name 'FreeBSD-*.pkg' | LC_ALL=C sort > "$SDK/base-packages"
+    [ -s "$SDK/base-packages" ] || die "No base packages found in snapshot"
+    while IFS= read -r package; do
+        case "${package##*/}" in
+            FreeBSD-*-dbg-*|FreeBSD-*-lib32-*|FreeBSD-*-tests-*|FreeBSD-tests-*|FreeBSD-kernel-*) continue ;;
+        esac
+        # Only materialize compiler inputs and a shell for ELF validation.
+        # bsdtar matches archive paths with or without a leading ./ or /.
+        tar -xf "$package" -C "$root" \
+            --include 'usr/include/*' --include 'usr/lib/*' \
+            --include 'usr/libdata/*' --include 'lib/*' \
+            --include 'libexec/*' --include 'bin/sh' \
+            --include './usr/include/*' --include './usr/lib/*' \
+            --include './usr/libdata/*' --include './lib/*' \
+            --include './libexec/*' --include './bin/sh' \
+            --include '/usr/include/*' --include '/usr/lib/*' \
+            --include '/usr/libdata/*' --include '/lib/*' \
+            --include '/libexec/*' --include '/bin/sh' \
+            --exclude '+*'
+    done < "$SDK/base-packages"
+    [ -f "$root/usr/include/sys/param.h" ] || die "FreeBSD 16 pkgbase development headers missing"
+    [ -f "$root/usr/lib/crt1.o" ] || die "FreeBSD 16 pkgbase startup objects missing"
+    [ -f "$root/bin/sh" ] || die "FreeBSD 16 pkgbase shell missing"
+    rm -rf "$SDK/pkgbase"
+    printf '[*] Verified FreeBSD 16 pkgbase snapshot: %s\n' "$archive"
+}
+
 prepare_target_sdk() {
     SDK="$WORK/sdk-$PACKAGE_ARCH"
     mkdir -p "$SDK"
@@ -299,17 +355,17 @@ prepare_target_sdk() {
     sysroot="$SDK/sysroot"
     mkdir -p "$sysroot" "$SDK/pkgdb" "$SDK/pkgcache" "$SDK/repos"
     if [ "$PACKAGE_ARCH" = powerpc64le ]; then
-        url="https://download.freebsd.org/snapshots/$LAYOUT/$RELEASE-CURRENT"
+        extract_pkgbase_sysroot "$sysroot"
     else
         url="https://download.freebsd.org/releases/$LAYOUT/$RELEASE-RELEASE"
+        fetch -qo "$SDK/MANIFEST" "$url/MANIFEST"
+        fetch -qo "$SDK/base.txz" "$url/base.txz"
+        expected=$(awk '$1 == "base.txz" {print $2}' "$SDK/MANIFEST")
+        [ -n "$expected" ] || die "Missing base.txz checksum"
+        [ "$(sha256 -q "$SDK/base.txz")" = "$expected" ] || die "Invalid FreeBSD base checksum"
+        tar -xf "$SDK/base.txz" -C "$sysroot"
+        rm -f "$SDK/base.txz"
     fi
-    fetch -qo "$SDK/MANIFEST" "$url/MANIFEST"
-    fetch -qo "$SDK/base.txz" "$url/base.txz"
-    expected=$(awk '$1 == "base.txz" {print $2}' "$SDK/MANIFEST")
-    [ -n "$expected" ] || die "Missing base.txz checksum"
-    [ "$(sha256 -q "$SDK/base.txz")" = "$expected" ] || die "Invalid FreeBSD base checksum"
-    tar -xf "$SDK/base.txz" -C "$sysroot"
-    rm -f "$SDK/base.txz"
     TARGET_OSVERSION=$(awk '$1 == "#define" && $2 == "__FreeBSD_version" {print $3; exit}' "$sysroot/usr/include/sys/param.h")
     case "$TARGET_OSVERSION" in ""|*[!0-9]*) die "Invalid target OSVERSION" ;; esac
     [ "$((TARGET_OSVERSION / 100000))" = "${RELEASE%%.*}" ] ||
