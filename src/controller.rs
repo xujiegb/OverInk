@@ -218,12 +218,8 @@ impl Guard {
         #[cfg(target_os = "windows")]
         crate::native::set_controller_region(canvas, size, pixels)?;
         #[cfg(not(target_os = "windows"))]
-        {
-            // SDL applies this mask to both rendering and native hit testing.
-            let opaque_regions =
-                pixels.map(|hole| outside(size, Some(hole)).map(Rect::sdl).collect::<Vec<_>>());
-            canvas.set_opaque_shape_regions(size, opaque_regions.as_deref())?;
-        }
+        // SDL applies this mask to both rendering and native hit testing.
+        canvas.set_shape_cutout(size, pixels)?;
         self.last = Some((size, pixels));
         Ok((hole, true))
     }

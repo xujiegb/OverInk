@@ -113,7 +113,6 @@ enum SdlNativeAction<'a> {
     ReadSurfacePixel(&'a OwnedSurface, i32, i32),
     ClipboardRead,
     ReadError,
-    ClearError,
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     WaylandScaleToDisplay,
     WindowIccProfile(&'a Window),
@@ -128,9 +127,7 @@ enum SdlNativeAction<'a> {
     MouseButtonsReleased,
     PollEvent(&'a mut SDL_Event),
     WaitEvent(i32),
-    PushUserEvent(&'a mut SDL_Event),
-    #[cfg(target_os = "macos")]
-    PushMacosTouch(&'a mut SDL_Event),
+    PushEvent(&'a mut SDL_Event),
     #[cfg(target_os = "linux")]
     FlushQuitEvent,
 }
@@ -426,10 +423,6 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
                 };
                 SdlNativeResult::Text(text)
             }
-            SdlNativeAction::ClearError => {
-                SDL_ClearError();
-                SdlNativeResult::Done
-            }
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             SdlNativeAction::WaylandScaleToDisplay => SdlNativeResult::Success(SDL_GetHintBoolean(
                 SDL_HINT_VIDEO_WAYLAND_SCALE_TO_DISPLAY,
@@ -541,11 +534,7 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
             SdlNativeAction::WaitEvent(timeout) => {
                 SdlNativeResult::Success(SDL_WaitEventTimeout(ptr::null_mut(), timeout))
             }
-            SdlNativeAction::PushUserEvent(event) => SdlNativeResult::Success(SDL_PushEvent(event)),
-            #[cfg(target_os = "macos")]
-            SdlNativeAction::PushMacosTouch(event) => {
-                SdlNativeResult::Success(SDL_PushEvent(event))
-            }
+            SdlNativeAction::PushEvent(event) => SdlNativeResult::Success(SDL_PushEvent(event)),
             #[cfg(target_os = "linux")]
             SdlNativeAction::FlushQuitEvent => {
                 SDL_FlushEvent(SDL_EVENT_QUIT.0);
@@ -616,7 +605,7 @@ impl Runtime {
         let backend = startup_driver(x11, smoke, wayland);
         use sdl3::hint::{self, Hint};
         if let Some(name) = backend {
-            let _ = sdl_native(SdlNativeAction::ClearError);
+            sdl3::clear_error();
             check(hint::set_with_priority(
                 "SDL_VIDEO_DRIVER",
                 name,
@@ -654,7 +643,7 @@ impl Runtime {
             Some(crate::VERSION),
             Some("org.overink.OverInk"),
         );
-        let _ = sdl_native(SdlNativeAction::ClearError);
+        sdl3::clear_error();
         let video = sdl3::init()
             .and_then(|context| context.video())
             .map_err(|error| {
@@ -941,7 +930,7 @@ pub fn push_user_event(ty: u32) -> bool {
     // zeroed and carries no borrowed native data.
     let mut event = SDL_Event::default();
     event.r#type = ty;
-    sdl_native(SdlNativeAction::PushUserEvent(&mut event)).succeeded()
+    sdl_native(SdlNativeAction::PushEvent(&mut event)).succeeded()
 }
 
 /// Push a macOS 27 AppKit *direct finger* sample into the existing checked
@@ -979,7 +968,7 @@ pub fn push_macos_direct_touch(window_id: u32, finger_id: u64, phase: u32, x: f3
         pressure: 1.,
         ..Default::default()
     };
-    sdl_native(SdlNativeAction::PushMacosTouch(&mut event)).succeeded()
+    sdl_native(SdlNativeAction::PushEvent(&mut event)).succeeded()
 }
 
 /// Owned display metadata, copied from SDL before its native allocation is freed.
@@ -1384,10 +1373,8 @@ enum WindowCommand<'a> {
     },
     Show(bool),
     SetParent(Option<&'a Window>),
-    #[cfg(target_os = "macos")]
-    RoundedCorners([i32; 2], i32),
     #[cfg(not(target_os = "windows"))]
-    ShapeRegions([i32; 2], Option<&'a [SDL_Rect]>),
+    Shape(Option<&'a sdl3::surface::SurfaceRef>),
 }
 
 /// Closed SDL window constructors, retaining borrowed title and parent
@@ -1645,50 +1632,11 @@ impl Window {
                     }
                     check(SDL_SetWindowParent(self.raw.as_ptr(), raw))
                 }
-                #[cfg(target_os = "macos")]
-                WindowCommand::RoundedCorners(size, radius) => {
-                    let surface = OwnedSurface(
-                        NonNull::new(SDL_CreateSurface(size[0], size[1], SDL_PIXELFORMAT_ARGB32))
-                            .ok_or_else(error)?,
-                    );
-                    let surface_handle = surface.as_non_null();
-                    paint_toolbar_mask(size, radius, |rects, alpha| {
-                        let color =
-                            SDL_MapSurfaceRGBA(surface_handle.as_ptr(), 255, 255, 255, alpha);
-                        for rect in rects {
-                            check(SDL_FillSurfaceRect(surface_handle.as_ptr(), rect, color))?;
-                        }
-                        Ok(())
-                    })?;
-                    check(SDL_SetWindowShape(
-                        self.raw.as_ptr(),
-                        surface_handle.as_ptr(),
-                    ))
-                }
                 #[cfg(not(target_os = "windows"))]
-                WindowCommand::ShapeRegions(size, opaque_regions) => {
-                    let Some(regions) = opaque_regions else {
-                        return check(SDL_SetWindowShape(self.raw.as_ptr(), ptr::null_mut()));
-                    };
-                    let surface = OwnedSurface(
-                        NonNull::new(SDL_CreateSurface(size[0], size[1], SDL_PIXELFORMAT_RGBA32))
-                            .ok_or_else(error)?,
-                    );
-                    let opaque =
-                        SDL_MapSurfaceRGBA(surface.as_non_null().as_ptr(), 255, 255, 255, 255);
-                    // SDL_CreateSurface already zeroes pixels outside the opaque regions.
-                    for region in regions {
-                        check(SDL_FillSurfaceRect(
-                            surface.as_non_null().as_ptr(),
-                            region,
-                            opaque,
-                        ))?;
-                    }
-                    check(SDL_SetWindowShape(
-                        self.raw.as_ptr(),
-                        surface.as_non_null().as_ptr(),
-                    ))
-                }
+                WindowCommand::Shape(mask) => check(SDL_SetWindowShape(
+                    self.raw.as_ptr(),
+                    mask.map_or_else(ptr::null_mut, sdl3::surface::SurfaceRef::raw),
+                )),
             }
         }
     }
@@ -1757,15 +1705,17 @@ impl Window {
         self.query_bool(WindowBooleanQuery::Transparent)
     }
 
-    /// Apply an RGBA shape mask, or clear it when no regions are supplied.
-    /// Own and free the temporary surface even if an SDL operation fails.
+    /// Protect the controller from canvas input, or clear the canvas mask.
     #[cfg(not(target_os = "windows"))]
-    pub fn set_opaque_shape_regions(
+    pub fn set_shape_cutout(
         &self,
         size: [i32; 2],
-        opaque_regions: Option<&[SDL_Rect]>,
+        cutout: Option<crate::controller::Rect>,
     ) -> Result<(), String> {
-        self.run_command(WindowCommand::ShapeRegions(size, opaque_regions))
+        let mask = cutout
+            .map(|cutout| canvas_mask_surface(size, cutout))
+            .transpose()?;
+        self.run_command(WindowCommand::Shape(mask.as_deref()))
     }
 
     /// Create either kind of SDL window at one native ownership boundary.
@@ -1988,13 +1938,13 @@ impl Window {
     }
 
     fn apply_toolbar_mask(&self, size: [i32; 2], radius: i32) -> Result<(), String> {
+        let surface = toolbar_mask_surface(size, radius)?;
         if let Some(owner) = &self.toolbar_owner {
-            let surface = toolbar_mask_surface(size, radius)?;
             return owner.set_shape(surface).map_err(|error| error.to_string());
         }
         #[cfg(target_os = "macos")]
         {
-            self.run_command(WindowCommand::RoundedCorners(size, radius))
+            self.run_command(WindowCommand::Shape(Some(&surface)))
         }
         #[cfg(not(target_os = "macos"))]
         Err("Rounded toolbar mask requires an SDL toolbar window".into())
@@ -2251,40 +2201,64 @@ fn set_toolbar_icon(owner: &mut sdl3::video::Window) {
     owner.set_icon(surface);
 }
 
+fn mask_surface([width, height]: [i32; 2]) -> Result<sdl3::surface::Surface<'static>, String> {
+    use sdl3::{pixels::PixelFormat, surface::Surface};
+    if width <= 0 || height <= 0 {
+        return Err("Invalid window shape geometry".into());
+    }
+    // SDL converts window shapes to ARGB32. Allocate in that format and
+    // keep the zeroed pixels outside the mask transparent.
+    Surface::new(width as u32, height as u32, PixelFormat::ARGB32)
+        .map_err(|error| error.to_string())
+}
+
+fn write_mask_rect(pixels: &mut [u8], pitch: usize, rect: SDL_Rect, alpha: u8) {
+    let SDL_Rect { x, y, w, h } = rect;
+    for row in pixels
+        .chunks_exact_mut(pitch)
+        .skip(y as usize)
+        .take(h as usize)
+    {
+        let span = &mut row[x as usize * 4..(x + w) as usize * 4];
+        span.fill(255);
+        if alpha != 255 {
+            for pixel in span.as_chunks_mut::<4>().0 {
+                pixel[0] = alpha;
+            }
+        }
+    }
+}
+
 fn toolbar_mask_surface(
     size: [i32; 2],
     radius: i32,
 ) -> Result<sdl3::surface::Surface<'static>, String> {
-    use sdl3::{pixels::PixelFormat, surface::Surface};
-    let [width, height] = size;
-    if width <= 0 || height <= 0 {
-        return Err("Invalid toolbar shape geometry".into());
-    }
-    let mut surface = Surface::new(width as u32, height as u32, PixelFormat::ARGB32)
-        .map_err(|error| error.to_string())?;
+    let mut surface = mask_surface(size)?;
     let pitch = surface.pitch() as usize;
-    // ARGB32 is alpha-first in memory on both endian orders. Write the
-    // complete mask under one lock, without a native fill call for each row.
+    // ARGB32 is alpha-first in memory on both endian orders.
     surface.with_lock_mut(|pixels| {
         paint_toolbar_mask(size, radius, |rects, alpha| {
-            for &SDL_Rect { x, y, w, h } in rects {
-                for row in pixels
-                    .chunks_exact_mut(pitch)
-                    .skip(y as usize)
-                    .take(h as usize)
-                {
-                    let span = &mut row[x as usize * 4..(x + w) as usize * 4];
-                    span.fill(255);
-                    if alpha != 255 {
-                        for pixel in span.as_chunks_mut::<4>().0 {
-                            pixel[0] = alpha;
-                        }
-                    }
-                }
+            for &rect in rects {
+                write_mask_rect(pixels, pitch, rect, alpha);
             }
             Ok(())
         })
     })?;
+    Ok(surface)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn canvas_mask_surface(
+    size: [i32; 2],
+    cutout: crate::controller::Rect,
+) -> Result<sdl3::surface::Surface<'static>, String> {
+    let mut surface = mask_surface(size)?;
+    let pitch = surface.pitch() as usize;
+    surface.with_lock_mut(|pixels| {
+        for rect in crate::controller::outside(size, Some(cutout)) {
+            write_mask_rect(pixels, pitch, rect.sdl(), 255);
+        }
+    });
     Ok(surface)
 }
 
@@ -3162,7 +3136,7 @@ impl Renderer {
     pub fn begin(&self, window: &Window, color: [f32; 4]) -> Result<([i32; 2], [f32; 2]), String> {
         let (pixels, scale) = window.render_size();
         self.set_render_scale(scale)?;
-        self.set_clip_rect(None);
+        self.try_set_clip_rect(None)?;
         self.clear(color)?;
         Ok((pixels, scale))
     }
@@ -3190,9 +3164,6 @@ impl Renderer {
             unwind_restore.disarm();
         }
         result.and(restore)
-    }
-    pub fn set_clip_rect(&self, clip: Option<&SDL_Rect>) {
-        let _ = self.run_command(RenderCommand::Clip(clip));
     }
     /// Query the renderer's SDR reference white, keeping SDL properties internal.
     pub fn sdr_white_point(&self) -> f32 {
@@ -3500,6 +3471,41 @@ mod tests {
             assert!(row(3).iter().all(|&channel| channel == 255));
         });
         assert!(toolbar_mask_surface([1, 8], 3).is_err());
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn canvas_mask_leaves_a_clipped_controller_cutout_transparent() -> Result<(), String> {
+        let size = [5, 4];
+        let surface = canvas_mask_surface(
+            size,
+            crate::controller::Rect {
+                x: -1,
+                y: 1,
+                w: 3,
+                h: 2,
+            },
+        )?;
+        let pitch = surface.pitch() as usize;
+        surface.with_lock(|pixels| {
+            for (y, row) in pixels.chunks_exact(pitch).enumerate() {
+                for (x, pixel) in row
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .take(size[0] as usize)
+                    .enumerate()
+                {
+                    let expected = if x < 2 && (1..=2).contains(&y) {
+                        0
+                    } else {
+                        255
+                    };
+                    assert_eq!(*pixel, [expected; 4]);
+                }
+            }
+        });
         Ok(())
     }
 

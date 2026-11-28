@@ -620,9 +620,12 @@ impl Ink {
             Some(plan) if plan.key == key => plan,
             slot => {
                 let mut tiles = occupied_tiles(frame, &app.history, region);
-                if software && tiles.len() == 1 {
+                if software {
                     let bands = ink_bands(frame, &app.history, region);
-                    if !bands.is_empty() {
+                    if !bands.is_empty()
+                        && bands.iter().copied().map(rect_area).sum::<i64>()
+                            < tiles.iter().copied().map(rect_area).sum()
+                    {
                         tiles = bands;
                     }
                 }
@@ -885,14 +888,24 @@ fn ink_bands(frame: &Frame<'_>, history: &History, region: SDL_Rect) -> Vec<SDL_
     let mut bands: Vec<SDL_Rect> = Vec::new();
     for band in spans.into_iter().flatten() {
         if let Some(last) = bands.last_mut()
-            && last.x == band.x
-            && last.w == band.w
             && last.y + last.h == band.y
         {
-            last.h += band.h;
-        } else {
-            bands.push(band);
+            // Coalesce adjacent bands when a small horizontal variation would
+            // otherwise consume another SDL target and another blit command.
+            let x = last.x.min(band.x);
+            let merged = SDL_Rect {
+                x,
+                w: (last.x + last.w).max(band.x + band.w) - x,
+                h: last.h + band.h,
+                ..*last
+            };
+            let separate = rect_area(*last) + rect_area(band);
+            if rect_area(merged) - separate <= separate / 8 {
+                *last = merged;
+                continue;
+            }
         }
+        bands.push(band);
     }
     // Leave dense pages on the single blit path.
     let painted = bands.iter().copied().map(rect_area).sum::<i64>();
