@@ -100,11 +100,17 @@ jobs:
             perf_bin=$(find /usr/lib/linux-tools -type f -name perf | sort | tail -n 1)
           fi
           test -n "$perf_bin"
-          if [ "$(cat /proc/sys/kernel/perf_event_paranoid)" -gt 2 ]; then
-            sudo sysctl -w kernel.perf_event_paranoid=2
+          perf_data="$RUNNER_TEMP/overink-perf.data"
+          record() {
+            "$perf_bin" record -e "$1" -F 99 --call-graph dwarf,16384 -o "$perf_data" -- \
+              "$OVERINK_PROFILE_BINARY" --exact app::ink::tests::profile_software_ink --ignored --nocapture
+          }
+          if ! record cpu-clock:u; then
+            # Hosted Ubuntu runners can reject even user-only software events.
+            sudo sysctl -w kernel.perf_event_paranoid=1
+            record cpu-clock
           fi
-          "$perf_bin" record -e cpu-clock:u -F 99 --call-graph dwarf,16384 -o profile/perf.data -- \
-            "$OVERINK_PROFILE_BINARY" --exact app::ink::tests::profile_software_ink --ignored --nocapture
+          mv "$perf_data" profile/perf.data
           "$perf_bin" report --stdio --no-children -i profile/perf.data > profile/cpu-hotspots.txt
           # Emit one symbol and DSO per physical stack frame for stackcollapse.
           "$perf_bin" script --no-inline -i profile/perf.data > "$RUNNER_TEMP/overink-stacks.txt"
