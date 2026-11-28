@@ -15,10 +15,19 @@ unsafe extern "C" {
     ) -> u32;
     pub(crate) safe fn overink_macos_raise_overlay(window_id: u32, keyboard: bool) -> bool;
     pub(crate) safe fn overink_macos_order_toolbar(canvas_id: u32, toolbar_id: u32);
+    pub(super) safe fn overink_macos_remove_metal_view(window_id: u32, tag: isize);
+    pub(crate) safe fn overink_macos_set_passthrough(
+        window_id: u32,
+        pass: bool,
+        refresh_motion: bool,
+    ) -> bool;
     pub(crate) safe fn overink_macos_overlay_crosshair(crosshair: bool);
     pub(crate) safe fn overink_macos_destroy_overlay(window_id: u32) -> bool;
     safe fn overink_macos_install_touch(window_id: u32) -> i32;
     safe fn overink_macos_uninstall_touch(window_id: u32);
+    safe fn overink_macos_install_pencil() -> bool;
+    safe fn overink_macos_take_pencil() -> u32;
+    safe fn overink_macos_uninstall_pencil();
 }
 
 pub struct DirectTouchMonitor {
@@ -51,6 +60,31 @@ impl Drop for DirectTouchMonitor {
     }
 }
 
+/// Tracks Apple Pencil change-mode gestures on AppKit's main thread.
+pub struct PencilModeMonitor {
+    _main_thread: PhantomData<Rc<()>>,
+}
+
+impl PencilModeMonitor {
+    pub fn install() -> Result<Self, String> {
+        overink_macos_install_pencil()
+            .then(|| Self {
+                _main_thread: PhantomData,
+            })
+            .ok_or_else(|| "AppKit did not create an Apple Pencil change-mode monitor".into())
+    }
+
+    pub fn take(&self) -> u32 {
+        overink_macos_take_pencil()
+    }
+}
+
+impl Drop for PencilModeMonitor {
+    fn drop(&mut self) {
+        overink_macos_uninstall_pencil();
+    }
+}
+
 /// Called synchronously by the AppKit gesture *action*, not by a worker.
 /// The ABI contains only initialized scalars; SDL validates all samples.
 #[unsafe(no_mangle)]
@@ -67,8 +101,9 @@ pub extern "C" fn overink_macos_touch_event(
 #[cfg(test)]
 mod tests {
     use super::{
-        overink_macos_create_overlay, overink_macos_destroy_overlay, overink_macos_install_touch,
-        overink_macos_raise_overlay, overink_macos_uninstall_touch,
+        overink_macos_create_overlay, overink_macos_destroy_overlay, overink_macos_install_pencil,
+        overink_macos_install_touch, overink_macos_raise_overlay, overink_macos_set_passthrough,
+        overink_macos_take_pencil, overink_macos_uninstall_pencil, overink_macos_uninstall_touch,
     };
 
     #[test]
@@ -78,11 +113,26 @@ mod tests {
                 overink_macos_create_overlay(100, 60, 0, 0., 0.),
                 overink_macos_raise_overlay(u32::MAX, false),
                 overink_macos_destroy_overlay(u32::MAX),
+                overink_macos_set_passthrough(u32::MAX, true, true),
             )
         })
         .join()
         .map_err(|_| "Off-main-thread overlay bridge panicked")?;
-        assert_eq!(result, (0, false, false));
+        assert_eq!(result, (0, false, false, false));
+        Ok(())
+    }
+
+    #[test]
+    fn off_main_thread_rejects_pencil_monitor() -> Result<(), String> {
+        let result = std::thread::spawn(|| {
+            let installed = overink_macos_install_pencil();
+            let pending = overink_macos_take_pencil();
+            overink_macos_uninstall_pencil();
+            (installed, pending)
+        })
+        .join()
+        .map_err(|_| "Off-main-thread Pencil bridge panicked")?;
+        assert_eq!(result, (false, 0));
         Ok(())
     }
 

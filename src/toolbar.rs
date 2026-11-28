@@ -80,13 +80,16 @@ pub enum Icon {
     Quit,
 }
 
-pub fn image() -> image::RgbaImage {
-    image::load_from_memory(include_bytes!("../assets/overink.png"))
-        .map(|image| image.into_rgba8())
-        .unwrap_or_else(|error| {
-            eprintln!("OverInk: invalid bundled toolbar icon: {error}");
-            image::RgbaImage::new(1, 1)
-        })
+pub fn image() -> &'static image::RgbaImage {
+    static IMAGE: std::sync::OnceLock<image::RgbaImage> = std::sync::OnceLock::new();
+    IMAGE.get_or_init(|| {
+        image::load_from_memory(include_bytes!("../assets/overink.png"))
+            .map(|image| image.into_rgba8())
+            .unwrap_or_else(|error| {
+                eprintln!("OverInk: invalid bundled toolbar icon: {error}");
+                image::RgbaImage::new(1, 1)
+            })
+    })
 }
 
 pub fn brand(ctx: &egui::Context) -> egui::TextureHandle {

@@ -16,6 +16,7 @@ use crate::{
 };
 use std::{
     collections::BTreeSet,
+    sync::{Arc, Weak},
     time::{Duration, Instant},
 };
 
@@ -34,10 +35,11 @@ pub(super) const MAX_EXTENDED_INK_TEXTURE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_EAGER_SDR_BYTES: usize = 4 * 1024 * 1024;
 const CACHE_STROKES: usize = 64;
 const CACHE_POINTS: usize = 8192;
+const SOFTWARE_REPLAY_POINTS: usize = 16_384;
 const CACHE_ALIGNMENT: i32 = 128;
 const INK_TILE_EDGE: i32 = 512;
 const MAX_INK_TILES: usize = 32;
-const INK_BAND_HEIGHT: i32 = 32;
+const INK_BAND_HEIGHT: i32 = u32::BITS as i32;
 const MAX_INK_BANDS: usize = 128;
 const REPLAY_WINDOW: Duration = Duration::from_millis(900);
 const EXPENSIVE_REPLAY: Duration = Duration::from_micros(500);
@@ -71,6 +73,71 @@ struct RibbonStyle {
 struct RibbonBatch {
     vertices: Vec<SDL_Vertex>,
     indices: Vec<u32>,
+}
+
+#[derive(Default)]
+struct SoftwareReplay {
+    aa: f32,
+    color: u64,
+    strokes: Vec<(Weak<Stroke>, RibbonBatch)>,
+}
+
+impl SoftwareReplay {
+    fn keep_prefix(&self, frame: &Frame<'_>, strokes: &[Arc<Stroke>]) -> usize {
+        if self.aa != frame.aa || self.color != frame.color.revision {
+            return 0;
+        }
+        self.strokes
+            .iter()
+            .zip(strokes)
+            .take_while(|((source, _), stroke)| {
+                source
+                    .upgrade()
+                    .is_some_and(|old| Arc::ptr_eq(&old, stroke))
+            })
+            .count()
+    }
+
+    fn update(&mut self, frame: &Frame<'_>, strokes: &[Arc<Stroke>], mesh: &mut Mesh, keep: usize) {
+        self.aa = frame.aa;
+        self.color = frame.color.revision;
+        self.strokes.truncate(keep);
+        self.strokes.reserve(strokes.len() - keep);
+        for stroke in &strokes[keep..] {
+            mesh.update(
+                stroke,
+                &stroke.points,
+                0..=stroke.points.len() - 1,
+                frame.aa,
+                false,
+            );
+            let rgb = frame.color.map(stroke.color.output_rgb(false));
+            let mut vertices = Vec::with_capacity(mesh.vertices.len());
+            set_vertices(
+                mesh,
+                &mut vertices,
+                rgb,
+                stroke.opacity,
+                [1.; 2],
+                [0; 2],
+                false,
+            );
+            self.strokes.push((
+                Arc::downgrade(stroke),
+                RibbonBatch {
+                    vertices,
+                    indices: std::mem::take(&mut mesh.indices),
+                },
+            ));
+        }
+    }
+
+    fn draw(&self, renderer: &Renderer, queued: &mut usize) -> Result<(), String> {
+        for (_, batch) in &self.strokes {
+            submit(renderer, None, &batch.vertices, &batch.indices, queued)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -264,6 +331,7 @@ impl Ink {
         self.unavailable_at = None;
         self.activity = ReplayActivity::default();
         self.bounds = InkBounds::default();
+        self.painter.software_replay = None;
     }
 
     pub fn release_idle_layer(&mut self, now: Instant) -> Option<Instant> {
@@ -552,9 +620,12 @@ impl Ink {
             Some(plan) if plan.key == key => plan,
             slot => {
                 let mut tiles = occupied_tiles(frame, &app.history, region);
-                if software && tiles.len() == 1 {
+                if software {
                     let bands = ink_bands(frame, &app.history, region);
-                    if !bands.is_empty() {
+                    if !bands.is_empty()
+                        && bands.iter().copied().map(rect_area).sum::<i64>()
+                            < tiles.iter().copied().map(rect_area).sum()
+                    {
                         tiles = bands;
                     }
                 }
@@ -577,6 +648,7 @@ impl Ink {
         if self.unavailable_at == Some(target) {
             return self.painter.history(frame, app, 0, None, 1.);
         }
+        self.painter.software_replay = None;
         let layer = self.layer.get_or_insert_with(|| CommittedLayer {
             tiles: Vec::new(),
             region,
@@ -786,51 +858,77 @@ fn ink_bands(frame: &Frame<'_>, history: &History, region: SDL_Rect) -> Vec<SDL_
     if count as usize > MAX_INK_BANDS || rect_area(region) <= i64::from(INK_TILE_EDGE).pow(2) {
         return Vec::new();
     }
-    let mut spans = [None::<SDL_Rect>; MAX_INK_BANDS];
+    let mut spans = [(i32::MAX, i32::MIN, 0_u32); MAX_INK_BANDS];
     visit_ink_regions(frame, history, |area| {
         let Some(area) = pixel_intersection(region, area) else {
             return true;
         };
         let first = ((area.y - region.y) / INK_BAND_HEIGHT) as usize;
         let last = ((area.y + area.h - 1 - region.y) / INK_BAND_HEIGHT) as usize;
-        for (row, span) in spans.iter_mut().enumerate().take(last + 1).skip(first) {
+        for (row, (left, right, covered_rows)) in
+            spans.iter_mut().enumerate().take(last + 1).skip(first)
+        {
             let band_top = region.y + row as i32 * INK_BAND_HEIGHT;
             let top = band_top.max(area.y);
-            let bottom = (band_top.saturating_add(INK_BAND_HEIGHT)).min(area.y + area.h);
-            let mut covered = SDL_Rect {
-                x: area.x,
-                y: top,
-                w: area.w,
-                h: bottom - top,
-            };
-            if let Some(old) = *span {
-                covered.x = covered.x.min(old.x);
-                covered.y = covered.y.min(old.y);
-                covered.w = (area.x + area.w).max(old.x + old.w) - covered.x;
-                covered.h = bottom.max(old.y + old.h) - covered.y;
-            }
-            *span = Some(covered);
+            let bottom = band_top
+                .saturating_add(INK_BAND_HEIGHT)
+                .min(area.y + area.h);
+            *left = (*left).min(area.x);
+            *right = (*right).max(area.x + area.w);
+            let bits = u32::MAX >> (INK_BAND_HEIGHT - (bottom - top));
+            *covered_rows |= bits << (top - band_top);
         }
         true
     });
-    let mut bands: Vec<SDL_Rect> = Vec::new();
-    for band in spans.into_iter().flatten() {
-        if let Some(last) = bands.last_mut()
-            && last.x == band.x
-            && last.w == band.w
-            && last.y + last.h == band.y
-        {
-            last.h += band.h;
-        } else {
-            bands.push(band);
+    let mut bands = Vec::new();
+    for (row, (left, right, mut covered_rows)) in spans.into_iter().enumerate() {
+        // A band can contain disjoint strokes. Preserve the gaps between them
+        // even when both fall inside the same 32-row bucket.
+        while covered_rows != 0 {
+            let first = covered_rows.trailing_zeros();
+            let length = (covered_rows >> first).trailing_ones();
+            covered_rows &= !((u32::MAX >> (u32::BITS - length)) << first);
+            append_ink_band(
+                &mut bands,
+                SDL_Rect {
+                    x: left,
+                    y: region.y + row as i32 * INK_BAND_HEIGHT + first as i32,
+                    w: right - left,
+                    h: length as i32,
+                },
+            );
+            if bands.len() > MAX_INK_TILES {
+                return Vec::new();
+            }
         }
     }
     // Leave dense pages on the single blit path.
     let painted = bands.iter().copied().map(rect_area).sum::<i64>();
-    if bands.len() > MAX_INK_TILES || painted * 4 >= rect_area(region) * 3 {
+    if painted * 4 >= rect_area(region) * 3 {
         return Vec::new();
     }
     bands
+}
+
+fn append_ink_band(bands: &mut Vec<SDL_Rect>, band: SDL_Rect) {
+    if let Some(last) = bands.last_mut()
+        && last.y + last.h == band.y
+    {
+        // A slight widening is cheaper than another SDL target and blit.
+        let x = last.x.min(band.x);
+        let merged = SDL_Rect {
+            x,
+            w: (last.x + last.w).max(band.x + band.w) - x,
+            h: last.h + band.h,
+            ..*last
+        };
+        let separate = rect_area(*last) + rect_area(band);
+        if rect_area(merged) - separate <= separate / 8 {
+            *last = merged;
+            return;
+        }
+    }
+    bands.push(band);
 }
 
 fn rect_area(rect: SDL_Rect) -> i64 {
@@ -971,6 +1069,7 @@ struct StrokePainter {
     mesh: Mesh,
     samples: Vec<Point>,
     vertices: Vec<SDL_Vertex>,
+    software_replay: Option<SoftwareReplay>,
     queued: usize,
     paper: Option<Texture>,
     paper_unavailable: bool,
@@ -1062,10 +1161,53 @@ impl StrokePainter {
         region: Option<InkClip>,
         white: f32,
     ) -> Result<(), String> {
+        let strokes = app.history.strokes();
+        let pending_erasures = &app.input.pending_erasures;
+        let has_erasures = !pending_erasures.is_empty();
+        // The software backend still rasterizes each frame. Reuse the stable
+        // pen geometry while a small page is using direct full replay.
+        let replay = first == 0
+            && region.is_none()
+            && white == 1.
+            && !frame.renderer.extended
+            && frame.renderer.name == "software"
+            && !has_erasures
+            && (1..=CACHE_STROKES).contains(&strokes.len())
+            && app.history.point_count() <= SOFTWARE_REPLAY_POINTS;
+        let mut keep = 0;
+        if replay && let Some(cache) = &mut self.software_replay {
+            keep = cache.keep_prefix(frame, strokes);
+            if keep == strokes.len() {
+                // Undo can remove a suffix without changing any retained stroke.
+                cache.strokes.truncate(keep);
+                return cache.draw(frame.renderer, &mut self.queued);
+            }
+        }
         // The index is incrementally maintained after appends. Reuse its
         // spacing information for full-frame replay too, not just dirty tiles.
         let paths = app.history.stroke_index();
-        for (index, stroke) in app.history.strokes().iter().enumerate().skip(first) {
+        if replay
+            && strokes
+                .iter()
+                .zip(paths.bounds())
+                .skip(keep)
+                .all(|(stroke, bounds)| {
+                    stroke.tool == Tool::Pen
+                        && stroke.opacity > 0.
+                        && (1..=MESH_SEGMENTS + 1).contains(&stroke.points.len())
+                        && bounds.is_some_and(StrokeBounds::samples_are_distinct)
+                })
+        {
+            let cache = self
+                .software_replay
+                .get_or_insert_with(SoftwareReplay::default);
+            cache.update(frame, strokes, &mut self.mesh, keep);
+            return cache.draw(frame.renderer, &mut self.queued);
+        }
+        if region.is_none() {
+            self.software_replay = None;
+        }
+        for (index, stroke) in strokes.iter().enumerate().skip(first) {
             let stroke_bounds = paths.bounds()[index];
             if let Some(region) = region
                 && stroke_bounds.is_none_or(|bounds| {
@@ -1075,22 +1217,25 @@ impl StrokePainter {
                 continue;
             }
             let mut result = Ok(());
-            if !Erasure::preview(
-                stroke,
-                index,
-                app.input.pending_erasures.values(),
-                &app.history,
-                |style, points, bounds| {
-                    if result.is_ok()
-                        && region.is_none_or(|region| {
-                            region
-                                .intersects(bounds.path.padded(style.max_radius() * 2. + frame.aa))
-                        })
-                    {
-                        result = self.path(frame, style, points, region, white, None);
-                    }
-                },
-            ) {
+            if !has_erasures
+                || !Erasure::preview(
+                    stroke,
+                    index,
+                    pending_erasures.values(),
+                    &app.history,
+                    |style, points, bounds| {
+                        if result.is_ok()
+                            && region.is_none_or(|region| {
+                                region.intersects(
+                                    bounds.path.padded(style.max_radius() * 2. + frame.aa),
+                                )
+                            })
+                        {
+                            result = self.path(frame, style, points, region, white, None);
+                        }
+                    },
+                )
+            {
                 if matches!(stroke.tool, Tool::Pen | Tool::Pencil)
                     && stroke.opacity > 0.
                     && stroke_bounds.is_some_and(StrokeBounds::samples_are_distinct)
@@ -1634,6 +1779,67 @@ mod tests {
         app.history.commit();
     }
 
+    fn profiled_pen_strokes(scale: f32) -> impl Iterator<Item = Stroke> {
+        (0..24).map(move |row| Stroke {
+            tool: Tool::Pen,
+            color: InkColor::from_rgb8([80, 160, 240]),
+            width: 4. * scale,
+            opacity: 0.8,
+            pressure_curve: 1.,
+            pressure_enabled: true,
+            points: (0..512)
+                .map(|i| {
+                    Point::new(
+                        (40. + 2. * i as f32) * scale,
+                        (40. + 30. * row as f32 + 8. * (i as f32 / 8.).sin()) * scale,
+                        (i % 100) as f32 / 100.,
+                        [0.; 2],
+                    )
+                })
+                .collect(),
+        })
+    }
+
+    #[test]
+    #[ignore = "software append preparation profiling workload"]
+    fn profile_software_replay_append() -> TestResult {
+        const APPEND_FROM: usize = 12;
+        const REPEATS: usize = 60;
+        let canvas = TestCanvas::new([1920, 1080])?;
+        let frame = canvas.frame();
+        let mut history = History::default();
+        history.append(profiled_pen_strokes(1.));
+        let strokes = history.strokes();
+
+        for keep_prefix in [false, true] {
+            let mut total = Duration::ZERO;
+            for _ in 0..REPEATS {
+                let mut mesh = Mesh::default();
+                let mut cache = SoftwareReplay::default();
+                cache.update(&frame, &strokes[..APPEND_FROM], &mut mesh, 0);
+                let started = Instant::now();
+                for count in APPEND_FROM + 1..=strokes.len() {
+                    let next = &strokes[..count];
+                    let keep = if keep_prefix {
+                        cache.keep_prefix(&frame, next)
+                    } else {
+                        0
+                    };
+                    cache.update(&frame, next, &mut mesh, keep);
+                    std::hint::black_box(&cache);
+                }
+                total += started.elapsed();
+            }
+            let samples = REPEATS * (strokes.len() - APPEND_FROM);
+            let mode = if keep_prefix { "prefix" } else { "full" };
+            println!(
+                "APPEND_PROFILE,{mode},{samples},{:.3}",
+                total.as_secs_f64() * 1_000_000. / samples as f64
+            );
+        }
+        Ok(())
+    }
+
     // Opt-in CPU profiling fixture. Compare direct and indexed replay with
     // the production committed-ink cache on the same software surface.
     // Timed frames include SDL submission/present, but not fixture creation.
@@ -1645,25 +1851,8 @@ mod tests {
             let canvas = TestCanvas::new([width, height])?;
             let mut app = app();
             let scale = width as f32 / 1920.;
-            for row in 0..24 {
-                app.history.append(std::iter::once(Stroke {
-                    tool: Tool::Pen,
-                    color: InkColor::from_rgb8([80, 160, 240]),
-                    width: 4. * scale,
-                    opacity: 0.8,
-                    pressure_curve: 1.,
-                    pressure_enabled: true,
-                    points: (0..512)
-                        .map(|i| {
-                            Point::new(
-                                (40. + 2. * i as f32) * scale,
-                                (40. + 30. * row as f32 + 8. * (i as f32 / 8.).sin()) * scale,
-                                (i % 100) as f32 / 100.,
-                                [0.; 2],
-                            )
-                        })
-                        .collect(),
-                }));
+            for stroke in profiled_pen_strokes(scale) {
+                app.history.append(std::iter::once(stroke));
             }
             for i in 0..512 {
                 app.laser_sample(
@@ -1775,6 +1964,64 @@ mod tests {
     }
 
     #[test]
+    fn software_replay_reuses_only_the_current_pen_strokes() -> TestResult {
+        let canvas = TestCanvas::new([112, 72])?;
+        let frame = canvas.frame();
+        let mut app = app();
+        let mut replay = StrokePainter::default();
+        for (index, y) in [16., 16., 52., 52.].into_iter().enumerate() {
+            if index == 0 || index == 2 {
+                app.history.undo();
+                commit(&mut app, Tool::Pen, [20, 150, 240], &[[12., y], [95., y]]);
+            }
+            let prev = replay.software_replay.as_ref();
+            assert_eq!(
+                prev.is_some_and(|cache| cache.keep_prefix(&frame, app.history.strokes())
+                    == app.history.strokes().len()),
+                index % 2 != 0
+            );
+            canvas.renderer.clear([0.; 4])?;
+            replay.queued = 0;
+            replay.history(&frame, &app, 0, None, 1.)?;
+            let actual = canvas.pixels()?;
+            canvas.renderer.clear([0.; 4])?;
+            for stroke in app.history.strokes() {
+                StrokePainter::default().stroke(&frame, stroke)?;
+            }
+            assert_eq!(actual, canvas.pixels()?);
+        }
+        commit(
+            &mut app,
+            Tool::Pen,
+            [220, 50, 100],
+            &[[12., 16.], [95., 16.]],
+        );
+        let cache = replay
+            .software_replay
+            .as_ref()
+            .ok_or("Missing prior pen geometry")?;
+        assert_eq!(cache.keep_prefix(&frame, app.history.strokes()), 1);
+        canvas.renderer.clear([0.; 4])?;
+        replay.queued = 0;
+        replay.history(&frame, &app, 0, None, 1.)?;
+        assert!(canvas.pixel(56, 16)?[3] > 0);
+        assert!(canvas.pixel(56, 52)?[3] > 0);
+        app.history.undo();
+        canvas.renderer.clear([0.; 4])?;
+        replay.queued = 0;
+        replay.history(&frame, &app, 0, None, 1.)?;
+        assert_eq!(canvas.pixel(56, 16)?[3], 0);
+        assert!(canvas.pixel(56, 52)?[3] > 0);
+        app.erase_sample(1, Point::new(56., 52., 1., [0.; 2]));
+        canvas.renderer.clear([0.; 4])?;
+        replay.queued = 0;
+        replay.history(&frame, &app, 0, None, 1.)?;
+        assert!(replay.software_replay.is_none());
+        assert_eq!(canvas.pixel(56, 52)?[3], 0);
+        Ok(())
+    }
+
+    #[test]
     fn history_matches_prepared_pen_samples_with_and_without_merges() -> TestResult {
         let direct = TestCanvas::new([128, 96])?;
         let replay = TestCanvas::new([128, 96])?;
@@ -1873,6 +2120,37 @@ mod tests {
             difference.is_none(),
             "Tiled output differs at index {difference:?}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn sparse_bands_skip_empty_rows_inside_a_bucket() -> TestResult {
+        let canvas = TestCanvas::new([960, 720])?;
+        let mut app = app();
+        app.history.append([7., 25.].into_iter().map(|y| {
+            Stroke {
+                tool: Tool::Pen,
+                color: InkColor::default(),
+                width: 1.,
+                opacity: 1.,
+                pressure_curve: 1.,
+                pressure_enabled: false,
+                points: [16., 912.]
+                    .into_iter()
+                    .map(|x| Point::new(x, y, 1., [0.; 2]))
+                    .collect(),
+            }
+        }));
+        let full = SDL_Rect {
+            x: 0,
+            y: 0,
+            w: 960,
+            h: 720,
+        };
+        let bands = ink_bands(&canvas.frame(), &app.history, full);
+        assert_eq!(bands.len(), 2);
+        assert!(bands[0].y + bands[0].h < 16);
+        assert!(bands[1].y > 16);
         Ok(())
     }
 

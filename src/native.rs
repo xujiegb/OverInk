@@ -176,36 +176,13 @@ fn passthrough_style(
 }
 
 #[cfg(target_os = "macos")]
-#[deny(clippy::undocumented_unsafe_blocks)]
 impl Passthrough {
     pub fn set(&mut self, window: &Window, pass: bool) -> Result<(), String> {
-        use objc2::{
-            msg_send,
-            runtime::{AnyObject, Bool},
-        };
-
-        let identity = window
-            .cocoa_window()
-            .ok_or("No Cocoa window handle")?
-            .as_non_null();
-        // SAFETY: SDL owns the live NSWindow. The Cocoa selectors and Bool
-        // return/argument types match the NSWindow methods being called.
-        unsafe {
-            let cocoa = identity.as_ptr().cast::<AnyObject>();
-            if self.applied != Some((window.id, pass)) {
-                // SDL's Cocoa listener can reset ignoresMouseEvents when it
-                // handles motion for a transparent window. Disable that motion
-                // while passing input through, as Cocoa does for tooltips.
-                let _: () = msg_send![cocoa, setAcceptsMouseMovedEvents: Bool::new(!pass)];
-            }
-            // A window-shape change or a queued event may have reset the
-            // property even if the requested mode is unchanged.
-            let ignoring: Bool = msg_send![cocoa, ignoresMouseEvents];
-            if ignoring.as_bool() != pass {
-                let _: () = msg_send![cocoa, setIgnoresMouseEvents: Bool::new(pass)];
-            }
+        let next = (window.id, pass);
+        if !macos::overink_macos_set_passthrough(window.id.0, pass, self.applied != Some(next)) {
+            return Err("No Cocoa window handle".into());
         }
-        self.applied = Some((window.id, pass));
+        self.applied = Some(next);
         Ok(())
     }
 }

@@ -1289,13 +1289,18 @@ mod tests {
         }
         let saved = write_screenshot(
             &image,
-            Destination::Replace(path.clone()),
+            Destination::Replace(path),
             false,
             1.,
             &AtomicU8::new(SAVE_PENDING),
+        )
+        .map_err(|error| format!("{error:?}"))?;
+        assert_eq!(
+            saved.file_name().and_then(|name| name.to_str()),
+            Some("capture.png")
         );
-        assert_eq!(saved.map_err(|error| format!("{error:?}"))?, path);
-        assert!(image::open(path).is_ok());
+        assert_eq!(saved.parent(), Some(folder.path()));
+        assert!(image::open(saved).is_ok());
         assert_eq!(std::fs::read_dir(folder.path())?.count(), 1);
         Ok(())
     }

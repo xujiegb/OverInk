@@ -464,21 +464,18 @@ mod tests {
             refresh: 60.,
             scale: 1.5,
         };
-        let left = display(1, [-800, -200, 800, 600]);
-        let right = display(2, [0, 0, 800, 600]);
+        let displays = [
+            display(1, [-800, -200, 800, 600]),
+            display(2, [0, 0, 800, 600]),
+        ];
+        let right = &displays[1];
         let local = Rect::from_min_size(egui::pos2(30., 20.), egui::vec2(10., 12.));
         let selection = Crop {
             region: local,
             size: [800., 600.],
         };
-        let (crop, sizes) = selection.for_portal(
-            &right,
-            &[left, right.clone()],
-            [1200, 900],
-            Some(1.5),
-            None,
-            None,
-        )?;
+        let (crop, sizes) =
+            selection.for_portal(right, &displays, [1200, 900], Some(1.5), None, None)?;
         assert_eq!(sizes, [[1600, 800], [2400, 1200], [0, 0]]);
         assert_eq!(crop.region, local.translate(egui::vec2(800., 200.)));
         assert!(!sizes.contains(&[1200, 900]));
@@ -486,8 +483,8 @@ mod tests {
         assert!(
             selection
                 .for_portal(
-                    &right,
-                    &[right.clone(), right.clone()],
+                    right,
+                    &[display(2, right.bounds), display(2, right.bounds)],
                     [1200, 900],
                     Some(1.5),
                     None,

@@ -27,6 +27,68 @@ static NSWindow *OverInkCocoaWindow(SDL_Window *window) {
         SDL_GetWindowProperties(window), "SDL.window.cocoa.window", NULL);
 }
 
+void overink_macos_remove_metal_view(uint32_t window_id, intptr_t tag) {
+    if ([NSThread isMainThread]) {
+        [[OverInkCocoaWindow(SDL_GetWindowFromID(window_id)).contentView viewWithTag:tag]
+            removeFromSuperview];
+    }
+}
+
+bool overink_macos_set_passthrough(uint32_t window_id, bool pass, bool refresh_motion) {
+    if (![NSThread isMainThread]) {
+        return false;
+    }
+    __auto_type window = OverInkCocoaWindow(SDL_GetWindowFromID(window_id));
+    if (window == nil) {
+        return false;
+    }
+    if (refresh_motion) {
+        // SDL's Cocoa listener may reset ignoresMouseEvents during motion.
+        window.acceptsMouseMovedEvents = !pass;
+    }
+    if (window.ignoresMouseEvents != pass) {
+        window.ignoresMouseEvents = pass;
+    }
+    return true;
+}
+
+// AppKit owns the event and the monitor token. Only counts cross to Rust.
+static id OverInkPencilMonitor;
+static uint32_t OverInkPencilPending;
+
+bool overink_macos_install_pencil(void) {
+    if (![NSThread isMainThread] || OverInkPencilMonitor != nil) {
+        return false;
+    }
+    // NSEventMaskChangeMode, also when building against an older SDK.
+    const NSEventMask changeMode = 1ULL << 38;
+    OverInkPencilMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:changeMode
+        handler:^NSEvent *(NSEvent *event) {
+            if (OverInkPencilPending < UINT32_MAX) {
+                OverInkPencilPending++;
+            }
+            return event;
+        }];
+    return OverInkPencilMonitor != nil;
+}
+
+uint32_t overink_macos_take_pencil(void) {
+    if (![NSThread isMainThread]) {
+        return 0;
+    }
+    uint32_t pending = OverInkPencilPending;
+    OverInkPencilPending = 0;
+    return pending;
+}
+
+void overink_macos_uninstall_pencil(void) {
+    if ([NSThread isMainThread] && OverInkPencilMonitor != nil) {
+        [NSEvent removeMonitor:OverInkPencilMonitor];
+        OverInkPencilMonitor = nil;
+        OverInkPencilPending = 0;
+    }
+}
+
 // SDL invalidates each window's cursor rect when the picker or screenshot
 // changes the cursor. External views supply the replacement rect themselves.
 static BOOL OverInkOverlayCrosshair = NO;

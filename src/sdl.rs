@@ -6,13 +6,14 @@ mod dialog_native;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod dialog_unix;
 pub use sdl3_sys::{
-    blendmode::*, clipboard::*, error::*, events::*, hints::*, init::*, keyboard::*, keycode::*,
-    locale::*, mouse::*, pen::*, pixels::*, properties::*, rect::*, render::*, stdinc::*,
-    surface::*, touch::*, video::*,
+    blendmode::*, clipboard::*, error::*, events::*, init::*, keyboard::*, keycode::*, locale::*,
+    mouse::*, pen::*, pixels::*, properties::*, rect::*, render::*, stdinc::*, surface::*,
+    touch::*, video::*,
 };
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+use std::marker::PhantomData;
 use std::{
     ffi::{CStr, CString, c_void},
-    marker::PhantomData,
     ptr::{self, NonNull},
 };
 
@@ -36,11 +37,13 @@ static WAYLAND_SCALE_TO_DISPLAY_FORCED: std::sync::atomic::AtomicBool =
 /// Window that owns the underlying system object. This also inherits the
 /// Window's thread-safety restrictions rather than returning a free-floating
 /// NonNull pointer to safe callers.
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
 pub struct NativeWindowHandle<'a> {
     raw: NonNull<c_void>,
     _window: PhantomData<&'a Window>,
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
 impl NativeWindowHandle<'_> {
     /// Keep the non-null identity and the SDL window borrow tied together
     /// across all supported native backends.
@@ -50,24 +53,22 @@ impl NativeWindowHandle<'_> {
 }
 
 /// Known SDL window property keys, with no arbitrary raw C-string input.
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
 enum NativeWindowProperty {
     #[cfg(target_os = "windows")]
     Win32Hwnd,
-    #[cfg(target_os = "macos")]
-    CocoaWindow,
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     WaylandSurface,
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     WaylandDisplay,
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
 impl NativeWindowProperty {
     fn key(&self) -> Option<NonNull<std::ffi::c_char>> {
         let key = match self {
             #[cfg(target_os = "windows")]
             Self::Win32Hwnd => SDL_PROP_WINDOW_WIN32_HWND_POINTER,
-            #[cfg(target_os = "macos")]
-            Self::CocoaWindow => SDL_PROP_WINDOW_COCOA_WINDOW_POINTER,
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             Self::WaylandSurface => SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER,
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -82,7 +83,7 @@ impl NativeWindowProperty {
 /// be wrapped by this type.
 struct SdlAllocation<T>(NonNull<T>);
 
-/// The only permitted SDL lifecycle operations. Native handles only enter
+/// Native handles only enter
 /// these variants from their unique Rust owners; no foreign function pointer
 /// or raw buffer can be supplied by application code.
 enum SdlNativeAction<'a> {
@@ -93,11 +94,6 @@ enum SdlNativeAction<'a> {
     FreeAllocation(NonNull<c_void>),
     CreateProperties,
     DestroyProperties(SDL_PropertiesID),
-    CreateCrosshair,
-    SetCursor(Option<NonNull<SDL_Cursor>>),
-    CurrentCursor,
-    DefaultCursor,
-    DestroyCursor(NonNull<SDL_Cursor>),
     DestroySurface(NonNull<SDL_Surface>),
     DestroyTexture(NonNull<SDL_Texture>),
     DestroyRenderer(NonNull<SDL_Renderer>),
@@ -115,27 +111,23 @@ enum SdlNativeAction<'a> {
     ),
     #[cfg(test)]
     ReadSurfacePixel(&'a OwnedSurface, i32, i32),
-    ClipboardWrite(&'a CStr),
     ClipboardRead,
     ReadError,
-    ClearError,
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     WaylandScaleToDisplay,
     WindowIccProfile(&'a Window),
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
     WindowPointer(&'a Window, NativeWindowProperty),
     WindowNumber(&'a Window, WindowNumberQuery),
     WindowFloat(&'a Window, WindowFloatQuery),
     #[cfg(target_os = "windows")]
     WindowsMonitor(u32),
-    SystemTheme,
     IndirectTouch(SDL_TouchID),
     CaptureMouse(bool),
     MouseButtonsReleased,
     PollEvent(&'a mut SDL_Event),
     WaitEvent(i32),
-    PushUserEvent(&'a mut SDL_Event),
-    #[cfg(target_os = "macos")]
-    PushMacosTouch(&'a mut SDL_Event),
+    PushEvent(&'a mut SDL_Event),
     #[cfg(target_os = "linux")]
     FlushQuitEvent,
 }
@@ -146,11 +138,11 @@ enum SdlNativeResult {
     ScreenshotTimestamp(String),
     EventType(u32),
     Properties(SDL_PropertiesID),
-    Cursor(Option<NonNull<SDL_Cursor>>),
     Success(bool),
     Text(Option<String>),
     Profile(Option<Vec<u8>>),
     Window(Option<NonNull<SDL_Window>>),
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
     NativePointer(Option<NonNull<c_void>>),
     Number(i64),
     Float(f32),
@@ -159,21 +151,12 @@ enum SdlNativeResult {
     ColorProperty((bool, f32)),
     #[cfg(test)]
     Pixel(Option<[u8; 4]>),
-    Theme(SDL_SystemTheme),
 }
 
 impl SdlNativeResult {
     fn properties(self) -> Option<SDL_PropertiesID> {
         if let Self::Properties(id) = self {
             Some(id)
-        } else {
-            None
-        }
-    }
-
-    fn cursor(self) -> Option<NonNull<SDL_Cursor>> {
-        if let Self::Cursor(cursor) = self {
-            cursor
         } else {
             None
         }
@@ -199,6 +182,7 @@ impl SdlNativeResult {
         }
     }
 
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
     fn native_pointer(self) -> Option<NonNull<c_void>> {
         if let Self::NativePointer(raw) = self {
             raw
@@ -272,21 +256,13 @@ impl SdlNativeResult {
             "OverInk".into()
         }
     }
-
-    fn theme(self) -> SDL_SystemTheme {
-        if let Self::Theme(theme) = self {
-            theme
-        } else {
-            SDL_SYSTEM_THEME_UNKNOWN
-        }
-    }
 }
 
 /// Native SDL operations are restricted to typed actions; application code
 /// never receives unsafe FFI functions or naked SDL-owned allocations.
 fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
     // SAFETY: Destruction variants are created only by unique Rust owners.
-    // Cursor, device, event-poll and video operations are checked at the
+    // Device, event-poll and video operations are checked at the
     // owning main-thread wrappers. SDL_PushEvent copies the locally built
     // user event, and SDL_WaitEventTimeout receives no output buffer.
     // Getter outputs are initialized local scalars. SDL_free only receives
@@ -321,22 +297,6 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
             }
             SdlNativeAction::DestroyProperties(id) => {
                 SDL_DestroyProperties(id);
-                SdlNativeResult::Done
-            }
-            SdlNativeAction::CreateCrosshair => SdlNativeResult::Cursor(NonNull::new(
-                SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_CROSSHAIR),
-            )),
-            SdlNativeAction::SetCursor(cursor) => SdlNativeResult::Success(SDL_SetCursor(
-                cursor.map_or(ptr::null_mut(), NonNull::as_ptr),
-            )),
-            SdlNativeAction::CurrentCursor => {
-                SdlNativeResult::Cursor(NonNull::new(SDL_GetCursor()))
-            }
-            SdlNativeAction::DefaultCursor => {
-                SdlNativeResult::Cursor(NonNull::new(SDL_GetDefaultCursor()))
-            }
-            SdlNativeAction::DestroyCursor(cursor) => {
-                SDL_DestroyCursor(cursor.as_ptr());
                 SdlNativeResult::Done
             }
             SdlNativeAction::DestroySurface(surface) => {
@@ -439,9 +399,6 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
                 };
                 SdlNativeResult::Pixel(pixel)
             }
-            SdlNativeAction::ClipboardWrite(value) => {
-                SdlNativeResult::Success(SDL_SetClipboardText(value.as_ptr()))
-            }
             SdlNativeAction::ClipboardRead => {
                 // SDL owns the returned allocation until the RAII guard drops.
                 let text = if let Some(raw) = NonNull::new(SDL_GetClipboardText()) {
@@ -466,15 +423,16 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
                 };
                 SdlNativeResult::Text(text)
             }
-            SdlNativeAction::ClearError => {
-                SDL_ClearError();
-                SdlNativeResult::Done
-            }
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-            SdlNativeAction::WaylandScaleToDisplay => SdlNativeResult::Success(SDL_GetHintBoolean(
-                SDL_HINT_VIDEO_WAYLAND_SCALE_TO_DISPLAY,
-                false,
-            )),
+            SdlNativeAction::WaylandScaleToDisplay => {
+                use sdl3_sys::hints::{
+                    SDL_GetHintBoolean, SDL_HINT_VIDEO_WAYLAND_SCALE_TO_DISPLAY,
+                };
+                SdlNativeResult::Success(SDL_GetHintBoolean(
+                    SDL_HINT_VIDEO_WAYLAND_SCALE_TO_DISPLAY,
+                    false,
+                ))
+            }
             SdlNativeAction::WindowIccProfile(window) => {
                 // SDL returns an owned profile allocation. The typed Window
                 // borrow keeps its SDL handle live through the synchronous
@@ -499,6 +457,7 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
                     SdlNativeResult::Profile(None)
                 }
             }
+            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
             SdlNativeAction::WindowPointer(window, property) => {
                 let raw = if let Some(key) = property.key() {
                     NonNull::new(SDL_GetPointerProperty(
@@ -560,7 +519,6 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
                 .map(|handle| handle.as_ptr().expose_provenance());
                 SdlNativeResult::WindowsMonitor(handle)
             }
-            SdlNativeAction::SystemTheme => SdlNativeResult::Theme(SDL_GetSystemTheme()),
             SdlNativeAction::IndirectTouch(device) => SdlNativeResult::Success(matches!(
                 SDL_GetTouchDeviceType(device),
                 SDL_TOUCH_DEVICE_INDIRECT_ABSOLUTE | SDL_TOUCH_DEVICE_INDIRECT_RELATIVE
@@ -581,11 +539,7 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
             SdlNativeAction::WaitEvent(timeout) => {
                 SdlNativeResult::Success(SDL_WaitEventTimeout(ptr::null_mut(), timeout))
             }
-            SdlNativeAction::PushUserEvent(event) => SdlNativeResult::Success(SDL_PushEvent(event)),
-            #[cfg(target_os = "macos")]
-            SdlNativeAction::PushMacosTouch(event) => {
-                SdlNativeResult::Success(SDL_PushEvent(event))
-            }
+            SdlNativeAction::PushEvent(event) => SdlNativeResult::Success(SDL_PushEvent(event)),
             #[cfg(target_os = "linux")]
             SdlNativeAction::FlushQuitEvent => {
                 SDL_FlushEvent(SDL_EVENT_QUIT.0);
@@ -613,6 +567,14 @@ pub fn check(value: bool) -> Result<(), String> {
 pub fn event_type(event: &SDL_Event) -> SDL_EventType {
     event.event_type()
 }
+fn without_nuls(value: &str) -> std::borrow::Cow<'_, str> {
+    if value.contains('\0') {
+        std::borrow::Cow::Owned(value.replace('\0', ""))
+    } else {
+        std::borrow::Cow::Borrowed(value)
+    }
+}
+
 pub fn cstring(v: &str) -> CString {
     CString::new(v).unwrap_or_else(|_| {
         // Only malformed inputs need a second allocation to remove NULs.
@@ -656,7 +618,7 @@ impl Runtime {
         let backend = startup_driver(x11, smoke, wayland);
         use sdl3::hint::{self, Hint};
         if let Some(name) = backend {
-            let _ = sdl_native(SdlNativeAction::ClearError);
+            sdl3::clear_error();
             check(hint::set_with_priority(
                 "SDL_VIDEO_DRIVER",
                 name,
@@ -694,7 +656,7 @@ impl Runtime {
             Some(crate::VERSION),
             Some("org.overink.OverInk"),
         );
-        let _ = sdl_native(SdlNativeAction::ClearError);
+        sdl3::clear_error();
         let video = sdl3::init()
             .and_then(|context| context.video())
             .map_err(|error| {
@@ -953,7 +915,12 @@ pub fn system_theme() -> SDL_SystemTheme {
     // SDL's video/theme query must run on the main thread. Avoid querying
     // shared video state from arbitrary safe Rust worker threads.
     if is_main_thread() {
-        sdl_native(SdlNativeAction::SystemTheme).theme()
+        use sdl3::video::SystemTheme;
+        match sdl3::VideoSubsystem::get_system_theme() {
+            SystemTheme::Dark => SDL_SYSTEM_THEME_DARK,
+            SystemTheme::Light => SDL_SYSTEM_THEME_LIGHT,
+            SystemTheme::Unknown => SDL_SYSTEM_THEME_UNKNOWN,
+        }
     } else {
         SDL_SYSTEM_THEME_UNKNOWN
     }
@@ -976,7 +943,7 @@ pub fn push_user_event(ty: u32) -> bool {
     // zeroed and carries no borrowed native data.
     let mut event = SDL_Event::default();
     event.r#type = ty;
-    sdl_native(SdlNativeAction::PushUserEvent(&mut event)).succeeded()
+    sdl_native(SdlNativeAction::PushEvent(&mut event)).succeeded()
 }
 
 /// Push a macOS 27 AppKit *direct finger* sample into the existing checked
@@ -1014,7 +981,7 @@ pub fn push_macos_direct_touch(window_id: u32, finger_id: u64, phase: u32, x: f3
         pressure: 1.,
         ..Default::default()
     };
-    sdl_native(SdlNativeAction::PushMacosTouch(&mut event)).succeeded()
+    sdl_native(SdlNativeAction::PushEvent(&mut event)).succeeded()
 }
 
 /// Owned display metadata, copied from SDL before its native allocation is freed.
@@ -1090,10 +1057,15 @@ pub fn mod_state() -> SDL_Keymod {
     }
 }
 
-/// Copy text to the native clipboard using an owned NUL-terminated argument.
+/// Copy text to the native clipboard, removing embedded NULs as SDL expects.
 pub fn set_clipboard_text(value: &str) {
-    let text = cstring(value);
-    let _ = sdl_native(SdlNativeAction::ClipboardWrite(&text));
+    if !is_main_thread() || !SDL_VIDEO_READY.load(std::sync::atomic::Ordering::Acquire) {
+        return;
+    }
+    let Ok(video) = sdl3::init().and_then(|context| context.video()) else {
+        return;
+    };
+    let _ = video.clipboard().set_clipboard_text(&without_nuls(value));
 }
 
 /// Copy SDL-owned clipboard text before releasing its allocation through RAII.
@@ -1226,36 +1198,72 @@ pub fn capture_mouse(enable: bool) -> bool {
     sdl_native(SdlNativeAction::CaptureMouse(enable)).succeeded()
 }
 
-/// Keep the cursor allocation owned and restore the default on drop.
-pub struct SystemCursor(NonNull<SDL_Cursor>);
+/// An SDL-owned cursor. SDL restores the default when dropping the active cursor.
+pub struct SystemCursor {
+    _cursor: sdl3::mouse::Cursor,
+    #[cfg(target_os = "macos")]
+    activation: u64,
+}
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Default)]
+struct CrosshairActivation {
+    latest: u64,
+    active: Option<u64>,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl CrosshairActivation {
+    fn install(&mut self) -> u64 {
+        self.latest = self.latest.wrapping_add(1);
+        self.active = Some(self.latest);
+        self.latest
+    }
+
+    fn release(&mut self, activation: u64) -> bool {
+        if self.active == Some(activation) {
+            self.active = None;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+thread_local! {
+    static CROSSHAIR_ACTIVATION: std::cell::RefCell<CrosshairActivation> =
+        std::cell::RefCell::new(CrosshairActivation::default());
+}
 
 impl SystemCursor {
     pub fn crosshair() -> Option<Self> {
         if !is_main_thread() || !SDL_VIDEO_READY.load(std::sync::atomic::Ordering::Acquire) {
             return None;
         }
-        let cursor = sdl_native(SdlNativeAction::CreateCrosshair).cursor()?;
-        if !sdl_native(SdlNativeAction::SetCursor(Some(cursor))).succeeded() {
-            let _ = sdl_native(SdlNativeAction::DestroyCursor(cursor));
-            return None;
-        }
+        let cursor = sdl3::mouse::Cursor::from_system(sdl3::mouse::SystemCursor::Crosshair).ok()?;
         #[cfg(target_os = "macos")]
-        crate::native::macos::overink_macos_overlay_crosshair(true);
-        Some(Self(cursor))
+        let activation = CROSSHAIR_ACTIVATION.with(|state| {
+            let activation = state.borrow_mut().install();
+            crate::native::macos::overink_macos_overlay_crosshair(true);
+            activation
+        });
+        cursor.set();
+        Some(Self {
+            _cursor: cursor,
+            #[cfg(target_os = "macos")]
+            activation,
+        })
     }
 }
 
+#[cfg(target_os = "macos")]
 impl Drop for SystemCursor {
     fn drop(&mut self) {
-        // A later cursor may have replaced this one before Drop, so only
-        // restore the default when we still own the active cursor.
-        if sdl_native(SdlNativeAction::CurrentCursor).cursor() == Some(self.0) {
-            let default = sdl_native(SdlNativeAction::DefaultCursor).cursor();
-            let _ = sdl_native(SdlNativeAction::SetCursor(default));
-            #[cfg(target_os = "macos")]
+        if CROSSHAIR_ACTIVATION.with(|state| state.borrow_mut().release(self.activation)) {
+            // Update external Cocoa views before SDL redraws the default cursor.
             crate::native::macos::overink_macos_overlay_crosshair(false);
         }
-        let _ = sdl_native(SdlNativeAction::DestroyCursor(self.0));
     }
 }
 
@@ -1373,16 +1381,15 @@ enum WindowCommand<'a> {
     },
     Show(bool),
     SetParent(Option<&'a Window>),
-    ToolbarIcon([i32; 2], &'a mut [u8]),
-    RoundedCorners([i32; 2], i32),
     #[cfg(not(target_os = "windows"))]
-    ShapeRegions([i32; 2], Option<&'a [SDL_Rect]>),
+    Shape(Option<&'a sdl3::surface::SurfaceRef>),
 }
 
 /// Closed SDL window constructors, retaining borrowed title and parent
 /// references only until native creation completes.
 enum WindowCreation<'a> {
-    Main(&'a CStr, i32, i32, WindowStyle),
+    #[cfg(target_os = "macos")]
+    CocoaOverlay(&'a CStr, i32, i32, WindowStyle),
     Tooltip(&'a Window, [i32; 4]),
 }
 
@@ -1410,8 +1417,8 @@ pub struct Window {
     // Only the SDL adapter may use or destroy this owned native handle.
     raw: NonNull<SDL_Window>,
     pub id: SDL_WindowID,
-    // The Rust SDL binding owns the standard toolbar and its hit test.
-    toolbar_owner: Option<sdl3::video::Window>,
+    // Ordinary windows use the Rust SDL owner, including any hit-test callback.
+    owner: Option<sdl3::video::Window>,
 }
 impl Window {
     /// Resolve an ID just returned by an SDL window constructor.
@@ -1534,15 +1541,14 @@ impl Window {
         unsafe {
             match command {
                 WindowCommand::InputArea(area) => {
-                    SDL_SetTextInputArea(self.raw.as_ptr(), area, 0);
-                    Ok(())
+                    check(SDL_SetTextInputArea(self.raw.as_ptr(), area, 0))
                 }
                 WindowCommand::SyncInput(enabled) => {
                     if enabled != SDL_TextInputActive(self.raw.as_ptr()) {
                         if enabled {
                             // Mouse/pen editor activation must not summon an OSK.
                             // The explicit touch/button request below opts in.
-                            SDL_SetHint(SDL_HINT_ENABLE_SCREEN_KEYBOARD, c"0".as_ptr());
+                            sdl3::hint::set("SDL_ENABLE_SCREEN_KEYBOARD", "0");
                             check(SDL_StartTextInput(self.raw.as_ptr()))
                         } else {
                             check(SDL_StopTextInput(self.raw.as_ptr()))
@@ -1556,12 +1562,12 @@ impl Window {
                     // SDL's hint must be set before StartTextInput. Restart
                     // just this editor's input method, then restore the normal
                     // non-OSK policy for subsequent mouse/pen editor activation.
-                    check(SDL_SetHint(SDL_HINT_ENABLE_SCREEN_KEYBOARD, c"1".as_ptr()))?;
+                    check(sdl3::hint::set("SDL_ENABLE_SCREEN_KEYBOARD", "1"))?;
                     if SDL_TextInputActive(self.raw.as_ptr()) {
                         let _ = SDL_StopTextInput(self.raw.as_ptr());
                     }
                     let result = check(SDL_StartTextInput(self.raw.as_ptr()));
-                    let _ = SDL_SetHint(SDL_HINT_ENABLE_SCREEN_KEYBOARD, c"0".as_ptr());
+                    sdl3::hint::set("SDL_ENABLE_SCREEN_KEYBOARD", "0");
                     result
                 }
                 WindowCommand::ClearComposition => {
@@ -1634,155 +1640,11 @@ impl Window {
                     }
                     check(SDL_SetWindowParent(self.raw.as_ptr(), raw))
                 }
-                WindowCommand::ToolbarIcon([width, height], pixels) => {
-                    // The pixel slice remains mutably borrowed until the
-                    // surface has been released by the OwnedSurface guard.
-                    let pitch = width.checked_mul(4).ok_or("Invalid toolbar icon pitch")?;
-                    let expected = usize::try_from(height)
-                        .ok()
-                        .and_then(|h| usize::try_from(pitch).ok().and_then(|p| h.checked_mul(p)))
-                        .ok_or("Invalid toolbar icon dimensions")?;
-                    if width <= 0 || height <= 0 || pixels.len() != expected {
-                        return Err("Invalid toolbar icon pixel buffer".into());
-                    }
-                    let surface = SDL_CreateSurfaceFrom(
-                        width,
-                        height,
-                        SDL_PIXELFORMAT_RGBA32,
-                        pixels.as_mut_ptr().cast(),
-                        pitch,
-                    );
-                    if let Some(surface) = NonNull::new(surface).map(OwnedSurface)
-                        && !cfg!(target_os = "macos")
-                    {
-                        // Cocoa maps SDL_SetWindowIcon to NSApplication's Dock icon.
-                        // Keep the correctly sized .icns from the macOS app bundle.
-                        SDL_SetWindowIcon(self.raw.as_ptr(), surface.as_non_null().as_ptr());
-                    }
-                    Ok(())
-                }
-                WindowCommand::RoundedCorners([width, height], radius) => {
-                    if width <= 0 || height <= 0 || radius <= 0 {
-                        return Err("Invalid toolbar shape geometry".into());
-                    }
-                    let radius = radius.min(width / 2).min(height / 2);
-                    if radius == 0 {
-                        return Err("Toolbar window is too small for rounded corners".into());
-                    }
-                    let surface = OwnedSurface(
-                        NonNull::new(SDL_CreateSurface(width, height, SDL_PIXELFORMAT_ARGB32))
-                            .ok_or_else(error)?,
-                    );
-                    let surface_handle = surface.as_non_null();
-                    let opaque = SDL_MapSurfaceRGBA(surface_handle.as_ptr(), 255, 255, 255, 255);
-
-                    // SDL_CreateSurface zeroes the pixels, so only paint
-                    // the opaque interior and antialiased corner edges.
-                    let middle = SDL_Rect {
-                        x: 0,
-                        y: radius,
-                        w: width,
-                        h: height - radius * 2,
-                    };
-                    if middle.h > 0 {
-                        check(SDL_FillSurfaceRect(
-                            surface_handle.as_ptr(),
-                            &middle,
-                            opaque,
-                        ))?;
-                    }
-                    // Alpha antialiasing at the extreme two outer edges of
-                    // each row, and mirrored geometry on all four corners.
-                    for y in 0..radius {
-                        let vertical = f64::from(radius) - (f64::from(y) + 0.5);
-                        let x_edge = f64::from(radius)
-                            - (f64::from(radius).powi(2) - vertical.powi(2))
-                                .max(0.)
-                                .sqrt();
-                        let inset = (x_edge.ceil() as i32).clamp(0, radius);
-                        let row_width = width - inset * 2;
-                        if row_width > 0 {
-                            let top = SDL_Rect {
-                                x: inset,
-                                y,
-                                w: row_width,
-                                h: 1,
-                            };
-                            let bottom = SDL_Rect {
-                                y: height - y - 1,
-                                ..top
-                            };
-                            check(SDL_FillSurfaceRect(surface_handle.as_ptr(), &top, opaque))?;
-                            check(SDL_FillSurfaceRect(
-                                surface_handle.as_ptr(),
-                                &bottom,
-                                opaque,
-                            ))?;
-                        }
-                        if inset > 0 {
-                            let coverage = (f64::from(inset) - x_edge).clamp(0., 1.);
-                            let edge_alpha = (coverage * 255.).round() as u8;
-                            if edge_alpha > 0 {
-                                let edge_color = SDL_MapSurfaceRGBA(
-                                    surface_handle.as_ptr(),
-                                    255,
-                                    255,
-                                    255,
-                                    edge_alpha,
-                                );
-                                for x in [inset - 1, width - inset] {
-                                    for row in [y, height - y - 1] {
-                                        let pixel = SDL_Rect {
-                                            x,
-                                            y: row,
-                                            w: 1,
-                                            h: 1,
-                                        };
-                                        check(SDL_FillSurfaceRect(
-                                            surface_handle.as_ptr(),
-                                            &pixel,
-                                            edge_color,
-                                        ))?;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    check(SDL_SetWindowShape(
-                        self.raw.as_ptr(),
-                        surface_handle.as_ptr(),
-                    ))
-                }
                 #[cfg(not(target_os = "windows"))]
-                WindowCommand::ShapeRegions(size, opaque_regions) => {
-                    let Some(regions) = opaque_regions else {
-                        return check(SDL_SetWindowShape(self.raw.as_ptr(), ptr::null_mut()));
-                    };
-                    let surface = OwnedSurface(
-                        NonNull::new(SDL_CreateSurface(size[0], size[1], SDL_PIXELFORMAT_RGBA32))
-                            .ok_or_else(error)?,
-                    );
-                    let opaque =
-                        SDL_MapSurfaceRGBA(surface.as_non_null().as_ptr(), 255, 255, 255, 255);
-                    let transparent =
-                        SDL_MapSurfaceRGBA(surface.as_non_null().as_ptr(), 0, 0, 0, 0);
-                    check(SDL_FillSurfaceRect(
-                        surface.as_non_null().as_ptr(),
-                        ptr::null(),
-                        transparent,
-                    ))?;
-                    for region in regions {
-                        check(SDL_FillSurfaceRect(
-                            surface.as_non_null().as_ptr(),
-                            region,
-                            opaque,
-                        ))?;
-                    }
-                    check(SDL_SetWindowShape(
-                        self.raw.as_ptr(),
-                        surface.as_non_null().as_ptr(),
-                    ))
-                }
+                WindowCommand::Shape(mask) => check(SDL_SetWindowShape(
+                    self.raw.as_ptr(),
+                    mask.map_or_else(ptr::null_mut, sdl3::surface::SurfaceRef::raw),
+                )),
             }
         }
     }
@@ -1851,62 +1713,59 @@ impl Window {
         self.query_bool(WindowBooleanQuery::Transparent)
     }
 
-    /// Apply an RGBA shape mask, or clear it when no regions are supplied.
-    /// Own and free the temporary surface even if an SDL operation fails.
+    /// Protect the controller from canvas input, or clear the canvas mask.
     #[cfg(not(target_os = "windows"))]
-    pub fn set_opaque_shape_regions(
+    pub fn set_shape_cutout(
         &self,
         size: [i32; 2],
-        opaque_regions: Option<&[SDL_Rect]>,
+        cutout: Option<crate::controller::Rect>,
     ) -> Result<(), String> {
-        self.run_command(WindowCommand::ShapeRegions(size, opaque_regions))
+        let mask = cutout
+            .map(|cutout| canvas_mask_surface(size, cutout))
+            .transpose()?;
+        self.run_command(WindowCommand::Shape(mask.as_deref()))
     }
 
-    /// Create either kind of SDL window at one native ownership boundary.
-    /// Only this function receives the newly allocated native pointer.
+    /// Create the Cocoa overlay or an SDL popup that needs a native parent.
     fn construct(kind: WindowCreation<'_>) -> Result<Self, String> {
         // SAFETY: Both SDL constructors return a newly owned window. The
         // pointer is checked before querying its ID, and is destroyed if
         // SDL fails to assign an ID. A valid pointer is owned only by Self.
         unsafe {
             let raw = match &kind {
-                WindowCreation::Main(title, w, h, style) => {
+                #[cfg(target_os = "macos")]
+                WindowCreation::CocoaOverlay(title, w, h, style) => {
                     let flags = main_window_flags(*style);
-                    SDL_ClearError();
-                    #[cfg(target_os = "macos")]
-                    if *style != WindowStyle::Normal && driver() == "cocoa" {
-                        let [grip_width, grip_height] = if *style == WindowStyle::Toolbar {
-                            [crate::toolbar::WIDTH, crate::toolbar::GRIP_HEIGHT]
-                        } else {
-                            [0.; 2]
-                        };
-                        let id = crate::native::macos::overink_macos_create_overlay(
-                            *w,
-                            *h,
-                            flags.0,
-                            grip_width,
-                            grip_height,
-                        );
-                        if id == 0 {
-                            return Err(format!(
-                                "Creating the nonactivating {} panel failed ({})",
-                                title.to_string_lossy(),
-                                error()
-                            ));
-                        }
-                        let id = SDL_WindowID(id);
-                        let raw = Self::lookup_created(id)?;
-                        // SDL's Cocoa wrapper infers the border flag from the
-                        // style mask, which now also has NonactivatingPanel.
-                        SDL_SetWindowBordered(raw.as_ptr(), false);
-                        SDL_SetWindowTitle(raw.as_ptr(), title.as_ptr());
-                        return Ok(Self {
-                            raw,
-                            id,
-                            toolbar_owner: None,
-                        });
+                    sdl3::clear_error();
+                    let [grip_width, grip_height] = if *style == WindowStyle::Toolbar {
+                        [crate::toolbar::WIDTH, crate::toolbar::GRIP_HEIGHT]
+                    } else {
+                        [0.; 2]
+                    };
+                    let id = crate::native::macos::overink_macos_create_overlay(
+                        *w,
+                        *h,
+                        flags.0,
+                        grip_width,
+                        grip_height,
+                    );
+                    if id == 0 {
+                        return Err(format!(
+                            "Creating the nonactivating {} panel failed ({})",
+                            title.to_string_lossy(),
+                            error()
+                        ));
                     }
-                    SDL_CreateWindow(title.as_ptr(), *w, *h, flags)
+                    let id = SDL_WindowID(id);
+                    let raw = Self::lookup_created(id)?;
+                    // SDL infers the flag from Cocoa's nonactivating panel style.
+                    SDL_SetWindowBordered(raw.as_ptr(), false);
+                    SDL_SetWindowTitle(raw.as_ptr(), title.as_ptr());
+                    return Ok(Self {
+                        raw,
+                        id,
+                        owner: None,
+                    });
                 }
                 WindowCreation::Tooltip(parent, [x, y, w, h]) => SDL_CreatePopupWindow(
                     parent.raw.as_ptr(),
@@ -1920,17 +1779,7 @@ impl Window {
                         | SDL_WINDOW_NOT_FOCUSABLE,
                 ),
             };
-            let raw = NonNull::new(raw).ok_or_else(|| {
-                let detail = error();
-                match kind {
-                    WindowCreation::Main(title, ..) => format!(
-                        "Creating {} on {} failed ({detail})",
-                        title.to_string_lossy(),
-                        driver()
-                    ),
-                    WindowCreation::Tooltip(..) => detail,
-                }
-            })?;
+            let raw = NonNull::new(raw).ok_or_else(error)?;
             let id = SDL_GetWindowID(raw.as_ptr());
             if id.0 == 0 {
                 let message = error();
@@ -1940,24 +1789,63 @@ impl Window {
             Ok(Self {
                 raw,
                 id,
-                toolbar_owner: None,
+                owner: None,
             })
         }
     }
 
-    pub fn new(title: &str, w: i32, h: i32, overlay: bool) -> Result<Self, String> {
-        let title = cstring(title);
+    pub fn new(
+        runtime: &Runtime,
+        title: &str,
+        w: i32,
+        h: i32,
+        overlay: bool,
+    ) -> Result<Self, String> {
         let style = if overlay {
             WindowStyle::Overlay
         } else {
             WindowStyle::Normal
         };
-        let window = Self::construct(WindowCreation::Main(&title, w, h, style))?;
+        #[cfg(target_os = "macos")]
+        if overlay && driver() == "cocoa" {
+            return Self::construct(WindowCreation::CocoaOverlay(&cstring(title), w, h, style));
+        }
+        let owner = Self::build_owned(runtime, title, [w, h], style)?;
+        let window = Self::from_owner(owner)?;
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         if overlay {
             window.keep_x11_composited()?;
         }
         Ok(window)
+    }
+
+    fn build_owned(
+        runtime: &Runtime,
+        title: &str,
+        [width, height]: [i32; 2],
+        style: WindowStyle,
+    ) -> Result<sdl3::video::Window, String> {
+        let width = u32::try_from(width).map_err(|_| "Invalid SDL window width")?;
+        let height = u32::try_from(height).map_err(|_| "Invalid SDL window height")?;
+        sdl3::clear_error();
+        runtime
+            .video
+            .window(&without_nuls(title), width, height)
+            .set_flags(main_window_flags(style).into())
+            .build()
+            .map_err(|error| format!("Creating {title} on {} failed ({error})", driver()))
+    }
+
+    fn from_owner(owner: sdl3::video::Window) -> Result<Self, String> {
+        let id = SDL_WindowID(owner.id());
+        if id.0 == 0 {
+            return Err(format!("SDL did not assign a window ID: {}", error()));
+        }
+        Ok(Self {
+            raw: Self::lookup_created(id)?,
+            id,
+            owner: Some(owner),
+        })
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -1969,15 +1857,14 @@ impl Window {
         Ok(())
     }
 
-    /// Controller windows need a transparent back buffer for a native rounded
-    /// alpha/hit-test mask. Canvas windows continue to use their original path.
+    /// The controller needs a transparent back buffer for its rounded hit mask.
     pub fn toolbar(runtime: &Runtime) -> Result<Self, String> {
         const TITLE: &str = "OverInk";
         let width = crate::toolbar::WIDTH as i32;
         let height = crate::toolbar::HEIGHT as i32;
         #[cfg(target_os = "macos")]
         if driver() == "cocoa" {
-            return Self::construct(WindowCreation::Main(
+            return Self::construct(WindowCreation::CocoaOverlay(
                 c"OverInk",
                 width,
                 height,
@@ -1985,18 +1872,7 @@ impl Window {
             ));
         }
 
-        let flags = main_window_flags(WindowStyle::Toolbar);
-        let mut owner = runtime
-            .video
-            .window(TITLE, width as u32, height as u32)
-            .set_window_flags(flags.0 as u32)
-            .build()
-            .map_err(|err| format!("Creating {TITLE} on {} failed ({err})", driver()))?;
-        let id = SDL_WindowID(owner.id());
-        if id.0 == 0 {
-            return Err(format!("SDL did not assign a window ID: {}", error()));
-        }
-        let raw = Self::lookup_created(id)?;
+        let mut owner = Self::build_owned(runtime, TITLE, [width, height], WindowStyle::Toolbar)?;
         TOOLBAR_GRIP_SCALE.set(owner.display_scale() / owner.pixel_density().max(0.1));
         // Some video drivers, including the smoke test's dummy driver, have
         // no native window movement. They can still display the controller.
@@ -2008,18 +1884,16 @@ impl Window {
                 HitTestResult::Normal
             }
         });
-        let window = Self {
-            raw,
-            id,
-            toolbar_owner: Some(owner),
-        };
+        #[cfg(not(target_os = "macos"))]
+        set_toolbar_icon(&mut owner);
+        let window = Self::from_owner(owner)?;
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         window.keep_x11_composited()?;
         Ok(window)
     }
 
     pub fn refresh_toolbar_grip(&self) {
-        if let Some(owner) = &self.toolbar_owner {
+        if let Some(owner) = &self.owner {
             TOOLBAR_GRIP_SCALE.set(owner.display_scale() / owner.pixel_density().max(0.1));
         }
     }
@@ -2052,12 +1926,6 @@ impl Window {
         let [width, height] = self.query_size(false).unwrap_or([0, 0]);
         [width.max(1) as f32, height.max(1) as f32]
     }
-    pub fn set_toolbar_icon(&self) {
-        let icon = crate::toolbar::image();
-        let size = [icon.width() as i32, icon.height() as i32];
-        let mut pixels = icon.into_raw();
-        let _ = self.run_command(WindowCommand::ToolbarIcon(size, &mut pixels));
-    }
     /// Rebuild the native shape only after an actual pixel-size/DPI change.
     pub fn update_rounded_shape(
         &self,
@@ -2081,8 +1949,21 @@ impl Window {
             crate::x11::set_rounded_input(id, size, radius.max(1))?;
             return Ok(true);
         }
-        self.run_command(WindowCommand::RoundedCorners(key.0, key.1))?;
+        self.apply_toolbar_mask(key.0, key.1)?;
         Ok(true)
+    }
+
+    fn apply_toolbar_mask(&self, size: [i32; 2], radius: i32) -> Result<(), String> {
+        let surface = toolbar_mask_surface(size, radius)?;
+        if let Some(owner) = &self.owner {
+            return owner.set_shape(surface).map_err(|error| error.to_string());
+        }
+        #[cfg(target_os = "macos")]
+        {
+            self.run_command(WindowCommand::Shape(Some(&surface)))
+        }
+        #[cfg(not(target_os = "macos"))]
+        Err("Rounded toolbar mask requires an SDL toolbar window".into())
     }
 
     pub fn arrange_toolbar(&self, expanded: bool, on_display: Option<u32>) -> Result<(), String> {
@@ -2194,6 +2075,7 @@ impl Window {
     }
     /// Borrow a native backend handle from the window property list.
     /// The returned handle cannot outlive this Window in safe Rust.
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
     fn native_pointer_property(
         &self,
         property: NativeWindowProperty,
@@ -2210,13 +2092,6 @@ impl Window {
     #[cfg(target_os = "windows")]
     pub fn win32_hwnd(&self) -> Option<NativeWindowHandle<'_>> {
         self.native_pointer_property(NativeWindowProperty::Win32Hwnd)
-    }
-
-    /// Borrow the Cocoa NSWindow for this live SDL window without exposing
-    /// property-list FFI to the platform input-routing code.
-    #[cfg(target_os = "macos")]
-    pub fn cocoa_window(&self) -> Option<NativeWindowHandle<'_>> {
-        self.native_pointer_property(NativeWindowProperty::CocoaWindow)
     }
 
     /// Read the Cocoa Metal view tag without exposing the SDL property handle.
@@ -2302,7 +2177,7 @@ impl Window {
 }
 impl Drop for Window {
     fn drop(&mut self) {
-        if self.toolbar_owner.is_some() {
+        if self.owner.is_some() {
             return;
         }
         // Only destroy the SDL-owned window while its ID still resolves to our
@@ -2321,6 +2196,162 @@ fn main_window_flags(style: WindowStyle) -> SDL_WindowFlags {
     }
     flags
 }
+#[cfg(not(target_os = "macos"))]
+fn set_toolbar_icon(owner: &mut sdl3::video::Window) {
+    use sdl3::{pixels::PixelFormat, surface::Surface};
+    let icon = crate::toolbar::image();
+    let (width, height) = icon.dimensions();
+    let Ok(mut surface) = Surface::new(width, height, PixelFormat::RGBA32) else {
+        return;
+    };
+    let pitch = surface.pitch() as usize;
+    let row_bytes = width as usize * 4;
+    surface.with_lock_mut(|pixels| {
+        for (dst, src) in pixels
+            .chunks_exact_mut(pitch)
+            .zip(icon.as_raw().chunks_exact(row_bytes))
+        {
+            dst[..row_bytes].copy_from_slice(src);
+        }
+    });
+    owner.set_icon(surface);
+}
+
+fn mask_surface([width, height]: [i32; 2]) -> Result<sdl3::surface::Surface<'static>, String> {
+    use sdl3::{pixels::PixelFormat, surface::Surface};
+    if width <= 0 || height <= 0 {
+        return Err("Invalid window shape geometry".into());
+    }
+    // SDL converts window shapes to ARGB32. Allocate in that format and
+    // keep the zeroed pixels outside the mask transparent.
+    Surface::new(width as u32, height as u32, PixelFormat::ARGB32)
+        .map_err(|error| error.to_string())
+}
+
+fn write_mask_rect(pixels: &mut [u8], pitch: usize, rect: SDL_Rect, alpha: u8) {
+    let SDL_Rect { x, y, w, h } = rect;
+    for row in pixels
+        .chunks_exact_mut(pitch)
+        .skip(y as usize)
+        .take(h as usize)
+    {
+        let span = &mut row[x as usize * 4..(x + w) as usize * 4];
+        span.fill(255);
+        if alpha != 255 {
+            for pixel in span.as_chunks_mut::<4>().0 {
+                pixel[0] = alpha;
+            }
+        }
+    }
+}
+
+fn toolbar_mask_surface(
+    size: [i32; 2],
+    radius: i32,
+) -> Result<sdl3::surface::Surface<'static>, String> {
+    let mut surface = mask_surface(size)?;
+    let pitch = surface.pitch() as usize;
+    // ARGB32 is alpha-first in memory on both endian orders.
+    surface.with_lock_mut(|pixels| {
+        paint_toolbar_mask(size, radius, |rects, alpha| {
+            for &rect in rects {
+                write_mask_rect(pixels, pitch, rect, alpha);
+            }
+            Ok(())
+        })
+    })?;
+    Ok(surface)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn canvas_mask_surface(
+    size: [i32; 2],
+    cutout: crate::controller::Rect,
+) -> Result<sdl3::surface::Surface<'static>, String> {
+    let mut surface = mask_surface(size)?;
+    let pitch = surface.pitch() as usize;
+    surface.with_lock_mut(|pixels| {
+        for rect in crate::controller::outside(size, Some(cutout)) {
+            write_mask_rect(pixels, pitch, rect.sdl(), 255);
+        }
+    });
+    Ok(surface)
+}
+
+/// Paint the same corner coverage into safe SDL surfaces and Cocoa panels.
+fn paint_toolbar_mask(
+    [width, height]: [i32; 2],
+    radius: i32,
+    mut fill: impl FnMut(&[SDL_Rect], u8) -> Result<(), String>,
+) -> Result<(), String> {
+    if width <= 0 || height <= 0 || radius <= 0 {
+        return Err("Invalid toolbar shape geometry".into());
+    }
+    let radius = radius.min(width / 2).min(height / 2);
+    if radius == 0 {
+        return Err("Toolbar window is too small for rounded corners".into());
+    }
+    let middle = SDL_Rect {
+        x: 0,
+        y: radius,
+        w: width,
+        h: height - radius * 2,
+    };
+    if middle.h > 0 {
+        fill(&[middle], 255)?;
+    }
+    for y in 0..radius {
+        let vertical = f64::from(radius) - (f64::from(y) + 0.5);
+        let x_edge = f64::from(radius)
+            - (f64::from(radius).powi(2) - vertical.powi(2))
+                .max(0.)
+                .sqrt();
+        let inset = (x_edge.ceil() as i32).clamp(0, radius);
+        let bottom = height - y - 1;
+        let top_row = SDL_Rect {
+            x: inset,
+            y,
+            w: width - inset * 2,
+            h: 1,
+        };
+        if top_row.w > 0 {
+            fill(
+                &[
+                    top_row,
+                    SDL_Rect {
+                        y: bottom,
+                        ..top_row
+                    },
+                ],
+                255,
+            )?;
+        }
+        let edge_alpha = ((f64::from(inset) - x_edge).clamp(0., 1.) * 255.).round() as u8;
+        if inset > 0 && edge_alpha > 0 {
+            let left = SDL_Rect {
+                x: inset - 1,
+                y,
+                w: 1,
+                h: 1,
+            };
+            let right = SDL_Rect {
+                x: width - inset,
+                ..left
+            };
+            fill(
+                &[
+                    left,
+                    right,
+                    SDL_Rect { y: bottom, ..left },
+                    SDL_Rect { y: bottom, ..right },
+                ],
+                edge_alpha,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// SDL properties have unique caller ownership and must be destroyed even
 /// when renderer or texture construction returns early or unwinds.
 struct OwnedProperties(SDL_PropertiesID);
@@ -2351,35 +2382,22 @@ fn destroy_owned_surface(raw: NonNull<SDL_Surface>) {
     let _ = sdl_native(SdlNativeAction::DestroySurface(raw));
 }
 
-/// A limited source of new caller-owned SDL surfaces. No borrowed surfaces
-/// or arbitrary native surface pointers may be passed to the safe constructor.
-enum SurfaceSource<'a> {
-    Readback(&'a Renderer, Option<&'a SDL_Rect>),
-    #[cfg(test)]
-    Test([i32; 2]),
-}
-
 /// Temporary SDL surface whose native allocation is released even when an
 /// operation returns early or unwinds.
 struct OwnedSurface(NonNull<SDL_Surface>);
 
 impl OwnedSurface {
-    /// Acquire an SDL-created surface and copy its dimensions and format.
-    fn acquire(source: SurfaceSource<'_>) -> Result<(Self, [i32; 2], SDL_PixelFormat), String> {
-        // SAFETY: Both SDL calls return unique, caller-owned surfaces and
-        // the owned guard releases them on all success and failure paths.
-        // The readback surface is live while reading its C-layout fields.
+    /// Read back an SDL-owned surface and copy its dimensions and format.
+    fn readback(
+        renderer: &Renderer,
+        region: Option<&SDL_Rect>,
+    ) -> Result<(Self, [i32; 2], SDL_PixelFormat), String> {
+        let renderer = renderer.raw.ok_or("Renderer has been destroyed")?;
+        // SAFETY: The live renderer and optional rectangle are borrowed
+        // through the call. SDL transfers ownership of a new surface.
         unsafe {
-            let raw = match source {
-                SurfaceSource::Readback(renderer, region) => {
-                    let renderer = renderer.raw.ok_or("Renderer has been destroyed")?;
-                    SDL_RenderReadPixels(renderer.as_ptr(), region.map_or(ptr::null(), |rect| rect))
-                }
-                #[cfg(test)]
-                SurfaceSource::Test([width, height]) => {
-                    SDL_CreateSurface(width, height, SDL_PIXELFORMAT_RGBA32)
-                }
-            };
+            let raw =
+                SDL_RenderReadPixels(renderer.as_ptr(), region.map_or(ptr::null(), |rect| rect));
             let surface = Self(NonNull::new(raw).ok_or_else(error)?);
             let details = surface.as_non_null().as_ref();
             let dimensions = [details.w, details.h];
@@ -3082,7 +3100,7 @@ impl Renderer {
     /// Write a renderer snapshot to BMP for headless smoke tests.
     /// The returned surface is always destroyed, including on write failures.
     pub fn save_bmp(&self, path: &std::path::Path) -> Result<(), String> {
-        let (surface, ..) = OwnedSurface::acquire(SurfaceSource::Readback(self, None))?;
+        let (surface, ..) = OwnedSurface::readback(self, None)?;
         let name = cstring(&path.to_string_lossy());
         // The owned surface and filename remain borrowed for the duration of
         // SDL's synchronous save. The native dispatcher keeps the FFI private.
@@ -3098,21 +3116,19 @@ impl Renderer {
             w: 1,
             h: 1,
         };
-        OwnedSurface::acquire(SurfaceSource::Readback(self, Some(&pixel))).is_ok_and(
-            |(_, _, format)| {
-                matches!(
-                    format,
-                    SDL_PIXELFORMAT_XRGB8888
-                        | SDL_PIXELFORMAT_RGBX8888
-                        | SDL_PIXELFORMAT_XBGR8888
-                        | SDL_PIXELFORMAT_BGRX8888
-                        | SDL_PIXELFORMAT_ARGB8888
-                        | SDL_PIXELFORMAT_RGBA8888
-                        | SDL_PIXELFORMAT_ABGR8888
-                        | SDL_PIXELFORMAT_BGRA8888
-                )
-            },
-        )
+        OwnedSurface::readback(self, Some(&pixel)).is_ok_and(|(_, _, format)| {
+            matches!(
+                format,
+                SDL_PIXELFORMAT_XRGB8888
+                    | SDL_PIXELFORMAT_RGBX8888
+                    | SDL_PIXELFORMAT_XBGR8888
+                    | SDL_PIXELFORMAT_BGRX8888
+                    | SDL_PIXELFORMAT_ARGB8888
+                    | SDL_PIXELFORMAT_RGBA8888
+                    | SDL_PIXELFORMAT_ABGR8888
+                    | SDL_PIXELFORMAT_BGRA8888
+            )
+        })
     }
 
     pub fn hdr(&self) -> (bool, f32) {
@@ -3121,7 +3137,7 @@ impl Renderer {
     pub fn begin(&self, window: &Window, color: [f32; 4]) -> Result<([i32; 2], [f32; 2]), String> {
         let (pixels, scale) = window.render_size();
         self.set_render_scale(scale)?;
-        self.set_clip_rect(None);
+        self.try_set_clip_rect(None)?;
         self.clear(color)?;
         Ok((pixels, scale))
     }
@@ -3149,9 +3165,6 @@ impl Renderer {
             unwind_restore.disarm();
         }
         result.and(restore)
-    }
-    pub fn set_clip_rect(&self, clip: Option<&SDL_Rect>) {
-        let _ = self.run_command(RenderCommand::Clip(clip));
     }
     /// Query the renderer's SDR reference white, keeping SDL properties internal.
     pub fn sdr_white_point(&self) -> f32 {
@@ -3318,22 +3331,25 @@ impl Drop for Renderer {
     }
 }
 
-/// Test-only backing surface for an SDL software renderer. The surface is
-/// transferred into TestRenderer, so it cannot be dropped while SDL still
-/// owns a renderer that reads or writes its pixel buffer.
+/// The safe SDL surface transfers ownership to its software canvas.
 #[cfg(test)]
 pub struct TestSurface {
-    surface: OwnedSurface,
+    surface: sdl3::surface::Surface<'static>,
     dimensions: [i32; 2],
 }
 
-/// The SDL software renderer and its backing surface are one RAII value.
-/// Field declaration order is intentional: the renderer is dropped before
-/// the surface it borrows. No Renderer can escape by value.
 #[cfg(test)]
 pub struct TestRenderer {
     renderer: Renderer,
-    _surface: TestSurface,
+    _canvas: sdl3::render::SurfaceCanvas<'static>,
+}
+
+#[cfg(test)]
+impl Drop for TestRenderer {
+    fn drop(&mut self) {
+        // The test adapter only borrows the renderer. The canvas drops it.
+        self.renderer.raw = None;
+    }
 }
 
 #[cfg(test)]
@@ -3351,73 +3367,64 @@ impl TestSurface {
         if width <= 0 || height <= 0 {
             return Err("Test surface dimensions must be positive".into());
         }
-        let (surface, dimensions, _) = OwnedSurface::acquire(SurfaceSource::Test([width, height]))?;
+        let surface = sdl3::surface::Surface::new(
+            width as u32,
+            height as u32,
+            sdl3::pixels::PixelFormat::RGBA32,
+        )
+        .map_err(|error| error.to_string())?;
         Ok(Self {
             surface,
-            dimensions,
+            dimensions: [width, height],
         })
     }
 
     pub fn software_renderer(self) -> Result<TestRenderer, String> {
-        // SAFETY: SDL receives a pointer into the live surface owned by self.
-        // TestRenderer takes ownership of that surface and drops its Renderer
-        // first, including when SDL configuration fails during construction.
-        unsafe {
-            let raw = NonNull::new(SDL_CreateSoftwareRenderer(
-                self.surface.as_non_null().as_ptr(),
-            ))
-            .ok_or_else(error)?;
-            let renderer = Renderer {
+        let mut canvas = self
+            .surface
+            .into_canvas()
+            .map_err(|error| error.to_string())?;
+        canvas.set_blend_mode(sdl3::render::BlendMode::Blend);
+        let raw = NonNull::new(canvas.raw()).ok_or("Missing SDL software renderer")?;
+        Ok(TestRenderer {
+            renderer: Renderer {
                 raw: Some(raw),
                 extended: false,
                 name: "software".into(),
-            };
-            check(SDL_SetRenderDrawBlendMode(
-                raw.as_ptr(),
-                SDL_BLENDMODE_BLEND,
-            ))?;
-            Ok(TestRenderer {
-                renderer,
-                _surface: self,
-            })
-        }
+            },
+            _canvas: canvas,
+        })
     }
 
     pub fn size(&self) -> [i32; 2] {
         self.dimensions
     }
 
-    fn readback(renderer: &Renderer) -> Result<Self, String> {
-        let (surface, dimensions, _) =
-            OwnedSurface::acquire(SurfaceSource::Readback(renderer, None))?;
-        Ok(Self {
-            surface,
-            dimensions,
-        })
-    }
-
-    /// Read a pixel from an owned test surface; share this one native read
-    /// boundary with both single-pixel and full-frame test assertions.
-    fn read_pixel(&self, x: i32, y: i32) -> Result<[u8; 4], String> {
-        if x < 0 || y < 0 || x >= self.dimensions[0] || y >= self.dimensions[1] {
+    fn read_pixel(
+        surface: &OwnedSurface,
+        dimensions: [i32; 2],
+        x: i32,
+        y: i32,
+    ) -> Result<[u8; 4], String> {
+        if x < 0 || y < 0 || x >= dimensions[0] || y >= dimensions[1] {
             return Err("Pixel is outside the test surface".into());
         }
-        sdl_native(SdlNativeAction::ReadSurfacePixel(&self.surface, x, y))
+        sdl_native(SdlNativeAction::ReadSurfacePixel(surface, x, y))
             .pixel()
             .ok_or_else(error)
     }
 
     pub fn pixel(renderer: &Renderer, x: i32, y: i32) -> Result<[u8; 4], String> {
-        Self::readback(renderer)?.read_pixel(x, y)
+        let (surface, dimensions, _) = OwnedSurface::readback(renderer, None)?;
+        Self::read_pixel(&surface, dimensions, x, y)
     }
 
     pub fn pixels(renderer: &Renderer) -> Result<Vec<[u8; 4]>, String> {
-        let image = Self::readback(renderer)?;
-        let [width, height] = image.size();
+        let (surface, [width, height], _) = OwnedSurface::readback(renderer, None)?;
         let mut pixels = Vec::with_capacity(width as usize * height as usize);
         for y in 0..height {
             for x in 0..width {
-                pixels.push(image.read_pixel(x, y)?);
+                pixels.push(Self::read_pixel(&surface, [width, height], x, y)?);
             }
         }
         Ok(pixels)
@@ -3427,6 +3434,75 @@ impl TestSurface {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_latest_crosshair_clears_the_cocoa_overlay() {
+        let mut state = CrosshairActivation::default();
+        let original = state.install();
+        let replacement = state.install();
+        assert!(!state.release(original));
+        assert!(state.release(replacement));
+        assert!(!state.release(replacement));
+        let next = state.install();
+        assert!(!state.release(original));
+        assert!(state.release(next));
+    }
+
+    #[test]
+    fn toolbar_mask_preserves_transparent_and_antialiased_corners() -> Result<(), String> {
+        let surface = toolbar_mask_surface([8, 8], 3)?;
+        let pitch = surface.pitch() as usize;
+        surface.with_lock(|pixels| {
+            let row = |y| &pixels[y * pitch..y * pitch + 32];
+            let alpha = row(0)
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|pixel| pixel[0])
+                .collect::<Vec<_>>();
+            assert_eq!(alpha, [0, 168, 255, 255, 255, 255, 168, 0]);
+            assert_eq!(row(0), row(7));
+            assert_eq!(&row(0)[0..8], &[0, 0, 0, 0, 168, 255, 255, 255]);
+            assert!(row(3).iter().all(|&channel| channel == 255));
+        });
+        assert!(toolbar_mask_surface([1, 8], 3).is_err());
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn canvas_mask_leaves_a_clipped_controller_cutout_transparent() -> Result<(), String> {
+        let size = [5, 4];
+        let surface = canvas_mask_surface(
+            size,
+            crate::controller::Rect {
+                x: -1,
+                y: 1,
+                w: 3,
+                h: 2,
+            },
+        )?;
+        let pitch = surface.pitch() as usize;
+        surface.with_lock(|pixels| {
+            for (y, row) in pixels.chunks_exact(pitch).enumerate() {
+                for (x, pixel) in row
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .take(size[0] as usize)
+                    .enumerate()
+                {
+                    let expected = if x < 2 && (1..=2).contains(&y) {
+                        0
+                    } else {
+                        255
+                    };
+                    assert_eq!(*pixel, [expected; 4]);
+                }
+            }
+        });
+        Ok(())
+    }
 
     #[test]
     fn toolbar_grip_excludes_buttons_and_the_expanded_panel() {
