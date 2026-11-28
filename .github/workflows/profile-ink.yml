@@ -1,0 +1,117 @@
+name: OverInk software ink profile
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'src/app/ink.rs'
+      - 'src/app/canvas.rs'
+      - 'src/app/canvas/**'
+      - 'src/geometry.rs'
+      - 'src/model.rs'
+      - 'src/model/**'
+      - '.github/workflows/profile-ink.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: overink-profile-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  software:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      CARGO_PROFILE_RELEASE_DEBUG: '1'
+      CARGO_PROFILE_RELEASE_STRIP: 'none'
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.100.0'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: software-ink-profile
+      - name: Build the profiling fixture
+        run: |
+          set -eu
+          cargo test --locked --release --features headless-check --no-run \
+            --message-format=json > "$RUNNER_TEMP/overink-profile-build.json"
+          python3 - <<'PY' >> "$GITHUB_ENV"
+          import json, os
+          with open(os.path.join(os.environ["RUNNER_TEMP"], "overink-profile-build.json")) as f:
+              for line in f:
+                  item = json.loads(line)
+                  if item.get("reason") == "compiler-artifact" and item.get("executable") and item["profile"]["test"] and item["target"]["name"] == "overink":
+                      print("OVERINK_PROFILE_BINARY=" + item["executable"])
+                      break
+              else:
+                  raise SystemExit("Could not find the OverInk test binary")
+          PY
+      - name: Measure frame times and memory
+        run: |
+          set -eu
+          mkdir -p profile
+          /usr/bin/time -v -o profile/memory.txt "$OVERINK_PROFILE_BINARY" \
+            --exact app::ink::tests::profile_software_ink --ignored --nocapture \
+            | tee profile/timing.log
+          python3 - <<'PY'
+          import csv, html, pathlib
+          folder = pathlib.Path("profile")
+          header = ["width", "height", "scenario", "frames", "mean_ms", "max_ms"]
+          rows = [line.split(",")[1:] for line in (folder / "timing.log").read_text().splitlines() if line.startswith("PROFILE,")]
+          if len(rows) != 6:
+              raise SystemExit("Missing profile results")
+          with (folder / "frame-times.csv").open("w") as f:
+              csv.writer(f).writerows([header, *rows])
+          # Exact measurements are included in the colored cells and CSV.
+          max_ms = max(float(row[-1]) for row in rows) or 1.0
+          svg = ['<svg xmlns="http://www.w3.org/2000/svg" width="740" height="390" viewBox="0 0 740 390">',
+                 '<rect width="740" height="390" fill="#f8fafc"/>',
+                 '<g font-family="sans-serif" fill="#172b4d">',
+                 '<text x="24" y="34" font-size="20" font-weight="bold">Software ink frame times (ms)</text>',
+                 '<text x="24" y="65" font-size="13">Scene</text><text x="330" y="65" font-size="13">Mean</text><text x="530" y="65" font-size="13">Maximum</text>']
+          for i, (w, h, scene, frames, mean, maximum) in enumerate(rows):
+              y = 82 + i * 46
+              svg.append(f'<text x="24" y="{y + 25}" font-size="15">{html.escape(w + " × " + h + " · " + scene)}</text>')
+              for x, value in [(310, mean), (510, maximum)]:
+                  ratio = float(value) / max_ms
+                  hue = 130 * (1 - ratio)
+                  svg.append(f'<rect x="{x}" y="{y}" width="184" height="37" rx="4" fill="hsl({hue:.1f},65%,73%)"/>')
+                  svg.append(f'<text x="{x + 92}" y="{y + 25}" text-anchor="middle" font-size="16">{float(value):.3f}</text>')
+          svg.append('</g></svg>')
+          (folder / "heatmap.svg").write_text("\n".join(svg))
+          PY
+      - name: Sample CPU stacks and render flame graph
+        # Timing data remains available even when a hosted kernel restricts perf.
+        continue-on-error: true
+        run: |
+          set -eu
+          if ! perf --version; then
+            sudo apt-get update
+            sudo apt-get install -y linux-tools-generic
+          fi
+          perf_bin=perf
+          if ! perf --version; then
+            perf_bin=$(find /usr/lib/linux-tools -type f -name perf | sort | tail -n 1)
+          fi
+          test -n "$perf_bin"
+          sudo sysctl -w kernel.perf_event_paranoid=1 || true
+          "$perf_bin" record -e cpu-clock -F 99 --call-graph dwarf -o profile/perf.data -- \
+            "$OVERINK_PROFILE_BINARY" --exact app::ink::tests::profile_software_ink --ignored --nocapture
+          "$perf_bin" report --stdio -i profile/perf.data > profile/cpu-hotspots.txt
+          "$perf_bin" script -i profile/perf.data > "$RUNNER_TEMP/overink-stacks.txt"
+          git clone https://github.com/brendangregg/FlameGraph.git "$RUNNER_TEMP/FlameGraph"
+          git -C "$RUNNER_TEMP/FlameGraph" checkout 41fee1f99f9276008b7cd112fca19dc3ea84ac32
+          perl "$RUNNER_TEMP/FlameGraph/stackcollapse-perf.pl" "$RUNNER_TEMP/overink-stacks.txt" > profile/stacks.folded
+          perl "$RUNNER_TEMP/FlameGraph/flamegraph.pl" profile/stacks.folded > profile/flamegraph.svg
+      - name: Upload measured profiles
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: overink-software-ink-profile
+          path: profile/
+          if-no-files-found: warn

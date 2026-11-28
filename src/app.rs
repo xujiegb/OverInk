@@ -165,6 +165,18 @@ impl CanvasInput {
         self.contact.is_some() || !self.touches.is_empty()
     }
 
+    fn prune_laser(&mut self, now: Instant) {
+        self.laser.retain(|_, trail| {
+            while trail
+                .front()
+                .is_some_and(|sample| now.duration_since(sample.at) >= LASER_LIFETIME)
+            {
+                trail.pop_front();
+            }
+            !trail.is_empty()
+        });
+    }
+
     fn cancel_erasure(&mut self, id: u64) {
         if let Some(draft) = self.pending_erasures.remove(&id)
             && let Some(bounds) = draft.affected(!self.pending_erasures.is_empty())

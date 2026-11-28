@@ -428,6 +428,7 @@ impl Canvas {
             self.invalidate(DirtyReason::Surface);
             self.native.invalidate();
             if !visible {
+                self.animation = false;
                 self.ink.reset_textures();
                 self.background.invalidate_texture();
                 self.suspend_text_input();
@@ -879,6 +880,12 @@ impl Canvas {
             return Ok(false);
         }
         let on_output = self.on_output(options.smoke);
+        if picker_choosing || !on_output {
+            // Neither the ink nor the text editor advances while this canvas
+            // is suppressed. Their old deadlines must not keep waking SDL.
+            self.animation = false;
+            self.text_repaint_at = None;
+        }
         if picker_choosing || !on_output && driver() == "wayland" {
             self.damage = None;
             self.render.begin(
@@ -904,7 +911,11 @@ impl Canvas {
                     }
                 }
                 page.history.set_size(self.window.size());
-                if self.paint_damaged_overlay(page, timings.as_deref_mut())? {
+                // Expire samples before measuring damage, so the previous
+                // footprint clears a disappearing trail without rescanning it.
+                let laser_now = Instant::now();
+                page.input.prune_laser(laser_now);
+                if self.paint_damaged_overlay(page, laser_now, timings.as_deref_mut())? {
                     return Ok(());
                 }
                 let ink_started = timings.as_ref().map(|_| Instant::now());
@@ -989,13 +1000,19 @@ impl Canvas {
                 if page.hidden {
                     self.render.present()?;
                 } else {
-                    self.ink
-                        .present(page, &self.render, &self.window, &self.color, scale)?;
+                    self.ink.present(
+                        page,
+                        &self.render,
+                        &self.window,
+                        &self.color,
+                        scale,
+                        laser_now,
+                    )?;
                 }
                 if let (Some(start), Some(metrics)) = (present_started, timings) {
                     metrics.present += start.elapsed();
                 }
-                self.animation = !page.input.laser.is_empty();
+                self.animation = !page.hidden && !page.input.laser.is_empty();
                 Ok(())
             })?;
         } else {
