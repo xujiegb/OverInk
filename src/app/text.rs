@@ -1071,20 +1071,36 @@ impl App {
         (current == color || self.recolor_text(color)).then_some(color)
     }
 
-    fn resize_text_font(&mut self, step: f32) {
-        let resize = |item: &mut TextBox| {
-            item.font_size = (item.font_size + step)
-                .clamp(*TextBox::FONT_SIZE.start(), *TextBox::FONT_SIZE.end());
-        };
+    fn resize_text_font(&mut self, step: f32) -> bool {
+        let resize =
+            |size: f32| (size + step).clamp(*TextBox::FONT_SIZE.start(), *TextBox::FONT_SIZE.end());
         if let Some(draft) = &mut self.input.text.draft {
-            resize(&mut draft.item);
-        } else if let Some(index) = self.input.text.selected
-            && let Some(item) = self.history.text_boxes().get(index)
-        {
-            let mut item = (**item).clone();
-            resize(&mut item);
-            self.history.set_text_box(Some(index), item);
+            let size = resize(draft.item.font_size);
+            return std::mem::replace(&mut draft.item.font_size, size) != size;
         }
+        let Some(index) = self.input.text.selected else {
+            return false;
+        };
+        let Some(item) = self.history.text_boxes().get(index) else {
+            return false;
+        };
+        let size = resize(item.font_size);
+        if size == item.font_size {
+            return false;
+        }
+        let mut item = (**item).clone();
+        item.font_size = size;
+        self.history.set_text_box(Some(index), item);
+        if let Some(preview) = self
+            .input
+            .text
+            .press
+            .as_mut()
+            .and_then(|press| press.preview.as_mut())
+        {
+            preview.font_size = resize(preview.font_size);
+        }
+        true
     }
 
     fn text_menu(&mut self, ui: &mut Ui, menus: TextMenus) {
@@ -1151,8 +1167,7 @@ impl App {
                 self.input.text.hovered_control = Some(response.rect);
             }
             if response.clicked() {
-                self.resize_text_font(step);
-                acted = true;
+                acted |= self.resize_text_font(step);
             }
         }
         let selected_srgb = color.srgb8();
@@ -2646,6 +2661,12 @@ mod tests {
         assert_eq!(preview.origin, [200., 160.]);
         assert_eq!(preview.text, "中文 👩🏽‍🎨");
         assert_eq!(app.history.text_boxes()[index].origin, [150., 120.]);
+        assert!(app.resize_text_font(*TextBox::FONT_SIZE.end()));
+        assert_eq!(
+            app.text_menu_item().map(|item| item.font_size),
+            Some(*TextBox::FONT_SIZE.end())
+        );
+        assert!(!app.resize_text_font(2.));
         Ok(())
     }
 

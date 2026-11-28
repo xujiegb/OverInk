@@ -63,14 +63,15 @@ jobs:
           folder = pathlib.Path("profile")
           header = ["width", "height", "scenario", "frames", "mean_ms", "max_ms"]
           rows = [line.split("PROFILE,", 1)[1].split(",") for line in (folder / "timing.log").read_text().splitlines() if "PROFILE," in line]
-          if len(rows) != 6:
+          if len(rows) != 8:
               raise SystemExit("Missing profile results")
           with (folder / "frame-times.csv").open("w") as f:
               csv.writer(f).writerows([header, *rows])
           # Exact measurements are included in the colored cells and CSV.
           max_ms = max(float(row[-1]) for row in rows) or 1.0
-          svg = ['<svg xmlns="http://www.w3.org/2000/svg" width="740" height="390" viewBox="0 0 740 390">',
-                 '<rect width="740" height="390" fill="#f8fafc"/>',
+          height = 90 + 46 * len(rows)
+          svg = [f'<svg xmlns="http://www.w3.org/2000/svg" width="740" height="{height}" viewBox="0 0 740 {height}">',
+                 f'<rect width="740" height="{height}" fill="#f8fafc"/>',
                  '<g font-family="sans-serif" fill="#172b4d">',
                  '<text x="24" y="34" font-size="20" font-weight="bold">Software ink frame times (ms)</text>',
                  '<text x="24" y="65" font-size="13">Scene</text><text x="330" y="65" font-size="13">Mean</text><text x="530" y="65" font-size="13">Maximum</text>']
@@ -99,15 +100,18 @@ jobs:
             perf_bin=$(find /usr/lib/linux-tools -type f -name perf | sort | tail -n 1)
           fi
           test -n "$perf_bin"
-          sudo sysctl -w kernel.perf_event_paranoid=1 || true
-          "$perf_bin" record -e cpu-clock -F 99 --call-graph dwarf -o profile/perf.data -- \
+          if [ "$(cat /proc/sys/kernel/perf_event_paranoid)" -gt 2 ]; then
+            sudo sysctl -w kernel.perf_event_paranoid=2
+          fi
+          "$perf_bin" record -e cpu-clock:u -F 99 --call-graph dwarf,16384 -o profile/perf.data -- \
             "$OVERINK_PROFILE_BINARY" --exact app::ink::tests::profile_software_ink --ignored --nocapture
-          "$perf_bin" report --stdio -i profile/perf.data > profile/cpu-hotspots.txt
-          "$perf_bin" script -i profile/perf.data > "$RUNNER_TEMP/overink-stacks.txt"
+          "$perf_bin" report --stdio --no-children -i profile/perf.data > profile/cpu-hotspots.txt
+          # Emit one symbol and DSO per physical stack frame for stackcollapse.
+          "$perf_bin" script --no-inline -i profile/perf.data > "$RUNNER_TEMP/overink-stacks.txt"
           git clone https://github.com/brendangregg/FlameGraph.git "$RUNNER_TEMP/FlameGraph"
           git -C "$RUNNER_TEMP/FlameGraph" checkout 41fee1f99f9276008b7cd112fca19dc3ea84ac32
           perl "$RUNNER_TEMP/FlameGraph/stackcollapse-perf.pl" "$RUNNER_TEMP/overink-stacks.txt" > profile/stacks.folded
-          perl "$RUNNER_TEMP/FlameGraph/flamegraph.pl" profile/stacks.folded > profile/flamegraph.svg
+          perl "$RUNNER_TEMP/FlameGraph/flamegraph.pl" --countname ns profile/stacks.folded > profile/flamegraph.svg
       - name: Upload measured profiles
         if: always()
         uses: actions/upload-artifact@v7

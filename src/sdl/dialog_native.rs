@@ -1,68 +1,42 @@
-//! SDL3 file dialog ABI boundary. SDL owns callback path storage and borrows
-//! the initial location for the duration of the native show call.
-#![deny(clippy::undocumented_unsafe_blocks)]
-
-use super::{
-    Window,
-    dialog::{DialogKind, complete, use_window_parent},
-    error,
+use super::dialog::{DialogKind, complete};
+use sdl3::{
+    dialog::{
+        DialogCallback, DialogError, DialogFileFilter, show_open_folder_dialog,
+        show_save_file_dialog,
+    },
+    video::Window,
 };
-use sdl3_sys::dialog::*;
 use std::{
-    ffi::{CStr, CString, c_char, c_int, c_void},
+    ffi::CStr,
     path::{Path, PathBuf},
-    ptr,
 };
 
-const PNG_FILTER: &SDL_DialogFileFilter = &SDL_DialogFileFilter {
-    name: c"PNG".as_ptr(),
-    pattern: c"png".as_ptr(),
-};
-
-/// Called from SDL, potentially on a different thread or before show returns.
-/// Userdata is an opaque numeric ID, never a pointer to Rust-owned storage.
-pub(super) extern "C" fn chosen(user: *mut c_void, files: *const *const c_char, _filter: c_int) {
-    complete(user.addr(), || {
-        if files.is_null() {
-            return Err(error());
+pub(super) fn show(id: usize, kind: DialogKind, location: Option<&Path>) {
+    // SDL accepts UTF-8 paths. Treat an unrepresentable suggestion as absent.
+    let location = location.filter(|path| path.to_str().is_some_and(|path| !path.contains('\0')));
+    let callback: DialogCallback =
+        Box::new(move |result, _| complete(id, || selected_path(result)));
+    // The fullscreen selection is hidden before opening the unparented chooser.
+    let parent = None::<&Window>;
+    match kind {
+        DialogKind::ScreenshotFolder => show_open_folder_dialog(location, false, parent, callback),
+        DialogKind::ScreenshotFile => {
+            let filters = [DialogFileFilter {
+                name: "PNG",
+                pattern: "png",
+            }];
+            if let Err(error) = show_save_file_dialog(&filters, location, parent, callback) {
+                complete(id, || Err(error.to_string()));
+            }
         }
-        // SAFETY: SDL guarantees that a non-null result list points to at
-        // least one C pointer, terminated by a null pointer, for this callback.
-        let file = unsafe { *files };
-        if file.is_null() {
-            return Ok(None);
-        }
-        // SAFETY: The selected path is NUL-terminated and borrowed from SDL
-        // for the duration of this callback. path_from_c copies it immediately.
-        path_from_c(unsafe { CStr::from_ptr(file) }).map(Some)
-    });
+    }
 }
 
-pub(super) fn show(id: usize, kind: DialogKind, window: &Window, location: Option<&Path>) {
-    // No pointer to owned Rust state survives the SDL callback. An ID is
-    // encoded as pointer metadata but is only converted back to an integer.
-    let user = ptr::without_provenance_mut(id);
-    let location = location.and_then(location_to_c);
-    let initial = location.as_ref().map_or(ptr::null(), |path| path.as_ptr());
-    let parent = if use_window_parent(kind) {
-        window.raw.as_ptr()
-    } else {
-        ptr::null_mut()
-    };
-    // SAFETY: SDL borrows the initial C string only during this call.
-    // The filter uses static storage valid through callback completion.
-    // The parent is a live SDL Window pointer or null. Screenshot-save
-    // dialogs are unparented so the fullscreen canvas can be hidden while
-    // the chooser is open, including GNOME Wayland and XWayland.
-    unsafe {
-        match kind {
-            DialogKind::ScreenshotFolder => {
-                SDL_ShowOpenFolderDialog(Some(chosen), user, parent, initial, false)
-            }
-            DialogKind::ScreenshotFile => {
-                SDL_ShowSaveFileDialog(Some(chosen), user, parent, PNG_FILTER, 1, initial)
-            }
-        }
+fn selected_path(result: Result<Vec<PathBuf>, DialogError>) -> Result<Option<PathBuf>, String> {
+    match result {
+        Ok(paths) => Ok(paths.into_iter().next()),
+        Err(DialogError::Canceled) => Ok(None),
+        Err(error) => Err(error.to_string()),
     }
 }
 
@@ -76,28 +50,32 @@ pub(super) fn downloads() -> Option<PathBuf> {
         if path.is_null() {
             return None;
         }
-        path_from_c(CStr::from_ptr(path)).ok()
+        let path = CStr::from_ptr(path);
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt as _;
+            Some(PathBuf::from(std::ffi::OsStr::from_bytes(path.to_bytes())))
+        }
+        #[cfg(not(unix))]
+        path.to_str().ok().map(PathBuf::from)
     }
 }
 
-fn location_to_c(path: &Path) -> Option<CString> {
-    #[cfg(any(windows, target_os = "macos"))]
-    let bytes = path.to_str()?.as_bytes();
-    #[cfg(not(any(windows, target_os = "macos")))]
-    let bytes = path.as_os_str().as_encoded_bytes();
-    CString::new(bytes).ok()
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-pub(super) fn path_from_c(path: &CStr) -> Result<PathBuf, String> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt as _;
-        Ok(PathBuf::from(std::ffi::OsStr::from_bytes(path.to_bytes())))
-    }
-    #[cfg(not(unix))]
-    {
-        path.to_str()
-            .map(PathBuf::from)
-            .map_err(|error| format!("Invalid UTF-8 file dialog path: {error}"))
+    #[test]
+    fn maps_native_dialog_selection_cancellation_and_error() -> Result<(), &'static str> {
+        assert_eq!(
+            selected_path(Ok(vec![PathBuf::from("截图.png")])),
+            Ok(Some(PathBuf::from("截图.png")))
+        );
+        assert_eq!(selected_path(Err(DialogError::Canceled)), Ok(None));
+        let error = std::ffi::CString::new([0])
+            .err()
+            .ok_or("Expected an invalid filter string")?;
+        assert!(selected_path(Err(DialogError::FilterError(error))).is_err());
+        Ok(())
     }
 }

@@ -1,6 +1,5 @@
 #![forbid(unsafe_code)]
-use super::Window;
-#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 use super::dialog_native as native;
 use std::{
     collections::BTreeMap,
@@ -19,19 +18,6 @@ type ResultPath = Result<Option<PathBuf>, String>;
 struct Callback {
     result: Option<ResultPath>,
     wake: u32,
-}
-
-// Cocoa can access the SDL parent from the sheet completion handler, and
-// Windows can look up its native handle from a worker thread.
-#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-pub const USE_WINDOW_PARENT: bool = !cfg!(any(windows, target_os = "macos"));
-
-/// The screenshot selection is a fullscreen, always-on-top canvas. A native
-/// save chooser must not be modal to that canvas: the canvas must be hidden
-/// before the chooser opens so it cannot obscure or intercept the chooser.
-#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-pub(super) const fn use_window_parent(kind: DialogKind) -> bool {
-    USE_WINDOW_PARENT && !matches!(kind, DialogKind::ScreenshotFile)
 }
 
 struct Callbacks {
@@ -94,19 +80,18 @@ impl FileDialog {
         Some(id)
     }
 
-    pub fn open(&mut self, kind: DialogKind, window: &Window, location: Option<&Path>) -> bool {
+    pub fn open(&mut self, kind: DialogKind, location: Option<&Path>) -> bool {
         let Some(id) = self.begin(kind) else {
             return false;
         };
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         {
-            let _ = window;
             let (cancel, cancelled) = async_channel::bounded(1);
             self.cancel = Some(cancel);
             super::dialog_unix::show(id, kind, location, cancelled);
         }
-        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-        native::show(id, kind, window, location);
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
+        native::show(id, kind, location);
         true
     }
 
@@ -152,25 +137,13 @@ pub(super) fn complete(id: usize, value: impl FnOnce() -> ResultPath) {
 pub fn downloads() -> Option<PathBuf> {
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     return super::dialog_unix::downloads();
-    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     native::downloads()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-    use std::ptr;
-
-    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-    #[test]
-    fn screenshot_save_dialog_does_not_parent_fullscreen_overlay() {
-        assert!(!use_window_parent(DialogKind::ScreenshotFile));
-        assert_eq!(
-            use_window_parent(DialogKind::ScreenshotFolder),
-            USE_WINDOW_PARENT
-        );
-    }
 
     #[test]
     fn delivers_a_callback_from_another_thread_once() -> Result<(), String> {
@@ -219,69 +192,6 @@ mod tests {
             next.poll(),
             Some((DialogKind::ScreenshotFolder, Ok(None)))
         ));
-        Ok(())
-    }
-
-    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-    #[test]
-    fn native_callback_copies_selected_path() -> Result<(), String> {
-        let mut dialog = FileDialog::default();
-        let id = dialog
-            .begin(DialogKind::ScreenshotFile)
-            .ok_or("Cannot begin file dialog")?;
-        let files = [c"sample.png".as_ptr(), ptr::null()];
-        native::chosen(ptr::without_provenance_mut(id), files.as_ptr(), -1);
-        let (kind, result) = dialog.poll().ok_or("Expected a file dialog result")?;
-        assert!(matches!(kind, DialogKind::ScreenshotFile));
-        assert_eq!(result, Ok(Some(PathBuf::from("sample.png"))));
-        Ok(())
-    }
-
-    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-    #[test]
-    fn native_callback_cancellation_is_owned_and_consumed_once() -> Result<(), String> {
-        let mut dialog = FileDialog::default();
-        let id = dialog
-            .begin(DialogKind::ScreenshotFolder)
-            .ok_or("Cannot begin folder dialog")?;
-        let list = [ptr::null()];
-        native::chosen(ptr::without_provenance_mut(id), list.as_ptr(), -1);
-        assert!(matches!(
-            dialog.poll(),
-            Some((DialogKind::ScreenshotFolder, Ok(None)))
-        ));
-        assert!(dialog.poll().is_none());
-        Ok(())
-    }
-
-    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-    #[test]
-    fn native_callback_error_returns_a_result_not_a_pending_dialog() -> Result<(), String> {
-        let mut dialog = FileDialog::default();
-        let id = dialog
-            .begin(DialogKind::ScreenshotFolder)
-            .ok_or("Cannot begin folder dialog")?;
-        native::chosen(ptr::without_provenance_mut(id), ptr::null(), -1);
-        assert!(matches!(
-            dialog.poll(),
-            Some((DialogKind::ScreenshotFolder, Err(_)))
-        ));
-        assert!(!dialog.pending());
-        Ok(())
-    }
-
-    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-    #[test]
-    fn handles_non_utf8_paths_with_platform_encoding() -> Result<(), String> {
-        let path = c"\xff";
-        #[cfg(unix)]
-        {
-            use std::os::unix::ffi::OsStrExt as _;
-            let native = native::path_from_c(path)?;
-            assert_eq!(native.as_os_str().as_bytes(), path.to_bytes());
-        }
-        #[cfg(not(unix))]
-        assert!(native::path_from_c(path).is_err());
         Ok(())
     }
 }

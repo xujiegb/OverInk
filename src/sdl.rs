@@ -1,7 +1,7 @@
 //! SDL is owned by the main thread. Window/renderer pointers never cross threads.
 #![deny(clippy::undocumented_unsafe_blocks)]
 pub mod dialog;
-#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 mod dialog_native;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod dialog_unix;

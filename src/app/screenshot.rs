@@ -752,12 +752,7 @@ impl Screenshot {
         self.save(Destination::Replace(path))
     }
 
-    pub fn open_save_as(
-        &mut self,
-        dialog: &mut dialog::FileDialog,
-        window: &Window,
-        preferences: &Preferences,
-    ) {
+    pub fn open_save_as(&mut self, dialog: &mut dialog::FileDialog, preferences: &Preferences) {
         let folder = if self.error.is_some() {
             downloads_folder().map(Cow::Owned)
         } else {
@@ -765,7 +760,7 @@ impl Screenshot {
         };
         let suggested = folder.map(|folder| folder.join(format!("{}.png", file_stem())));
         let location = self.replace.as_deref().or(suggested.as_deref());
-        self.save_dialog |= dialog.open(dialog::DialogKind::ScreenshotFile, window, location);
+        self.save_dialog |= dialog.open(dialog::DialogKind::ScreenshotFile, location);
     }
 
     pub fn close_save_as(&mut self) {

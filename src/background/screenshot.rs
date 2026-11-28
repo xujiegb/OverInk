@@ -437,12 +437,20 @@ mod tests {
             region: Rect::from_min_max(egui::pos2(1.2, 1.1), egui::pos2(3.3, 3.7)),
             size: [5., 4.],
         };
-        let reference = crop.apply(Image::from_hdr_capture(&pixels, stride, full, None)?)?;
-        let region = Image::from_hdr_capture(&pixels, stride, full, Some(crop))?;
+        let reference = crop.apply(Image::from_hdr_capture(
+            pixels.to_vec(),
+            stride,
+            full,
+            None,
+        )?)?;
+        let region = Image::from_hdr_capture(pixels.to_vec(), stride, full, Some(crop))?;
         assert_eq!([region.width, region.height], [3, 3]);
+        assert_eq!(region.rgba[4..6], 0x4006_u16.to_ne_bytes());
+        assert_eq!(region.rgba[6..8], 0x3c00_u16.to_ne_bytes());
+        assert_eq!(region.rgba[68..70], 0x4012_u16.to_ne_bytes());
         assert_eq!(region.rgba, reference.rgba);
-        assert!(Image::from_hdr_capture(&pixels[..183], stride, full, Some(crop)).is_err());
-        assert!(Image::from_hdr_capture(&pixels, 39, full, Some(crop)).is_err());
+        assert!(Image::from_hdr_capture(pixels[..183].to_vec(), stride, full, Some(crop)).is_err());
+        assert!(Image::from_hdr_capture(pixels.to_vec(), 39, full, Some(crop)).is_err());
         Ok(())
     }
 

@@ -1587,8 +1587,8 @@ mod tests {
         app.history.commit();
     }
 
-    // Opt-in CPU profiling fixture. Compare the old sample-preparation path
-    // and indexed replay on exactly the same document and software surface.
+    // Opt-in CPU profiling fixture. Compare direct and indexed replay with
+    // the production committed-ink cache on the same software surface.
     // Timed frames include SDL submission/present, but not fixture creation.
     #[test]
     #[ignore = "software renderer profiling workload"]
@@ -1633,7 +1633,7 @@ mod tests {
             let now = Instant::now();
             let frame = canvas.frame();
             app.input.prune_laser(now);
-            for scenario in ["prepared", "indexed", "laser"] {
+            for scenario in ["prepared", "indexed", "cached", "laser"] {
                 let mut ink = Ink::default();
                 let mut total = Duration::ZERO;
                 let mut slowest = Duration::ZERO;
@@ -1648,6 +1648,7 @@ mod tests {
                             }
                         }
                         "indexed" => ink.painter.history(&frame, &app, 0, None, 1.)?,
+                        "cached" => ink.committed(&frame, &mut app)?,
                         _ => ink.paint_laser(
                             &frame,
                             &app,
@@ -1660,6 +1661,8 @@ mod tests {
                         let elapsed = started.elapsed();
                         total += elapsed;
                         slowest = slowest.max(elapsed);
+                    } else if scenario == "cached" && ink.layer.is_none() {
+                        return Err("The software renderer did not create the ink cache".into());
                     }
                 }
                 println!(

@@ -28,6 +28,7 @@ use crate::{
 };
 use screenshot::{Destination, MenuAction, SaveError, Screenshot};
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -2419,16 +2420,31 @@ fn run_inner(options: Options) -> Result<(), String> {
                     None
                 };
                 let requested = requested_display.take();
-                let displays = topology
-                    .connected()
-                    .unwrap_or_else(|error| {
+                let displays = match topology.connected() {
+                    Ok(mut displays) => {
+                        displays.retain(|display| !disconnected.contains(&display.id));
+                        Cow::Owned(displays)
+                    }
+                    Err(error) => {
                         app.status = text("Display query failed").detail(error);
                         toolbar_dirty = true;
-                        app.displays.clone()
-                    })
-                    .into_iter()
-                    .filter(|d| !disconnected.contains(&d.id))
-                    .collect::<Vec<_>>();
+                        if app
+                            .displays
+                            .iter()
+                            .any(|display| disconnected.contains(&display.id))
+                        {
+                            Cow::Owned(
+                                app.displays
+                                    .iter()
+                                    .filter(|display| !disconnected.contains(&display.id))
+                                    .cloned()
+                                    .collect(),
+                            )
+                        } else {
+                            Cow::Borrowed(app.displays.as_slice())
+                        }
+                    }
+                };
                 let was_suspended = app.suspended;
                 let reported = canvases[0]
                     .window
@@ -2440,26 +2456,27 @@ fn run_inner(options: Options) -> Result<(), String> {
                 } else {
                     desired
                 };
-                let topology_changed = displays != app.displays;
+                let topology_changed = displays.as_ref() != app.displays;
                 if topology_changed {
                     connected = displays.iter().map(|display| display.id).collect();
                 }
                 let previous_page = app.pages.active;
-                if target.is_some_and(|id| Some(id) != previous_page)
+                let switch_page = target.is_some_and(|id| Some(id) != previous_page);
+                let flush_text = switch_page
                     && displays
                         .iter()
-                        .any(|display| Some(display.id) == previous_page)
-                {
+                        .any(|display| Some(display.id) == previous_page);
+                let displays = (topology_changed || switch_page).then(|| displays.into_owned());
+                if flush_text {
                     let active = canvas::active_index(&canvases, previous_page);
                     canvases[active].flush_text_events(&mut app, gui.ctx.theme())?;
                 }
-                let (layout, removed) =
-                    if topology_changed || target.is_some_and(|id| Some(id) != app.pages.active) {
-                        toolbar_dirty = true;
-                        app.refresh_displays(displays, target)
-                    } else {
-                        (false, false)
-                    };
+                let (layout, removed) = if let Some(displays) = displays {
+                    toolbar_dirty = true;
+                    app.refresh_displays(displays, target)
+                } else {
+                    (false, false)
+                };
                 if app.multi
                     && previous_page != app.pages.active
                     && let Some(canvas) = canvases
@@ -2772,7 +2789,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 }
                 gui.suspend_input(&toolbar);
                 let location = screenshot::default_folder(&app.preferences);
-                file_dialog.open(DialogKind::ScreenshotFolder, &toolbar, location.as_deref());
+                file_dialog.open(DialogKind::ScreenshotFolder, location.as_deref());
                 cmd.redraw_canvas = true;
                 toolbar_dirty = true;
             }
@@ -3268,9 +3285,9 @@ fn run_inner(options: Options) -> Result<(), String> {
             }
             if open_save_as
                 && !file_dialog.pending()
-                && let Some(index) = canvases
+                && canvases
                     .iter()
-                    .position(|canvas| app.screenshot.targets(canvas.window.id))
+                    .any(|canvas| app.screenshot.targets(canvas.window.id))
             {
                 // Hide the fullscreen selection *before* opening the native
                 // chooser, even on Linux/FreeBSD. Wayland transient parents
@@ -3279,11 +3296,8 @@ fn run_inner(options: Options) -> Result<(), String> {
                 for canvas in &mut canvases {
                     canvas.show(&toolbar, false)?;
                 }
-                app.screenshot.open_save_as(
-                    &mut file_dialog,
-                    &canvases[index].window,
-                    &app.preferences,
-                );
+                app.screenshot
+                    .open_save_as(&mut file_dialog, &app.preferences);
             }
             if screenshot_active && !app.screenshot.active() {
                 toolbar_dirty |= capture_visibility(
