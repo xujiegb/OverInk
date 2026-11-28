@@ -2327,7 +2327,8 @@ mod tests {
         let original = app.history.text_boxes()[0].clone();
         let mut edited = (*original).clone();
         edited.text = "可重做".into();
-        app.history.set_text_box(Some(0), edited.clone());
+        app.history.set_text_box(Some(0), edited);
+        let expected = std::sync::Arc::clone(&app.history.text_boxes()[0]);
         app.change_history(HistoryAction::Undo);
         click(&mut app, original.rect().center());
         let mut gui = Gui::new();
@@ -2354,7 +2355,7 @@ mod tests {
 
         app.change_history(HistoryAction::Redo);
         assert!(!app.input.text.editing());
-        assert_eq!(*app.history.text_boxes()[0], edited);
+        assert_eq!(app.history.text_boxes(), &[expected]);
     }
 
     #[test]

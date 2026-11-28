@@ -13,38 +13,48 @@ impl Rect {
     pub fn contains(self, x: f32, y: f32) -> bool {
         // Native input coordinates can be close to i32::MAX. Widen the
         // endpoints before comparing against the floating-point input.
-        let right = i64::from(self.x) + i64::from(self.w);
-        let bottom = i64::from(self.y) + i64::from(self.h);
-        x >= self.x as f32 && y >= self.y as f32 && x < right as f32 && y < bottom as f32
+        let [left, top, x, y] = [
+            f64::from(self.x),
+            f64::from(self.y),
+            f64::from(x),
+            f64::from(y),
+        ];
+        x >= left && y >= top && x < left + f64::from(self.w) && y < top + f64::from(self.h)
     }
     pub fn crosses(self, from: crate::model::Point, to: crate::model::Point) -> bool {
-        let (mut enter, mut exit) = (0.0_f32, 1.0_f32);
-        for (start, end, min, max) in [
-            (
-                from.x,
-                to.x,
-                i64::from(self.x),
-                i64::from(self.x) + i64::from(self.w),
-            ),
-            (
-                from.y,
-                to.y,
-                i64::from(self.y),
-                i64::from(self.y) + i64::from(self.h),
-            ),
+        if self.w <= 0 || self.h <= 0 {
+            return false;
+        }
+        let mut enter = (0.0, false);
+        let mut exit = (1.0, true);
+        // The maximum edge is excluded, just as in contains(). At an equal
+        // time, a later entry or an earlier exit must prefer the open bound.
+        for (start, end, origin, extent) in [
+            (from.x, to.x, self.x, self.w),
+            (from.y, to.y, self.y, self.h),
         ] {
+            let start = f64::from(start);
+            let end = f64::from(end);
+            let min = f64::from(origin);
+            let max = min + f64::from(extent);
             let delta = end - start;
-            let (min, max) = (min as f32, max as f32);
             if delta == 0. {
-                if start < min || start > max {
+                if start < min || start >= max {
                     return false;
                 }
             } else {
-                let near = (min - start) / delta;
-                let far = (max - start) / delta;
-                enter = enter.max(near.min(far));
-                exit = exit.min(near.max(far));
-                if enter > exit {
+                let at_min = (min - start) / delta;
+                let at_max = (max - start) / delta;
+                let backwards = delta < 0.;
+                let entry = (at_min.min(at_max), backwards);
+                let departure = (at_min.max(at_max), backwards);
+                if entry > enter {
+                    enter = entry;
+                }
+                if departure < exit {
+                    exit = departure;
+                }
+                if enter.0 > exit.0 || (enter.0 == exit.0 && (enter.1 || !exit.1)) {
                     return false;
                 }
             }
@@ -291,6 +301,30 @@ mod tests {
         let within = crate::model::Point::new(inside, inside, 0.5, [0.; 2]);
         assert!(rect.crosses(outside, within));
         assert!(!rect.crosses(outside, outside));
+    }
+
+    #[test]
+    fn pen_segments_touch_only_the_included_toolbar_edges() {
+        let rect = Rect {
+            x: 100,
+            y: 100,
+            w: 56,
+            h: 100,
+        };
+        let point = |x, y| crate::model::Point::new(x, y, 0.5, [0.; 2]);
+        for (from, to, crosses) in [
+            (point(156., 80.), point(156., 220.), false),
+            (point(80., 200.), point(220., 200.), false),
+            (point(160., 96.), point(156., 100.), false),
+            (point(96., 96.), point(100., 100.), true),
+            (point(100., 80.), point(100., 220.), true),
+            (point(80., 100.), point(220., 100.), true),
+            (point(160., 150.), point(150., 150.), true),
+        ] {
+            assert_eq!(rect.crosses(from, to), crosses);
+            assert_eq!(rect.crosses(to, from), crosses);
+        }
+        assert!(!Rect { w: 0, ..rect }.crosses(point(80., 150.), point(220., 150.)));
     }
 
     #[test]

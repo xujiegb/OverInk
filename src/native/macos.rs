@@ -8,7 +8,7 @@ pub(crate) use direct_touch::{
 pub use pencil::PencilModeMonitor;
 
 use crate::sdl::*;
-use objc2::{msg_send, rc::Retained, runtime::AnyObject};
+use objc2::{msg_send, runtime::AnyObject};
 use objc2_core_graphics::{CGColorSpace, kCGColorSpaceSRGB};
 use std::ptr::NonNull;
 
@@ -28,24 +28,7 @@ pub fn configure_metal(raw: NonNull<SDL_Renderer>, extended: bool) {
 }
 
 pub fn remove_metal_view(window: &Window) {
-    let Some(tag) = window.cocoa_metal_view_tag() else {
-        return;
-    };
-    let Some(ns) = window.cocoa_window() else {
-        return;
-    };
-    // SAFETY: The NSWindow is borrowed from the live SDL window and the
-    // selectors use their Cocoa object-pointer and NSInteger signatures.
-    // Check the intermediate contentView before messaging it.
-    unsafe {
-        let ns = ns.as_non_null().as_ptr().cast::<AnyObject>();
-        let content: Option<Retained<AnyObject>> = msg_send![ns, contentView];
-        let Some(content) = content else {
-            return;
-        };
-        let metal: Option<Retained<AnyObject>> = msg_send![&*content, viewWithTag: tag];
-        if let Some(metal) = metal {
-            let _: () = msg_send![&*metal, removeFromSuperview];
-        }
+    if let Some(tag) = window.cocoa_metal_view_tag() {
+        direct_touch::overink_macos_remove_metal_view(window.id.0, tag);
     }
 }

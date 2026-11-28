@@ -1771,7 +1771,6 @@ fn run_inner(options: Options) -> Result<(), String> {
         canvas::Canvas::new(window, app.displays.get(app.display), &options)
     })?];
     let toolbar = with_autorelease_pool(|| Window::toolbar(&runtime))?;
-    with_autorelease_pool(|| toolbar.set_toolbar_icon());
     // With NSIsTouchNative set, AppKit no longer synthesizes mouse clicks for
     // direct touches. The separate toolbar is an SDL window too, so it needs
     // the same direct-touch bridge as every canvas.

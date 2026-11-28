@@ -15,6 +15,7 @@ unsafe extern "C" {
     ) -> u32;
     pub(crate) safe fn overink_macos_raise_overlay(window_id: u32, keyboard: bool) -> bool;
     pub(crate) safe fn overink_macos_order_toolbar(canvas_id: u32, toolbar_id: u32);
+    pub(super) safe fn overink_macos_remove_metal_view(window_id: u32, tag: isize);
     pub(crate) safe fn overink_macos_overlay_crosshair(crosshair: bool);
     pub(crate) safe fn overink_macos_destroy_overlay(window_id: u32) -> bool;
     safe fn overink_macos_install_touch(window_id: u32) -> i32;

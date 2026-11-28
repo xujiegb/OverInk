@@ -27,6 +27,13 @@ static NSWindow *OverInkCocoaWindow(SDL_Window *window) {
         SDL_GetWindowProperties(window), "SDL.window.cocoa.window", NULL);
 }
 
+void overink_macos_remove_metal_view(uint32_t window_id, intptr_t tag) {
+    if ([NSThread isMainThread]) {
+        [[OverInkCocoaWindow(SDL_GetWindowFromID(window_id)).contentView viewWithTag:tag]
+            removeFromSuperview];
+    }
+}
+
 // SDL invalidates each window's cursor rect when the picker or screenshot
 // changes the cursor. External views supply the replacement rect themselves.
 static BOOL OverInkOverlayCrosshair = NO;

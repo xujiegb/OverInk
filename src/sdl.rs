@@ -1373,7 +1373,7 @@ enum WindowCommand<'a> {
     },
     Show(bool),
     SetParent(Option<&'a Window>),
-    ToolbarIcon([i32; 2], &'a mut [u8]),
+    #[cfg(target_os = "macos")]
     RoundedCorners([i32; 2], i32),
     #[cfg(not(target_os = "windows"))]
     ShapeRegions([i32; 2], Option<&'a [SDL_Rect]>),
@@ -1634,120 +1634,21 @@ impl Window {
                     }
                     check(SDL_SetWindowParent(self.raw.as_ptr(), raw))
                 }
-                WindowCommand::ToolbarIcon([width, height], pixels) => {
-                    // The pixel slice remains mutably borrowed until the
-                    // surface has been released by the OwnedSurface guard.
-                    let pitch = width.checked_mul(4).ok_or("Invalid toolbar icon pitch")?;
-                    let expected = usize::try_from(height)
-                        .ok()
-                        .and_then(|h| usize::try_from(pitch).ok().and_then(|p| h.checked_mul(p)))
-                        .ok_or("Invalid toolbar icon dimensions")?;
-                    if width <= 0 || height <= 0 || pixels.len() != expected {
-                        return Err("Invalid toolbar icon pixel buffer".into());
-                    }
-                    let surface = SDL_CreateSurfaceFrom(
-                        width,
-                        height,
-                        SDL_PIXELFORMAT_RGBA32,
-                        pixels.as_mut_ptr().cast(),
-                        pitch,
-                    );
-                    if let Some(surface) = NonNull::new(surface).map(OwnedSurface)
-                        && !cfg!(target_os = "macos")
-                    {
-                        // Cocoa maps SDL_SetWindowIcon to NSApplication's Dock icon.
-                        // Keep the correctly sized .icns from the macOS app bundle.
-                        SDL_SetWindowIcon(self.raw.as_ptr(), surface.as_non_null().as_ptr());
-                    }
-                    Ok(())
-                }
-                WindowCommand::RoundedCorners([width, height], radius) => {
-                    if width <= 0 || height <= 0 || radius <= 0 {
-                        return Err("Invalid toolbar shape geometry".into());
-                    }
-                    let radius = radius.min(width / 2).min(height / 2);
-                    if radius == 0 {
-                        return Err("Toolbar window is too small for rounded corners".into());
-                    }
+                #[cfg(target_os = "macos")]
+                WindowCommand::RoundedCorners(size, radius) => {
                     let surface = OwnedSurface(
-                        NonNull::new(SDL_CreateSurface(width, height, SDL_PIXELFORMAT_ARGB32))
+                        NonNull::new(SDL_CreateSurface(size[0], size[1], SDL_PIXELFORMAT_ARGB32))
                             .ok_or_else(error)?,
                     );
                     let surface_handle = surface.as_non_null();
-                    let opaque = SDL_MapSurfaceRGBA(surface_handle.as_ptr(), 255, 255, 255, 255);
-
-                    // SDL_CreateSurface zeroes the pixels, so only paint
-                    // the opaque interior and antialiased corner edges.
-                    let middle = SDL_Rect {
-                        x: 0,
-                        y: radius,
-                        w: width,
-                        h: height - radius * 2,
-                    };
-                    if middle.h > 0 {
-                        check(SDL_FillSurfaceRect(
-                            surface_handle.as_ptr(),
-                            &middle,
-                            opaque,
-                        ))?;
-                    }
-                    // Alpha antialiasing at the extreme two outer edges of
-                    // each row, and mirrored geometry on all four corners.
-                    for y in 0..radius {
-                        let vertical = f64::from(radius) - (f64::from(y) + 0.5);
-                        let x_edge = f64::from(radius)
-                            - (f64::from(radius).powi(2) - vertical.powi(2))
-                                .max(0.)
-                                .sqrt();
-                        let inset = (x_edge.ceil() as i32).clamp(0, radius);
-                        let row_width = width - inset * 2;
-                        if row_width > 0 {
-                            let top = SDL_Rect {
-                                x: inset,
-                                y,
-                                w: row_width,
-                                h: 1,
-                            };
-                            let bottom = SDL_Rect {
-                                y: height - y - 1,
-                                ..top
-                            };
-                            check(SDL_FillSurfaceRect(surface_handle.as_ptr(), &top, opaque))?;
-                            check(SDL_FillSurfaceRect(
-                                surface_handle.as_ptr(),
-                                &bottom,
-                                opaque,
-                            ))?;
+                    paint_toolbar_mask(size, radius, |rects, alpha| {
+                        let color =
+                            SDL_MapSurfaceRGBA(surface_handle.as_ptr(), 255, 255, 255, alpha);
+                        for rect in rects {
+                            check(SDL_FillSurfaceRect(surface_handle.as_ptr(), rect, color))?;
                         }
-                        if inset > 0 {
-                            let coverage = (f64::from(inset) - x_edge).clamp(0., 1.);
-                            let edge_alpha = (coverage * 255.).round() as u8;
-                            if edge_alpha > 0 {
-                                let edge_color = SDL_MapSurfaceRGBA(
-                                    surface_handle.as_ptr(),
-                                    255,
-                                    255,
-                                    255,
-                                    edge_alpha,
-                                );
-                                for x in [inset - 1, width - inset] {
-                                    for row in [y, height - y - 1] {
-                                        let pixel = SDL_Rect {
-                                            x,
-                                            y: row,
-                                            w: 1,
-                                            h: 1,
-                                        };
-                                        check(SDL_FillSurfaceRect(
-                                            surface_handle.as_ptr(),
-                                            &pixel,
-                                            edge_color,
-                                        ))?;
-                                    }
-                                }
-                            }
-                        }
-                    }
+                        Ok(())
+                    })?;
                     check(SDL_SetWindowShape(
                         self.raw.as_ptr(),
                         surface_handle.as_ptr(),
@@ -1764,13 +1665,7 @@ impl Window {
                     );
                     let opaque =
                         SDL_MapSurfaceRGBA(surface.as_non_null().as_ptr(), 255, 255, 255, 255);
-                    let transparent =
-                        SDL_MapSurfaceRGBA(surface.as_non_null().as_ptr(), 0, 0, 0, 0);
-                    check(SDL_FillSurfaceRect(
-                        surface.as_non_null().as_ptr(),
-                        ptr::null(),
-                        transparent,
-                    ))?;
+                    // SDL_CreateSurface already zeroes pixels outside the opaque regions.
                     for region in regions {
                         check(SDL_FillSurfaceRect(
                             surface.as_non_null().as_ptr(),
@@ -2008,6 +1903,8 @@ impl Window {
                 HitTestResult::Normal
             }
         });
+        #[cfg(not(target_os = "macos"))]
+        set_toolbar_icon(&mut owner);
         let window = Self {
             raw,
             id,
@@ -2052,12 +1949,6 @@ impl Window {
         let [width, height] = self.query_size(false).unwrap_or([0, 0]);
         [width.max(1) as f32, height.max(1) as f32]
     }
-    pub fn set_toolbar_icon(&self) {
-        let icon = crate::toolbar::image();
-        let size = [icon.width() as i32, icon.height() as i32];
-        let mut pixels = icon.into_raw();
-        let _ = self.run_command(WindowCommand::ToolbarIcon(size, &mut pixels));
-    }
     /// Rebuild the native shape only after an actual pixel-size/DPI change.
     pub fn update_rounded_shape(
         &self,
@@ -2081,8 +1972,21 @@ impl Window {
             crate::x11::set_rounded_input(id, size, radius.max(1))?;
             return Ok(true);
         }
-        self.run_command(WindowCommand::RoundedCorners(key.0, key.1))?;
+        self.apply_toolbar_mask(key.0, key.1)?;
         Ok(true)
+    }
+
+    fn apply_toolbar_mask(&self, size: [i32; 2], radius: i32) -> Result<(), String> {
+        if let Some(owner) = &self.toolbar_owner {
+            let surface = toolbar_mask_surface(size, radius)?;
+            return owner.set_shape(surface).map_err(|error| error.to_string());
+        }
+        #[cfg(target_os = "macos")]
+        {
+            self.run_command(WindowCommand::RoundedCorners(size, radius))
+        }
+        #[cfg(not(target_os = "macos"))]
+        Err("Rounded toolbar mask requires an SDL toolbar window".into())
     }
 
     pub fn arrange_toolbar(&self, expanded: bool, on_display: Option<u32>) -> Result<(), String> {
@@ -2321,6 +2225,138 @@ fn main_window_flags(style: WindowStyle) -> SDL_WindowFlags {
     }
     flags
 }
+#[cfg(not(target_os = "macos"))]
+fn set_toolbar_icon(owner: &mut sdl3::video::Window) {
+    use sdl3::{pixels::PixelFormat, surface::Surface};
+    let icon = crate::toolbar::image();
+    let (width, height) = icon.dimensions();
+    let Ok(mut surface) = Surface::new(width, height, PixelFormat::RGBA32) else {
+        return;
+    };
+    let pitch = surface.pitch() as usize;
+    let row_bytes = width as usize * 4;
+    surface.with_lock_mut(|pixels| {
+        for (dst, src) in pixels
+            .chunks_exact_mut(pitch)
+            .zip(icon.as_raw().chunks_exact(row_bytes))
+        {
+            dst[..row_bytes].copy_from_slice(src);
+        }
+    });
+    owner.set_icon(surface);
+}
+
+fn toolbar_mask_surface(
+    size: [i32; 2],
+    radius: i32,
+) -> Result<sdl3::surface::Surface<'static>, String> {
+    use sdl3::{pixels::PixelFormat, surface::Surface};
+    let [width, height] = size;
+    if width <= 0 || height <= 0 {
+        return Err("Invalid toolbar shape geometry".into());
+    }
+    let mut surface = Surface::new(width as u32, height as u32, PixelFormat::ARGB32)
+        .map_err(|error| error.to_string())?;
+    let pitch = surface.pitch() as usize;
+    // ARGB32 is alpha-first in memory on both endian orders. Write the
+    // complete mask under one lock, without a native fill call for each row.
+    surface.with_lock_mut(|pixels| {
+        paint_toolbar_mask(size, radius, |rects, alpha| {
+            for &SDL_Rect { x, y, w, h } in rects {
+                for row in pixels
+                    .chunks_exact_mut(pitch)
+                    .skip(y as usize)
+                    .take(h as usize)
+                {
+                    let span = &mut row[x as usize * 4..(x + w) as usize * 4];
+                    span.fill(255);
+                    if alpha != 255 {
+                        for pixel in span.as_chunks_mut::<4>().0 {
+                            pixel[0] = alpha;
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })
+    })?;
+    Ok(surface)
+}
+
+/// Paint the same corner coverage into safe SDL surfaces and Cocoa panels.
+fn paint_toolbar_mask(
+    [width, height]: [i32; 2],
+    radius: i32,
+    mut fill: impl FnMut(&[SDL_Rect], u8) -> Result<(), String>,
+) -> Result<(), String> {
+    if width <= 0 || height <= 0 || radius <= 0 {
+        return Err("Invalid toolbar shape geometry".into());
+    }
+    let radius = radius.min(width / 2).min(height / 2);
+    if radius == 0 {
+        return Err("Toolbar window is too small for rounded corners".into());
+    }
+    let middle = SDL_Rect {
+        x: 0,
+        y: radius,
+        w: width,
+        h: height - radius * 2,
+    };
+    if middle.h > 0 {
+        fill(&[middle], 255)?;
+    }
+    for y in 0..radius {
+        let vertical = f64::from(radius) - (f64::from(y) + 0.5);
+        let x_edge = f64::from(radius)
+            - (f64::from(radius).powi(2) - vertical.powi(2))
+                .max(0.)
+                .sqrt();
+        let inset = (x_edge.ceil() as i32).clamp(0, radius);
+        let bottom = height - y - 1;
+        let top_row = SDL_Rect {
+            x: inset,
+            y,
+            w: width - inset * 2,
+            h: 1,
+        };
+        if top_row.w > 0 {
+            fill(
+                &[
+                    top_row,
+                    SDL_Rect {
+                        y: bottom,
+                        ..top_row
+                    },
+                ],
+                255,
+            )?;
+        }
+        let edge_alpha = ((f64::from(inset) - x_edge).clamp(0., 1.) * 255.).round() as u8;
+        if inset > 0 && edge_alpha > 0 {
+            let left = SDL_Rect {
+                x: inset - 1,
+                y,
+                w: 1,
+                h: 1,
+            };
+            let right = SDL_Rect {
+                x: width - inset,
+                ..left
+            };
+            fill(
+                &[
+                    left,
+                    right,
+                    SDL_Rect { y: bottom, ..left },
+                    SDL_Rect { y: bottom, ..right },
+                ],
+                edge_alpha,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// SDL properties have unique caller ownership and must be destroyed even
 /// when renderer or texture construction returns early or unwinds.
 struct OwnedProperties(SDL_PropertiesID);
@@ -3427,6 +3463,27 @@ impl TestSurface {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn toolbar_mask_preserves_transparent_and_antialiased_corners() -> Result<(), String> {
+        let surface = toolbar_mask_surface([8, 8], 3)?;
+        let pitch = surface.pitch() as usize;
+        surface.with_lock(|pixels| {
+            let row = |y| &pixels[y * pitch..y * pitch + 32];
+            let alpha = row(0)
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|pixel| pixel[0])
+                .collect::<Vec<_>>();
+            assert_eq!(alpha, [0, 168, 255, 255, 255, 255, 168, 0]);
+            assert_eq!(row(0), row(7));
+            assert_eq!(&row(0)[0..8], &[0, 0, 0, 0, 168, 255, 255, 255]);
+            assert!(row(3).iter().all(|&channel| channel == 255));
+        });
+        assert!(toolbar_mask_surface([1, 8], 3).is_err());
+        Ok(())
+    }
 
     #[test]
     fn toolbar_grip_excludes_buttons_and_the_expanded_panel() {
