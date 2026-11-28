@@ -21,6 +21,10 @@ use std::{
 // through a safe extern that cannot enforce its main-thread precondition.
 static SDL_VIDEO_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+thread_local! {
+    static SDL_VIDEO_DRIVER: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+
 // Read SDL's Wayland scaling hint while the SDL-owning thread is already in
 // its audited native initialization boundary. Screenshot workers only need
 // the scalar result, not a callable C API accepting arbitrary pointers.
@@ -113,7 +117,10 @@ enum SdlNativeAction<'a> {
     ReadSurfacePixel(&'a OwnedSurface, i32, i32),
     ClipboardWrite(&'a CStr),
     ClipboardRead,
-    ReadString(SdlStringSource),
+    ReadError,
+    ClearError,
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    WaylandScaleToDisplay,
     WindowIccProfile(&'a Window),
     WindowPointer(&'a Window, NativeWindowProperty),
     WindowNumber(&'a Window, WindowNumberQuery),
@@ -449,20 +456,25 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
                 };
                 SdlNativeResult::Text(text)
             }
-            SdlNativeAction::ReadString(source) => {
-                // SDL owns these borrowed NUL-terminated strings. Copy while
-                // the native getter's returned storage remains valid.
-                let text = match source {
-                    SdlStringSource::Error => SDL_GetError(),
-                    SdlStringSource::VideoDriver => SDL_GetCurrentVideoDriver(),
-                };
-                let copied = if text.is_null() {
+            SdlNativeAction::ReadError => {
+                // SDL and system errors can contain bytes outside UTF-8.
+                let message = SDL_GetError();
+                let text = if message.is_null() {
                     None
                 } else {
-                    Some(CStr::from_ptr(text).to_string_lossy().into_owned())
+                    Some(CStr::from_ptr(message).to_string_lossy().into_owned())
                 };
-                SdlNativeResult::Text(copied)
+                SdlNativeResult::Text(text)
             }
+            SdlNativeAction::ClearError => {
+                SDL_ClearError();
+                SdlNativeResult::Done
+            }
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            SdlNativeAction::WaylandScaleToDisplay => SdlNativeResult::Success(SDL_GetHintBoolean(
+                SDL_HINT_VIDEO_WAYLAND_SCALE_TO_DISPLAY,
+                false,
+            )),
             SdlNativeAction::WindowIccProfile(window) => {
                 // SDL returns an owned profile allocation. The typed Window
                 // borrow keeps its SDL handle live through the synchronous
@@ -589,20 +601,9 @@ impl<T> Drop for SdlAllocation<T> {
     }
 }
 
-/// Restrict native string getters to known SDL functions; a caller cannot
-/// inject a function returning an invalid C string into this safe API.
-enum SdlStringSource {
-    Error,
-    VideoDriver,
-}
-
-/// Copy a borrowed SDL C string through the audited native boundary.
-fn sdl_string(source: SdlStringSource) -> Option<String> {
-    sdl_native(SdlNativeAction::ReadString(source)).text()
-}
-
 pub fn error() -> String {
-    sdl_string(SdlStringSource::Error)
+    sdl_native(SdlNativeAction::ReadError)
+        .text()
         .filter(|message| !message.is_empty())
         .unwrap_or_else(|| "SDL did not report an error message".into())
 }
@@ -653,84 +654,75 @@ impl Runtime {
             && cfg!(any(target_os = "linux", target_os = "freebsd"))
             && is_wayland_session();
         let backend = startup_driver(x11, smoke, wayland);
-        // SAFETY: The SDL main-thread check succeeded. SDL copies the fixed
-        // static hint names and NUL-terminated values; Runtime owns shutdown.
-        unsafe {
-            if let Some(name) = backend {
-                SDL_ClearError();
-                check(SDL_SetHintWithPriority(
-                    SDL_HINT_VIDEO_DRIVER,
-                    name.as_ptr(),
-                    SDL_HINT_OVERRIDE,
-                ))
-                .map_err(|error| {
-                    format!(
-                        "Selecting {} video failed ({error})",
-                        name.to_string_lossy()
-                    )
-                })?;
-            }
-            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-            if backend == Some(c"x11") {
-                // Match the verified X11 workaround before creating any
-                // window. SDL may recreate the XID when choosing a renderer;
-                // do not let its default compositor bypass return.
-                check(SDL_SetHintWithPriority(
-                    SDL_HINT_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR,
-                    c"0".as_ptr(),
-                    SDL_HINT_OVERRIDE,
-                ))?;
-            }
-            // Avoid a second mouse/touch stroke synthesized from the same pen packet.
-            SDL_SetHint(SDL_HINT_PEN_MOUSE_EVENTS, c"0".as_ptr());
-            SDL_SetHint(SDL_HINT_PEN_TOUCH_EVENTS, c"0".as_ptr());
-            SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, c"0".as_ptr());
-            SDL_SetHint(SDL_HINT_MOUSE_TOUCH_EVENTS, c"0".as_ptr());
-            // The initial contact must draw even when it gives the canvas focus.
-            SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, c"1".as_ptr());
-            // A canvas drag must release on entering the separate controller.
-            SDL_SetHint(SDL_HINT_MOUSE_AUTO_CAPTURE, c"0".as_ptr());
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
-            SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, c"0".as_ptr());
-            SDL_SetHint(SDL_HINT_IME_IMPLEMENTED_UI, c"composition".as_ptr());
-            let version = cstring(crate::VERSION);
-            SDL_SetAppMetadata(
-                c"OverInk".as_ptr(),
-                version.as_ptr(),
-                c"org.overink.OverInk".as_ptr(),
-            );
-            SDL_ClearError();
-            let initialize = |error: sdl3::Error| {
-                let name = backend.map_or_else(|| "SDL".into(), CStr::to_string_lossy);
-                format!("Initializing {name} video failed ({error})")
-            };
-            let video = sdl3::init()
-                .and_then(|context| context.video())
-                .map_err(initialize)?;
-            SDL_VIDEO_READY.store(true, std::sync::atomic::Ordering::Release);
-            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-            {
-                // Query the SDL hint in this existing native initialization
-                // scope, not through a safe extern with a pointer argument.
-                let name = SDL_HINT_VIDEO_WAYLAND_SCALE_TO_DISPLAY;
-                let enabled = !name.is_null() && SDL_GetHintBoolean(name, false);
-                WAYLAND_SCALE_TO_DISPLAY_FORCED
-                    .store(enabled, std::sync::atomic::Ordering::Relaxed);
-            }
-            Ok(Self { video })
+        use sdl3::hint::{self, Hint};
+        if let Some(name) = backend {
+            let _ = sdl_native(SdlNativeAction::ClearError);
+            check(hint::set_with_priority(
+                "SDL_VIDEO_DRIVER",
+                name,
+                &Hint::Override,
+            ))
+            .map_err(|error| format!("Selecting {name} video failed ({error})"))?;
         }
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        if backend == Some("x11") {
+            // SDL may recreate the XID when choosing a renderer. Keep the
+            // compositor active for the recreated overlay window as well.
+            check(hint::set_with_priority(
+                "SDL_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR",
+                "0",
+                &Hint::Override,
+            ))?;
+        }
+        // Suppress duplicate synthetic strokes and accept the first contact
+        // even when it gives the canvas focus. Release drags over the toolbar.
+        for (name, value) in [
+            ("SDL_PEN_MOUSE_EVENTS", "0"),
+            ("SDL_PEN_TOUCH_EVENTS", "0"),
+            ("SDL_TOUCH_MOUSE_EVENTS", "0"),
+            ("SDL_MOUSE_TOUCH_EVENTS", "0"),
+            ("SDL_MOUSE_FOCUS_CLICKTHROUGH", "1"),
+            ("SDL_MOUSE_AUTO_CAPTURE", "0"),
+            ("SDL_IME_IMPLEMENTED_UI", "composition"),
+        ] {
+            hint::set(name, value);
+        }
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        hint::set("SDL_WINDOW_ACTIVATE_WHEN_SHOWN", "0");
+        let _ = sdl3::set_app_metadata(
+            Some("OverInk"),
+            Some(crate::VERSION),
+            Some("org.overink.OverInk"),
+        );
+        let _ = sdl_native(SdlNativeAction::ClearError);
+        let video = sdl3::init()
+            .and_then(|context| context.video())
+            .map_err(|error| {
+                format!(
+                    "Initializing {} video failed ({error})",
+                    backend.unwrap_or("SDL")
+                )
+            })?;
+        SDL_VIDEO_DRIVER.set(Some(video.current_video_driver()));
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        WAYLAND_SCALE_TO_DISPLAY_FORCED.store(
+            sdl_native(SdlNativeAction::WaylandScaleToDisplay).succeeded(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        SDL_VIDEO_READY.store(true, std::sync::atomic::Ordering::Release);
+        Ok(Self { video })
     }
 }
 
-fn startup_driver(x11: bool, smoke: bool, wayland: bool) -> Option<&'static CStr> {
+fn startup_driver(x11: bool, smoke: bool, wayland: bool) -> Option<&'static str> {
     if smoke {
-        Some(c"dummy")
+        Some("dummy")
     } else if x11 {
-        Some(c"x11")
+        Some("x11")
     } else if wayland {
-        Some(c"wayland")
+        Some("wayland")
     } else if cfg!(any(target_os = "linux", target_os = "freebsd")) {
-        Some(c"x11")
+        Some("x11")
     } else {
         None
     }
@@ -738,10 +730,14 @@ fn startup_driver(x11: bool, smoke: bool, wayland: bool) -> Option<&'static CStr
 impl Drop for Runtime {
     fn drop(&mut self) {
         SDL_VIDEO_READY.store(false, std::sync::atomic::Ordering::Release);
+        SDL_VIDEO_DRIVER.set(None);
     }
 }
-pub fn driver() -> String {
-    sdl_string(SdlStringSource::VideoDriver).unwrap_or_else(|| "unknown".into())
+
+/// SDL's driver name is valid for the owning runtime. Cache it on its main
+/// thread so window and input handling never allocate or query SDL for it.
+pub fn driver() -> &'static str {
+    SDL_VIDEO_DRIVER.get().unwrap_or("unknown")
 }
 
 /// Check SDL's native main-thread identity without exposing an FFI function.
@@ -3594,14 +3590,14 @@ mod tests {
 
     #[test]
     fn x11_is_default_and_wayland_is_opt_in() {
-        assert_eq!(startup_driver(false, false, true), Some(c"wayland"));
-        assert_eq!(startup_driver(true, false, true), Some(c"x11"));
-        assert_eq!(startup_driver(true, true, true), Some(c"dummy"));
-        assert_eq!(startup_driver(true, false, false), Some(c"x11"));
+        assert_eq!(startup_driver(false, false, true), Some("wayland"));
+        assert_eq!(startup_driver(true, false, true), Some("x11"));
+        assert_eq!(startup_driver(true, true, true), Some("dummy"));
+        assert_eq!(startup_driver(true, false, false), Some("x11"));
         assert_eq!(
             startup_driver(false, false, false),
             if cfg!(any(target_os = "linux", target_os = "freebsd")) {
-                Some(c"x11")
+                Some("x11")
             } else {
                 None
             }

@@ -465,7 +465,7 @@ impl Ink {
             self.paint_laser(&frame, app, laser_now)?;
         }
         if let Some(hole) = app.input.protected {
-            clear_hole(renderer, hole)?;
+            clear_hole(renderer, hole, scale)?;
         }
         Ok(())
     }
@@ -683,23 +683,22 @@ impl Ink {
                 layer
                     .tiles
                     .iter()
-                    .filter(|tile| intersects(tile.region, visible))
-                    .try_for_each(|tile| tile.draw(renderer, software.then_some(visible)))
+                    .filter_map(|tile| {
+                        let area = if software {
+                            pixel_intersection(tile.region, visible)
+                        } else {
+                            intersects(tile.region, visible).then_some(tile.region)
+                        };
+                        area.map(|area| (tile, area))
+                    })
+                    .try_for_each(|(tile, area)| tile.draw(renderer, area))
             })
         })
     }
 }
 
 impl InkTile {
-    fn draw(&self, renderer: &Renderer, limit: Option<SDL_Rect>) -> Result<(), String> {
-        let draw = if let Some(limit) = limit {
-            let Some(draw) = pixel_intersection(self.region, limit) else {
-                return Ok(());
-            };
-            draw
-        } else {
-            self.region
-        };
+    fn draw(&self, renderer: &Renderer, draw: SDL_Rect) -> Result<(), String> {
         let SDL_Rect { x, y, w, h } = draw;
         let destination = SDL_FRect {
             x: x as f32,
@@ -953,20 +952,18 @@ fn pixel_bounds(bounds: Bounds, pixels: [i32; 2], scale: [f32; 2], aa: f32) -> O
     })
 }
 
-fn clear_hole(renderer: &Renderer, rect: Rect) -> Result<(), String> {
-    clear_rect(
-        renderer,
-        SDL_FRect {
-            x: rect.x as f32,
-            y: rect.y as f32,
-            w: rect.w as f32,
-            h: rect.h as f32,
-        },
-    )
-}
-
-fn clear_rect(renderer: &Renderer, rect: SDL_FRect) -> Result<(), String> {
-    renderer.clear_rect_transparent(&rect)
+fn clear_hole(renderer: &Renderer, rect: Rect, scale: [f32; 2]) -> Result<(), String> {
+    // Match the native input hole's outward-rounded pixel edges. SDL's
+    // software renderer truncates a scaled fill's origin and size separately.
+    let Rect { x, y, w, h } = rect.scaled(scale);
+    renderer.with_pixel_scale(scale, || {
+        renderer.clear_rect_transparent(&SDL_FRect {
+            x: x as f32,
+            y: y as f32,
+            w: w as f32,
+            h: h as f32,
+        })
+    })
 }
 
 #[derive(Default)]
@@ -1048,7 +1045,8 @@ impl StrokePainter {
                 origin,
                 frame.scale,
             );
-            let result = clear_rect(renderer, rect)
+            let result = renderer
+                .clear_rect_transparent(&rect)
                 .and_then(|()| self.history(frame, app, 0, Some(clip), white));
             let reset_clip = renderer.try_set_clip_rect(None);
             result.and(reset_clip)?;
@@ -1937,7 +1935,7 @@ mod tests {
                         region,
                         fresh: false,
                     }
-                    .draw(&sparse.renderer, None)
+                    .draw(&sparse.renderer, region)
                 })?;
                 assert!(
                     actual == sparse.pixels()?,
@@ -1945,6 +1943,45 @@ mod tests {
                 );
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn software_controller_hole_matches_native_pixels_at_fractional_scale() -> TestResult {
+        let canvas = TestCanvas::new([12, 12])?;
+        let scale = [1.25, 1.5];
+        let hole = Rect {
+            x: 1,
+            y: 1,
+            w: 3,
+            h: 3,
+        };
+        let renderer = &canvas.renderer;
+        renderer.set_render_scale(scale)?;
+        renderer.clear([1.; 4])?;
+        clear_hole(renderer, hole, scale)?;
+
+        let pixels = canvas.pixels()?;
+        for y in 0..12 {
+            for x in 0..12 {
+                let expected = if (1..5).contains(&x) && (1..6).contains(&y) {
+                    [0; 4]
+                } else {
+                    [255; 4]
+                };
+                assert_eq!(pixels[y * 12 + x], expected, "pixel ({x}, {y})");
+            }
+        }
+        renderer.replace_rect(
+            &SDL_FRect {
+                x: 8.,
+                y: 5.,
+                w: 1.,
+                h: 1.,
+            },
+            [0., 1., 0., 1.],
+        )?;
+        assert_eq!(canvas.pixel(10, 7)?, [0, 255, 0, 255]);
         Ok(())
     }
 
@@ -2043,7 +2080,7 @@ mod tests {
                     region,
                     fresh: false,
                 }
-                .draw(renderer, None)?;
+                .draw(renderer, region)?;
             }
             canvas.pixels()
         };
@@ -2221,6 +2258,7 @@ mod tests {
                 w: 8,
                 h: 8,
             },
+            [1.; 2],
         )?;
         assert_eq!(canvas.pixel(50, 20)?, [0; 4]);
         assert_eq!(canvas.pixel(60, 20)?, outside_hole);

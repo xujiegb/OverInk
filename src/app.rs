@@ -1749,9 +1749,9 @@ fn run_inner(options: Options) -> Result<(), String> {
     let mut place_kwin_toolbar = wayland && !options.smoke && crate::kwin::active();
     let window =
         with_autorelease_pool(|| Window::new("OverInk - canvas", 1100, 720, !options.smoke))?;
-    let mut topology = crate::display::Topology::new(&video);
+    let mut topology = crate::display::Topology::new(video);
     let displays = with_autorelease_pool(|| topology.connected()).unwrap_or_default();
-    let xwayland = crate::background::is_xwayland(&video);
+    let xwayland = crate::background::is_xwayland(video);
     let mut app = with_autorelease_pool(|| {
         App::new(
             options.board || options.smoke,
@@ -2556,7 +2556,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 if !canvas.background.frozen {
                     continue;
                 }
-                let mode = canvas.snapshot_mode(&video, xwayland, options.sdr);
+                let mode = canvas.snapshot_mode(video, xwayland, options.sdr);
                 if let Err(reason) = canvas.update_background(
                     &app.displays,
                     &connected,
@@ -2780,10 +2780,10 @@ fn run_inner(options: Options) -> Result<(), String> {
                     cmd = app.ui(
                         ui,
                         canvas,
-                        &video,
+                        video,
                         || {
                             canvas
-                                .snapshot_mode(&video, xwayland, options.sdr)
+                                .snapshot_mode(video, xwayland, options.sdr)
                                 .unavailable()
                         },
                         mark.id(),
@@ -3216,12 +3216,12 @@ fn run_inner(options: Options) -> Result<(), String> {
                 canvas.keep_toolbar_above(&toolbar);
                 text_focus.deadline = None;
                 if app.preferences.keyboard_source == KeyboardSource::System
-                    && crate::keyboard::system_supported(&video)
+                    && crate::keyboard::system_supported(video)
                 {
                     // Respect an explicit Windows system-keyboard preference:
                     // never leave an old OverInk overlay open behind TabTip.
                     app.input.text.close_osk();
-                    match crate::keyboard::show(&canvas.window, &video) {
+                    match crate::keyboard::show(&canvas.window, video) {
                         Ok(()) => app.input.text.mark_screen_keyboard_open(),
                         Err(error) => {
                             #[cfg(not(target_os = "windows"))]
