@@ -16,6 +16,7 @@ use crate::{
 };
 use std::{
     collections::BTreeSet,
+    sync::{Arc, Weak},
     time::{Duration, Instant},
 };
 
@@ -34,6 +35,7 @@ pub(super) const MAX_EXTENDED_INK_TEXTURE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_EAGER_SDR_BYTES: usize = 4 * 1024 * 1024;
 const CACHE_STROKES: usize = 64;
 const CACHE_POINTS: usize = 8192;
+const SOFTWARE_REPLAY_POINTS: usize = 16_384;
 const CACHE_ALIGNMENT: i32 = 128;
 const INK_TILE_EDGE: i32 = 512;
 const MAX_INK_TILES: usize = 32;
@@ -71,6 +73,74 @@ struct RibbonStyle {
 struct RibbonBatch {
     vertices: Vec<SDL_Vertex>,
     indices: Vec<u32>,
+}
+
+struct SoftwareReplay {
+    aa: f32,
+    color: u64,
+    strokes: Vec<(Weak<Stroke>, RibbonBatch)>,
+}
+
+impl SoftwareReplay {
+    fn build(frame: &Frame<'_>, strokes: &[Arc<Stroke>], mesh: &mut Mesh) -> Self {
+        let strokes = strokes
+            .iter()
+            .map(|stroke| {
+                mesh.update(
+                    stroke,
+                    &stroke.points,
+                    0..=stroke.points.len() - 1,
+                    frame.aa,
+                    false,
+                );
+                let rgb = frame.color.map(stroke.color.output_rgb(false));
+                let mut vertices = Vec::with_capacity(mesh.vertices.len());
+                set_vertices(
+                    mesh,
+                    &mut vertices,
+                    rgb,
+                    stroke.opacity,
+                    [1.; 2],
+                    [0; 2],
+                    false,
+                );
+                (
+                    Arc::downgrade(stroke),
+                    RibbonBatch {
+                        vertices,
+                        indices: std::mem::take(&mut mesh.indices),
+                    },
+                )
+            })
+            .collect();
+        Self {
+            aa: frame.aa,
+            color: frame.color.revision,
+            strokes,
+        }
+    }
+
+    fn matches(&self, frame: &Frame<'_>, strokes: &[Arc<Stroke>]) -> bool {
+        self.aa == frame.aa
+            && self.color == frame.color.revision
+            && self.strokes.len() == strokes.len()
+            && self
+                .strokes
+                .iter()
+                .zip(strokes)
+                .all(|((source, _), stroke)| {
+                    source
+                        .upgrade()
+                        .is_some_and(|old| Arc::ptr_eq(&old, stroke))
+                })
+    }
+
+    fn draw(&self, renderer: &Renderer, queued: &mut usize) -> Result<(), String> {
+        for (_, batch) in &self.strokes {
+            submit(renderer, None, &batch.vertices, &batch.indices, queued)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -264,6 +334,7 @@ impl Ink {
         self.unavailable_at = None;
         self.activity = ReplayActivity::default();
         self.bounds = InkBounds::default();
+        self.painter.software_replay = None;
     }
 
     pub fn release_idle_layer(&mut self, now: Instant) -> Option<Instant> {
@@ -577,6 +648,7 @@ impl Ink {
         if self.unavailable_at == Some(target) {
             return self.painter.history(frame, app, 0, None, 1.);
         }
+        self.painter.software_replay = None;
         let layer = self.layer.get_or_insert_with(|| CommittedLayer {
             tiles: Vec::new(),
             region,
@@ -971,6 +1043,7 @@ struct StrokePainter {
     mesh: Mesh,
     samples: Vec<Point>,
     vertices: Vec<SDL_Vertex>,
+    software_replay: Option<SoftwareReplay>,
     queued: usize,
     paper: Option<Texture>,
     paper_unavailable: bool,
@@ -1062,10 +1135,45 @@ impl StrokePainter {
         region: Option<InkClip>,
         white: f32,
     ) -> Result<(), String> {
+        let strokes = app.history.strokes();
+        let pending_erasures = &app.input.pending_erasures;
+        let has_erasures = !pending_erasures.is_empty();
+        // The software backend still rasterizes each frame. Reuse the stable
+        // pen geometry while a small page is using direct full replay.
+        let replay = first == 0
+            && region.is_none()
+            && white == 1.
+            && !frame.renderer.extended
+            && frame.renderer.name == "software"
+            && !has_erasures
+            && (1..=CACHE_STROKES).contains(&strokes.len())
+            && app.history.point_count() <= SOFTWARE_REPLAY_POINTS;
+        if replay
+            && let Some(cache) = &self.software_replay
+            && cache.matches(frame, strokes)
+        {
+            return cache.draw(frame.renderer, &mut self.queued);
+        }
         // The index is incrementally maintained after appends. Reuse its
         // spacing information for full-frame replay too, not just dirty tiles.
         let paths = app.history.stroke_index();
-        for (index, stroke) in app.history.strokes().iter().enumerate().skip(first) {
+        if replay
+            && strokes.iter().zip(paths.bounds()).all(|(stroke, bounds)| {
+                stroke.tool == Tool::Pen
+                    && stroke.opacity > 0.
+                    && (1..=MESH_SEGMENTS + 1).contains(&stroke.points.len())
+                    && bounds.is_some_and(StrokeBounds::samples_are_distinct)
+            })
+        {
+            let cache = SoftwareReplay::build(frame, strokes, &mut self.mesh);
+            let result = cache.draw(frame.renderer, &mut self.queued);
+            self.software_replay = Some(cache);
+            return result;
+        }
+        if region.is_none() {
+            self.software_replay = None;
+        }
+        for (index, stroke) in strokes.iter().enumerate().skip(first) {
             let stroke_bounds = paths.bounds()[index];
             if let Some(region) = region
                 && stroke_bounds.is_none_or(|bounds| {
@@ -1075,22 +1183,25 @@ impl StrokePainter {
                 continue;
             }
             let mut result = Ok(());
-            if !Erasure::preview(
-                stroke,
-                index,
-                app.input.pending_erasures.values(),
-                &app.history,
-                |style, points, bounds| {
-                    if result.is_ok()
-                        && region.is_none_or(|region| {
-                            region
-                                .intersects(bounds.path.padded(style.max_radius() * 2. + frame.aa))
-                        })
-                    {
-                        result = self.path(frame, style, points, region, white, None);
-                    }
-                },
-            ) {
+            if !has_erasures
+                || !Erasure::preview(
+                    stroke,
+                    index,
+                    pending_erasures.values(),
+                    &app.history,
+                    |style, points, bounds| {
+                        if result.is_ok()
+                            && region.is_none_or(|region| {
+                                region.intersects(
+                                    bounds.path.padded(style.max_radius() * 2. + frame.aa),
+                                )
+                            })
+                        {
+                            result = self.path(frame, style, points, region, white, None);
+                        }
+                    },
+                )
+            {
                 if matches!(stroke.tool, Tool::Pen | Tool::Pencil)
                     && stroke.opacity > 0.
                     && stroke_bounds.is_some_and(StrokeBounds::samples_are_distinct)
@@ -1771,6 +1882,41 @@ mod tests {
             assert!(painter.samples.is_empty());
             assert_eq!(incremental.pixels()?, direct.pixels()?);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn software_replay_reuses_only_the_current_pen_strokes() -> TestResult {
+        let canvas = TestCanvas::new([112, 72])?;
+        let frame = canvas.frame();
+        let mut app = app();
+        let mut replay = StrokePainter::default();
+        for (index, y) in [16., 16., 52., 52.].into_iter().enumerate() {
+            if index == 0 || index == 2 {
+                app.history.undo();
+                commit(&mut app, Tool::Pen, [20, 150, 240], &[[12., y], [95., y]]);
+            }
+            let prev = replay.software_replay.as_ref();
+            assert_eq!(
+                prev.is_some_and(|cache| cache.matches(&frame, app.history.strokes())),
+                index % 2 != 0
+            );
+            canvas.renderer.clear([0.; 4])?;
+            replay.queued = 0;
+            replay.history(&frame, &app, 0, None, 1.)?;
+            let actual = canvas.pixels()?;
+            canvas.renderer.clear([0.; 4])?;
+            for stroke in app.history.strokes() {
+                StrokePainter::default().stroke(&frame, stroke)?;
+            }
+            assert_eq!(actual, canvas.pixels()?);
+        }
+        app.erase_sample(1, Point::new(56., 52., 1., [0.; 2]));
+        canvas.renderer.clear([0.; 4])?;
+        replay.queued = 0;
+        replay.history(&frame, &app, 0, None, 1.)?;
+        assert!(replay.software_replay.is_none());
+        assert_eq!(canvas.pixel(56, 52)?[3], 0);
         Ok(())
     }
 

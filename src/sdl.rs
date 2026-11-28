@@ -1542,7 +1542,7 @@ impl Window {
                         if enabled {
                             // Mouse/pen editor activation must not summon an OSK.
                             // The explicit touch/button request below opts in.
-                            SDL_SetHint(SDL_HINT_ENABLE_SCREEN_KEYBOARD, c"0".as_ptr());
+                            sdl3::hint::set("SDL_ENABLE_SCREEN_KEYBOARD", "0");
                             check(SDL_StartTextInput(self.raw.as_ptr()))
                         } else {
                             check(SDL_StopTextInput(self.raw.as_ptr()))
@@ -1556,12 +1556,12 @@ impl Window {
                     // SDL's hint must be set before StartTextInput. Restart
                     // just this editor's input method, then restore the normal
                     // non-OSK policy for subsequent mouse/pen editor activation.
-                    check(SDL_SetHint(SDL_HINT_ENABLE_SCREEN_KEYBOARD, c"1".as_ptr()))?;
+                    check(sdl3::hint::set("SDL_ENABLE_SCREEN_KEYBOARD", "1"))?;
                     if SDL_TextInputActive(self.raw.as_ptr()) {
                         let _ = SDL_StopTextInput(self.raw.as_ptr());
                     }
                     let result = check(SDL_StartTextInput(self.raw.as_ptr()));
-                    let _ = SDL_SetHint(SDL_HINT_ENABLE_SCREEN_KEYBOARD, c"0".as_ptr());
+                    sdl3::hint::set("SDL_ENABLE_SCREEN_KEYBOARD", "0");
                     result
                 }
                 WindowCommand::ClearComposition => {
