@@ -75,6 +75,7 @@ impl Canvas {
     pub(super) fn paint_damaged_overlay(
         &mut self,
         app: &mut App,
+        laser_now: Instant,
         mut timings: Option<&mut CanvasPaintTimings>,
     ) -> Result<bool, String> {
         if self.render.name != "software"
@@ -182,8 +183,14 @@ impl Canvas {
                         &mut self.background,
                         scope,
                     )?;
-                    self.ink
-                        .paint_overlays(app, &self.render, &self.window, &self.color, scale)
+                    self.ink.paint_overlays(
+                        app,
+                        &self.render,
+                        &self.window,
+                        &self.color,
+                        scale,
+                        laser_now,
+                    )
                 })();
                 result.and(self.render.try_set_clip_rect(None))
             });
@@ -205,8 +212,8 @@ impl Canvas {
         }
         self.ink.release_unused_layer(app);
         self.animation = !app.input.laser.is_empty();
-        // The last fade frame clears the previous trail. It also stops the
-        // animation timer, so release the composition here when drawing ends.
+        // Keep the prior footprint for the next local redraw. Once no
+        // overlays remain, the caller falls back to a normal full repaint.
         if self.animation || app.history.active.is_some() {
             layer.key = key;
             layer.footprint = Some(footprint);

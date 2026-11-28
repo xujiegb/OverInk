@@ -379,20 +379,11 @@ impl Ink {
             } else {
                 None
             };
-            if stroke.tool == Tool::Pen {
+            if matches!(stroke.tool, Tool::Pen | Tool::Pencil) {
                 // App::append already merged neighboring points for pointer
                 // and touch input. Pressure updates leave coordinates intact.
                 self.painter
-                    .distinct_pen(&frame, stroke, None, 1., &[], live)?;
-            } else if live.is_some() {
-                self.painter.path(
-                    &frame,
-                    stroke,
-                    PointSpan::new(&stroke.points),
-                    None,
-                    1.,
-                    live,
-                )?;
+                    .distinct_path(&frame, stroke, None, 1., &[], live)?;
             } else {
                 self.painter.stroke(&frame, stroke)?;
             }
@@ -406,17 +397,7 @@ impl Ink {
         Ok(scale)
     }
 
-    fn paint_laser(&mut self, frame: &Frame<'_>, app: &mut App) -> Result<(), String> {
-        let now = Instant::now();
-        app.input.laser.retain(|_, trail| {
-            while trail
-                .front()
-                .is_some_and(|sample| now.duration_since(sample.at) >= LASER_LIFETIME)
-            {
-                trail.pop_front();
-            }
-            !trail.is_empty()
-        });
+    fn paint_laser(&mut self, frame: &Frame<'_>, app: &App, now: Instant) -> Result<(), String> {
         let laser = Stroke {
             tool: Tool::Laser,
             color: InkColor::from_rgb8([246, 72, 99]),
@@ -449,13 +430,14 @@ impl Ink {
 
     pub fn present(
         &mut self,
-        app: &mut App,
+        app: &App,
         renderer: &Renderer,
         window: &Window,
         color: &ColorManager,
         scale: [f32; 2],
+        laser_now: Instant,
     ) -> Result<(), String> {
-        self.paint_overlays(app, renderer, window, color, scale)?;
+        self.paint_overlays(app, renderer, window, color, scale, laser_now)?;
         renderer.present()?;
         self.release_unused_layer(app);
         Ok(())
@@ -463,11 +445,12 @@ impl Ink {
 
     pub(super) fn paint_overlays(
         &mut self,
-        app: &mut App,
+        app: &App,
         renderer: &Renderer,
         window: &Window,
         color: &ColorManager,
         scale: [f32; 2],
+        laser_now: Instant,
     ) -> Result<(), String> {
         if !app.input.laser.is_empty() {
             let frame = Frame {
@@ -478,7 +461,7 @@ impl Ink {
                 aa: 0.8 / scale[0].max(scale[1]),
                 extended_budget: 0,
             };
-            self.paint_laser(&frame, app)?;
+            self.paint_laser(&frame, app, laser_now)?;
         }
         if let Some(hole) = app.input.protected {
             clear_hole(renderer, hole)?;
@@ -1038,14 +1021,14 @@ impl StrokePainter {
         region: Option<InkClip>,
         white: f32,
     ) -> Result<(), String> {
-        let paths = region.map(|_| app.history.stroke_index());
+        // The index is incrementally maintained after appends. Reuse its
+        // spacing information for full-frame replay too, not just dirty tiles.
+        let paths = app.history.stroke_index();
         for (index, stroke) in app.history.strokes().iter().enumerate().skip(first) {
-            let stroke_bounds = paths.as_ref().and_then(|paths| paths.bounds().get(index));
+            let stroke_bounds = paths.bounds()[index];
             if let Some(region) = region
-                && stroke_bounds.is_some_and(|entry| {
-                    entry.as_ref().is_none_or(|bounds| {
-                        !region.intersects(bounds.path.padded(stroke.max_radius() * 2. + frame.aa))
-                    })
+                && stroke_bounds.is_none_or(|bounds| {
+                    !region.intersects(bounds.path.padded(stroke.max_radius() * 2. + frame.aa))
                 })
             {
                 continue;
@@ -1067,15 +1050,11 @@ impl StrokePainter {
                     }
                 },
             ) {
-                if stroke.tool == Tool::Pen
+                if matches!(stroke.tool, Tool::Pen | Tool::Pencil)
                     && stroke.opacity > 0.
-                    && stroke_bounds
-                        .copied()
-                        .flatten()
-                        .is_some_and(StrokeBounds::samples_are_distinct)
+                    && stroke_bounds.is_some_and(StrokeBounds::samples_are_distinct)
                 {
-                    let blocks = paths.as_ref().map_or(&[][..], |paths| paths.blocks(index));
-                    self.distinct_pen(frame, stroke, region, white, blocks, None)?;
+                    self.distinct_path(frame, stroke, region, white, paths.blocks(index), None)?;
                 } else {
                     self.stroke_in(frame, stroke, region, white)?;
                 }
@@ -1089,7 +1068,7 @@ impl StrokePainter {
         self.stroke_in(frame, stroke, None, 1.)
     }
 
-    fn distinct_pen(
+    fn distinct_path(
         &mut self,
         frame: &Frame<'_>,
         stroke: &Stroke,
@@ -1101,6 +1080,19 @@ impl StrokePainter {
         if stroke.points.is_empty() || stroke.opacity <= 0. {
             return Ok(());
         }
+        let paper = stroke.tool == Tool::Pencil && self.ensure_paper_texture(frame.renderer);
+        if stroke.tool == Tool::Pencil && !paper {
+            // Without a paper texture, the pencil must subdivide samples to
+            // preserve its vertex grain. Keep the original preparation path.
+            return self.path(
+                frame,
+                stroke,
+                PointSpan::new(&stroke.points),
+                region,
+                white,
+                live,
+            );
+        }
         let rgb = frame
             .color
             .map(stroke.color.output_rgb(frame.renderer.extended));
@@ -1111,9 +1103,9 @@ impl StrokePainter {
                 rgb,
                 region,
                 RibbonInput {
+                    paper,
                     borrowed_samples: Some(&stroke.points),
                     blocks,
-                    ..RibbonInput::default()
                 },
                 live,
             )
@@ -1126,8 +1118,10 @@ impl StrokePainter {
         laser: &Stroke,
         rgb: [f32; 3],
     ) -> Result<(), String> {
-        self.draw_ribbon(frame, laser, rgb, None, RibbonInput::default(), None)?;
-        self.samples.clear();
+        if !self.samples.is_empty() {
+            self.draw_ribbon(frame, laser, rgb, None, RibbonInput::default(), None)?;
+            self.samples.clear();
+        }
         Ok(())
     }
 
@@ -1593,6 +1587,94 @@ mod tests {
         app.history.commit();
     }
 
+    // Opt-in CPU profiling fixture. Compare direct and indexed replay with
+    // the production committed-ink cache on the same software surface.
+    // Timed frames include SDL submission/present, but not fixture creation.
+    #[test]
+    #[ignore = "software renderer profiling workload"]
+    fn profile_software_ink() -> TestResult {
+        const FRAMES: u32 = 90;
+        for [width, height] in [[1920, 1080], [3840, 2160]] {
+            let canvas = TestCanvas::new([width, height])?;
+            let mut app = app();
+            let scale = width as f32 / 1920.;
+            for row in 0..24 {
+                app.history.append(std::iter::once(Stroke {
+                    tool: Tool::Pen,
+                    color: InkColor::from_rgb8([80, 160, 240]),
+                    width: 4. * scale,
+                    opacity: 0.8,
+                    pressure_curve: 1.,
+                    pressure_enabled: true,
+                    points: (0..512)
+                        .map(|i| {
+                            Point::new(
+                                (40. + 2. * i as f32) * scale,
+                                (40. + 30. * row as f32 + 8. * (i as f32 / 8.).sin()) * scale,
+                                (i % 100) as f32 / 100.,
+                                [0.; 2],
+                            )
+                        })
+                        .collect(),
+                }));
+            }
+            for i in 0..512 {
+                app.laser_sample(
+                    1,
+                    Point::new(
+                        (40. + 2. * i as f32) * scale,
+                        (900. + 20. * (i as f32 / 16.).sin()) * scale,
+                        1.,
+                        [0.; 2],
+                    ),
+                    i == 0,
+                );
+            }
+            let now = Instant::now();
+            let frame = canvas.frame();
+            app.input.prune_laser(now);
+            for scenario in ["prepared", "indexed", "cached", "laser"] {
+                let mut ink = Ink::default();
+                let mut total = Duration::ZERO;
+                let mut slowest = Duration::ZERO;
+                for i in 0..=FRAMES {
+                    let started = Instant::now();
+                    canvas.renderer.clear([0.; 4])?;
+                    ink.painter.queued = 0;
+                    match scenario {
+                        "prepared" => {
+                            for stroke in app.history.strokes() {
+                                ink.painter.stroke(&frame, stroke)?;
+                            }
+                        }
+                        "indexed" => ink.painter.history(&frame, &app, 0, None, 1.)?,
+                        "cached" => ink.committed(&frame, &mut app)?,
+                        _ => ink.paint_laser(
+                            &frame,
+                            &app,
+                            now + Duration::from_millis(u64::from(i) * 8),
+                        )?,
+                    }
+                    canvas.renderer.present()?;
+                    // Exclude the first frame (resource and index warmup).
+                    if i != 0 {
+                        let elapsed = started.elapsed();
+                        total += elapsed;
+                        slowest = slowest.max(elapsed);
+                    } else if scenario == "cached" && ink.layer.is_none() {
+                        return Err("The software renderer did not create the ink cache".into());
+                    }
+                }
+                println!(
+                    "PROFILE,{width},{height},{scenario},{FRAMES},{:.3},{:.3}",
+                    total.as_secs_f64() * 1000. / f64::from(FRAMES),
+                    slowest.as_secs_f64() * 1000.,
+                );
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn stable_ribbon_matches_full_raster_after_append_and_pressure_correction() -> TestResult {
         let direct = TestCanvas::new([180, 144])?;
@@ -1630,7 +1712,7 @@ mod tests {
             StrokePainter::default().stroke(&direct.frame(), &stroke)?;
             incremental.renderer.clear([0.; 4])?;
             painter.queued = 0;
-            painter.distinct_pen(
+            painter.distinct_path(
                 &incremental.frame(),
                 &stroke,
                 None,
@@ -1646,7 +1728,7 @@ mod tests {
     }
 
     #[test]
-    fn clipped_history_matches_prepared_pen_samples_with_and_without_merges() -> TestResult {
+    fn history_matches_prepared_pen_samples_with_and_without_merges() -> TestResult {
         let direct = TestCanvas::new([128, 96])?;
         let replay = TestCanvas::new([128, 96])?;
         let region = Some(InkClip::new(
@@ -1693,13 +1775,15 @@ mod tests {
                 .strokes()
                 .first()
                 .ok_or("Missing committed stroke")?;
-            direct.renderer.clear([0.; 4])?;
-            replay.renderer.clear([0.; 4])?;
-            StrokePainter::default().stroke_in(&direct.frame(), stroke, region, 1.)?;
-            let mut painter = StrokePainter::default();
-            painter.history(&replay.frame(), &app, 0, region, 1.)?;
-            assert_eq!(painter.samples.is_empty(), !close_samples);
-            assert_eq!(replay.pixels()?, direct.pixels()?);
+            for region in [None, region] {
+                direct.renderer.clear([0.; 4])?;
+                replay.renderer.clear([0.; 4])?;
+                StrokePainter::default().stroke_in(&direct.frame(), stroke, region, 1.)?;
+                let mut painter = StrokePainter::default();
+                painter.history(&replay.frame(), &app, 0, region, 1.)?;
+                assert_eq!(painter.samples.is_empty(), !close_samples);
+                assert_eq!(replay.pixels()?, direct.pixels()?);
+            }
         }
         Ok(())
     }
@@ -1964,12 +2048,19 @@ mod tests {
             .ok_or("No laser sample")?;
         first.at -= LASER_LIFETIME;
         canvas.renderer.clear([0.; 4])?;
-        ink.paint_laser(&canvas.frame(), &mut app)?;
+        let now = Instant::now();
+        app.input.prune_laser(now);
+        ink.paint_laser(&canvas.frame(), &app, now)?;
         assert!(canvas.pixel(24, 30)?[3] > 200);
         assert_eq!(canvas.pixel(48, 30)?[3], 0);
         assert!(canvas.pixel(72, 30)?[3] > 200);
         assert_eq!(canvas.pixel(8, 30)?[3], 0);
         assert!(ink.painter.samples.is_empty());
+
+        // Pruning before a damage calculation must also remove the final
+        // expired trail and allow the canvas animation timer to stop.
+        app.input.prune_laser(now + LASER_LIFETIME);
+        assert!(app.input.laser.is_empty());
         Ok(())
     }
 

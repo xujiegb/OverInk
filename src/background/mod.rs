@@ -44,7 +44,7 @@ impl Image {
     pub fn buffer(width: u32, height: u32) -> Result<Self, String> {
         Self::allocate(width, height, Encoding::Srgb8)
     }
-    #[cfg(any(target_os = "macos", test))]
+    #[cfg(test)]
     fn hdr_buffer(width: u32, height: u32) -> Result<Self, String> {
         Self::allocate(width, height, Encoding::LinearRgba16)
     }
@@ -112,7 +112,7 @@ impl Image {
         Ok(self)
     }
 
-    #[cfg(any(target_os = "windows", target_os = "macos", test))]
+    #[cfg(any(target_os = "windows", test))]
     fn capture_row_layout(&self, stride: usize) -> Option<(usize, usize)> {
         let row_bytes = (self.width as usize).checked_mul(self.encoding.bytes_per_pixel())?;
         let height = self.height as usize;
@@ -123,7 +123,7 @@ impl Image {
         Some((row_bytes, needed))
     }
 
-    #[cfg(any(target_os = "windows", target_os = "macos", test))]
+    #[cfg(any(target_os = "windows", test))]
     fn copy_hdr_rows(
         &mut self,
         len: usize,
@@ -136,18 +136,14 @@ impl Image {
             .ok_or("Invalid HDR capture row pitch")?;
         for (y, row) in self.rgba.chunks_exact_mut(row_bytes).enumerate() {
             copy(y * stride, row);
-            for pixel in row.as_chunks_mut::<8>().0 {
-                // A display snapshot is opaque. Leave the three FP16 color
-                // channels intact, including negative values and values above 1.
-                pixel[6..].copy_from_slice(&0x3c00_u16.to_ne_bytes());
-            }
+            make_hdr_opaque(row);
         }
         Ok(())
     }
 
     #[cfg(any(target_os = "macos", test))]
     fn from_hdr_capture(
-        pixels: &[u8],
+        mut pixels: Vec<u8>,
         stride: usize,
         full: [u32; 2],
         crop: Option<screenshot::Crop>,
@@ -155,19 +151,30 @@ impl Image {
         let [width, height] = full;
         let encoding = Encoding::LinearRgba16;
         Self::byte_len(width, height, encoding)?;
-        let bytes = encoding.bytes_per_pixel();
-        capture_row_span(width as usize * bytes, height as usize, stride)
+        let bytes_per_pixel = encoding.bytes_per_pixel();
+        capture_row_span(width as usize * bytes_per_pixel, height as usize, stride)
             .filter(|&needed| needed <= pixels.len())
             .ok_or("Invalid HDR capture row pitch")?;
         let area = screenshot::CaptureArea::new(full, crop)?;
         let [left, top, ..] = area.bounds;
         let [width, height] = area.dimensions();
-        let pixels = &pixels[top as usize * stride + left as usize * bytes..];
-        let mut image = Self::hdr_buffer(width, height)?;
-        image.copy_hdr_rows(pixels.len(), stride, |offset, row| {
-            row.copy_from_slice(&pixels[offset..offset + row.len()]);
-        })?;
-        Ok(image)
+        let row_bytes = width as usize * bytes_per_pixel;
+        let start = top as usize * stride + left as usize * bytes_per_pixel;
+        if start != 0 || stride != row_bytes {
+            for row in 0..height as usize {
+                let offset = start + row * stride;
+                pixels.copy_within(offset..offset + row_bytes, row * row_bytes);
+            }
+        }
+        pixels.truncate(height as usize * row_bytes);
+        pixels.shrink_to_fit();
+        make_hdr_opaque(&mut pixels);
+        Ok(Self {
+            width,
+            height,
+            rgba: pixels,
+            encoding,
+        })
     }
     // WGC supplies BGRA8 for SDR monitors. Validate the mapped D3D11 pitch
     // before copying; the snapshot format consumed by SDL remains opaque RGBA8.
@@ -234,6 +241,14 @@ fn capture_row_span(row_bytes: usize, height: usize, stride: usize) -> Option<us
         .checked_sub(1)?
         .checked_mul(stride)?
         .checked_add(row_bytes)
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
+fn make_hdr_opaque(pixels: &mut [u8]) {
+    // Preserve extended and negative FP16 color components.
+    for pixel in pixels.as_chunks_mut::<8>().0 {
+        pixel[6..].copy_from_slice(&0x3c00_u16.to_ne_bytes());
+    }
 }
 
 // Keep the original channels available for a renderer reset without retaining

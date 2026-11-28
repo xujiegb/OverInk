@@ -441,10 +441,11 @@ fn copy_screenshot(
     let provider =
         CGImage::data_provider(Some(image)).ok_or("The HDR screenshot has no pixel data")?;
     let data = CGDataProvider::data(Some(&provider)).ok_or("Cannot read the HDR screenshot")?;
-    // SAFETY: CopyData returns an immutable CFData that is owned here.
-    let pixels = unsafe { data.as_bytes_unchecked() };
+    if data.len() > super::MAX_SNAPSHOT_BYTES {
+        return Err("Capture exceeds the 256 MiB limit".into());
+    }
     Image::from_hdr_capture(
-        pixels,
+        data.to_vec(),
         CGImage::bytes_per_row(Some(image)),
         [width, height],
         crop,

@@ -633,20 +633,21 @@ impl History {
 
     fn trim_steps(&mut self) {
         // Charge shared samples to each step to keep a conservative bound.
-        while self.undo.len() + self.redo.len() > 64
-            || self
-                .undo
-                .iter()
-                .chain(&self.redo)
-                .fold(0usize, |bytes, step| bytes.saturating_add(step.bytes))
-                > MAX_HISTORY_BYTES
-        {
+        let mut bytes = self
+            .undo
+            .iter()
+            .chain(&self.redo)
+            .fold(0usize, |bytes, step| bytes.saturating_add(step.bytes));
+        while self.undo.len() + self.redo.len() > 64 || bytes > MAX_HISTORY_BYTES {
             let older = if self.undo.len() >= self.redo.len() {
                 &mut self.undo
             } else {
                 &mut self.redo
             };
-            older.pop_front();
+            let Some(step) = older.pop_front() else {
+                break;
+            };
+            bytes = bytes.saturating_sub(step.bytes);
         }
     }
 

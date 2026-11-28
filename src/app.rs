@@ -28,7 +28,8 @@ use crate::{
 };
 use screenshot::{Destination, MenuAction, SaveError, Screenshot};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet, VecDeque},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -36,7 +37,7 @@ use std::{
 #[derive(Clone, Copy)]
 struct PendingPenDown {
     timestamp: u64,
-    point: Point,
+    point: Option<Point>,
     eraser: bool,
 }
 
@@ -49,13 +50,16 @@ struct Pen {
     pending_down: Option<PendingPenDown>,
 }
 impl Pen {
-    fn point(self, x: f32, y: f32) -> Point {
+    fn point(self, x: f32, y: f32) -> Option<Point> {
+        if !x.is_finite() || !y.is_finite() {
+            return None;
+        }
         let pressure = if self.has_pressure {
             self.pressure
         } else {
             0.5
         };
-        Point::new(x, y, pressure, self.tilt)
+        Some(Point::new(x, y, pressure, self.tilt))
     }
     fn finish(&mut self) {
         self.pressure = 0.;
@@ -63,6 +67,34 @@ impl Pen {
         self.down = false;
         self.pending_down = None;
     }
+}
+
+#[derive(Clone, Copy)]
+enum PenEvent {
+    Proximity(SDL_PenProximityEvent),
+    Tip(SDL_PenTouchEvent),
+    Motion(SDL_PenMotionEvent),
+    Axis(SDL_PenAxisEvent),
+}
+
+impl PenEvent {
+    fn read(event: &SDL_Event, ty: SDL_EventType) -> Option<Self> {
+        match ty {
+            SDL_EVENT_PEN_PROXIMITY_IN | SDL_EVENT_PEN_PROXIMITY_OUT => {
+                pen_proximity_event(event).map(Self::Proximity)
+            }
+            SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP => pen_touch_event(event).map(Self::Tip),
+            SDL_EVENT_PEN_MOTION => pen_motion_event(event).map(Self::Motion),
+            SDL_EVENT_PEN_AXIS => pen_axis_event(event).map(Self::Axis),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PenPresence {
+    Contact,
+    Proximity,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Source {
@@ -130,8 +162,8 @@ enum HistoryAction {
 
 struct CanvasInput {
     protected: Option<crate::controller::Rect>,
-    pens: HashMap<u32, Pen>,
-    pen_proximity: BTreeSet<u32>,
+    pens: BTreeMap<u32, Pen>,
+    pen_proximity: BTreeMap<u32, PenPresence>,
     touches: BTreeMap<TouchKey, FingerStroke>,
     contact: Option<Contact>,
     laser: BTreeMap<u64, VecDeque<LaserSample>>,
@@ -146,8 +178,8 @@ impl Default for CanvasInput {
     fn default() -> Self {
         Self {
             protected: None,
-            pens: HashMap::new(),
-            pen_proximity: BTreeSet::new(),
+            pens: BTreeMap::new(),
+            pen_proximity: BTreeMap::new(),
             touches: BTreeMap::new(),
             contact: None,
             laser: BTreeMap::new(),
@@ -163,6 +195,18 @@ impl Default for CanvasInput {
 impl CanvasInput {
     fn has_contacts(&self) -> bool {
         self.contact.is_some() || !self.touches.is_empty()
+    }
+
+    fn prune_laser(&mut self, now: Instant) {
+        self.laser.retain(|_, trail| {
+            while trail
+                .front()
+                .is_some_and(|sample| now.duration_since(sample.at) >= LASER_LIFETIME)
+            {
+                trail.pop_front();
+            }
+            !trail.is_empty()
+        });
     }
 
     fn cancel_erasure(&mut self, id: u64) {
@@ -192,6 +236,7 @@ enum Board {
 struct App {
     input: CanvasInput,
     pen_double: stylus::PenDoubleTap,
+    pen_hover_reliable: bool,
     parked_input: BTreeMap<u32, CanvasInput>,
     multi: bool,
     history: History,
@@ -259,6 +304,7 @@ impl App {
         Self {
             input: CanvasInput::default(),
             pen_double: stylus::PenDoubleTap::default(),
+            pen_hover_reliable: true,
             parked_input: BTreeMap::new(),
             multi: false,
             history,
@@ -827,6 +873,11 @@ impl App {
             self.commit_touch(finger);
         }
     }
+    fn finish_touch(&mut self, key: TouchKey) {
+        if let Some(finger) = self.input.touches.remove(&key) {
+            self.commit_touch(finger);
+        }
+    }
     fn touch_motion(&mut self, key: TouchKey, point: Point) {
         let point_count = self.draft_point_count();
         let can_append = point_count < MAX_POINTS;
@@ -913,9 +964,7 @@ impl App {
             if let Some(point) = touch::point(event, size) {
                 self.touch_motion(key, point);
             }
-            if let Some(finger) = self.input.touches.remove(&key) {
-                self.commit_touch(finger);
-            }
+            self.finish_touch(key);
             return;
         }
         if !self.touch_enabled
@@ -934,9 +983,7 @@ impl App {
             // Some touch/Sidecar backends reuse the same touch/finger IDs
             // without delivering the previous UP. A new DOWN is an explicit
             // stroke boundary: commit the stale stroke, never append to it.
-            if let Some(previous) = self.input.touches.remove(&key) {
-                self.commit_touch(previous);
-            }
+            self.finish_touch(key);
             if self
                 .input
                 .protected
@@ -944,11 +991,7 @@ impl App {
             {
                 return;
             }
-            if self.input.touches.len() >= 16
-                || touch::is_indirect(event.touchID)
-                || !(0.0..=1.0).contains(&event.x)
-                || !(0.0..=1.0).contains(&event.y)
-            {
+            if self.input.touches.len() >= 16 || !touch::starts_on_window(event) {
                 return;
             }
             let gesture = self.gesture(self.tool);
@@ -976,229 +1019,204 @@ impl App {
         }
         self.touch_motion(key, point);
     }
-    // Release state is global to the physical pen, but proximity remains
-    // local to the canvas. This helper is safe to call on all parked pages:
-    // unlike track_pen, it does not mark an unrelated page as pen-proximate
-    // or cancel the page's ongoing finger gestures.
-    fn release_pen(&mut self, id: u32, definitive: bool) {
+    fn release_pen(&mut self, id: u32) -> bool {
         let had_contact = self
             .input
             .contact
             .is_some_and(|contact| contact.source == Source::Pen(id));
         self.end(Source::Pen(id));
-        if (definitive || had_contact)
-            && let Some(pen) = self.input.pens.get_mut(&id)
-        {
+        if let Some(pen) = self.input.pens.get_mut(&id) {
             pen.finish();
+        }
+        if self.input.pen_proximity.get(&id) == Some(&PenPresence::Contact) {
+            self.input.pen_proximity.remove(&id);
+        }
+        had_contact
+    }
+
+    fn note_pen(&mut self, id: u32, presence: PenPresence) {
+        use std::collections::btree_map::Entry;
+        match self.input.pen_proximity.entry(id) {
+            Entry::Vacant(entry) => {
+                entry.insert(presence);
+                self.discard_touches();
+            }
+            Entry::Occupied(mut entry)
+                if presence == PenPresence::Proximity && *entry.get() == PenPresence::Contact =>
+            {
+                entry.insert(presence);
+            }
+            Entry::Occupied(_) => {}
+        }
+    }
+
+    fn track_pen_sample(&mut self, id: u32, state: SDL_PenInputFlags) {
+        if state & SDL_PEN_INPUT_DOWN != 0 {
+            self.note_pen(id, PenPresence::Contact);
+        } else if self.pen_hover_reliable {
+            self.note_pen(id, PenPresence::Proximity);
         }
     }
 
     // Device proximity is independent of the current tool or modal picker.
-    fn track_pen(&mut self, event: &SDL_Event) {
-        let ty = event_type(event);
-        let id = match ty {
-            SDL_EVENT_PEN_PROXIMITY_IN | SDL_EVENT_PEN_PROXIMITY_OUT => {
-                pen_proximity_event(event).map(|pen| pen.which.0)
+    fn track_pen(&mut self, event: PenEvent) {
+        match event {
+            PenEvent::Proximity(p) if p.r#type == SDL_EVENT_PEN_PROXIMITY_OUT => {
+                self.end(Source::Pen(p.which.0));
+                self.input.pens.remove(&p.which.0);
+                self.input.pen_proximity.remove(&p.which.0);
             }
-            SDL_EVENT_PEN_AXIS => pen_axis_event(event).map(|pen| pen.which.0),
-            SDL_EVENT_PEN_MOTION => pen_motion_event(event).map(|pen| pen.which.0),
-            SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP => pen_touch_event(event).map(|pen| pen.which.0),
-            _ => None,
-        };
-        let Some(id) = id else {
-            return;
-        };
-        if ty == SDL_EVENT_PEN_PROXIMITY_OUT {
-            self.end(Source::Pen(id));
-            self.input.pens.remove(&id);
-            self.input.pen_proximity.remove(&id);
-            return;
-        }
-        // Only an explicit pen-up ends contact here. Proximity-out already
-        // releases and forgets this pen above.
-        if ty == SDL_EVENT_PEN_UP {
-            self.release_pen(id, true);
-        }
-        if self.input.pen_proximity.insert(id) {
-            self.discard_touches();
+            PenEvent::Proximity(p) => {
+                // SDL XInput2 can report a windowless proximity-in at device
+                // registration even when the driver has no proximity sensor.
+                if self.pen_hover_reliable || p.windowID.0 != 0 {
+                    self.note_pen(p.which.0, PenPresence::Proximity);
+                }
+            }
+            PenEvent::Tip(p) if p.down => self.note_pen(p.which.0, PenPresence::Contact),
+            PenEvent::Tip(p) => {
+                self.release_pen(p.which.0);
+            }
+            PenEvent::Motion(p) => self.track_pen_sample(p.which.0, p.pen_state),
+            PenEvent::Axis(p) => self.track_pen_sample(p.which.0, p.pen_state),
         }
     }
+
+    fn apply_pen_sample(&mut self, id: u32, timestamp: u64, x: f32, y: f32) {
+        let pen = self.input.pens.entry(id).or_default();
+        let Some(point) = pen.point(x, y) else {
+            return;
+        };
+        let measured = pen.has_pressure;
+        if let Some(pending) = pen.pending_down.take() {
+            // A same-timestamp SDL Cocoa sample carries the current position.
+            let initial = pending.point.filter(|_| pending.timestamp != timestamp);
+            self.begin_pen(id, initial.unwrap_or(point), pending.eraser, measured);
+            if initial.is_none() {
+                return;
+            }
+        }
+        self.pen_motion(Source::Pen(id), point, measured);
+    }
+
+    fn pen_event(&mut self, event: PenEvent, overlay: SDL_WindowID) {
+        if let PenEvent::Tip(tip) = event
+            && !tip.down
+        {
+            let id = tip.which.0;
+            if tip.windowID == overlay
+                && let Some(pen) = self.input.pens.get_mut(&id)
+            {
+                let point = pen.point(tip.x, tip.y);
+                let measured = pen.has_pressure;
+                if let Some(pending) = pen.pending_down.take()
+                    && let Some(start) = pending.point.or(point)
+                {
+                    self.begin_pen(id, start, pending.eraser, measured);
+                }
+                if let Some(point) = point {
+                    self.pen_motion(Source::Pen(id), point, measured);
+                }
+            }
+            self.release_pen(id);
+            return;
+        }
+
+        self.track_pen(event);
+        match event {
+            PenEvent::Tip(tip) if tip.windowID == overlay => {
+                let id = tip.which.0;
+                let pen = *self.input.pens.entry(id).or_default();
+                let point = pen.point(tip.x, tip.y);
+                // SDL Cocoa sends PEN_DOWN before the coordinates for the
+                // same NSEvent. Also wait if a backend supplied invalid x/y.
+                if let Some(point) =
+                    point.filter(|_| !cfg!(target_os = "macos") || tip.timestamp == 0)
+                {
+                    self.begin_pen(id, point, tip.eraser, pen.has_pressure);
+                } else {
+                    self.end(Source::Pen(id));
+                    self.input.pens.entry(id).or_default().pending_down = Some(PendingPenDown {
+                        timestamp: tip.timestamp,
+                        point,
+                        eraser: tip.eraser,
+                    });
+                }
+            }
+            PenEvent::Axis(axis) if axis.windowID == overlay => {
+                let id = axis.which.0;
+                if axis.value.is_finite() {
+                    let pen = self.input.pens.entry(id).or_default();
+                    match axis.axis {
+                        SDL_PEN_AXIS_PRESSURE => {
+                            pen.pressure = axis.value.clamp(0., 1.);
+                            pen.has_pressure = pen.down
+                                || axis.pen_state & SDL_PEN_INPUT_DOWN != 0
+                                || pen.pressure > 0.;
+                        }
+                        SDL_PEN_AXIS_XTILT => pen.tilt[0] = axis.value.clamp(-90., 90.),
+                        SDL_PEN_AXIS_YTILT => pen.tilt[1] = axis.value.clamp(-90., 90.),
+                        _ => {}
+                    }
+                }
+                self.apply_pen_sample(id, axis.timestamp, axis.x, axis.y);
+            }
+            PenEvent::Motion(motion) if motion.windowID == overlay => {
+                self.apply_pen_sample(motion.which.0, motion.timestamp, motion.x, motion.y);
+            }
+            _ => {}
+        }
+    }
+
     fn event(&mut self, e: &SDL_Event, overlay: SDL_WindowID, size: [f32; 2]) {
         let ty = event_type(e);
-        // Accept the final PEN_UP endpoint before ending the pen contact.
-        if ty != SDL_EVENT_PEN_UP {
-            self.track_pen(e);
+        if let Some(pen) = PenEvent::read(e, ty) {
+            self.pen_event(pen, overlay);
+            return;
         }
         match ty {
-            SDL_EVENT_MOUSE_BUTTON_DOWN
-                if mouse_button_event(e).is_some_and(|button| button.windowID == overlay) =>
-            {
-                let Some(b) = mouse_button_event(e) else {
+            SDL_EVENT_MOUSE_BUTTON_DOWN | SDL_EVENT_MOUSE_BUTTON_UP => {
+                let Some(b) = mouse_button_event(e).filter(|b| {
+                    b.windowID == overlay
+                        && b.which != SDL_PEN_MOUSEID
+                        && b.which != SDL_TOUCH_MOUSEID
+                }) else {
                     return;
                 };
-                if b.which == SDL_PEN_MOUSEID || b.which == SDL_TOUCH_MOUSEID {
-                    return;
-                }
-                if b.button == RIGHT_BUTTON
+                let source = Source::Mouse(b.button);
+                let point = Point::new(b.x, b.y, 1., [0.; 2]);
+                if ty == SDL_EVENT_MOUSE_BUTTON_UP {
+                    self.motion(source, point);
+                    self.end(source);
+                } else if b.button == RIGHT_BUTTON
                     || (b.button == LEFT_BUTTON
                         && self
                             .input
                             .contact
                             .is_none_or(|c| c.source != Source::Mouse(RIGHT_BUTTON)))
                 {
-                    self.begin(
-                        Source::Mouse(b.button),
-                        Point::new(b.x, b.y, 1., [0.; 2]),
-                        b.button == RIGHT_BUTTON,
-                    );
+                    self.begin(source, point, b.button == RIGHT_BUTTON);
                 }
             }
-            SDL_EVENT_MOUSE_BUTTON_UP
-                if mouse_button_event(e).is_some_and(|button| {
-                    button.windowID == overlay
-                        && button.which != SDL_PEN_MOUSEID
-                        && button.which != SDL_TOUCH_MOUSEID
-                }) =>
-            {
-                let Some(b) = mouse_button_event(e) else {
-                    return;
-                };
-                let source = Source::Mouse(b.button);
-                self.motion(source, Point::new(b.x, b.y, 1., [0.; 2]));
-                self.end(source);
-            }
-            SDL_EVENT_MOUSE_MOTION
-                if mouse_motion_event(e).is_some_and(|motion| motion.windowID == overlay) =>
-            {
-                let Some(m) = mouse_motion_event(e) else {
-                    return;
-                };
-                if m.which != SDL_PEN_MOUSEID
-                    && m.which != SDL_TOUCH_MOUSEID
+            SDL_EVENT_MOUSE_MOTION => {
+                if let Some(m) = real_mouse_motion(e).filter(|m| m.windowID == overlay)
                     && let Some(contact) = self.input.contact
                     && matches!(contact.source, Source::Mouse(_))
                 {
                     self.motion(contact.source, Point::new(m.x, m.y, 1., [0.; 2]));
                 }
             }
-            SDL_EVENT_FINGER_CANCELED => {
+            SDL_EVENT_FINGER_DOWN
+            | SDL_EVENT_FINGER_MOTION
+            | SDL_EVENT_FINGER_UP
+            | SDL_EVENT_FINGER_CANCELED => {
                 if let Some(finger) = finger_event(e) {
-                    self.touch_event(finger, size);
-                }
-            }
-            SDL_EVENT_FINGER_DOWN | SDL_EVENT_FINGER_MOTION | SDL_EVENT_FINGER_UP
-                if finger_event(e).is_some_and(|finger| finger.windowID == overlay) =>
-            {
-                if let Some(finger) = finger_event(e) {
-                    self.touch_event(finger, size);
-                }
-            }
-            SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP
-                if pen_touch_event(e).is_some_and(|pen| pen.windowID == overlay) =>
-            {
-                let Some(t) = pen_touch_event(e) else {
-                    return;
-                };
-                let pen = *self.input.pens.entry(t.which.0).or_default();
-                let source = Source::Pen(t.which.0);
-                let p = pen.point(t.x, t.y);
-                if t.down {
-                    if cfg!(target_os = "macos") && t.timestamp != 0 {
-                        // In SDL 3.4.20 Cocoa_HandlePenPointEvent calls
-                        // SDL_SendPenTouch before SDL_SendPenMotion, so the
-                        // PEN_DOWN x/y are the previous cached pen position.
-                        // Defer beginning until a matching same-timestamp
-                        // PEN_MOTION or PEN_AXIS provides the actual position.
-                        self.input.pens.entry(t.which.0).or_default().pending_down =
-                            Some(PendingPenDown {
-                                timestamp: t.timestamp,
-                                point: p,
-                                eraser: t.eraser,
-                            });
-                    } else {
-                        self.begin_pen(t.which.0, p, t.eraser, pen.has_pressure);
+                    if ty == SDL_EVENT_FINGER_CANCELED || finger.windowID == overlay {
+                        self.touch_event(finger, size);
+                    } else if ty == SDL_EVENT_FINGER_UP {
+                        // The release coordinates are local to a different window.
+                        self.finish_touch(TouchKey::from(finger));
                     }
-                } else {
-                    if let Some(pending) = self
-                        .input
-                        .pens
-                        .get_mut(&t.which.0)
-                        .and_then(|pen| pen.pending_down.take())
-                    {
-                        // A stationary tap can have no motion or changed axis.
-                        // In that case the stored DOWN coordinate is valid.
-                        self.begin_pen(t.which.0, pending.point, pending.eraser, pen.has_pressure);
-                    }
-                    self.pen_motion(source, p, pen.has_pressure);
-                    self.end(source);
-                    // The common PEN_UP reconciliation at the end of event()
-                    // resets the cached pen exactly once.
-                }
-            }
-            SDL_EVENT_PEN_AXIS if pen_axis_event(e).is_some_and(|pen| pen.windowID == overlay) => {
-                let Some(a) = pen_axis_event(e) else {
-                    return;
-                };
-                let source = Source::Pen(a.which.0);
-                let pen = self.input.pens.entry(a.which.0).or_default();
-                let in_contact = pen.down || a.pen_state & SDL_PEN_INPUT_DOWN != 0;
-                match a.axis {
-                    SDL_PEN_AXIS_PRESSURE if a.value.is_finite() => {
-                        pen.pressure = a.value.clamp(0., 1.);
-                        pen.has_pressure = in_contact || pen.pressure > 0.;
-                    }
-                    SDL_PEN_AXIS_XTILT => pen.tilt[0] = a.value.clamp(-90., 90.),
-                    SDL_PEN_AXIS_YTILT => pen.tilt[1] = a.value.clamp(-90., 90.),
-                    _ => {}
-                }
-                let point = pen.point(a.x, a.y);
-                let has_pressure = pen.has_pressure;
-                let pending = pen.pending_down.take();
-                if let Some(pending) = pending {
-                    // Cocoa generates motion then axis with the same
-                    // timestamp. If motion didn't change the SDL pen position,
-                    // the axis still carries the current true coordinates.
-                    let starts_at = if pending.timestamp == a.timestamp {
-                        point
-                    } else {
-                        pending.point
-                    };
-                    self.begin_pen(a.which.0, starts_at, pending.eraser, has_pressure);
-                    if pending.timestamp != a.timestamp {
-                        self.pen_motion(source, point, has_pressure);
-                    }
-                } else {
-                    self.pen_motion(source, point, has_pressure);
-                }
-            }
-            SDL_EVENT_PEN_MOTION
-                if pen_motion_event(e).is_some_and(|pen| pen.windowID == overlay) =>
-            {
-                let Some(m) = pen_motion_event(e) else {
-                    return;
-                };
-                let pen = self.input.pens.entry(m.which.0).or_default();
-                let point = pen.point(m.x, m.y);
-                let has_pressure = pen.has_pressure;
-                let pending = pen.pending_down.take();
-                let source = Source::Pen(m.which.0);
-                if let Some(pending) = pending {
-                    let same_cocoa_event = pending.timestamp == m.timestamp;
-                    self.begin_pen(
-                        m.which.0,
-                        if same_cocoa_event {
-                            point
-                        } else {
-                            pending.point
-                        },
-                        pending.eraser,
-                        has_pressure,
-                    );
-                    if !same_cocoa_event {
-                        self.pen_motion(source, point, has_pressure);
-                    }
-                } else {
-                    self.pen_motion(source, point, has_pressure);
                 }
             }
             SDL_EVENT_WINDOW_FOCUS_LOST if window_event_id(e) == Some(overlay) => {
@@ -1207,6 +1225,9 @@ impl App {
                 }
                 self.finish_contact();
                 self.reset_pens();
+                self.input
+                    .pen_proximity
+                    .retain(|_, presence| *presence == PenPresence::Proximity);
             }
             SDL_EVENT_WINDOW_MOUSE_LEAVE
                 if window_event_id(e) == Some(overlay)
@@ -1218,9 +1239,6 @@ impl App {
                 self.finish_contact();
             }
             _ => {}
-        }
-        if ty == SDL_EVENT_PEN_UP {
-            self.track_pen(e);
         }
     }
     fn keyboard(&mut self, e: &SDL_Event, toolbar_keyboard: bool) -> Commands {
@@ -1574,7 +1592,8 @@ fn handle_screenshot_event(
     {
         let on_canvas = event_window(event, ty) == Some(canvas.window.id);
         let contact_cancelled =
-            matches!(ty, SDL_EVENT_FINGER_CANCELED | SDL_EVENT_PEN_PROXIMITY_OUT);
+            matches!(ty, SDL_EVENT_FINGER_CANCELED | SDL_EVENT_PEN_PROXIMITY_OUT)
+                || !on_canvas && matches!(ty, SDL_EVENT_FINGER_UP | SDL_EVENT_PEN_UP);
         if on_canvas || contact_cancelled {
             canvas.invalidate_if(
                 screenshot.event(
@@ -1586,7 +1605,7 @@ fn handle_screenshot_event(
             );
         }
         if screenshot.ready()
-            && (on_canvas || ty == SDL_EVENT_FINGER_CANCELED)
+            && (on_canvas || contact_cancelled)
             && (ty != SDL_EVENT_FINGER_DOWN
                 || (app.touch_enabled && app.input.pen_proximity.is_empty()))
             && !(ty == SDL_EVENT_MOUSE_MOTION
@@ -1742,6 +1761,7 @@ fn run_inner(options: Options) -> Result<(), String> {
             preferences,
         )
     });
+    app.pen_hover_reliable = video != "x11";
     #[cfg(target_os = "linux")]
     if let Some(status) = gnome_status {
         app.status = status;
@@ -2031,19 +2051,12 @@ fn run_inner(options: Options) -> Result<(), String> {
                     app.for_each_page(|page| page.input.text.refocus());
                 }
 
+                let pen = PenEvent::read(&event, ty);
                 if screenshot_owns_input {
                     // Keep pen proximity and palm rejection current even while
                     // screenshot selection owns the event batch.
-                    if matches!(
-                        ty,
-                        SDL_EVENT_PEN_PROXIMITY_IN
-                            | SDL_EVENT_PEN_PROXIMITY_OUT
-                            | SDL_EVENT_PEN_DOWN
-                            | SDL_EVENT_PEN_UP
-                            | SDL_EVENT_PEN_MOTION
-                            | SDL_EVENT_PEN_AXIS
-                    ) {
-                        app.for_each_page(|page| page.track_pen(&event));
+                    if let Some(pen) = pen {
+                        app.for_each_page(|page| page.track_pen(pen));
                         if !app.input.pen_proximity.is_empty()
                             && app.screenshot.reject_touch_drag()
                             && let Some(canvas) = canvases
@@ -2085,18 +2098,24 @@ fn run_inner(options: Options) -> Result<(), String> {
                 {
                     continue;
                 }
-                let target = if ty == SDL_EVENT_FINGER_CANCELED {
-                    let key = touch::key_from_event(&event)
-                        .ok_or("SDL finger cancellation event has no finger data")?;
-                    app.touch_page(key)
-                        .and_then(|output| canvases.iter().position(|c| c.output == Some(output)))
-                        .or_else(|| {
-                            canvases
-                                .iter()
-                                .position(|canvas| canvas.has_text_touch(key))
+                let addressed = id.and_then(|id| canvases.iter().position(|c| c.window.id == id));
+                // A release may carry a different window ID or no window at all.
+                let target = if matches!(ty, SDL_EVENT_FINGER_UP | SDL_EVENT_FINGER_CANCELED) {
+                    touch::key_from_event(&event)
+                        .and_then(|key| {
+                            app.touch_page(key)
+                                .and_then(|output| {
+                                    canvases.iter().position(|c| c.output == Some(output))
+                                })
+                                .or_else(|| {
+                                    canvases
+                                        .iter()
+                                        .position(|canvas| canvas.has_text_touch(key))
+                                })
                         })
+                        .or(addressed)
                 } else {
-                    id.and_then(|id| canvases.iter().position(|c| c.window.id == id))
+                    addressed
                 };
                 let drawing = !app.picking
                     && !was_picking
@@ -2131,11 +2150,16 @@ fn run_inner(options: Options) -> Result<(), String> {
                 if ty == SDL_EVENT_WINDOW_FOCUS_LOST {
                     app.pen_double.clear();
                 }
-                if ty == SDL_EVENT_PEN_PROXIMITY_OUT {
+                if let Some(pen @ PenEvent::Proximity(left)) =
+                    pen.filter(|_| ty == SDL_EVENT_PEN_PROXIMITY_OUT)
+                {
                     // A pen can leave proximity over a different window from the
                     // one that received its earlier packets.
-                    app.for_each_page(|page| page.track_pen(&event));
+                    app.for_each_page(|page| page.track_pen(pen));
                     for canvas in &mut canvases {
+                        app.on_page(canvas.output, |page| {
+                            canvas.cancel_text_pen(page, left.which)
+                        });
                         canvas.invalidate(DirtyReason::Overlay);
                     }
                     toolbar_dirty = true;
@@ -2176,7 +2200,11 @@ fn run_inner(options: Options) -> Result<(), String> {
                         let had_contacts = app.input.has_contacts();
                         if drawing && canvas.visible && canvas.on_output(options.smoke) {
                             canvas.set_page_geometry(app);
-                            app.event(&event, canvas.window.id, canvas.window.size());
+                            if let Some(pen) = pen {
+                                app.pen_event(pen, canvas.window.id);
+                            } else {
+                                app.event(&event, canvas.window.id, canvas.window.size());
+                            }
                             if app.tool.is_text() && !app.pass {
                                 let was_editing = app.input.text.editing();
                                 let edited = canvas.text_event(app, &event);
@@ -2185,8 +2213,8 @@ fn run_inner(options: Options) -> Result<(), String> {
                                 }
                                 return edited || had_contacts || app.input.has_contacts();
                             }
-                        } else {
-                            app.track_pen(&event);
+                        } else if let Some(pen) = pen {
+                            app.track_pen(pen);
                         }
                         had_contacts || app.input.has_contacts()
                     });
@@ -2195,14 +2223,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                     toolbar_dirty |= selection_before != app.input.text.selected;
                     toolbar_dirty |= panel_before != app.panel;
                     toolbar_dirty |= app.panel.is_some() && (edited || activates);
-                } else if matches!(
-                    ty,
-                    SDL_EVENT_PEN_PROXIMITY_IN
-                        | SDL_EVENT_PEN_DOWN
-                        | SDL_EVENT_PEN_UP
-                        | SDL_EVENT_PEN_AXIS
-                        | SDL_EVENT_PEN_MOTION
-                ) {
+                } else if let Some(pen) = pen {
                     // Pen events on the controller still drive palm rejection.
                     let index = if id == Some(toolbar.id) && app.multi {
                         canvas::active_index(&canvases, toolbar.display_id())
@@ -2212,8 +2233,9 @@ fn run_inner(options: Options) -> Result<(), String> {
                     let canvas = &mut canvases[index];
                     let edited = app.on_page(canvas.output, |page| {
                         let had_touches = !page.input.touches.is_empty();
-                        page.track_pen(&event);
-                        let canceled_text = canvas.cancel_text_touches(page);
+                        page.track_pen(pen);
+                        let canceled_text = !page.input.pen_proximity.is_empty()
+                            && canvas.cancel_text_touches(page);
                         canceled_text || (had_touches && page.input.touches.is_empty())
                     });
                     canvas.invalidate_if(edited, DirtyReason::Overlay);
@@ -2268,13 +2290,23 @@ fn run_inner(options: Options) -> Result<(), String> {
                         break;
                     }
                 }
-                if ty == SDL_EVENT_PEN_UP
-                    && let Some(pen) = pen_touch_event(&event)
+                if let Some(PenEvent::Tip(tip)) = pen
+                    && !tip.down
                 {
-                    // The normal target already consumed its release endpoint.
-                    // Commit orphaned contacts without changing other pages'
-                    // pen proximity or invalidating their touch gestures.
-                    app.for_each_page(|page| page.release_pen(pen.which.0, true));
+                    // If SDL routed the release elsewhere, redraw the canvas
+                    // that owned the pen so it drops the old live stroke.
+                    for (index, canvas) in canvases.iter_mut().enumerate() {
+                        if Some(index) == target {
+                            continue;
+                        }
+                        let released = app.on_page(canvas.output, |page| {
+                            let released = page.release_pen(tip.which.0);
+                            let canceled_text = canvas.cancel_text_pen(page, tip.which);
+                            released || canceled_text
+                        });
+                        canvas.invalidate_if(released, DirtyReason::Overlay);
+                        toolbar_dirty |= released;
+                    }
                 }
             }
             if toolbar_color_changed {
@@ -2407,16 +2439,31 @@ fn run_inner(options: Options) -> Result<(), String> {
                     None
                 };
                 let requested = requested_display.take();
-                let displays = topology
-                    .connected()
-                    .unwrap_or_else(|error| {
+                let displays = match topology.connected() {
+                    Ok(mut displays) => {
+                        displays.retain(|display| !disconnected.contains(&display.id));
+                        Cow::Owned(displays)
+                    }
+                    Err(error) => {
                         app.status = text("Display query failed").detail(error);
                         toolbar_dirty = true;
-                        app.displays.clone()
-                    })
-                    .into_iter()
-                    .filter(|d| !disconnected.contains(&d.id))
-                    .collect::<Vec<_>>();
+                        if app
+                            .displays
+                            .iter()
+                            .any(|display| disconnected.contains(&display.id))
+                        {
+                            Cow::Owned(
+                                app.displays
+                                    .iter()
+                                    .filter(|display| !disconnected.contains(&display.id))
+                                    .cloned()
+                                    .collect(),
+                            )
+                        } else {
+                            Cow::Borrowed(app.displays.as_slice())
+                        }
+                    }
+                };
                 let was_suspended = app.suspended;
                 let reported = canvases[0]
                     .window
@@ -2428,26 +2475,27 @@ fn run_inner(options: Options) -> Result<(), String> {
                 } else {
                     desired
                 };
-                let topology_changed = displays != app.displays;
+                let topology_changed = displays.as_ref() != app.displays;
                 if topology_changed {
                     connected = displays.iter().map(|display| display.id).collect();
                 }
                 let previous_page = app.pages.active;
-                if target.is_some_and(|id| Some(id) != previous_page)
+                let switch_page = target.is_some_and(|id| Some(id) != previous_page);
+                let flush_text = switch_page
                     && displays
                         .iter()
-                        .any(|display| Some(display.id) == previous_page)
-                {
+                        .any(|display| Some(display.id) == previous_page);
+                let displays = (topology_changed || switch_page).then(|| displays.into_owned());
+                if flush_text {
                     let active = canvas::active_index(&canvases, previous_page);
                     canvases[active].flush_text_events(&mut app, gui.ctx.theme())?;
                 }
-                let (layout, removed) =
-                    if topology_changed || target.is_some_and(|id| Some(id) != app.pages.active) {
-                        toolbar_dirty = true;
-                        app.refresh_displays(displays, target)
-                    } else {
-                        (false, false)
-                    };
+                let (layout, removed) = if let Some(displays) = displays {
+                    toolbar_dirty = true;
+                    app.refresh_displays(displays, target)
+                } else {
+                    (false, false)
+                };
                 if app.multi
                     && previous_page != app.pages.active
                     && let Some(canvas) = canvases
@@ -2760,7 +2808,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                 }
                 gui.suspend_input(&toolbar);
                 let location = screenshot::default_folder(&app.preferences);
-                file_dialog.open(DialogKind::ScreenshotFolder, &toolbar, location.as_deref());
+                file_dialog.open(DialogKind::ScreenshotFolder, location.as_deref());
                 cmd.redraw_canvas = true;
                 toolbar_dirty = true;
             }
@@ -3256,9 +3304,9 @@ fn run_inner(options: Options) -> Result<(), String> {
             }
             if open_save_as
                 && !file_dialog.pending()
-                && let Some(index) = canvases
+                && canvases
                     .iter()
-                    .position(|canvas| app.screenshot.targets(canvas.window.id))
+                    .any(|canvas| app.screenshot.targets(canvas.window.id))
             {
                 // Hide the fullscreen selection *before* opening the native
                 // chooser, even on Linux/FreeBSD. Wayland transient parents
@@ -3267,11 +3315,8 @@ fn run_inner(options: Options) -> Result<(), String> {
                 for canvas in &mut canvases {
                     canvas.show(&toolbar, false)?;
                 }
-                app.screenshot.open_save_as(
-                    &mut file_dialog,
-                    &canvases[index].window,
-                    &app.preferences,
-                );
+                app.screenshot
+                    .open_save_as(&mut file_dialog, &app.preferences);
             }
             if screenshot_active && !app.screenshot.active() {
                 toolbar_dirty |= capture_visibility(
@@ -3591,6 +3636,7 @@ mod touch_tests {
         App {
             input: CanvasInput::default(),
             pen_double: stylus::PenDoubleTap::default(),
+            pen_hover_reliable: true,
             parked_input: BTreeMap::new(),
             multi: false,
             history: History::default(),
@@ -4029,7 +4075,7 @@ mod touch_tests {
         a.reset_contacts();
         a.history.clear();
         finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 5, 0.4, 0.4);
-        assert!(a.input.touches.is_empty() && a.input.pen_proximity.contains(&4));
+        assert!(a.input.touches.is_empty() && a.input.pen_proximity.contains_key(&4));
     }
     #[test]
     fn first_pen_pressure_replaces_fallback_and_stationary_samples_merge() {
@@ -4483,11 +4529,11 @@ mod touch_tests {
     }
     #[test]
     fn multi_window_touches_and_unplug_are_local_to_their_output() {
-        let left = screen(10, 0, 60.0);
-        let right = screen(20, 1920, 120.0);
+        let left = || screen(10, 0, 60.0);
+        let right = || screen(20, 1920, 120.0);
         let mut a = app();
         a.multi = true;
-        a.refresh_displays(vec![left.clone(), right.clone()], Some(10));
+        a.refresh_displays(vec![left(), right()], Some(10));
         finger(&mut a, SDL_EVENT_FINGER_DOWN, 1, 1, 0.1, 0.1);
         a.select_page(20);
         finger(&mut a, SDL_EVENT_FINGER_DOWN, 2, 2, 0.25, 0.1);
@@ -4500,8 +4546,8 @@ mod touch_tests {
         assert!(a.input.has_contacts());
         finger(&mut a, SDL_EVENT_FINGER_UP, 2, 2, 0.25, 0.2);
         assert_eq!(a.history.strokes()[0].points[0].x, 200.);
-        a.refresh_displays(vec![right.clone()], None);
-        a.refresh_displays(vec![left, right], None);
+        a.refresh_displays(vec![right()], None);
+        a.refresh_displays(vec![left(), right()], None);
         a.select_page(10);
         a.history.undo();
         assert!(a.history.strokes().is_empty());

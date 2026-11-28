@@ -1,7 +1,7 @@
 //! SDL is owned by the main thread. Window/renderer pointers never cross threads.
 #![deny(clippy::undocumented_unsafe_blocks)]
 pub mod dialog;
-#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 mod dialog_native;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod dialog_unix;
@@ -610,9 +610,7 @@ pub fn check(value: bool) -> Result<(), String> {
     if value { Ok(()) } else { Err(error()) }
 }
 pub fn event_type(event: &SDL_Event) -> SDL_EventType {
-    // SAFETY: SDL_Event's discriminant occupies the shared first field of
-    // every union variant, and the borrowed event is initialized.
-    unsafe { SDL_EventType(event.r#type) }
+    event.event_type()
 }
 pub fn cstring(v: &str) -> CString {
     CString::new(v).unwrap_or_else(|_| {

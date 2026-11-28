@@ -17,10 +17,8 @@ impl From<SDL_TouchFingerEvent> for TouchKey {
 }
 
 pub fn point(event: SDL_TouchFingerEvent, size: [f32; 2]) -> Option<Point> {
-    if !event.x.is_finite()
-        || !event.y.is_finite()
-        || size.iter().any(|v| !v.is_finite() || *v <= 0.)
-    {
+    let [x, y] = [event.x * size[0], event.y * size[1]];
+    if !x.is_finite() || !y.is_finite() || size.iter().any(|v| *v <= 0.) {
         return None;
     }
     // SDL coordinates are window-normalized; use logical window units, not pixels.
@@ -30,16 +28,13 @@ pub fn point(event: SDL_TouchFingerEvent, size: [f32; 2]) -> Option<Point> {
     } else {
         1.
     };
-    Some(Point::new(
-        event.x * size[0],
-        event.y * size[1],
-        pressure,
-        [0.; 2],
-    ))
+    Some(Point::new(x, y, pressure, [0.; 2]))
 }
 
-pub fn is_indirect(device: SDL_TouchID) -> bool {
-    crate::sdl::indirect_touch_device(device)
+pub fn starts_on_window(event: SDL_TouchFingerEvent) -> bool {
+    (0.0..=1.0).contains(&event.x)
+        && (0.0..=1.0).contains(&event.y)
+        && !indirect_touch_device(event.touchID)
 }
 
 pub fn key_from_event(event: &SDL_Event) -> Option<TouchKey> {
@@ -71,6 +66,16 @@ mod tests {
             point(
                 SDL_TouchFingerEvent {
                     x: f32::NAN,
+                    ..Default::default()
+                },
+                [800., 600.]
+            )
+            .is_none()
+        );
+        assert!(
+            point(
+                SDL_TouchFingerEvent {
+                    x: f32::MAX,
                     ..Default::default()
                 },
                 [800., 600.]
