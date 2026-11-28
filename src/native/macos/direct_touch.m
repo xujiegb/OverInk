@@ -34,6 +34,24 @@ void overink_macos_remove_metal_view(uint32_t window_id, intptr_t tag) {
     }
 }
 
+bool overink_macos_set_passthrough(uint32_t window_id, bool pass, bool refresh_motion) {
+    if (![NSThread isMainThread]) {
+        return false;
+    }
+    __auto_type window = OverInkCocoaWindow(SDL_GetWindowFromID(window_id));
+    if (window == nil) {
+        return false;
+    }
+    if (refresh_motion) {
+        // SDL's Cocoa listener may reset ignoresMouseEvents during motion.
+        window.acceptsMouseMovedEvents = !pass;
+    }
+    if (window.ignoresMouseEvents != pass) {
+        window.ignoresMouseEvents = pass;
+    }
+    return true;
+}
+
 // SDL invalidates each window's cursor rect when the picker or screenshot
 // changes the cursor. External views supply the replacement rect themselves.
 static BOOL OverInkOverlayCrosshair = NO;

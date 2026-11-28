@@ -75,6 +75,7 @@ struct RibbonBatch {
     indices: Vec<u32>,
 }
 
+#[derive(Default)]
 struct SoftwareReplay {
     aa: f32,
     color: u64,
@@ -82,57 +83,53 @@ struct SoftwareReplay {
 }
 
 impl SoftwareReplay {
-    fn build(frame: &Frame<'_>, strokes: &[Arc<Stroke>], mesh: &mut Mesh) -> Self {
-        let strokes = strokes
-            .iter()
-            .map(|stroke| {
-                mesh.update(
-                    stroke,
-                    &stroke.points,
-                    0..=stroke.points.len() - 1,
-                    frame.aa,
-                    false,
-                );
-                let rgb = frame.color.map(stroke.color.output_rgb(false));
-                let mut vertices = Vec::with_capacity(mesh.vertices.len());
-                set_vertices(
-                    mesh,
-                    &mut vertices,
-                    rgb,
-                    stroke.opacity,
-                    [1.; 2],
-                    [0; 2],
-                    false,
-                );
-                (
-                    Arc::downgrade(stroke),
-                    RibbonBatch {
-                        vertices,
-                        indices: std::mem::take(&mut mesh.indices),
-                    },
-                )
-            })
-            .collect();
-        Self {
-            aa: frame.aa,
-            color: frame.color.revision,
-            strokes,
+    fn keep_prefix(&self, frame: &Frame<'_>, strokes: &[Arc<Stroke>]) -> usize {
+        if self.aa != frame.aa || self.color != frame.color.revision {
+            return 0;
         }
+        self.strokes
+            .iter()
+            .zip(strokes)
+            .take_while(|((source, _), stroke)| {
+                source
+                    .upgrade()
+                    .is_some_and(|old| Arc::ptr_eq(&old, stroke))
+            })
+            .count()
     }
 
-    fn matches(&self, frame: &Frame<'_>, strokes: &[Arc<Stroke>]) -> bool {
-        self.aa == frame.aa
-            && self.color == frame.color.revision
-            && self.strokes.len() == strokes.len()
-            && self
-                .strokes
-                .iter()
-                .zip(strokes)
-                .all(|((source, _), stroke)| {
-                    source
-                        .upgrade()
-                        .is_some_and(|old| Arc::ptr_eq(&old, stroke))
-                })
+    fn update(&mut self, frame: &Frame<'_>, strokes: &[Arc<Stroke>], mesh: &mut Mesh, keep: usize) {
+        self.aa = frame.aa;
+        self.color = frame.color.revision;
+        self.strokes.truncate(keep);
+        self.strokes.reserve(strokes.len() - keep);
+        for stroke in &strokes[keep..] {
+            mesh.update(
+                stroke,
+                &stroke.points,
+                0..=stroke.points.len() - 1,
+                frame.aa,
+                false,
+            );
+            let rgb = frame.color.map(stroke.color.output_rgb(false));
+            let mut vertices = Vec::with_capacity(mesh.vertices.len());
+            set_vertices(
+                mesh,
+                &mut vertices,
+                rgb,
+                stroke.opacity,
+                [1.; 2],
+                [0; 2],
+                false,
+            );
+            self.strokes.push((
+                Arc::downgrade(stroke),
+                RibbonBatch {
+                    vertices,
+                    indices: std::mem::take(&mut mesh.indices),
+                },
+            ));
+        }
     }
 
     fn draw(&self, renderer: &Renderer, queued: &mut usize) -> Result<(), String> {
@@ -1148,27 +1145,35 @@ impl StrokePainter {
             && !has_erasures
             && (1..=CACHE_STROKES).contains(&strokes.len())
             && app.history.point_count() <= SOFTWARE_REPLAY_POINTS;
-        if replay
-            && let Some(cache) = &self.software_replay
-            && cache.matches(frame, strokes)
-        {
-            return cache.draw(frame.renderer, &mut self.queued);
+        let mut keep = 0;
+        if replay && let Some(cache) = &mut self.software_replay {
+            keep = cache.keep_prefix(frame, strokes);
+            if keep == strokes.len() {
+                // Undo can remove a suffix without changing any retained stroke.
+                cache.strokes.truncate(keep);
+                return cache.draw(frame.renderer, &mut self.queued);
+            }
         }
         // The index is incrementally maintained after appends. Reuse its
         // spacing information for full-frame replay too, not just dirty tiles.
         let paths = app.history.stroke_index();
         if replay
-            && strokes.iter().zip(paths.bounds()).all(|(stroke, bounds)| {
-                stroke.tool == Tool::Pen
-                    && stroke.opacity > 0.
-                    && (1..=MESH_SEGMENTS + 1).contains(&stroke.points.len())
-                    && bounds.is_some_and(StrokeBounds::samples_are_distinct)
-            })
+            && strokes
+                .iter()
+                .zip(paths.bounds())
+                .skip(keep)
+                .all(|(stroke, bounds)| {
+                    stroke.tool == Tool::Pen
+                        && stroke.opacity > 0.
+                        && (1..=MESH_SEGMENTS + 1).contains(&stroke.points.len())
+                        && bounds.is_some_and(StrokeBounds::samples_are_distinct)
+                })
         {
-            let cache = SoftwareReplay::build(frame, strokes, &mut self.mesh);
-            let result = cache.draw(frame.renderer, &mut self.queued);
-            self.software_replay = Some(cache);
-            return result;
+            let cache = self
+                .software_replay
+                .get_or_insert_with(SoftwareReplay::default);
+            cache.update(frame, strokes, &mut self.mesh, keep);
+            return cache.draw(frame.renderer, &mut self.queued);
         }
         if region.is_none() {
             self.software_replay = None;
@@ -1745,6 +1750,67 @@ mod tests {
         app.history.commit();
     }
 
+    fn profiled_pen_strokes(scale: f32) -> impl Iterator<Item = Stroke> {
+        (0..24).map(move |row| Stroke {
+            tool: Tool::Pen,
+            color: InkColor::from_rgb8([80, 160, 240]),
+            width: 4. * scale,
+            opacity: 0.8,
+            pressure_curve: 1.,
+            pressure_enabled: true,
+            points: (0..512)
+                .map(|i| {
+                    Point::new(
+                        (40. + 2. * i as f32) * scale,
+                        (40. + 30. * row as f32 + 8. * (i as f32 / 8.).sin()) * scale,
+                        (i % 100) as f32 / 100.,
+                        [0.; 2],
+                    )
+                })
+                .collect(),
+        })
+    }
+
+    #[test]
+    #[ignore = "software append preparation profiling workload"]
+    fn profile_software_replay_append() -> TestResult {
+        const APPEND_FROM: usize = 12;
+        const REPEATS: usize = 60;
+        let canvas = TestCanvas::new([1920, 1080])?;
+        let frame = canvas.frame();
+        let mut history = History::default();
+        history.append(profiled_pen_strokes(1.));
+        let strokes = history.strokes();
+
+        for keep_prefix in [false, true] {
+            let mut total = Duration::ZERO;
+            for _ in 0..REPEATS {
+                let mut mesh = Mesh::default();
+                let mut cache = SoftwareReplay::default();
+                cache.update(&frame, &strokes[..APPEND_FROM], &mut mesh, 0);
+                let started = Instant::now();
+                for count in APPEND_FROM + 1..=strokes.len() {
+                    let next = &strokes[..count];
+                    let keep = if keep_prefix {
+                        cache.keep_prefix(&frame, next)
+                    } else {
+                        0
+                    };
+                    cache.update(&frame, next, &mut mesh, keep);
+                    std::hint::black_box(&cache);
+                }
+                total += started.elapsed();
+            }
+            let samples = REPEATS * (strokes.len() - APPEND_FROM);
+            let mode = if keep_prefix { "prefix" } else { "full" };
+            println!(
+                "APPEND_PROFILE,{mode},{samples},{:.3}",
+                total.as_secs_f64() * 1_000_000. / samples as f64
+            );
+        }
+        Ok(())
+    }
+
     // Opt-in CPU profiling fixture. Compare direct and indexed replay with
     // the production committed-ink cache on the same software surface.
     // Timed frames include SDL submission/present, but not fixture creation.
@@ -1756,25 +1822,8 @@ mod tests {
             let canvas = TestCanvas::new([width, height])?;
             let mut app = app();
             let scale = width as f32 / 1920.;
-            for row in 0..24 {
-                app.history.append(std::iter::once(Stroke {
-                    tool: Tool::Pen,
-                    color: InkColor::from_rgb8([80, 160, 240]),
-                    width: 4. * scale,
-                    opacity: 0.8,
-                    pressure_curve: 1.,
-                    pressure_enabled: true,
-                    points: (0..512)
-                        .map(|i| {
-                            Point::new(
-                                (40. + 2. * i as f32) * scale,
-                                (40. + 30. * row as f32 + 8. * (i as f32 / 8.).sin()) * scale,
-                                (i % 100) as f32 / 100.,
-                                [0.; 2],
-                            )
-                        })
-                        .collect(),
-                }));
+            for stroke in profiled_pen_strokes(scale) {
+                app.history.append(std::iter::once(stroke));
             }
             for i in 0..512 {
                 app.laser_sample(
@@ -1898,7 +1947,8 @@ mod tests {
             }
             let prev = replay.software_replay.as_ref();
             assert_eq!(
-                prev.is_some_and(|cache| cache.matches(&frame, app.history.strokes())),
+                prev.is_some_and(|cache| cache.keep_prefix(&frame, app.history.strokes())
+                    == app.history.strokes().len()),
                 index % 2 != 0
             );
             canvas.renderer.clear([0.; 4])?;
@@ -1911,6 +1961,28 @@ mod tests {
             }
             assert_eq!(actual, canvas.pixels()?);
         }
+        commit(
+            &mut app,
+            Tool::Pen,
+            [220, 50, 100],
+            &[[12., 16.], [95., 16.]],
+        );
+        let cache = replay
+            .software_replay
+            .as_ref()
+            .ok_or("Missing prior pen geometry")?;
+        assert_eq!(cache.keep_prefix(&frame, app.history.strokes()), 1);
+        canvas.renderer.clear([0.; 4])?;
+        replay.queued = 0;
+        replay.history(&frame, &app, 0, None, 1.)?;
+        assert!(canvas.pixel(56, 16)?[3] > 0);
+        assert!(canvas.pixel(56, 52)?[3] > 0);
+        app.history.undo();
+        canvas.renderer.clear([0.; 4])?;
+        replay.queued = 0;
+        replay.history(&frame, &app, 0, None, 1.)?;
+        assert_eq!(canvas.pixel(56, 16)?[3], 0);
+        assert!(canvas.pixel(56, 52)?[3] > 0);
         app.erase_sample(1, Point::new(56., 52., 1., [0.; 2]));
         canvas.renderer.clear([0.; 4])?;
         replay.queued = 0;

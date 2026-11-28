@@ -3,7 +3,7 @@ mod pencil;
 pub use direct_touch::DirectTouchMonitor;
 pub(crate) use direct_touch::{
     overink_macos_create_overlay, overink_macos_destroy_overlay, overink_macos_order_toolbar,
-    overink_macos_overlay_crosshair, overink_macos_raise_overlay,
+    overink_macos_overlay_crosshair, overink_macos_raise_overlay, overink_macos_set_passthrough,
 };
 pub use pencil::PencilModeMonitor;
 

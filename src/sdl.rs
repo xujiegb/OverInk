@@ -10,9 +10,10 @@ pub use sdl3_sys::{
     locale::*, mouse::*, pen::*, pixels::*, properties::*, rect::*, render::*, stdinc::*,
     surface::*, touch::*, video::*,
 };
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+use std::marker::PhantomData;
 use std::{
     ffi::{CStr, CString, c_void},
-    marker::PhantomData,
     ptr::{self, NonNull},
 };
 
@@ -36,11 +37,13 @@ static WAYLAND_SCALE_TO_DISPLAY_FORCED: std::sync::atomic::AtomicBool =
 /// Window that owns the underlying system object. This also inherits the
 /// Window's thread-safety restrictions rather than returning a free-floating
 /// NonNull pointer to safe callers.
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
 pub struct NativeWindowHandle<'a> {
     raw: NonNull<c_void>,
     _window: PhantomData<&'a Window>,
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
 impl NativeWindowHandle<'_> {
     /// Keep the non-null identity and the SDL window borrow tied together
     /// across all supported native backends.
@@ -50,24 +53,22 @@ impl NativeWindowHandle<'_> {
 }
 
 /// Known SDL window property keys, with no arbitrary raw C-string input.
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
 enum NativeWindowProperty {
     #[cfg(target_os = "windows")]
     Win32Hwnd,
-    #[cfg(target_os = "macos")]
-    CocoaWindow,
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     WaylandSurface,
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     WaylandDisplay,
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
 impl NativeWindowProperty {
     fn key(&self) -> Option<NonNull<std::ffi::c_char>> {
         let key = match self {
             #[cfg(target_os = "windows")]
             Self::Win32Hwnd => SDL_PROP_WINDOW_WIN32_HWND_POINTER,
-            #[cfg(target_os = "macos")]
-            Self::CocoaWindow => SDL_PROP_WINDOW_COCOA_WINDOW_POINTER,
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             Self::WaylandSurface => SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER,
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -93,11 +94,6 @@ enum SdlNativeAction<'a> {
     FreeAllocation(NonNull<c_void>),
     CreateProperties,
     DestroyProperties(SDL_PropertiesID),
-    CreateCrosshair,
-    SetCursor(Option<NonNull<SDL_Cursor>>),
-    CurrentCursor,
-    DefaultCursor,
-    DestroyCursor(NonNull<SDL_Cursor>),
     DestroySurface(NonNull<SDL_Surface>),
     DestroyTexture(NonNull<SDL_Texture>),
     DestroyRenderer(NonNull<SDL_Renderer>),
@@ -115,19 +111,18 @@ enum SdlNativeAction<'a> {
     ),
     #[cfg(test)]
     ReadSurfacePixel(&'a OwnedSurface, i32, i32),
-    ClipboardWrite(&'a CStr),
     ClipboardRead,
     ReadError,
     ClearError,
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     WaylandScaleToDisplay,
     WindowIccProfile(&'a Window),
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
     WindowPointer(&'a Window, NativeWindowProperty),
     WindowNumber(&'a Window, WindowNumberQuery),
     WindowFloat(&'a Window, WindowFloatQuery),
     #[cfg(target_os = "windows")]
     WindowsMonitor(u32),
-    SystemTheme,
     IndirectTouch(SDL_TouchID),
     CaptureMouse(bool),
     MouseButtonsReleased,
@@ -146,11 +141,11 @@ enum SdlNativeResult {
     ScreenshotTimestamp(String),
     EventType(u32),
     Properties(SDL_PropertiesID),
-    Cursor(Option<NonNull<SDL_Cursor>>),
     Success(bool),
     Text(Option<String>),
     Profile(Option<Vec<u8>>),
     Window(Option<NonNull<SDL_Window>>),
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
     NativePointer(Option<NonNull<c_void>>),
     Number(i64),
     Float(f32),
@@ -159,21 +154,12 @@ enum SdlNativeResult {
     ColorProperty((bool, f32)),
     #[cfg(test)]
     Pixel(Option<[u8; 4]>),
-    Theme(SDL_SystemTheme),
 }
 
 impl SdlNativeResult {
     fn properties(self) -> Option<SDL_PropertiesID> {
         if let Self::Properties(id) = self {
             Some(id)
-        } else {
-            None
-        }
-    }
-
-    fn cursor(self) -> Option<NonNull<SDL_Cursor>> {
-        if let Self::Cursor(cursor) = self {
-            cursor
         } else {
             None
         }
@@ -199,6 +185,7 @@ impl SdlNativeResult {
         }
     }
 
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
     fn native_pointer(self) -> Option<NonNull<c_void>> {
         if let Self::NativePointer(raw) = self {
             raw
@@ -272,21 +259,13 @@ impl SdlNativeResult {
             "OverInk".into()
         }
     }
-
-    fn theme(self) -> SDL_SystemTheme {
-        if let Self::Theme(theme) = self {
-            theme
-        } else {
-            SDL_SYSTEM_THEME_UNKNOWN
-        }
-    }
 }
 
 /// Native SDL operations are restricted to typed actions; application code
 /// never receives unsafe FFI functions or naked SDL-owned allocations.
 fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
     // SAFETY: Destruction variants are created only by unique Rust owners.
-    // Cursor, device, event-poll and video operations are checked at the
+    // Device, event-poll and video operations are checked at the
     // owning main-thread wrappers. SDL_PushEvent copies the locally built
     // user event, and SDL_WaitEventTimeout receives no output buffer.
     // Getter outputs are initialized local scalars. SDL_free only receives
@@ -321,22 +300,6 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
             }
             SdlNativeAction::DestroyProperties(id) => {
                 SDL_DestroyProperties(id);
-                SdlNativeResult::Done
-            }
-            SdlNativeAction::CreateCrosshair => SdlNativeResult::Cursor(NonNull::new(
-                SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_CROSSHAIR),
-            )),
-            SdlNativeAction::SetCursor(cursor) => SdlNativeResult::Success(SDL_SetCursor(
-                cursor.map_or(ptr::null_mut(), NonNull::as_ptr),
-            )),
-            SdlNativeAction::CurrentCursor => {
-                SdlNativeResult::Cursor(NonNull::new(SDL_GetCursor()))
-            }
-            SdlNativeAction::DefaultCursor => {
-                SdlNativeResult::Cursor(NonNull::new(SDL_GetDefaultCursor()))
-            }
-            SdlNativeAction::DestroyCursor(cursor) => {
-                SDL_DestroyCursor(cursor.as_ptr());
                 SdlNativeResult::Done
             }
             SdlNativeAction::DestroySurface(surface) => {
@@ -439,9 +402,6 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
                 };
                 SdlNativeResult::Pixel(pixel)
             }
-            SdlNativeAction::ClipboardWrite(value) => {
-                SdlNativeResult::Success(SDL_SetClipboardText(value.as_ptr()))
-            }
             SdlNativeAction::ClipboardRead => {
                 // SDL owns the returned allocation until the RAII guard drops.
                 let text = if let Some(raw) = NonNull::new(SDL_GetClipboardText()) {
@@ -499,6 +459,7 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
                     SdlNativeResult::Profile(None)
                 }
             }
+            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
             SdlNativeAction::WindowPointer(window, property) => {
                 let raw = if let Some(key) = property.key() {
                     NonNull::new(SDL_GetPointerProperty(
@@ -560,7 +521,6 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
                 .map(|handle| handle.as_ptr().expose_provenance());
                 SdlNativeResult::WindowsMonitor(handle)
             }
-            SdlNativeAction::SystemTheme => SdlNativeResult::Theme(SDL_GetSystemTheme()),
             SdlNativeAction::IndirectTouch(device) => SdlNativeResult::Success(matches!(
                 SDL_GetTouchDeviceType(device),
                 SDL_TOUCH_DEVICE_INDIRECT_ABSOLUTE | SDL_TOUCH_DEVICE_INDIRECT_RELATIVE
@@ -953,7 +913,12 @@ pub fn system_theme() -> SDL_SystemTheme {
     // SDL's video/theme query must run on the main thread. Avoid querying
     // shared video state from arbitrary safe Rust worker threads.
     if is_main_thread() {
-        sdl_native(SdlNativeAction::SystemTheme).theme()
+        use sdl3::video::SystemTheme;
+        match sdl3::VideoSubsystem::get_system_theme() {
+            SystemTheme::Dark => SDL_SYSTEM_THEME_DARK,
+            SystemTheme::Light => SDL_SYSTEM_THEME_LIGHT,
+            SystemTheme::Unknown => SDL_SYSTEM_THEME_UNKNOWN,
+        }
     } else {
         SDL_SYSTEM_THEME_UNKNOWN
     }
@@ -1090,10 +1055,20 @@ pub fn mod_state() -> SDL_Keymod {
     }
 }
 
-/// Copy text to the native clipboard using an owned NUL-terminated argument.
+/// Copy text to the native clipboard, removing embedded NULs as SDL expects.
 pub fn set_clipboard_text(value: &str) {
-    let text = cstring(value);
-    let _ = sdl_native(SdlNativeAction::ClipboardWrite(&text));
+    if !is_main_thread() || !SDL_VIDEO_READY.load(std::sync::atomic::Ordering::Acquire) {
+        return;
+    }
+    let Ok(video) = sdl3::init().and_then(|context| context.video()) else {
+        return;
+    };
+    let text = if value.contains('\0') {
+        std::borrow::Cow::Owned(value.replace('\0', ""))
+    } else {
+        std::borrow::Cow::Borrowed(value)
+    };
+    let _ = video.clipboard().set_clipboard_text(&text);
 }
 
 /// Copy SDL-owned clipboard text before releasing its allocation through RAII.
@@ -1226,36 +1201,72 @@ pub fn capture_mouse(enable: bool) -> bool {
     sdl_native(SdlNativeAction::CaptureMouse(enable)).succeeded()
 }
 
-/// Keep the cursor allocation owned and restore the default on drop.
-pub struct SystemCursor(NonNull<SDL_Cursor>);
+/// An SDL-owned cursor. SDL restores the default when dropping the active cursor.
+pub struct SystemCursor {
+    _cursor: sdl3::mouse::Cursor,
+    #[cfg(target_os = "macos")]
+    activation: u64,
+}
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Default)]
+struct CrosshairActivation {
+    latest: u64,
+    active: Option<u64>,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl CrosshairActivation {
+    fn install(&mut self) -> u64 {
+        self.latest = self.latest.wrapping_add(1);
+        self.active = Some(self.latest);
+        self.latest
+    }
+
+    fn release(&mut self, activation: u64) -> bool {
+        if self.active == Some(activation) {
+            self.active = None;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+thread_local! {
+    static CROSSHAIR_ACTIVATION: std::cell::RefCell<CrosshairActivation> =
+        std::cell::RefCell::new(CrosshairActivation::default());
+}
 
 impl SystemCursor {
     pub fn crosshair() -> Option<Self> {
         if !is_main_thread() || !SDL_VIDEO_READY.load(std::sync::atomic::Ordering::Acquire) {
             return None;
         }
-        let cursor = sdl_native(SdlNativeAction::CreateCrosshair).cursor()?;
-        if !sdl_native(SdlNativeAction::SetCursor(Some(cursor))).succeeded() {
-            let _ = sdl_native(SdlNativeAction::DestroyCursor(cursor));
-            return None;
-        }
+        let cursor = sdl3::mouse::Cursor::from_system(sdl3::mouse::SystemCursor::Crosshair).ok()?;
         #[cfg(target_os = "macos")]
-        crate::native::macos::overink_macos_overlay_crosshair(true);
-        Some(Self(cursor))
+        let activation = CROSSHAIR_ACTIVATION.with(|state| {
+            let activation = state.borrow_mut().install();
+            crate::native::macos::overink_macos_overlay_crosshair(true);
+            activation
+        });
+        cursor.set();
+        Some(Self {
+            _cursor: cursor,
+            #[cfg(target_os = "macos")]
+            activation,
+        })
     }
 }
 
+#[cfg(target_os = "macos")]
 impl Drop for SystemCursor {
     fn drop(&mut self) {
-        // A later cursor may have replaced this one before Drop, so only
-        // restore the default when we still own the active cursor.
-        if sdl_native(SdlNativeAction::CurrentCursor).cursor() == Some(self.0) {
-            let default = sdl_native(SdlNativeAction::DefaultCursor).cursor();
-            let _ = sdl_native(SdlNativeAction::SetCursor(default));
-            #[cfg(target_os = "macos")]
+        if CROSSHAIR_ACTIVATION.with(|state| state.borrow_mut().release(self.activation)) {
+            // Update external Cocoa views before SDL redraws the default cursor.
             crate::native::macos::overink_macos_overlay_crosshair(false);
         }
-        let _ = sdl_native(SdlNativeAction::DestroyCursor(self.0));
     }
 }
 
@@ -2098,6 +2109,7 @@ impl Window {
     }
     /// Borrow a native backend handle from the window property list.
     /// The returned handle cannot outlive this Window in safe Rust.
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
     fn native_pointer_property(
         &self,
         property: NativeWindowProperty,
@@ -2114,13 +2126,6 @@ impl Window {
     #[cfg(target_os = "windows")]
     pub fn win32_hwnd(&self) -> Option<NativeWindowHandle<'_>> {
         self.native_pointer_property(NativeWindowProperty::Win32Hwnd)
-    }
-
-    /// Borrow the Cocoa NSWindow for this live SDL window without exposing
-    /// property-list FFI to the platform input-routing code.
-    #[cfg(target_os = "macos")]
-    pub fn cocoa_window(&self) -> Option<NativeWindowHandle<'_>> {
-        self.native_pointer_property(NativeWindowProperty::CocoaWindow)
     }
 
     /// Read the Cocoa Metal view tag without exposing the SDL property handle.
@@ -3463,6 +3468,19 @@ impl TestSurface {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_latest_crosshair_clears_the_cocoa_overlay() {
+        let mut state = CrosshairActivation::default();
+        let original = state.install();
+        let replacement = state.install();
+        assert!(!state.release(original));
+        assert!(state.release(replacement));
+        assert!(!state.release(replacement));
+        let next = state.install();
+        assert!(!state.release(original));
+        assert!(state.release(next));
+    }
 
     #[test]
     fn toolbar_mask_preserves_transparent_and_antialiased_corners() -> Result<(), String> {

@@ -573,24 +573,25 @@ mod tests {
         pages.save(&history, &path)?;
 
         // SDL display IDs and list order can differ after a restart.
-        let right = screen(31, "Right", 800);
-        let left = screen(32, "Left", 0);
-        let mut restored = Pages::new(Some(right.id));
+        let mut displays = [screen(31, "Right", 800), screen(32, "Left", 0)];
+        let [right, left] = displays.each_ref().map(|display| display.id);
+        let mut restored = Pages::new(Some(right));
         let mut history = History::default();
-        restored.sync(&mut history, &[right.clone(), left.clone()]);
+        restored.sync(&mut history, &displays);
         restored.load(&mut history, &path, true)?;
         assert_eq!(history.strokes()[0].points[0].x, 22.);
-        restored.switch(&mut history, left.id);
+        restored.switch(&mut history, left);
         assert_eq!(history.strokes()[0].points[0].x, 11.);
         history.undo();
         assert_eq!(history.strokes().len(), 1);
         assert!(!restored.needs_save(&history));
-        restored.sync(&mut history, std::slice::from_ref(&left));
+        restored.sync(&mut history, &displays[1..]);
         assert!(restored.needs_save(&history));
         restored.save(&history, &path)?;
         restored.mark_saved(&mut history);
-        restored.sync(&mut history, &[left, right.clone()]);
-        restored.switch(&mut history, right.id);
+        displays.swap(0, 1);
+        restored.sync(&mut history, &displays);
+        restored.switch(&mut history, right);
         assert!(history.strokes().is_empty());
         restored.load(&mut history, &path, true)?;
         assert!(history.strokes().is_empty());
