@@ -1747,8 +1747,9 @@ fn run_inner(options: Options) -> Result<(), String> {
     let wayland = video == "wayland";
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     let mut place_kwin_toolbar = wayland && !options.smoke && crate::kwin::active();
-    let window =
-        with_autorelease_pool(|| Window::new("OverInk - canvas", 1100, 720, !options.smoke))?;
+    let window = with_autorelease_pool(|| {
+        Window::new(&runtime, "OverInk - canvas", 1100, 720, !options.smoke)
+    })?;
     let mut topology = crate::display::Topology::new(video);
     let displays = with_autorelease_pool(|| topology.connected()).unwrap_or_default();
     let xwayland = crate::background::is_xwayland(video);
@@ -1796,7 +1797,9 @@ fn run_inner(options: Options) -> Result<(), String> {
     };
     if !options.smoke {
         let _ = with_autorelease_pool(|| toolbar.arrange_toolbar(false, app.pages.active));
-        with_autorelease_pool(|| canvas::reconcile(&mut canvases, &mut app, &toolbar, &options))?;
+        with_autorelease_pool(|| {
+            canvas::reconcile(&mut canvases, &mut app, &toolbar, &options, &runtime)
+        })?;
     }
     let toolbar_render = with_autorelease_pool(|| Renderer::new(&toolbar, true))
         .map_err(|error| format!("Creating the toolbar renderer on {video} failed ({error})"))?;
@@ -2527,7 +2530,7 @@ fn run_inner(options: Options) -> Result<(), String> {
                         mode_changed = true;
                     }
                     if let Err(error) =
-                        canvas::reconcile(&mut canvases, &mut app, &toolbar, &options)
+                        canvas::reconcile(&mut canvases, &mut app, &toolbar, &options, &runtime)
                     {
                         app.status = canvas::failure(error);
                         toolbar_dirty = true;

@@ -1214,8 +1214,9 @@ pub(super) fn reconcile(
     app: &mut App,
     toolbar: &Window,
     options: &Options,
+    runtime: &Runtime,
 ) -> Result<(), String> {
-    if let Err(error) = reconcile_windows(canvases, app, toolbar, options) {
+    if let Err(error) = reconcile_windows(canvases, app, toolbar, options, runtime) {
         if !app.multi {
             return Err(error);
         }
@@ -1224,7 +1225,7 @@ pub(super) fn reconcile(
         app.multi = false;
         app.status =
             text("Using one canvas because a display window could not be opened").detail(error);
-        reconcile_windows(canvases, app, toolbar, options)?;
+        reconcile_windows(canvases, app, toolbar, options, runtime)?;
     }
     Ok(())
 }
@@ -1234,6 +1235,7 @@ fn reconcile_windows(
     app: &App,
     toolbar: &Window,
     options: &Options,
+    runtime: &Runtime,
 ) -> Result<(), String> {
     if app.multi && !app.displays.is_empty() {
         let mut added = Vec::new();
@@ -1242,7 +1244,7 @@ fn reconcile_windows(
                 .iter()
                 .any(|canvas| canvas.output == Some(display.id))
             {
-                let window = Window::new("OverInk - canvas", 1100, 720, true)?;
+                let window = Window::new(runtime, "OverInk - canvas", 1100, 720, true)?;
                 added.push(Canvas::new(window, Some(display), options)?);
             }
         }

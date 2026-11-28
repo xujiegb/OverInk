@@ -19,7 +19,7 @@ pub(super) fn run(
     let runtime = Runtime::new(false, true, false).or_else(|wayland| {
         Runtime::new(true, false, false).map_err(|x11| format!("{wayland} · {x11}"))
     })?;
-    let window = Window::new("OverInk — GNOME Wayland", WIDTH, HEIGHT, false)?;
+    let window = Window::new(&runtime, "OverInk — GNOME Wayland", WIDTH, HEIGHT, false)?;
     // SDL's X11 window coordinates are pixels, while egui uses points.
     let units = crate::gui::window_units(&window);
     if units > 1. && driver() == "x11" {

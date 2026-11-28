@@ -39,7 +39,7 @@ const SOFTWARE_REPLAY_POINTS: usize = 16_384;
 const CACHE_ALIGNMENT: i32 = 128;
 const INK_TILE_EDGE: i32 = 512;
 const MAX_INK_TILES: usize = 32;
-const INK_BAND_HEIGHT: i32 = 32;
+const INK_BAND_HEIGHT: i32 = u32::BITS as i32;
 const MAX_INK_BANDS: usize = 128;
 const REPLAY_WINDOW: Duration = Duration::from_millis(900);
 const EXPENSIVE_REPLAY: Duration = Duration::from_micros(500);
@@ -858,61 +858,77 @@ fn ink_bands(frame: &Frame<'_>, history: &History, region: SDL_Rect) -> Vec<SDL_
     if count as usize > MAX_INK_BANDS || rect_area(region) <= i64::from(INK_TILE_EDGE).pow(2) {
         return Vec::new();
     }
-    let mut spans = [None::<SDL_Rect>; MAX_INK_BANDS];
+    let mut spans = [(i32::MAX, i32::MIN, 0_u32); MAX_INK_BANDS];
     visit_ink_regions(frame, history, |area| {
         let Some(area) = pixel_intersection(region, area) else {
             return true;
         };
         let first = ((area.y - region.y) / INK_BAND_HEIGHT) as usize;
         let last = ((area.y + area.h - 1 - region.y) / INK_BAND_HEIGHT) as usize;
-        for (row, span) in spans.iter_mut().enumerate().take(last + 1).skip(first) {
+        for (row, (left, right, covered_rows)) in
+            spans.iter_mut().enumerate().take(last + 1).skip(first)
+        {
             let band_top = region.y + row as i32 * INK_BAND_HEIGHT;
             let top = band_top.max(area.y);
-            let bottom = (band_top.saturating_add(INK_BAND_HEIGHT)).min(area.y + area.h);
-            let mut covered = SDL_Rect {
-                x: area.x,
-                y: top,
-                w: area.w,
-                h: bottom - top,
-            };
-            if let Some(old) = *span {
-                covered.x = covered.x.min(old.x);
-                covered.y = covered.y.min(old.y);
-                covered.w = (area.x + area.w).max(old.x + old.w) - covered.x;
-                covered.h = bottom.max(old.y + old.h) - covered.y;
-            }
-            *span = Some(covered);
+            let bottom = band_top
+                .saturating_add(INK_BAND_HEIGHT)
+                .min(area.y + area.h);
+            *left = (*left).min(area.x);
+            *right = (*right).max(area.x + area.w);
+            let bits = u32::MAX >> (INK_BAND_HEIGHT - (bottom - top));
+            *covered_rows |= bits << (top - band_top);
         }
         true
     });
-    let mut bands: Vec<SDL_Rect> = Vec::new();
-    for band in spans.into_iter().flatten() {
-        if let Some(last) = bands.last_mut()
-            && last.y + last.h == band.y
-        {
-            // Coalesce adjacent bands when a small horizontal variation would
-            // otherwise consume another SDL target and another blit command.
-            let x = last.x.min(band.x);
-            let merged = SDL_Rect {
-                x,
-                w: (last.x + last.w).max(band.x + band.w) - x,
-                h: last.h + band.h,
-                ..*last
-            };
-            let separate = rect_area(*last) + rect_area(band);
-            if rect_area(merged) - separate <= separate / 8 {
-                *last = merged;
-                continue;
+    let mut bands = Vec::new();
+    for (row, (left, right, mut covered_rows)) in spans.into_iter().enumerate() {
+        // A band can contain disjoint strokes. Preserve the gaps between them
+        // even when both fall inside the same 32-row bucket.
+        while covered_rows != 0 {
+            let first = covered_rows.trailing_zeros();
+            let length = (covered_rows >> first).trailing_ones();
+            covered_rows &= !((u32::MAX >> (u32::BITS - length)) << first);
+            append_ink_band(
+                &mut bands,
+                SDL_Rect {
+                    x: left,
+                    y: region.y + row as i32 * INK_BAND_HEIGHT + first as i32,
+                    w: right - left,
+                    h: length as i32,
+                },
+            );
+            if bands.len() > MAX_INK_TILES {
+                return Vec::new();
             }
         }
-        bands.push(band);
     }
     // Leave dense pages on the single blit path.
     let painted = bands.iter().copied().map(rect_area).sum::<i64>();
-    if bands.len() > MAX_INK_TILES || painted * 4 >= rect_area(region) * 3 {
+    if painted * 4 >= rect_area(region) * 3 {
         return Vec::new();
     }
     bands
+}
+
+fn append_ink_band(bands: &mut Vec<SDL_Rect>, band: SDL_Rect) {
+    if let Some(last) = bands.last_mut()
+        && last.y + last.h == band.y
+    {
+        // A slight widening is cheaper than another SDL target and blit.
+        let x = last.x.min(band.x);
+        let merged = SDL_Rect {
+            x,
+            w: (last.x + last.w).max(band.x + band.w) - x,
+            h: last.h + band.h,
+            ..*last
+        };
+        let separate = rect_area(*last) + rect_area(band);
+        if rect_area(merged) - separate <= separate / 8 {
+            *last = merged;
+            return;
+        }
+    }
+    bands.push(band);
 }
 
 fn rect_area(rect: SDL_Rect) -> i64 {
@@ -2104,6 +2120,37 @@ mod tests {
             difference.is_none(),
             "Tiled output differs at index {difference:?}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn sparse_bands_skip_empty_rows_inside_a_bucket() -> TestResult {
+        let canvas = TestCanvas::new([960, 720])?;
+        let mut app = app();
+        app.history.append([7., 25.].into_iter().map(|y| {
+            Stroke {
+                tool: Tool::Pen,
+                color: InkColor::default(),
+                width: 1.,
+                opacity: 1.,
+                pressure_curve: 1.,
+                pressure_enabled: false,
+                points: [16., 912.]
+                    .into_iter()
+                    .map(|x| Point::new(x, y, 1., [0.; 2]))
+                    .collect(),
+            }
+        }));
+        let full = SDL_Rect {
+            x: 0,
+            y: 0,
+            w: 960,
+            h: 720,
+        };
+        let bands = ink_bands(&canvas.frame(), &app.history, full);
+        assert_eq!(bands.len(), 2);
+        assert!(bands[0].y + bands[0].h < 16);
+        assert!(bands[1].y > 16);
         Ok(())
     }
 
