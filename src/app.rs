@@ -1736,10 +1736,10 @@ fn run_inner(options: Options) -> Result<(), String> {
     let preferences_path = base.join("ui.json");
     let preferences = Preferences::load(&preferences_path);
     #[cfg(target_os = "linux")]
-    let (_runtime, preferences, gnome_status) =
+    let (runtime, preferences, gnome_status) =
         crate::gnome::start_video(preferences, &preferences_path, options.x11, options.smoke)?;
     #[cfg(not(target_os = "linux"))]
-    let _runtime =
+    let runtime =
         with_autorelease_pool(|| Runtime::new(options.x11, preferences.wayland, options.smoke))?;
     let video = crate::sdl::driver();
     #[cfg(target_os = "windows")]
@@ -1770,14 +1770,8 @@ fn run_inner(options: Options) -> Result<(), String> {
     let mut canvases = vec![with_autorelease_pool(|| {
         canvas::Canvas::new(window, app.displays.get(app.display), &options)
     })?];
-    let toolbar = with_autorelease_pool(|| {
-        Window::toolbar(
-            "OverInk",
-            crate::toolbar::WIDTH as i32,
-            crate::toolbar::HEIGHT as i32,
-        )
-    })?;
-    with_autorelease_pool(|| toolbar.setup_toolbar());
+    let toolbar = with_autorelease_pool(|| Window::toolbar(&runtime))?;
+    with_autorelease_pool(|| toolbar.set_toolbar_icon());
     // With NSIsTouchNative set, AppKit no longer synthesizes mouse clicks for
     // direct touches. The separate toolbar is an SDL window too, so it needs
     // the same direct-touch bridge as every canvas.
@@ -1946,6 +1940,14 @@ fn run_inner(options: Options) -> Result<(), String> {
                         if bounds_changed {
                             tooltips.clear();
                             controller_bounds_changed = true;
+                        }
+                        if matches!(
+                            ty,
+                            SDL_EVENT_WINDOW_DISPLAY_CHANGED
+                                | SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED
+                                | SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED
+                        ) {
+                            toolbar.refresh_toolbar_grip();
                         }
                         let moved = matches!(
                             ty,
@@ -4478,15 +4480,15 @@ mod touch_tests {
     #[test]
     fn display_selection_survives_a_refresh_without_controller_movement() {
         let mut a = app();
-        let displays = vec![screen(10, 0, 60.0), screen(20, 1920, 120.0)];
-        a.displays = displays.clone();
+        let displays = || vec![screen(10, 0, 60.0), screen(20, 1920, 120.0)];
+        a.displays = displays();
         a.pages = Pages::new(Some(20)); // selected by --display 2
-        a.refresh_displays(displays.clone(), None);
+        a.refresh_displays(displays(), None);
         assert_eq!(a.pages.active, Some(20));
-        a.refresh_displays(displays.clone(), Some(10)); // settings selection
-        a.refresh_displays(displays.clone(), None);
+        a.refresh_displays(displays(), Some(10)); // settings selection
+        a.refresh_displays(displays(), None);
         assert_eq!(a.pages.active, Some(10));
-        a.refresh_displays(displays, Some(20)); // toolbar actually crosses screens
+        a.refresh_displays(displays(), Some(20)); // toolbar actually crosses screens
         assert_eq!(a.pages.active, Some(20));
     }
     #[test]

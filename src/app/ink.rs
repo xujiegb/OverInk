@@ -330,10 +330,8 @@ impl Ink {
         scope: PaintScope,
     ) -> Result<[f32; 2], String> {
         let bg = Self::clear_color(app);
-        let scale = if let Some(rect) = scope.damage {
-            let logical = window.size();
-            let pixels = window.pixel_size();
-            let scale = std::array::from_fn(|axis| pixels[axis] as f32 / logical[axis]);
+        let (pixels, scale) = if let Some(rect) = scope.damage {
+            let (pixels, scale) = window.render_size();
             renderer.set_render_scale(scale)?;
             renderer.try_set_clip_rect(Some(&rect))?;
             renderer.replace_rect(
@@ -345,14 +343,14 @@ impl Ink {
                 },
                 bg,
             )?;
-            scale
+            (pixels, scale)
         } else {
             renderer.begin(window, bg)?
         };
         let frame = Frame {
             renderer,
             color,
-            pixels: window.pixel_size(),
+            pixels,
             scale,
             aa: antialias(scale),
             extended_budget: scope.extended_budget,
@@ -789,45 +787,49 @@ fn ink_bands(frame: &Frame<'_>, history: &History, region: SDL_Rect) -> Vec<SDL_
     if count as usize > MAX_INK_BANDS || rect_area(region) <= i64::from(INK_TILE_EDGE).pow(2) {
         return Vec::new();
     }
-    let mut spans = [[i32::MAX, 0]; MAX_INK_BANDS];
+    let mut spans = [None::<SDL_Rect>; MAX_INK_BANDS];
     visit_ink_regions(frame, history, |area| {
-        let left = area.x.max(region.x);
-        let right = (area.x + area.w).min(region.x + region.w);
-        let top = area.y.max(region.y) - region.y;
-        let bottom = (area.y + area.h).min(region.y + region.h) - region.y;
-        if left < right && top < bottom {
-            for span in &mut spans
-                [(top / INK_BAND_HEIGHT) as usize..=((bottom - 1) / INK_BAND_HEIGHT) as usize]
-            {
-                span[0] = span[0].min(left);
-                span[1] = span[1].max(right);
+        let Some(area) = pixel_intersection(region, area) else {
+            return true;
+        };
+        let first = ((area.y - region.y) / INK_BAND_HEIGHT) as usize;
+        let last = ((area.y + area.h - 1 - region.y) / INK_BAND_HEIGHT) as usize;
+        for (row, span) in spans.iter_mut().enumerate().take(last + 1).skip(first) {
+            let band_top = region.y + row as i32 * INK_BAND_HEIGHT;
+            let top = band_top.max(area.y);
+            let bottom = (band_top.saturating_add(INK_BAND_HEIGHT)).min(area.y + area.h);
+            let mut covered = SDL_Rect {
+                x: area.x,
+                y: top,
+                w: area.w,
+                h: bottom - top,
+            };
+            if let Some(old) = *span {
+                covered.x = covered.x.min(old.x);
+                covered.y = covered.y.min(old.y);
+                covered.w = (area.x + area.w).max(old.x + old.w) - covered.x;
+                covered.h = bottom.max(old.y + old.h) - covered.y;
             }
+            *span = Some(covered);
         }
         true
     });
     let mut bands: Vec<SDL_Rect> = Vec::new();
-    for (row, &[left, right]) in spans[..count as usize].iter().enumerate() {
-        if left >= right {
-            continue;
-        }
-        let offset = row as i32 * INK_BAND_HEIGHT;
-        let y = region.y + offset;
-        let w = right - left;
-        let h = INK_BAND_HEIGHT.min(region.h - offset);
+    for band in spans.into_iter().flatten() {
         if let Some(last) = bands.last_mut()
-            && last.x == left
-            && last.w == w
-            && last.y + last.h == y
+            && last.x == band.x
+            && last.w == band.w
+            && last.y + last.h == band.y
         {
-            last.h += h;
+            last.h += band.h;
         } else {
-            bands.push(SDL_Rect { x: left, y, w, h });
+            bands.push(band);
         }
     }
     // Leave dense pages on the single blit path.
     let painted = bands.iter().copied().map(rect_area).sum::<i64>();
     if bands.len() > MAX_INK_TILES || painted * 4 >= rect_area(region) * 3 {
-        bands.clear();
+        return Vec::new();
     }
     bands
 }

@@ -86,7 +86,6 @@ enum SdlNativeAction<'a> {
     ModState,
     ScreenshotTimestamp,
     RegisterUserEvent,
-    Shutdown,
     FreeAllocation(NonNull<c_void>),
     CreateProperties,
     DestroyProperties(SDL_PropertiesID),
@@ -99,6 +98,7 @@ enum SdlNativeAction<'a> {
     DestroyTexture(NonNull<SDL_Texture>),
     DestroyRenderer(NonNull<SDL_Renderer>),
     DestroyWindow(SDL_WindowID, NonNull<SDL_Window>),
+    LookupWindow(SDL_WindowID),
     SaveBmp(&'a OwnedSurface, &'a CStr),
     TextureModulation(&'a OwnedTexture, [f32; 3], f32),
     TextureUpload(&'a OwnedTexture, Option<&'a SDL_Rect>, &'a [u8], i32),
@@ -143,6 +143,7 @@ enum SdlNativeResult {
     Success(bool),
     Text(Option<String>),
     Profile(Option<Vec<u8>>),
+    Window(Option<NonNull<SDL_Window>>),
     NativePointer(Option<NonNull<c_void>>),
     Number(i64),
     Float(f32),
@@ -304,10 +305,6 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
                 SdlNativeResult::ScreenshotTimestamp(stem)
             }
             SdlNativeAction::RegisterUserEvent => SdlNativeResult::EventType(SDL_RegisterEvents(1)),
-            SdlNativeAction::Shutdown => {
-                SDL_Quit();
-                SdlNativeResult::Done
-            }
             SdlNativeAction::FreeAllocation(raw) => {
                 SDL_free(raw.as_ptr());
                 SdlNativeResult::Done
@@ -356,6 +353,9 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
                     SDL_DestroyWindow(window.as_ptr());
                 }
                 SdlNativeResult::Done
+            }
+            SdlNativeAction::LookupWindow(id) => {
+                SdlNativeResult::Window(NonNull::new(SDL_GetWindowFromID(id)))
             }
             SdlNativeAction::SaveBmp(surface, name) => {
                 SdlNativeResult::Success(SDL_SaveBMP(surface.as_non_null().as_ptr(), name.as_ptr()))
@@ -637,15 +637,15 @@ pub fn is_wayland_session() -> bool {
 }
 /// SDL's video lifetime is confined to its creating main thread.
 pub struct Runtime {
-    _main_thread: PhantomData<std::rc::Rc<()>>,
+    video: sdl3::VideoSubsystem,
 }
 impl Runtime {
     pub fn new(x11: bool, wayland: bool, smoke: bool) -> Result<Self, String> {
         if !is_main_thread() {
             return Err("SDL video must initialize on the main thread".into());
         }
-        // A second Runtime could call SDL_Quit while the first one still
-        // owns windows, renderers and textures. Never allow overlapping owners.
+        // A second runtime could change process-wide hints while windows from
+        // the first are still live.
         if SDL_VIDEO_READY.load(std::sync::atomic::Ordering::Acquire) {
             return Err("An SDL video runtime is already active".into());
         }
@@ -700,10 +700,13 @@ impl Runtime {
                 c"org.overink.OverInk".as_ptr(),
             );
             SDL_ClearError();
-            check(SDL_Init(SDL_INIT_VIDEO)).map_err(|error| {
+            let initialize = |error: sdl3::Error| {
                 let name = backend.map_or_else(|| "SDL".into(), CStr::to_string_lossy);
                 format!("Initializing {name} video failed ({error})")
-            })?;
+            };
+            let video = sdl3::init()
+                .and_then(|context| context.video())
+                .map_err(initialize)?;
             SDL_VIDEO_READY.store(true, std::sync::atomic::Ordering::Release);
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             {
@@ -714,9 +717,7 @@ impl Runtime {
                 WAYLAND_SCALE_TO_DISPLAY_FORCED
                     .store(enabled, std::sync::atomic::Ordering::Relaxed);
             }
-            Ok(Self {
-                _main_thread: PhantomData,
-            })
+            Ok(Self { video })
         }
     }
 }
@@ -736,12 +737,7 @@ fn startup_driver(x11: bool, smoke: bool, wayland: bool) -> Option<&'static CStr
 }
 impl Drop for Runtime {
     fn drop(&mut self) {
-        // The runtime cannot cross threads in safe Rust. Do not shut SDL
-        // down if a foreign callback somehow causes off-main destruction.
-        if is_main_thread() {
-            SDL_VIDEO_READY.store(false, std::sync::atomic::Ordering::Release);
-            let _ = sdl_native(SdlNativeAction::Shutdown);
-        }
+        SDL_VIDEO_READY.store(false, std::sync::atomic::Ordering::Release);
     }
 }
 pub fn driver() -> String {
@@ -1381,7 +1377,7 @@ enum WindowCommand<'a> {
     },
     Show(bool),
     SetParent(Option<&'a Window>),
-    ToolbarSetup([i32; 2], &'a mut [u8]),
+    ToolbarIcon([i32; 2], &'a mut [u8]),
     RoundedCorners([i32; 2], i32),
     #[cfg(not(target_os = "windows"))]
     ShapeRegions([i32; 2], Option<&'a [SDL_Rect]>),
@@ -1390,46 +1386,49 @@ enum WindowCommand<'a> {
 /// Closed SDL window constructors, retaining borrowed title and parent
 /// references only until native creation completes.
 enum WindowCreation<'a> {
-    Main(&'a CStr, i32, i32, bool),
+    Main(&'a CStr, i32, i32, WindowStyle),
     Tooltip(&'a Window, [i32; 4]),
 }
 
-/// SDL only borrows the hit-test point while this callback runs.
-extern "C" fn toolbar_hit_test(
-    window: *mut SDL_Window,
-    point: *const SDL_Point,
-    _: *mut c_void,
-) -> SDL_HitTestResult {
-    if window.is_null() {
-        return SDL_HITTEST_NORMAL;
-    }
-    // SAFETY: SDL invokes this callback with a valid live window
-    // and a point borrowed for the duration of the call. The null
-    // check protects against malformed callback inputs.
-    let (point, scale) = unsafe {
-        let Some(point) = point.as_ref() else {
-            return SDL_HITTEST_NORMAL;
-        };
-        let scale = SDL_GetWindowDisplayScale(window) / SDL_GetWindowPixelDensity(window).max(0.1);
-        (point, scale)
-    };
-    if point.x >= 0
-        && (point.x as f32) < crate::toolbar::WIDTH * scale
-        && point.y >= 0
-        && (point.y as f32) < crate::toolbar::GRIP_HEIGHT * scale
-    {
-        SDL_HITTEST_DRAGGABLE
-    } else {
-        SDL_HITTEST_NORMAL
-    }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WindowStyle {
+    Normal,
+    Overlay,
+    Toolbar,
+}
+
+thread_local! {
+    // Only one controller exists on the SDL thread. Its display events
+    // refresh the scale; native hit tests only check the saved dimensions.
+    static TOOLBAR_GRIP_SCALE: std::cell::Cell<f32> = const { std::cell::Cell::new(1.) };
+}
+
+fn toolbar_grip_contains(x: i32, y: i32, scale: f32) -> bool {
+    x >= 0
+        && y >= 0
+        && (x as f32) < crate::toolbar::WIDTH * scale
+        && (y as f32) < crate::toolbar::GRIP_HEIGHT * scale
 }
 
 pub struct Window {
     // Only the SDL adapter may use or destroy this owned native handle.
     raw: NonNull<SDL_Window>,
     pub id: SDL_WindowID,
+    // The Rust SDL binding owns the standard toolbar and its hit test.
+    toolbar_owner: Option<sdl3::video::Window>,
 }
 impl Window {
+    /// Resolve an ID just returned by an SDL window constructor.
+    fn lookup_created(id: SDL_WindowID) -> Result<NonNull<SDL_Window>, String> {
+        match sdl_native(SdlNativeAction::LookupWindow(id)) {
+            SdlNativeResult::Window(Some(window)) => Ok(window),
+            _ => Err(format!(
+                "SDL could not find the window it just created: {}",
+                error()
+            )),
+        }
+    }
+
     /// Copy only a known numeric SDL window property; never expose a
     /// property handle or unchecked key to higher-level callers.
     fn query_number(&self, query: WindowNumberQuery) -> i64 {
@@ -1639,15 +1638,7 @@ impl Window {
                     }
                     check(SDL_SetWindowParent(self.raw.as_ptr(), raw))
                 }
-                WindowCommand::ToolbarSetup([width, height], pixels) => {
-                    SDL_SetWindowResizable(self.raw.as_ptr(), false);
-                    if SDL_SetWindowHitTest(
-                        self.raw.as_ptr(),
-                        Some(toolbar_hit_test),
-                        ptr::null_mut(),
-                    ) {
-                        SDL_SetWindowBordered(self.raw.as_ptr(), false);
-                    }
+                WindowCommand::ToolbarIcon([width, height], pixels) => {
                     // The pixel slice remains mutably borrowed until the
                     // surface has been released by the OwnedSurface guard.
                     let pitch = width.checked_mul(4).ok_or("Invalid toolbar icon pitch")?;
@@ -1883,19 +1874,23 @@ impl Window {
         // SDL fails to assign an ID. A valid pointer is owned only by Self.
         unsafe {
             let raw = match &kind {
-                WindowCreation::Main(title, w, h, overlay) => {
-                    let mut flags = SDL_WINDOW_HIDDEN
-                        | SDL_WINDOW_HIGH_PIXEL_DENSITY
-                        | SDL_WINDOW_ALWAYS_ON_TOP
-                        | SDL_WINDOW_RESIZABLE;
-                    if *overlay {
-                        flags |= SDL_WINDOW_BORDERLESS | SDL_WINDOW_TRANSPARENT;
-                    }
+                WindowCreation::Main(title, w, h, style) => {
+                    let flags = main_window_flags(*style);
                     SDL_ClearError();
                     #[cfg(target_os = "macos")]
-                    if *overlay && driver() == "cocoa" {
-                        let id =
-                            crate::native::macos::overink_macos_create_overlay(*w, *h, flags.0);
+                    if *style != WindowStyle::Normal && driver() == "cocoa" {
+                        let [grip_width, grip_height] = if *style == WindowStyle::Toolbar {
+                            [crate::toolbar::WIDTH, crate::toolbar::GRIP_HEIGHT]
+                        } else {
+                            [0.; 2]
+                        };
+                        let id = crate::native::macos::overink_macos_create_overlay(
+                            *w,
+                            *h,
+                            flags.0,
+                            grip_width,
+                            grip_height,
+                        );
                         if id == 0 {
                             return Err(format!(
                                 "Creating the nonactivating {} panel failed ({})",
@@ -1904,13 +1899,16 @@ impl Window {
                             ));
                         }
                         let id = SDL_WindowID(id);
-                        let raw = NonNull::new(SDL_GetWindowFromID(id))
-                            .ok_or("SDL could not find the Cocoa panel it just created")?;
+                        let raw = Self::lookup_created(id)?;
                         // SDL's Cocoa wrapper infers the border flag from the
                         // style mask, which now also has NonactivatingPanel.
                         SDL_SetWindowBordered(raw.as_ptr(), false);
                         SDL_SetWindowTitle(raw.as_ptr(), title.as_ptr());
-                        return Ok(Self { raw, id });
+                        return Ok(Self {
+                            raw,
+                            id,
+                            toolbar_owner: None,
+                        });
                     }
                     SDL_CreateWindow(title.as_ptr(), *w, *h, flags)
                 }
@@ -1943,13 +1941,22 @@ impl Window {
                 SDL_DestroyWindow(raw.as_ptr());
                 return Err(format!("SDL did not assign a window ID: {message}"));
             }
-            Ok(Self { raw, id })
+            Ok(Self {
+                raw,
+                id,
+                toolbar_owner: None,
+            })
         }
     }
 
     pub fn new(title: &str, w: i32, h: i32, overlay: bool) -> Result<Self, String> {
         let title = cstring(title);
-        let window = Self::construct(WindowCreation::Main(&title, w, h, overlay))?;
+        let style = if overlay {
+            WindowStyle::Overlay
+        } else {
+            WindowStyle::Normal
+        };
+        let window = Self::construct(WindowCreation::Main(&title, w, h, style))?;
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         if overlay {
             window.keep_x11_composited()?;
@@ -1968,8 +1975,57 @@ impl Window {
 
     /// Controller windows need a transparent back buffer for a native rounded
     /// alpha/hit-test mask. Canvas windows continue to use their original path.
-    pub fn toolbar(title: &str, w: i32, h: i32) -> Result<Self, String> {
-        Self::new(title, w, h, true)
+    pub fn toolbar(runtime: &Runtime) -> Result<Self, String> {
+        const TITLE: &str = "OverInk";
+        let width = crate::toolbar::WIDTH as i32;
+        let height = crate::toolbar::HEIGHT as i32;
+        #[cfg(target_os = "macos")]
+        if driver() == "cocoa" {
+            return Self::construct(WindowCreation::Main(
+                c"OverInk",
+                width,
+                height,
+                WindowStyle::Toolbar,
+            ));
+        }
+
+        let flags = main_window_flags(WindowStyle::Toolbar);
+        let mut owner = runtime
+            .video
+            .window(TITLE, width as u32, height as u32)
+            .set_window_flags(flags.0 as u32)
+            .build()
+            .map_err(|err| format!("Creating {TITLE} on {} failed ({err})", driver()))?;
+        let id = SDL_WindowID(owner.id());
+        if id.0 == 0 {
+            return Err(format!("SDL did not assign a window ID: {}", error()));
+        }
+        let raw = Self::lookup_created(id)?;
+        TOOLBAR_GRIP_SCALE.set(owner.display_scale() / owner.pixel_density().max(0.1));
+        // Some video drivers, including the smoke test's dummy driver, have
+        // no native window movement. They can still display the controller.
+        let _ = owner.set_hit_test(|point| {
+            use sdl3::video::HitTestResult;
+            if toolbar_grip_contains(point.x(), point.y(), TOOLBAR_GRIP_SCALE.get()) {
+                HitTestResult::Draggable
+            } else {
+                HitTestResult::Normal
+            }
+        });
+        let window = Self {
+            raw,
+            id,
+            toolbar_owner: Some(owner),
+        };
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        window.keep_x11_composited()?;
+        Ok(window)
+    }
+
+    pub fn refresh_toolbar_grip(&self) {
+        if let Some(owner) = &self.toolbar_owner {
+            TOOLBAR_GRIP_SCALE.set(owner.display_scale() / owner.pixel_density().max(0.1));
+        }
     }
 
     pub fn tooltip(parent: &Self, x: i32, y: i32, w: i32, h: i32) -> Result<Self, String> {
@@ -2000,11 +2056,11 @@ impl Window {
         let [width, height] = self.query_size(false).unwrap_or([0, 0]);
         [width.max(1) as f32, height.max(1) as f32]
     }
-    pub fn setup_toolbar(&self) {
+    pub fn set_toolbar_icon(&self) {
         let icon = crate::toolbar::image();
         let size = [icon.width() as i32, icon.height() as i32];
         let mut pixels = icon.into_raw();
-        let _ = self.run_command(WindowCommand::ToolbarSetup(size, &mut pixels));
+        let _ = self.run_command(WindowCommand::ToolbarIcon(size, &mut pixels));
     }
     /// Rebuild the native shape only after an actual pixel-size/DPI change.
     pub fn update_rounded_shape(
@@ -2104,6 +2160,14 @@ impl Window {
     pub fn pixel_size(&self) -> [i32; 2] {
         let [width, height] = self.query_size(true).unwrap_or([0, 0]);
         [width.max(1), height.max(1)]
+    }
+    pub fn render_size(&self) -> ([i32; 2], [f32; 2]) {
+        let logical = self.size();
+        let pixels = self.pixel_size();
+        (
+            pixels,
+            std::array::from_fn(|axis| pixels[axis] as f32 / logical[axis]),
+        )
     }
     pub fn scale(&self) -> f32 {
         self.query_float(WindowFloatQuery::DisplayScale).max(1.)
@@ -2242,10 +2306,24 @@ impl Window {
 }
 impl Drop for Window {
     fn drop(&mut self) {
+        if self.toolbar_owner.is_some() {
+            return;
+        }
         // Only destroy the SDL-owned window while its ID still resolves to our
         // handle; its native identity can be invalidated by parent teardown.
         let _ = sdl_native(SdlNativeAction::DestroyWindow(self.id, self.raw));
     }
+}
+
+fn main_window_flags(style: WindowStyle) -> SDL_WindowFlags {
+    let mut flags = SDL_WINDOW_HIDDEN | SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_ALWAYS_ON_TOP;
+    if style != WindowStyle::Toolbar {
+        flags |= SDL_WINDOW_RESIZABLE;
+    }
+    if style != WindowStyle::Normal {
+        flags |= SDL_WINDOW_BORDERLESS | SDL_WINDOW_TRANSPARENT;
+    }
+    flags
 }
 /// SDL properties have unique caller ownership and must be destroyed even
 /// when renderer or texture construction returns early or unwinds.
@@ -3044,14 +3122,12 @@ impl Renderer {
     pub fn hdr(&self) -> (bool, f32) {
         self.query_color_property(RendererPropertyQuery::HdrState)
     }
-    pub fn begin(&self, window: &Window, color: [f32; 4]) -> Result<[f32; 2], String> {
-        let logical = window.size();
-        let pixel = window.pixel_size();
-        let scale = [pixel[0] as f32 / logical[0], pixel[1] as f32 / logical[1]];
+    pub fn begin(&self, window: &Window, color: [f32; 4]) -> Result<([i32; 2], [f32; 2]), String> {
+        let (pixels, scale) = window.render_size();
         self.set_render_scale(scale)?;
         self.set_clip_rect(None);
         self.clear(color)?;
-        Ok(scale)
+        Ok((pixels, scale))
     }
     pub fn clear(&self, color: [f32; 4]) -> Result<(), String> {
         self.run_command(RenderCommand::Clear(color))
@@ -3355,6 +3431,20 @@ impl TestSurface {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn toolbar_grip_excludes_buttons_and_the_expanded_panel() {
+        for scale in [1., 1.25, 1.5, 2.] {
+            let width = (crate::toolbar::WIDTH * scale).ceil() as i32;
+            let height = (crate::toolbar::GRIP_HEIGHT * scale).ceil() as i32;
+            assert!(toolbar_grip_contains(0, 0, scale));
+            assert!(toolbar_grip_contains(width - 1, height - 1, scale));
+            assert!(!toolbar_grip_contains(width, 0, scale));
+            assert!(!toolbar_grip_contains(0, height, scale));
+            assert!(!toolbar_grip_contains(-1, 0, scale));
+            assert!(!toolbar_grip_contains(0, -1, scale));
+        }
+    }
 
     #[test]
     fn destroyed_renderer_is_idempotent_and_rejects_commands() {

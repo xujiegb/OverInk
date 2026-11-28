@@ -51,10 +51,6 @@ void overink_macos_overlay_crosshair(bool crosshair) {
     return YES;
 }
 
-- (BOOL)mouseDownCanMoveWindow {
-    return YES;
-}
-
 - (void)rightMouseDown:(NSEvent *)event {
     [self.nextResponder rightMouseDown:event];
 }
@@ -84,15 +80,8 @@ void overink_macos_overlay_crosshair(bool crosshair) {
 }
 @end
 
-// SDL 3.4 tracks its native hit-test drag in the window listener. External
-// windows need to tell that same listener when AppKit consumes the mouse-up.
-@protocol OverInkSDLDragListener
-@optional
-- (BOOL)isMoving;
-- (void)windowDidFinishMoving;
-@end
-
 @interface OverInkOverlayPanel : NSPanel
+@property NSSize gripSize;
 @end
 
 @implementation OverInkOverlayPanel
@@ -110,28 +99,36 @@ void overink_macos_overlay_crosshair(bool crosshair) {
 }
 
 - (void)sendEvent:(NSEvent *)event {
-    [super sendEvent:event];
-    if (event.type == NSEventTypeLeftMouseUp) {
-        NSObject<OverInkSDLDragListener> *listener = (id)self.delegate;
-        if ([listener respondsToSelector:@selector(isMoving)]
-            && [listener respondsToSelector:@selector(windowDidFinishMoving)]
-            && listener.isMoving) {
-            [listener windowDidFinishMoving];
+    if (event.type == NSEventTypeLeftMouseDown && self.gripSize.height > 0
+        && event.subtype != NSEventSubtypeTabletPoint
+        && (event.modifierFlags & NSEventModifierFlagControl) == 0) {
+        NSRect content = self.contentView.frame;
+        NSRect grip = NSMakeRect(NSMinX(content), NSMaxY(content) - self.gripSize.height,
+            self.gripSize.width, self.gripSize.height);
+        if (NSPointInRect(event.locationInWindow, grip)) {
+            [self performWindowDragWithEvent:event];
+            return;
         }
     }
+    [super sendEvent:event];
 }
 @end
 
-uint32_t overink_macos_create_overlay(int32_t width, int32_t height, uint64_t flags) {
+uint32_t overink_macos_create_overlay(int32_t width, int32_t height, uint64_t flags,
+                                    float grip_width, float grip_height) {
     if (![NSThread isMainThread] || width <= 0 || height <= 0) {
         return 0;
     }
     NSRect rect = NSMakeRect(0, 0, width, height);
     OverInkOverlayPanel *panel;
+    NSWindowStyleMask style = NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel;
+    if (grip_height <= 0) {
+        style |= NSWindowStyleMaskResizable;
+    }
     @try {
         panel = [[OverInkOverlayPanel alloc]
             initWithContentRect:rect
-            styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskResizable | NSWindowStyleMaskNonactivatingPanel
+            styleMask:style
             backing:NSBackingStoreBuffered defer:NO];
     } @catch (NSException *exception) {
         return 0;
@@ -139,6 +136,7 @@ uint32_t overink_macos_create_overlay(int32_t width, int32_t height, uint64_t fl
     if (panel == nil) {
         return 0;
     }
+    panel.gripSize = NSMakeSize(grip_width, grip_height);
     panel.releasedWhenClosed = NO;
     panel.hidesOnDeactivate = NO;
     panel.colorSpace = NSColorSpace.sRGBColorSpace;
