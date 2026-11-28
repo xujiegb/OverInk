@@ -37,7 +37,7 @@ jobs:
           key: software-ink-profile
       - name: Build the profiling fixture
         run: |
-          set -eu
+          set -euo pipefail
           cargo test --locked --release --features headless-check --no-run \
             --message-format=json > "$RUNNER_TEMP/overink-profile-build.json"
           python3 - <<'PY' >> "$GITHUB_ENV"
@@ -53,7 +53,7 @@ jobs:
           PY
       - name: Measure frame times and memory
         run: |
-          set -eu
+          set -euo pipefail
           mkdir -p profile
           /usr/bin/time -v -o profile/memory.txt "$OVERINK_PROFILE_BINARY" \
             --exact app::ink::tests::profile_software_ink --ignored --nocapture \
@@ -62,7 +62,7 @@ jobs:
           import csv, html, pathlib
           folder = pathlib.Path("profile")
           header = ["width", "height", "scenario", "frames", "mean_ms", "max_ms"]
-          rows = [line.split(",")[1:] for line in (folder / "timing.log").read_text().splitlines() if line.startswith("PROFILE,")]
+          rows = [line.split("PROFILE,", 1)[1].split(",") for line in (folder / "timing.log").read_text().splitlines() if "PROFILE," in line]
           if len(rows) != 6:
               raise SystemExit("Missing profile results")
           with (folder / "frame-times.csv").open("w") as f:
@@ -89,7 +89,7 @@ jobs:
         # Timing data remains available even when a hosted kernel restricts perf.
         continue-on-error: true
         run: |
-          set -eu
+          set -euo pipefail
           if ! perf --version; then
             sudo apt-get update
             sudo apt-get install -y linux-tools-generic
