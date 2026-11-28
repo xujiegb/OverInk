@@ -32,6 +32,7 @@ pub struct Gui {
     pub units: f32,
     touch_primary: Option<TouchKey>,
     touch_positions: BTreeMap<TouchKey, egui::Pos2>,
+    pen_pressed: Option<SDL_PenID>,
     composing: bool,
     composition_ended: Option<u64>,
     input_area: Option<SDL_Rect>,
@@ -75,6 +76,7 @@ impl Gui {
             units: 1.,
             touch_primary: None,
             touch_positions: BTreeMap::new(),
+            pen_pressed: None,
             composing: false,
             composition_ended: None,
             input_area: None,
@@ -95,6 +97,9 @@ impl Gui {
 
     fn suspend_pointer_input(&mut self) {
         self.cancel_touches();
+        if self.pen_pressed.take().is_some() {
+            self.cancel_pointer();
+        }
         self.raw
             .events
             .retain(|event| matches!(event, Event::PointerButton { pressed: false, .. }));
@@ -113,6 +118,15 @@ impl Gui {
 
     pub fn primary_touch(&self) -> Option<TouchKey> {
         self.touch_primary
+    }
+
+    pub fn cancel_pen(&mut self, id: SDL_PenID) -> bool {
+        if self.pen_pressed != Some(id) {
+            return false;
+        }
+        self.pen_pressed = None;
+        self.cancel_pointer();
+        true
     }
 
     pub fn sync_text_input(&mut self, window: &Window, enabled: bool) {
@@ -275,23 +289,25 @@ impl Gui {
                     });
                 }
             }
-            SDL_EVENT_FINGER_DOWN | SDL_EVENT_FINGER_MOTION | SDL_EVENT_FINGER_UP => {
-                if let Some(finger) = finger_event(e)
-                    && finger.windowID == id
-                {
-                    self.touch_event(finger, size);
-                }
-            }
-            SDL_EVENT_FINGER_CANCELED => {
-                if let Some(finger) = finger_event(e)
-                    && self.has_touch(TouchKey::from(finger))
-                {
-                    self.touch_event(finger, size);
+            SDL_EVENT_FINGER_DOWN
+            | SDL_EVENT_FINGER_MOTION
+            | SDL_EVENT_FINGER_UP
+            | SDL_EVENT_FINGER_CANCELED => {
+                if let Some(mut finger) = finger_event(e) {
+                    if ty == SDL_EVENT_FINGER_UP && finger.windowID != id {
+                        finger.r#type = SDL_EVENT_FINGER_CANCELED;
+                    }
+                    if finger.windowID == id || finger.r#type == SDL_EVENT_FINGER_CANCELED {
+                        self.touch_event(finger, size);
+                    }
                 }
             }
             SDL_EVENT_PEN_MOTION => {
                 if let Some(pen) = pen_motion_event(e)
                     && pen.windowID == id
+                    && self.pen_pressed.is_none_or(|held| held == pen.which)
+                    && pen.x.is_finite()
+                    && pen.y.is_finite()
                 {
                     self.raw.events.push(Event::PointerMoved(egui::pos2(
                         pen.x / scale,
@@ -300,16 +316,33 @@ impl Gui {
                 }
             }
             SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP => {
-                if let Some(p) = pen_touch_event(e)
-                    && p.windowID == id
-                    && !p.eraser
-                {
+                if let Some(p) = pen_touch_event(e) {
+                    let local = p.windowID == id && !p.eraser && p.x.is_finite() && p.y.is_finite();
+                    if p.down && local {
+                        self.cancel_touches();
+                        if self.pen_pressed.replace(p.which).is_some() {
+                            self.cancel_pointer();
+                        }
+                    } else if !p.down && self.pen_pressed == Some(p.which) {
+                        if !local {
+                            self.cancel_pen(p.which);
+                            return;
+                        }
+                        self.pen_pressed = None;
+                    } else {
+                        return;
+                    }
                     self.raw.events.push(Event::PointerButton {
                         pos: egui::pos2(p.x / scale, p.y / scale),
                         button: egui::PointerButton::Primary,
                         pressed: p.down,
                         modifiers: modifiers(mod_state()),
                     });
+                }
+            }
+            SDL_EVENT_PEN_PROXIMITY_OUT => {
+                if let Some(pen) = pen_proximity_event(e) {
+                    self.cancel_pen(pen.which);
                 }
             }
             SDL_EVENT_MOUSE_WHEEL => {
@@ -330,6 +363,9 @@ impl Gui {
             }
             SDL_EVENT_WINDOW_FOCUS_LOST if window_event_id(e) == Some(id) => {
                 self.cancel_touches();
+                if self.pen_pressed.take().is_some() {
+                    self.cancel_pointer();
+                }
                 self.cancel_composition(0);
                 self.composition_ended = None;
                 self.raw.focused = false;
@@ -433,11 +469,19 @@ impl Gui {
             SDL_EVENT_FINGER_UP => egui::TouchPhase::End,
             _ => egui::TouchPhase::Cancel,
         };
+        let point = if phase == egui::TouchPhase::Cancel {
+            None
+        } else {
+            touch::point(event, size)
+        };
         if phase == egui::TouchPhase::Start {
-            if touch::is_indirect(event.touchID) || self.touch_positions.contains_key(&key) {
+            if self.pen_pressed.is_some()
+                || !touch::starts_on_window(event)
+                || self.touch_positions.contains_key(&key)
+            {
                 return;
             }
-            let Some(point) = touch::point(event, size) else {
+            let Some(point) = point else {
                 return;
             };
             let pos = egui::pos2(point.x / self.units, point.y / self.units);
@@ -449,7 +493,6 @@ impl Gui {
         let Some(previous) = self.touch_positions.get_mut(&key) else {
             return;
         };
-        let point = touch::point(event, size);
         let pos = point.map_or(*previous, |p| {
             egui::pos2(p.x / self.units, p.y / self.units)
         });
@@ -467,17 +510,7 @@ impl Gui {
         });
         if self.touch_primary == Some(key) {
             if phase == egui::TouchPhase::Cancel {
-                // Move away before releasing; an OS cancellation must not click a button.
-                self.ctx.stop_dragging();
-                self.raw
-                    .events
-                    .push(Event::PointerMoved(egui::pos2(-10000., -10000.)));
-                self.raw.events.push(Event::PointerButton {
-                    pos: egui::pos2(-10000., -10000.),
-                    button: egui::PointerButton::Primary,
-                    pressed: false,
-                    modifiers: egui::Modifiers::default(),
-                });
+                self.cancel_pointer();
             } else {
                 self.raw.events.push(Event::PointerMoved(pos));
                 if phase == egui::TouchPhase::Start || phase == egui::TouchPhase::End {
@@ -488,9 +521,11 @@ impl Gui {
                         modifiers: egui::Modifiers::default(),
                     });
                 }
+                if phase == egui::TouchPhase::End {
+                    self.raw.events.push(Event::PointerGone);
+                }
             }
             if phase == egui::TouchPhase::End || phase == egui::TouchPhase::Cancel {
-                self.raw.events.push(Event::PointerGone);
                 self.touch_primary = None;
             }
         }
@@ -509,18 +544,23 @@ impl Gui {
             });
         }
         if self.touch_primary.take().is_some() {
-            self.ctx.stop_dragging();
-            self.raw
-                .events
-                .push(Event::PointerMoved(egui::pos2(-10000., -10000.)));
-            self.raw.events.push(Event::PointerButton {
-                pos: egui::pos2(-10000., -10000.),
+            self.cancel_pointer();
+        }
+    }
+    fn cancel_pointer(&mut self) {
+        // Move away before releasing so cancellation cannot activate a button.
+        let pos = egui::pos2(-10000., -10000.);
+        self.ctx.stop_dragging();
+        self.raw.events.extend([
+            Event::PointerMoved(pos),
+            Event::PointerButton {
+                pos,
                 button: egui::PointerButton::Primary,
                 pressed: false,
                 modifiers: egui::Modifiers::default(),
-            });
-            self.raw.events.push(Event::PointerGone);
-        }
+            },
+            Event::PointerGone,
+        ]);
     }
     pub fn paint(
         &mut self,
@@ -1063,6 +1103,53 @@ mod tests {
         );
         assert!(frame(&mut gui, &mut position));
     }
+
+    #[test]
+    fn a_release_from_another_window_cancels_the_held_ui_touch() {
+        let mut gui = Gui::new();
+        finger(&mut gui, SDL_EVENT_FINGER_DOWN, 7, 0.25, 0.5);
+        gui.raw.events.clear();
+        let event = SDL_Event {
+            tfinger: SDL_TouchFingerEvent {
+                r#type: SDL_EVENT_FINGER_UP,
+                windowID: SDL_WindowID(2),
+                touchID: SDL_TouchID(2),
+                fingerID: SDL_FingerID(7),
+                x: 0.9,
+                y: 0.9,
+                ..Default::default()
+            },
+        };
+        gui.event(&event, SDL_WindowID(1), [800., 600.]);
+        assert!(gui.touch_primary.is_none() && gui.touch_positions.is_empty());
+        assert!(
+            matches!(gui.raw.events.first(), Some(Event::Touch { phase: egui::TouchPhase::Cancel, pos, .. }) if *pos == egui::pos2(200., 300.))
+        );
+    }
+    #[test]
+    fn invalid_pen_release_cancels_the_ui_press_without_using_its_position() {
+        let mut gui = Gui::new();
+        let window = SDL_WindowID(1);
+        let packet = |ty, x| SDL_Event {
+            ptouch: SDL_PenTouchEvent {
+                r#type: ty,
+                windowID: window,
+                which: SDL_PenID(4),
+                x,
+                y: 100.,
+                down: ty == SDL_EVENT_PEN_DOWN,
+                ..Default::default()
+            },
+        };
+        gui.event(&packet(SDL_EVENT_PEN_DOWN, 100.), window, [800., 600.]);
+        gui.raw.events.clear();
+        gui.event(&packet(SDL_EVENT_PEN_UP, f32::NAN), window, [800., 600.]);
+        assert!(gui.pen_pressed.is_none());
+        assert!(
+            matches!(gui.raw.events.as_slice(), [Event::PointerMoved(pos), Event::PointerButton { pressed: false, .. }, Event::PointerGone] if pos.x < 0.)
+        );
+    }
+
     #[test]
     fn primary_touch_drags_a_slider() {
         let mut gui = Gui::new();

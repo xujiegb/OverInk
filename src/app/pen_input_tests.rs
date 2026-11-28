@@ -86,22 +86,166 @@ fn normal_pen_up_keeps_last_coordinate_sample() {
     assert_eq!(app.history.strokes()[0].points[1].x, 40.);
 }
 
+#[test]
+fn invalid_pen_coordinates_never_create_an_ink_sample_at_the_origin() {
+    let mut app = super::touch_tests::app();
+    contact(&mut app, CANVAS, true, f32::NAN);
+    assert!(app.history.active.is_none());
+    motion(&mut app, CANVAS, true, 150.);
+    motion(&mut app, CANVAS, true, f32::INFINITY);
+    contact(&mut app, CANVAS, false, f32::NAN);
+    let [stroke] = app.history.strokes() else {
+        panic!("expected one completed stroke");
+    };
+    assert_eq!(stroke.points.len(), 1);
+    assert_eq!(stroke.points[0].x, 150.);
+}
+
 fn finger_contact(app: &mut App, ty: SDL_EventType, x: f32) {
+    app.event(&finger_packet(ty, CANVAS, 3, x), CANVAS, SIZE);
+}
+
+fn finger_packet(ty: SDL_EventType, window: SDL_WindowID, finger: u64, x: f32) -> SDL_Event {
+    SDL_Event {
+        tfinger: SDL_TouchFingerEvent {
+            r#type: ty,
+            touchID: SDL_TouchID(9),
+            fingerID: SDL_FingerID(finger),
+            windowID: window,
+            x,
+            y: 0.2,
+            pressure: if ty == SDL_EVENT_FINGER_UP { 0. } else { 1. },
+            ..Default::default()
+        },
+    }
+}
+
+#[test]
+fn release_sent_to_another_window_commits_only_the_matching_finger() {
+    let mut app = super::touch_tests::app();
+    finger_contact(&mut app, SDL_EVENT_FINGER_DOWN, 0.05);
+    finger_contact(&mut app, SDL_EVENT_FINGER_MOTION, 0.1);
+    app.event(
+        &finger_packet(SDL_EVENT_FINGER_DOWN, CANVAS, 4, 0.3),
+        CANVAS,
+        SIZE,
+    );
+    app.event(
+        &finger_packet(SDL_EVENT_FINGER_UP, OTHER_WINDOW, 3, 0.9),
+        CANVAS,
+        SIZE,
+    );
+
+    assert_eq!(app.input.touches.len(), 1);
+    let [stroke] = app.history.strokes() else {
+        panic!("expected one completed finger stroke");
+    };
+    assert_eq!(stroke.points.last().map(|p| p.x), Some(100.));
+}
+
+#[test]
+fn xinput_registration_and_hover_leave_touch_available_after_pen_up() {
+    let mut app = super::touch_tests::app();
+    app.pen_hover_reliable = false;
     app.event(
         &SDL_Event {
-            tfinger: SDL_TouchFingerEvent {
-                r#type: ty,
-                touchID: SDL_TouchID(9),
-                fingerID: SDL_FingerID(3),
-                windowID: CANVAS,
-                x,
-                y: 0.2,
-                pressure: if ty == SDL_EVENT_FINGER_UP { 0. } else { 1. },
+            pproximity: SDL_PenProximityEvent {
+                r#type: SDL_EVENT_PEN_PROXIMITY_IN,
+                which: PEN,
                 ..Default::default()
             },
         },
         CANVAS,
         SIZE,
+    );
+    motion(&mut app, CANVAS, false, 250.);
+    finger_contact(&mut app, SDL_EVENT_FINGER_DOWN, 0.05);
+    assert_eq!(app.input.touches.len(), 1);
+
+    contact(&mut app, CANVAS, true, 250.);
+    assert!(app.input.touches.is_empty());
+    finger_contact(&mut app, SDL_EVENT_FINGER_DOWN, 0.1);
+    assert!(app.input.touches.is_empty());
+    contact(&mut app, OTHER_WINDOW, false, 600.);
+    motion(&mut app, CANVAS, false, 260.);
+    finger_contact(&mut app, SDL_EVENT_FINGER_DOWN, 0.2);
+    assert_eq!(app.input.touches.len(), 1);
+    finger_contact(&mut app, SDL_EVENT_FINGER_UP, 0.3);
+    assert_eq!(app.history.strokes().len(), 2);
+}
+
+#[test]
+#[ignore = "synthetic input profiling workload"]
+fn profile_pen_touch_input() {
+    const GESTURES: u32 = 20_000;
+    const SAMPLES: u32 = 96;
+    let mut app = super::touch_tests::app();
+    app.pen_hover_reliable = false;
+
+    let start = Instant::now();
+    for _ in 0..GESTURES {
+        contact(&mut app, CANVAS, true, 100.);
+        for sample in 0..SAMPLES {
+            let x = 102. + sample as f32 * 4.;
+            motion(&mut app, CANVAS, true, x);
+            app.event(
+                std::hint::black_box(&SDL_Event {
+                    paxis: SDL_PenAxisEvent {
+                        r#type: SDL_EVENT_PEN_AXIS,
+                        windowID: CANVAS,
+                        which: PEN,
+                        pen_state: SDL_PEN_INPUT_DOWN,
+                        axis: SDL_PEN_AXIS_PRESSURE,
+                        value: sample as f32 / SAMPLES as f32,
+                        x,
+                        y: 140.,
+                        ..Default::default()
+                    },
+                }),
+                CANVAS,
+                SIZE,
+            );
+        }
+        contact(&mut app, CANVAS, false, 490.);
+        assert_eq!(app.history.strokes().len(), 1);
+        app.history = History::default();
+    }
+    println!(
+        "INPUT_PROFILE,pen,{},{:.3}",
+        GESTURES * (2 * SAMPLES + 2),
+        start.elapsed().as_secs_f64() * 1000.
+    );
+
+    let mut app = super::touch_tests::app();
+    let start = Instant::now();
+    for _ in 0..GESTURES {
+        for (ty, count) in [
+            (SDL_EVENT_FINGER_DOWN, 1),
+            (SDL_EVENT_FINGER_MOTION, SAMPLES),
+            (SDL_EVENT_FINGER_UP, 1),
+        ] {
+            for sample in 0..count {
+                let x = 0.15
+                    + 0.005
+                        * (sample
+                            + if ty == SDL_EVENT_FINGER_UP {
+                                SAMPLES
+                            } else {
+                                0
+                            }) as f32;
+                for finger in [1, 2] {
+                    let packet = finger_packet(ty, CANVAS, finger, x);
+                    app.event(std::hint::black_box(&packet), CANVAS, SIZE);
+                }
+            }
+        }
+        assert_eq!(app.history.strokes().len(), 2);
+        app.history = History::default();
+    }
+    println!(
+        "INPUT_PROFILE,touch,{},{:.3}",
+        GESTURES * 2 * (SAMPLES + 2),
+        start.elapsed().as_secs_f64() * 1000.
     );
 }
 

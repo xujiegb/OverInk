@@ -506,6 +506,15 @@ impl Canvas {
             .is_some_and(|gui| app.cancel_text_touches(gui))
     }
 
+    pub fn cancel_text_pen(&mut self, app: &mut App, id: SDL_PenID) -> bool {
+        if self.text.as_mut().is_some_and(|gui| gui.cancel_pen(id)) {
+            app.input.text.cancel_press();
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn text_event(&mut self, app: &mut App, event: &SDL_Event) -> bool {
         let ty = event_type(event);
         let editing = app.input.text.editing();

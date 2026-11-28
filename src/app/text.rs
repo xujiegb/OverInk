@@ -473,13 +473,31 @@ impl App {
         }
         let first = gui.raw.events.len();
         let mut changed = false;
-        if ty == SDL_EVENT_FINGER_CANCELED
-            && gui.primary_touch() == crate::touch::key_from_event(event)
+        if matches!(ty, SDL_EVENT_FINGER_UP | SDL_EVENT_FINGER_CANCELED)
+            && let Some(finger) = finger_event(event)
+            && (ty == SDL_EVENT_FINGER_CANCELED || finger.windowID != window)
+            && gui.primary_touch() == Some(crate::touch::TouchKey::from(finger))
         {
             self.input.text.cancel_press();
             changed = true;
         }
-        if matches!(ty, SDL_EVENT_PEN_PROXIMITY_IN | SDL_EVENT_PEN_DOWN) {
+        if ty == SDL_EVENT_PEN_UP
+            && let Some(pen) = pen_touch_event(event)
+            && (!pen.x.is_finite() || !pen.y.is_finite())
+            && gui.cancel_pen(pen.which)
+        {
+            self.input.text.cancel_press();
+            changed = true;
+        }
+        if !self.input.pen_proximity.is_empty()
+            && matches!(
+                ty,
+                SDL_EVENT_PEN_PROXIMITY_IN
+                    | SDL_EVENT_PEN_DOWN
+                    | SDL_EVENT_PEN_MOTION
+                    | SDL_EVENT_PEN_AXIS
+            )
+        {
             changed |= self.cancel_text_touches(gui);
         }
         let primary_touch = gui.primary_touch();
@@ -529,6 +547,7 @@ impl App {
                 && self.input.text.touch_press
                 && crate::touch::key_from_event(event) == primary_touch
                 && finger_event(event)
+                    .filter(|finger| finger.windowID == window)
                     .and_then(|finger| crate::touch::point(finger, size))
                     .is_some_and(|point| {
                         let pos = pos2(point.x, point.y);

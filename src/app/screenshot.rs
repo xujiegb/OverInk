@@ -74,7 +74,12 @@ enum SelectionEvent {
 }
 
 impl SelectionEvent {
-    fn from_sdl(event: &SDL_Event, size: [f32; 2], touch_enabled: bool) -> Option<Self> {
+    fn from_sdl(
+        event: &SDL_Event,
+        window: SDL_WindowID,
+        size: [f32; 2],
+        touch_enabled: bool,
+    ) -> Option<Self> {
         let mouse = |id| id != SDL_TOUCH_MOUSEID && id != SDL_PEN_MOUSEID;
         match event_type(event) {
             ty @ (SDL_EVENT_MOUSE_BUTTON_DOWN | SDL_EVENT_MOUSE_BUTTON_UP) => {
@@ -95,6 +100,11 @@ impl SelectionEvent {
             }
             ty @ (SDL_EVENT_PEN_DOWN | SDL_EVENT_PEN_UP) => {
                 let p = pen_touch_event(event)?;
+                let pointer = Pointer::Pen(p.which);
+                let valid_position = p.windowID == window && p.x.is_finite() && p.y.is_finite();
+                if ty == SDL_EVENT_PEN_UP && !valid_position {
+                    return Some(Self::Cancel(Some(pointer)));
+                }
                 if p.eraser {
                     return None;
                 }
@@ -103,11 +113,12 @@ impl SelectionEvent {
                 } else {
                     Self::Up
                 };
-                Some(press(Pointer::Pen(p.which), pos2(p.x, p.y)))
+                valid_position.then(|| press(pointer, pos2(p.x, p.y)))
             }
             SDL_EVENT_PEN_MOTION => {
                 let p = pen_motion_event(event)?;
-                Some(Self::Move(Pointer::Pen(p.which), pos2(p.x, p.y)))
+                (p.windowID == window && p.x.is_finite() && p.y.is_finite())
+                    .then(|| Self::Move(Pointer::Pen(p.which), pos2(p.x, p.y)))
             }
             SDL_EVENT_PEN_PROXIMITY_OUT => Some(Self::Cancel(Some(Pointer::Pen(
                 pen_proximity_event(event)?.which,
@@ -118,11 +129,14 @@ impl SelectionEvent {
                 let finger = finger_event(event)?;
                 let pointer = Pointer::Touch(finger.into());
                 match ty {
-                    SDL_EVENT_FINGER_DOWN if !touch::is_indirect(finger.touchID) => {
+                    SDL_EVENT_FINGER_DOWN if touch::starts_on_window(finger) => {
                         touch::point(finger, size).map(|p| Self::Down(pointer, pos2(p.x, p.y)))
                     }
                     SDL_EVENT_FINGER_MOTION => {
                         touch::point(finger, size).map(|p| Self::Move(pointer, pos2(p.x, p.y)))
+                    }
+                    SDL_EVENT_FINGER_UP if finger.windowID != window => {
+                        Some(Self::Cancel(Some(pointer)))
                     }
                     SDL_EVENT_FINGER_UP => Some(
                         touch::point(finger, size).map_or(Self::Cancel(Some(pointer)), |p| {
@@ -521,7 +535,7 @@ impl Screenshot {
             return false;
         }
         let size = window.size();
-        SelectionEvent::from_sdl(event, size, touch_enabled)
+        SelectionEvent::from_sdl(event, window.id, size, touch_enabled)
             .is_some_and(|event| self.select(event, size))
     }
 
@@ -1482,7 +1496,7 @@ mod tests {
             },
         };
         let send = |shot: &mut Screenshot, event: SDL_Event| {
-            SelectionEvent::from_sdl(&event, size, true)
+            SelectionEvent::from_sdl(&event, SDL_WindowID(0), size, true)
                 .is_some_and(|event| shot.select(event, size))
         };
         assert!(send(&mut screenshot, pen(SDL_EVENT_PEN_DOWN, 10., 20.)));
@@ -1517,6 +1531,21 @@ mod tests {
         assert!(send(
             &mut screenshot,
             touch(SDL_EVENT_FINGER_CANCELED, 1, 0., 0.)
+        ));
+        assert!(matches!(screenshot.stage, Stage::Selecting(None)));
+        assert!(send(&mut screenshot, pen(SDL_EVENT_PEN_DOWN, 10., 20.)));
+        assert!(send(
+            &mut screenshot,
+            SDL_Event {
+                ptouch: SDL_PenTouchEvent {
+                    r#type: SDL_EVENT_PEN_UP,
+                    windowID: SDL_WindowID(2),
+                    which: SDL_PenID(7),
+                    x: 80.,
+                    y: 60.,
+                    ..Default::default()
+                },
+            }
         ));
         assert!(matches!(screenshot.stage, Stage::Selecting(None)));
         assert!(send(
