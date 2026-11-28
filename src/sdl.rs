@@ -6,9 +6,9 @@ mod dialog_native;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod dialog_unix;
 pub use sdl3_sys::{
-    blendmode::*, clipboard::*, error::*, events::*, hints::*, init::*, keyboard::*, keycode::*,
-    locale::*, mouse::*, pen::*, pixels::*, properties::*, rect::*, render::*, stdinc::*,
-    surface::*, touch::*, video::*,
+    blendmode::*, clipboard::*, error::*, events::*, init::*, keyboard::*, keycode::*, locale::*,
+    mouse::*, pen::*, pixels::*, properties::*, rect::*, render::*, stdinc::*, surface::*,
+    touch::*, video::*,
 };
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
 use std::marker::PhantomData;
@@ -424,10 +424,15 @@ fn sdl_native(action: SdlNativeAction<'_>) -> SdlNativeResult {
                 SdlNativeResult::Text(text)
             }
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-            SdlNativeAction::WaylandScaleToDisplay => SdlNativeResult::Success(SDL_GetHintBoolean(
-                SDL_HINT_VIDEO_WAYLAND_SCALE_TO_DISPLAY,
-                false,
-            )),
+            SdlNativeAction::WaylandScaleToDisplay => {
+                use sdl3_sys::hints::{
+                    SDL_GetHintBoolean, SDL_HINT_VIDEO_WAYLAND_SCALE_TO_DISPLAY,
+                };
+                SdlNativeResult::Success(SDL_GetHintBoolean(
+                    SDL_HINT_VIDEO_WAYLAND_SCALE_TO_DISPLAY,
+                    false,
+                ))
+            }
             SdlNativeAction::WindowIccProfile(window) => {
                 // SDL returns an owned profile allocation. The typed Window
                 // borrow keeps its SDL handle live through the synchronous
