@@ -3107,19 +3107,36 @@ impl Renderer {
         previous: [f32; 2],
         draw: impl FnOnce() -> Result<(), String>,
     ) -> Result<(), String> {
+        self.with_pixel_scale_and_clip(previous, None, draw)
+    }
+
+    /// Preserve a logical-space clip while compositing in device pixels.
+    pub fn with_pixel_scale_and_clip(
+        &self,
+        previous: [f32; 2],
+        clip: Option<&SDL_Rect>,
+        draw: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
         if previous == [1.; 2] {
             return draw();
         }
         self.set_render_scale([1.; 2])?;
+        let restore = || {
+            let clip_result = clip.map_or(Ok(()), |rect| self.try_set_clip_rect(Some(rect)));
+            clip_result.and(self.set_render_scale(previous))
+        };
         let mut unwind_restore = RestoreOnDrop::new(|| {
-            let _ = self.set_render_scale(previous);
+            let _ = restore();
         });
+        if let Some(&rect) = clip {
+            self.try_set_clip_rect(Some(&pixel_clip_rect(rect, previous)))?;
+        }
         let result = draw();
-        let restore = self.set_render_scale(previous);
-        if restore.is_ok() {
+        let restored = restore();
+        if restored.is_ok() {
             unwind_restore.disarm();
         }
-        result.and(restore)
+        result.and(restored)
     }
 
     /// Set a clip region and return failures (unlike the UI's best-effort clip).
@@ -3211,6 +3228,16 @@ impl Renderer {
     }
     pub fn present(&self) -> Result<(), String> {
         self.run_command(RenderCommand::Present)
+    }
+}
+
+pub fn pixel_clip_rect(rect: SDL_Rect, [sx, sy]: [f32; 2]) -> SDL_Rect {
+    // Match SDL's renderer view when it applies scale to the logical clip.
+    SDL_Rect {
+        x: (rect.x as f32 * sx).floor() as i32,
+        y: (rect.y as f32 * sy).floor() as i32,
+        w: (rect.w as f32 * sx).ceil() as i32,
+        h: (rect.h as f32 * sy).ceil() as i32,
     }
 }
 impl Drop for Renderer {

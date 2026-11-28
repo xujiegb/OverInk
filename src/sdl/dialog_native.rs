@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use super::dialog::{DialogKind, complete};
 use sdl3::{
     dialog::{
@@ -6,10 +8,7 @@ use sdl3::{
     },
     video::Window,
 };
-use std::{
-    ffi::CStr,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 pub(super) fn show(id: usize, kind: DialogKind, location: Option<&Path>) {
     // SDL accepts UTF-8 paths. Treat an unrepresentable suggestion as absent.
@@ -40,25 +39,28 @@ fn selected_path(result: Result<Vec<PathBuf>, DialogError>) -> Result<Option<Pat
     }
 }
 
+#[cfg(target_os = "windows")]
 pub(super) fn downloads() -> Option<PathBuf> {
-    use sdl3_sys::filesystem::{SDL_FOLDER_DOWNLOADS, SDL_GetUserFolder};
+    use winsafe::co::{KF, KNOWNFOLDERID};
+    winsafe::SHGetKnownFolderPath(&KNOWNFOLDERID::Downloads, KF::CREATE, None)
+        .ok()
+        .map(PathBuf::from)
+}
 
-    // SAFETY: SDL returns a borrowed, optional NUL-terminated string owned by
-    // SDL itself. The returned path is copied; SDL_GetUserFolder is not freed.
-    unsafe {
-        let path = SDL_GetUserFolder(SDL_FOLDER_DOWNLOADS);
-        if path.is_null() {
-            return None;
-        }
-        let path = CStr::from_ptr(path);
-        #[cfg(unix)]
-        {
-            use std::os::unix::ffi::OsStrExt as _;
-            Some(PathBuf::from(std::ffi::OsStr::from_bytes(path.to_bytes())))
-        }
-        #[cfg(not(unix))]
-        path.to_str().ok().map(PathBuf::from)
-    }
+#[cfg(target_os = "macos")]
+pub(super) fn downloads() -> Option<PathBuf> {
+    use objc2_foundation::{
+        NSSearchPathDirectory, NSSearchPathDomainMask, NSSearchPathForDirectoriesInDomains,
+    };
+    objc2::rc::autoreleasepool(|_| {
+        NSSearchPathForDirectoriesInDomains(
+            NSSearchPathDirectory::DownloadsDirectory,
+            NSSearchPathDomainMask::UserDomainMask,
+            true,
+        )
+        .firstObject()
+        .map(|path| PathBuf::from(path.to_string()))
+    })
 }
 
 #[cfg(test)]

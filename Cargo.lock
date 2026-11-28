@@ -871,6 +871,7 @@ dependencies = [
  "tempfile",
  "unicode-segmentation",
  "windows 0.62.2",
+ "winsafe",
  "x11rb",
  "zbus",
 ]
@@ -1619,6 +1620,12 @@ checksum = "8c3b93199df0ab874cdf0c6a94f0a0dc3423fe41f1cafb62b8bd7b1deb277aef"
 dependencies = [
  "memchr",
 ]
+
+[[package]]
+name = "winsafe"
+version = "0.0.27"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bcfff8264c3af1b0352006934e2265365ecb5a145aee88e770dc8b82e0456f4f"
 
 [[package]]
 name = "x11rb"

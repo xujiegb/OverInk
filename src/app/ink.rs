@@ -52,6 +52,7 @@ struct Frame<'a> {
     scale: [f32; 2],
     aa: f32,
     extended_budget: usize,
+    clip: Option<SDL_Rect>,
 }
 
 pub(super) struct PaintScope {
@@ -355,6 +356,7 @@ impl Ink {
             scale,
             aa: antialias(scale),
             extended_budget: scope.extended_budget,
+            clip: scope.damage,
         };
         self.painter.queued = 0;
         if background.frozen
@@ -460,6 +462,7 @@ impl Ink {
                 scale,
                 aa: 0.8 / scale[0].max(scale[1]),
                 extended_budget: 0,
+                clip: None,
             };
             self.paint_laser(&frame, app, laser_now)?;
         }
@@ -525,14 +528,15 @@ impl Ink {
             // A busy document keeps its layer independent of hover activity.
             self.activity = ReplayActivity::default();
         }
-        let Some(region) = self
+        let Some(coverage) = self
             .bounds
             .get(&app.history)
-            .and_then(|bounds| cache_region(frame, bounds))
+            .and_then(|bounds| dirty_rect(frame, bounds))
         else {
             self.invalidate_layer();
             return Ok(());
         };
+        let region = cache_region(frame.pixels, coverage);
         let size = [region.w, region.h];
         let target = (size, format);
         let key = LayerPlanKey {
@@ -545,19 +549,20 @@ impl Ink {
                 app.history.erase_revision(),
             ],
         };
-        if self.plan.as_ref().is_none_or(|plan| plan.key != key) {
-            let mut tiles = occupied_tiles(frame, &app.history, region);
-            if renderer.name == "software" && tiles.len() == 1 {
-                let bands = ink_bands(frame, &app.history, region);
-                if !bands.is_empty() {
-                    tiles = bands;
+        let software = renderer.name == "software";
+        let plan = match &mut self.plan {
+            Some(plan) if plan.key == key => plan,
+            slot => {
+                let mut tiles = occupied_tiles(frame, &app.history, region);
+                if software && tiles.len() == 1 {
+                    let bands = ink_bands(frame, &app.history, region);
+                    if !bands.is_empty() {
+                        tiles = bands;
+                    }
                 }
+                self.unavailable_at = None;
+                slot.insert(LayerPlan { key, tiles })
             }
-            self.plan = Some(LayerPlan { key, tiles });
-            self.unavailable_at = None;
-        }
-        let Some(plan) = self.plan.as_ref() else {
-            return self.painter.history(frame, app, 0, None, 1.);
         };
         if renderer.extended
             && plan
@@ -664,24 +669,53 @@ impl Ink {
 
         // The history was painted with source-over into a transparent
         // texture, so its stored RGB is already premultiplied by alpha.
-        renderer.with_pixel_scale(frame.scale, || {
+        // Keep aligned allocations for reuse, but blend only the visible ink
+        // area on software. SDL otherwise scans the transparent padding too.
+        let full = if software { coverage } else { region };
+        let visible = if let Some(clip) = frame.clip {
+            let Some(visible) = pixel_intersection(full, pixel_clip_rect(clip, frame.scale)) else {
+                return Ok(());
+            };
+            visible
+        } else {
+            full
+        };
+        renderer.with_pixel_scale_and_clip(frame.scale, frame.clip.as_ref(), || {
             renderer.with_color_scale(revision_white_scale(layer), || {
-                layer.tiles.iter().try_for_each(|tile| tile.draw(renderer))
+                layer
+                    .tiles
+                    .iter()
+                    .filter(|tile| intersects(tile.region, visible))
+                    .try_for_each(|tile| tile.draw(renderer, software.then_some(visible)))
             })
         })
     }
 }
 
 impl InkTile {
-    fn draw(&self, renderer: &Renderer) -> Result<(), String> {
-        let SDL_Rect { x, y, w, h } = self.region;
+    fn draw(&self, renderer: &Renderer, limit: Option<SDL_Rect>) -> Result<(), String> {
+        let draw = if let Some(limit) = limit {
+            let Some(draw) = pixel_intersection(self.region, limit) else {
+                return Ok(());
+            };
+            draw
+        } else {
+            self.region
+        };
+        let SDL_Rect { x, y, w, h } = draw;
         let destination = SDL_FRect {
             x: x as f32,
             y: y as f32,
             w: w as f32,
             h: h as f32,
         };
-        self.texture.draw(renderer, None, Some(&destination))
+        let source = (draw != self.region).then(|| SDL_FRect {
+            x: (x - self.region.x) as f32,
+            y: (y - self.region.y) as f32,
+            ..destination
+        });
+        self.texture
+            .draw(renderer, source.as_ref(), Some(&destination))
     }
 }
 
@@ -738,6 +772,14 @@ fn uses_adaptive_cache(pixels: [i32; 2], format: SDL_PixelFormat) -> bool {
 
 fn intersects(a: SDL_Rect, b: SDL_Rect) -> bool {
     a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
+}
+
+fn pixel_intersection(a: SDL_Rect, b: SDL_Rect) -> Option<SDL_Rect> {
+    let x = a.x.max(b.x);
+    let y = a.y.max(b.y);
+    let w = (a.x + a.w).min(b.x.saturating_add(b.w)).saturating_sub(x);
+    let h = (a.y + a.h).min(b.y.saturating_add(b.h)).saturating_sub(y);
+    (w > 0 && h > 0).then_some(SDL_Rect { x, y, w, h })
 }
 
 // Store only bands that can contain ink. Bands are disjoint in device
@@ -863,8 +905,7 @@ fn document_needs_layer(app: &App) -> bool {
     app.history.strokes().len() >= CACHE_STROKES || app.history.point_count() >= CACHE_POINTS
 }
 
-fn cache_region(frame: &Frame<'_>, bounds: Bounds) -> Option<SDL_Rect> {
-    let pixels = dirty_rect(frame, bounds)?;
+fn cache_region(surface: [i32; 2], pixels: SDL_Rect) -> SDL_Rect {
     let left = pixels.x / CACHE_ALIGNMENT * CACHE_ALIGNMENT;
     let top = pixels.y / CACHE_ALIGNMENT * CACHE_ALIGNMENT;
     let align_end = |end: i32, limit: i32| {
@@ -872,12 +913,12 @@ fn cache_region(frame: &Frame<'_>, bounds: Bounds) -> Option<SDL_Rect> {
             * i64::from(CACHE_ALIGNMENT))
         .min(i64::from(limit)) as i32
     };
-    Some(SDL_Rect {
+    SDL_Rect {
         x: left,
         y: top,
-        w: align_end(pixels.x + pixels.w, frame.pixels[0]) - left,
-        h: align_end(pixels.y + pixels.h, frame.pixels[1]) - top,
-    })
+        w: align_end(pixels.x + pixels.w, surface[0]) - left,
+        h: align_end(pixels.y + pixels.h, surface[1]) - top,
+    }
 }
 
 fn revision_white_scale(layer: &CommittedLayer) -> f32 {
@@ -1373,7 +1414,12 @@ impl StrokePainter {
         } else {
             frame.scale
         };
-        renderer.with_pixel_scale(scale, || {
+        let clip = if region.is_none() {
+            frame.clip.as_ref()
+        } else {
+            None
+        };
+        renderer.with_pixel_scale_and_clip(scale, clip, || {
             for y in (top..bottom).step_by(tile_height as usize) {
                 for x in (left..right).step_by(tile_width as usize) {
                     let width = (right - x).min(tile_width) as f32;
@@ -1557,6 +1603,7 @@ mod tests {
                 scale: [1.; 2],
                 aa: 0.8,
                 extended_budget: MAX_EXTENDED_INK_TEXTURE_BYTES,
+                clip: None,
             }
         }
         fn pixel(&self, x: i32, y: i32) -> Result<[u8; 4], String> {
@@ -1888,7 +1935,7 @@ mod tests {
                         region,
                         fresh: false,
                     }
-                    .draw(&sparse.renderer)
+                    .draw(&sparse.renderer, None)
                 })?;
                 assert!(
                     actual == sparse.pixels()?,
@@ -1896,6 +1943,68 @@ mod tests {
                 );
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn software_cache_preserves_fractional_damage_clip_and_restores_it() -> TestResult {
+        let canvas = TestCanvas::new([270, 180])?;
+        let mut frame = canvas.frame();
+        frame.scale = [1.25, 1.5];
+        frame.aa = antialias(frame.scale);
+        let mut app = app();
+        commit(
+            &mut app,
+            Tool::Pen,
+            [200, 70, 30],
+            &[[120., 40.], [120., 110.]],
+        );
+        let mut ink = Ink::default();
+        canvas.renderer.set_render_scale(frame.scale)?;
+        canvas.renderer.clear([0.; 4])?;
+        ink.committed(&frame, &mut app)?;
+        let full = canvas.pixels()?;
+
+        let clip = SDL_Rect {
+            x: 107,
+            y: 49,
+            w: 27,
+            h: 43,
+        };
+        frame.clip = Some(clip);
+        canvas.renderer.clear([0.; 4])?;
+        canvas.renderer.try_set_clip_rect(Some(&clip))?;
+        ink.committed(&frame, &mut app)?;
+        let pixels = canvas.pixels()?;
+        let [width, height] = canvas.pixels;
+        let visible = pixel_clip_rect(clip, frame.scale);
+        let mut drew_ink = false;
+        for y in 0..height {
+            for x in 0..width {
+                let index = (y * width + x) as usize;
+                let expected = if (visible.x..visible.x + visible.w).contains(&x)
+                    && (visible.y..visible.y + visible.h).contains(&y)
+                {
+                    full[index]
+                } else {
+                    [0; 4]
+                };
+                drew_ink |= expected[3] != 0;
+                assert_eq!(pixels[index], expected, "pixel ({x}, {y})");
+            }
+        }
+        assert!(drew_ink);
+        canvas.renderer.replace_rect(
+            &SDL_FRect {
+                x: 0.,
+                y: 0.,
+                w: 216.,
+                h: 120.,
+            },
+            [1.; 4],
+        )?;
+        assert_eq!(canvas.pixel(visible.x, visible.y)?, [255; 4]);
+        assert_eq!(canvas.pixel(visible.x - 1, visible.y)?, [0; 4]);
         Ok(())
     }
 
@@ -1932,7 +2041,7 @@ mod tests {
                     region,
                     fresh: false,
                 }
-                .draw(renderer)?;
+                .draw(renderer, None)?;
             }
             canvas.pixels()
         };
@@ -2337,9 +2446,11 @@ mod tests {
             assert_eq!(ink.extended_bytes(), 0);
         }
 
-        let stroke = (*app.history.strokes()[0]).clone();
-        app.history
-            .append(std::iter::repeat_n(stroke, CACHE_STROKES));
+        let style = app.stroke(Tool::Pen);
+        app.history.append((0..CACHE_STROKES).map(|_| Stroke {
+            points: vec![Point::new(50., 50., 1., [0.; 2])],
+            ..style
+        }));
         assert!(document_needs_layer(&app));
         Ok(())
     }
