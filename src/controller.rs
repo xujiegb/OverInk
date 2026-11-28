@@ -71,13 +71,11 @@ impl Rect {
         })
     }
     pub fn pixels(self, window: &Window) -> Self {
-        let size = window.size();
-        let pixels = window.pixel_size();
-        let scale = [pixels[0] as f32 / size[0], pixels[1] as f32 / size[1]];
+        let (_, scale) = window.render_size();
         self.scaled(scale)
     }
 
-    fn scaled(self, scale: [f32; 2]) -> Self {
+    pub(crate) fn scaled(self, scale: [f32; 2]) -> Self {
         // Window placement may approach the i32 limits. Calculate both
         // endpoints without overflowing before narrowing to native pixels.
         let [sx, sy] = scale.map(f64::from);

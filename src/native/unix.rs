@@ -372,7 +372,7 @@ pub struct Passthrough {
 }
 impl Passthrough {
     pub fn new(w: &Window) -> Self {
-        let backend = match crate::sdl::driver().as_str() {
+        let backend = match crate::sdl::driver() {
             "x11" => crate::x11::shape_connection().map(Backend::X11),
             "wayland" => Wayland::new(w).map(Backend::Wayland),
             _ => Err("Input passthrough needs X11 or Wayland".into()),

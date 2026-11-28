@@ -184,6 +184,7 @@ mod tests {
         color::InkColor,
         model::{Point, Stroke, TextBox},
     };
+    use std::sync::Arc;
 
     #[test]
     fn pencil_exports_every_core_triangle_and_its_density() -> Result<(), String> {
@@ -222,16 +223,13 @@ mod tests {
             text: "中😀".into(),
             scroll_offset: 0.,
         };
+        let recolored = TextBox {
+            color: InkColor::from_rgb8([255, 0, 0]),
+            ..item.clone()
+        };
+        let repeated = Arc::new(item);
         let doc = Document {
-            text_boxes: vec![
-                item.clone().into(),
-                item.clone().into(),
-                TextBox {
-                    color: InkColor::from_rgb8([255, 0, 0]),
-                    ..item
-                }
-                .into(),
-            ],
+            text_boxes: vec![Arc::clone(&repeated), repeated, recolored.into()],
             ..Document::default()
         };
         let svg = svg(&doc, &TextFonts::default())?;

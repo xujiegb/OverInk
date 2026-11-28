@@ -929,7 +929,7 @@ impl Canvas {
                 }
                 let ink_started = timings.as_ref().map(|_| Instant::now());
                 let scale = if page.hidden {
-                    self.render.begin(&self.window, [0.; 4])?
+                    self.render.begin(&self.window, [0.; 4])?.1
                 } else {
                     self.ink.paint(
                         page,

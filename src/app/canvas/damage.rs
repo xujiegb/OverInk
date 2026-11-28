@@ -103,8 +103,7 @@ impl Canvas {
         let pixels = self.window.pixel_size();
         let bytes = crate::app::ink::layer_bytes(pixels, SDL_PIXELFORMAT_RGBA32);
         let size = self.window.size();
-        if pixels.iter().any(|&value| value <= 0)
-            || pixels.map(|value| value as f32) != size
+        if pixels.map(|value| value as f32) != size
             || bytes.saturating_add(cached) > MAX_COMPOSITION_BYTES
         {
             self.damage = None;

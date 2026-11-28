@@ -6,7 +6,13 @@ use crate::sdl::{self, Window};
 use std::{marker::PhantomData, rc::Rc};
 
 unsafe extern "C" {
-    pub(crate) safe fn overink_macos_create_overlay(width: i32, height: i32, flags: u64) -> u32;
+    pub(crate) safe fn overink_macos_create_overlay(
+        width: i32,
+        height: i32,
+        flags: u64,
+        grip_width: f32,
+        grip_height: f32,
+    ) -> u32;
     pub(crate) safe fn overink_macos_raise_overlay(window_id: u32, keyboard: bool) -> bool;
     pub(crate) safe fn overink_macos_order_toolbar(canvas_id: u32, toolbar_id: u32);
     pub(crate) safe fn overink_macos_overlay_crosshair(crosshair: bool);
@@ -69,7 +75,7 @@ mod tests {
     fn off_main_thread_rejects_overlay_calls() -> Result<(), String> {
         let result = std::thread::spawn(|| {
             (
-                overink_macos_create_overlay(100, 60, 0),
+                overink_macos_create_overlay(100, 60, 0, 0., 0.),
                 overink_macos_raise_overlay(u32::MAX, false),
                 overink_macos_destroy_overlay(u32::MAX),
             )

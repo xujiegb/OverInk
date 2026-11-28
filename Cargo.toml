@@ -15,6 +15,7 @@ egui = { version = "=0.37.0", features = ["default_fonts"] }
 base64 = "0.23"
 epaint = { version = "=0.37.0", features = ["color_fonts"] }
 harfrust = "=0.16.1"
+sdl3 = { version = "=0.22.1", default-features = false }
 sdl3-sys = { version = "=0.7.3", default-features = false, features = ["build-from-source-static", "no-default-subsystems", "sdl-video", "sdl-render", "sdl-dialog"] }
 skrifa = "=0.50.0"
 unicode-segmentation = "1"
@@ -60,7 +61,7 @@ objc2-core-graphics = { version = "=0.3.2", default-features = false, features =
     "CGImage",
     "objc2",
 ] }
-objc2-foundation = { version = "=0.3.2", default-features = false, features = ["NSArray", "NSError", "NSString"] }
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["NSArray", "NSError", "NSPathUtilities", "NSString"] }
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = [
     "std",
     "NSColor",
@@ -75,9 +76,9 @@ block2 = "=0.6.2"
 # OverInk. Linux/FreeBSD keep their existing SDL and IBus/Fcitx paths.
 [target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
 enigo = { version = "=0.6.1", default-features = false }
-sdl3 = { version = "=0.22.1", default-features = false }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+winsafe = { version = "=0.0.27", default-features = false, features = ["advapi", "shell"] }
 windows = { version = "=0.62.2", features = [
     "Graphics_Capture",
     "Graphics_DirectX_Direct3D11",
